@@ -1810,6 +1810,17 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .decision-why { margin: 0.25rem 0 0.5rem; }
 /* §17.1186 — a run pause: the block, the checks, the refusals, the runbook */
 .decision-run-label { font-weight: 600; margin: 0.6rem 0 0.25rem; }
+/* §17.1271 — the files a block writes, folded away so a 90-line script does not
+   bury the question the card is asking. */
+.decision-files { margin: 0.3rem 0; }
+.decision-file { margin: 0.2rem 0; }
+.decision-file > summary { cursor: pointer; font-size: 0.92em; }
+.decision-file-body {
+  margin: 0.35rem 0 0.2rem; padding: 0.5rem 0.6rem; max-height: 22rem;
+  overflow: auto; white-space: pre; font-size: 0.86em;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+}
 .decision-run-block { max-height: 30vh; overflow: auto; white-space: pre; margin: 0; }
 .decision-refused { border: 1px solid var(--warn); border-radius: 8px; padding: 0.5rem 0.7rem; margin-top: 0.5rem; }
 .decision-runbook { margin-top: 0.6rem; }

@@ -457,6 +457,20 @@ class DecideResult(BaseModel):
     # §17.1186 — what a run pause did: resolved | delegated | ran | failed | runbook | skipped
     outcome: str = "resolved"
     node_status: str | None = None
+    # §17.1266 — and WHAT HAPPENED. §17.1261 put the run's detail into
+    # `resolve_decision`'s return and this model silently dropped every field of
+    # it, because a response_model filters what it does not declare. Live: the
+    # operator approved ADD115, the block stopped on its second indexer, and the
+    # answer was `{"outcome": "failed", "node_status": "failed"}` — no reason, no
+    # executed count, none of the diagnosis the engine had already paid a web
+    # search for. Fixing the function below the surface fixed nothing a caller
+    # could see; this is the surface (feedback: verify the OPERATOR'S surface).
+    executed: list[dict] | None = None      # the commands that ran, with output
+    verify: str | None = None               # the read-only checks' report
+    reason: str | None = None               # why it stopped, when it stopped
+    diagnosis: str | None = None            # §17.1230 — the researched diagnosis
+    unknown_outcome: bool | None = None     # §17.1201 — the runner dropped mid-block
+    confirmed_after_drop: bool | None = None
 
 
 class SkipNodeInput(BaseModel):
@@ -791,6 +805,14 @@ class NodeInsertInput(BaseModel):
     edited_by: str | None = None
 
 
+class DecisionReviseInput(BaseModel):
+    """§17.1241 — body for POST /nodes/{job_id}/{node_key}/revise."""
+    choice: str = Field(min_length=1, max_length=2000,
+                        description="What the operator's answer is NOW, in their words.")
+    note: str | None = Field(default=None, max_length=4000)
+    edited_by: str | None = None
+
+
 class NodeReorderInput(BaseModel):
     """Body for POST /nodes/{job_id}/reorder."""
     ordered_keys: list[str]
@@ -799,6 +821,14 @@ class NodeReorderInput(BaseModel):
 
 class NodeResetInput(BaseModel):
     """Body for POST /nodes/{job_id}/{node_key}/reset."""
+    edited_by: str | None = None
+
+
+class NodeSatisfiedInput(BaseModel):
+    """§17.1226 — body for POST /nodes/{job_id}/{node_key}/satisfied."""
+    evidence: str = Field(min_length=1, max_length=8000,
+                          description="What shows the step's goal is already met — the commands "
+                                      "read back and their output. Written into the node.")
     edited_by: str | None = None
 
 

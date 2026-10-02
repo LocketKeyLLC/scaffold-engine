@@ -465,6 +465,23 @@ export function ephemeralIsDurable(turns, entry, maxIdAtTurnStart) {
 // without a DOM. `total` is the list length (the plan as ordered), not the
 // step_counts sum — the two agree except mid-mutation.
 const TERMINAL_STEP = new Set(["committed", "done", "skipped", "handed_off"]);
+//: §17.1217 — the dag_nodes vocabulary for work that is finished.
+const NODE_DONE = new Set(["done", "skipped"]);
+
+// §17.1217 — what the engine is ON, which is not always where the cursor is.
+// `current_node_key` is SESSION state: it freezes where the walkthrough stopped,
+// and once steps are handed to the executor it points at one nobody is working
+// on. Live, the console showed ADD65 (failed, handed off) while the ready work
+// was ADD50 — "if we are on add 50, why is it on ADD 65 on the web ui?".
+// The cursor still wins while it names a step that is genuinely open; only a
+// SPENT cursor defers to what the DAG says is next.
+function workingKey(session, steps) {
+  const nk = session && session.current_node_key;
+  const cur = (steps || []).find((x) => x.node_key === nk);
+  const spent = !cur || TERMINAL_STEP.has(cur.step_status || cur.status);
+  const nxt = session && session.outstanding && session.outstanding.next;
+  return (spent && nxt && nxt.node_key) ? nxt.node_key : nk;
+}
 export function planPosition(steps, currentKey) {
   const list = Array.isArray(steps) ? steps : [];
   const idx = list.findIndex((x) => x && x.node_key === currentKey);
@@ -497,7 +514,13 @@ export function railModel(steps, currentKey, { keepDone = 2, keepAhead = 4, focu
     node_key: x.node_key,
     title: x.title || "",
     status: x.step_status || "pending",
-    terminal: TERMINAL_STEP.has(x.step_status),
+    // §17.1217 — FINISHED means the work finished. `step_status` is the
+    // session's own vocabulary and `handed_off` is terminal in it, so the rail
+    // struck ADD50 through and counted "131 of 131 done" while that step was
+    // pending in the DAG and was the very next thing to do. `node_status` rides
+    // in the same row (assist_agent's step query joins dag_nodes); the step
+    // status is only the fallback for a row that has none.
+    terminal: x.node_status ? NODE_DONE.has(x.node_status) : TERMINAL_STEP.has(x.step_status),
     current: x.node_key === currentKey,
     focused: !!focus && x.node_key === focus,
     inserted: /^ADD\d+$/.test(x.node_key || ""),
@@ -839,7 +862,7 @@ export function renderChat(container, sessionId, opts = {}) {
   }
 
   async function doneNext(message) {
-    const nk = session?.current_node_key;
+    const nk = workingKey(session, steps);   // §17.1217 — the step SHOWN
     if (!nk) { await claimAndGuideNext(); return; }
     const output = composerText.value.trim();
     if (output) { await submitEvidence(nk, output); return; }
@@ -914,7 +937,7 @@ export function renderChat(container, sessionId, opts = {}) {
       composerText.value = "";
       appendBubble("operator", "fix", err);
       const res = await api.post(`/assist/${sessionId}/fix`, {
-        error: err, node_key: session?.current_node_key || null, history: historyForGuide(),
+        error: err, node_key: workingKey(session, steps) || null, history: historyForGuide(),
       });
       // §17.876 — same honest fallback as the server turn loop.
       appendBubble("assistant", "fix", res.fix || "I couldn't produce a fix this time — the model returned no usable answer after several attempts. Press the button again to retry, or paste just the last ~50 lines of the error output.");
@@ -924,14 +947,14 @@ export function renderChat(container, sessionId, opts = {}) {
   );
   const moreBody = el("div", { class: "verbs-more-body" },
     verb("⏩ Skip", "Skip the current step (recorded, revisitable)", async () => {
-      const nk = session?.current_node_key;
+      const nk = workingKey(session, steps);
       if (!nk) { toast("No step in flight.", "err"); return; }
       await api.post(`/assist/${sessionId}/submit`, { node_key: nk, action: "skip" });
       toast(`Step ${nk} skipped.`, "ok");
       load();
     }),
     verb("🤝 Engine does it", "Hand this step to the engine to do autonomously (LLM work only — never your machine)", async () => {
-      const nk = session?.current_node_key;
+      const nk = workingKey(session, steps);
       if (!nk) { toast("No step in flight.", "err"); return; }
       await api.post(`/assist/${sessionId}/handoff`, { node_key: nk, mode: "single" });
       toast(`Step ${nk} handed to the engine.`, "ok");
@@ -1265,7 +1288,7 @@ export function renderChat(container, sessionId, opts = {}) {
   }
   function renderRail() {
     if (!follow || !session) return;
-    const m = railModel(steps, session.current_node_key, { focus: railFocus, expandDone: railExpandDone, expandAhead: railExpandAhead });
+    const m = railModel(steps, workingKey(session, steps), { focus: railFocus, expandDone: railExpandDone, expandAhead: railExpandAhead });
     const head = el("div", { class: "follow-rail-head" },
       el("span", { class: "follow-rail-count", text: `${m.doneCount} of ${m.total} done` }),
       el("span", { class: "spacer" }),
@@ -1298,7 +1321,7 @@ export function renderChat(container, sessionId, opts = {}) {
   function renderStepHero() {
     if (follow) { renderRail(); return; }
     if (!session) return;
-    const nk = session.current_node_key;
+    const nk = workingKey(session, steps);      // §17.1217 — not a spent cursor
     const sc = session.step_counts || {};
     // §17.938 — `step_counts` is keyed by ASSIST-step status, where the
     // terminal state is `committed`; `done` is the dag_nodes vocabulary and
@@ -1493,7 +1516,7 @@ export function renderChat(container, sessionId, opts = {}) {
     // plus session-level turns (no node) that arrived after its first turn.
     // The whole-session scroll stays one click away in the Full view.
     if (follow && (railFocus || followScope === "step")) {
-      const key = railFocus || (session && session.current_node_key) || null;
+      const key = railFocus || workingKey(session, steps) || null;
       if (key) {
         const first = turns.findIndex((t) => t && t.node_key === key);
         const mine = turns.filter((t, i) => t && (t.node_key === key || (!t.node_key && first >= 0 && i > first)));
@@ -1632,7 +1655,17 @@ export function renderChat(container, sessionId, opts = {}) {
     // one muted line, the list behind a click.
     if (!openN) {
       const doneList = el("details", { class: "checklist-done" },
-        el("summary", { class: "side-title checklist-quiet", text: `Nothing needed from you right now · ${checkItems.length} answered` }),
+        // §17.1217 — this panel is about open QUESTIONS, and "nothing needed
+        // from you right now" was locally true and globally false: it sat under
+        // a plan with 15 pending steps and 2 ready to run. With work
+        // outstanding it says what is next instead of claiming there is nothing.
+        el("summary", { class: "side-title checklist-quiet", text: (() => {
+          const o = session && session.outstanding;
+          const nx = o && o.known && !o.finished && o.next;
+          return nx
+            ? `No open questions · ${checkItems.length} answered — next: ${nx.node_key} ${nx.title}`
+            : `Nothing needed from you right now · ${checkItems.length} answered`;
+        })() }),
         ...checkItems.map((it) => el("div", { class: "side-check" },
           el("span", { class: "check-dot done", text: "✓" }),
           el("span", { class: "check-text dim" }, `${it.title || it.node_key}`,
@@ -1726,7 +1759,7 @@ export function renderChat(container, sessionId, opts = {}) {
         : null,
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Session" }),
-        el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "on " + session.current_node_key } ) : null),
+        el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), workingKey(session, steps) ? el("span", { class: "tag", text: "on " + workingKey(session, steps) } ) : null),
         row("Hand-offs", { manual: "you decide, step by step", auto: "the engine takes steps it can do itself" }[session.handoff_policy] || session.handoff_policy),
         row("Re-planning", { context_only: "adapts from what you tell it", always: "re-plans after every step", never: "never re-plans" }[session.replan_policy] || session.replan_policy),
         row("Times the plan and reality disagreed", String(session.divergence_count ?? 0)),
@@ -2141,14 +2174,14 @@ export function renderChat(container, sessionId, opts = {}) {
         liveBody);
       // §17.1159 — the live walkthrough is for the session's current step until
       // the done frame names the step actually guided (a repair may divert).
-      if (session?.current_node_key) live.dataset.step = session.current_node_key;
+      { const _wk = workingKey(session, steps); if (_wk) live.dataset.step = _wk; }
       transcript.append(live);
       stick();
     };
     const streamArgs = resumeRunId
       ? [`/assist/${sessionId}/message/${resumeRunId}/tail`, { method: "GET", signal: abort.signal }]
       : [`/assist/${sessionId}/message`, {
-          body: { history: historyForGuide(), node_key: session?.current_node_key || null, ...body },
+          body: { history: historyForGuide(), node_key: workingKey(session, steps) || null, ...body },
           signal: abort.signal,
         }];
     try {
@@ -2306,7 +2339,7 @@ export function renderChat(container, sessionId, opts = {}) {
     // through the verified submit/track flow). EVERYTHING else is one server
     // turn — capture included (the server ingests the turn; no separate
     // /turn call to race it).
-    if (ADVANCE_RE.test(text) && session?.current_node_key) {
+    if (ADVANCE_RE.test(text) && workingKey(session, steps)) {
       await doneNext(text);
       return;
     }
@@ -2329,7 +2362,7 @@ export function renderChat(container, sessionId, opts = {}) {
   let autoGuided = false;
   async function maybeAutoGuide() {
     if (!follow || autoGuided || guiding || disposed || !session) return;
-    const key = session.current_node_key;
+    const key = workingKey(session, steps);
     if (!key || session.status !== "active") return;
     const has = turns.some((t) => t && t.node_key === key && t.role === "assistant" && (t.kind === "guide" || t.kind === "fix"));
     if (has) return;

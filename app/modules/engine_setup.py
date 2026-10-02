@@ -1002,7 +1002,22 @@ async def read_prefixes_needed(db) -> list[dict]:
 
 #: Tools whose READS go through pmxcfs, so an unprivileged runner cannot use
 #: them at all — the surprise §17.1198 was built from.
-_PVE_TOOLS = frozenset({"qm", "pct", "pvesm", "pvesh", "pveum", "pvecm", "pvenode", "ha-manager"})
+#:
+#: §17.1246 — `pveam` was missing, and it is the one that bit. ADD111 (set up
+#: Pi-hole) needed the current Debian template name, which only `pveam available`
+#: can give, and the runner's read came back
+#:
+#:     ipcc_send_rec[1] failed: Unknown error -1
+#:     Unable to load access control list: Unknown error -1
+#:
+#: the exact pmxcfs signature this set exists to predict. Because `pveam` was not
+#: listed, no read grant for it was ever offered, so the install line the engine
+#: shows the operator could not have fixed the step. The template name the draft
+#: used instead was invented (`debian-12-standard_12.7-1_amd64.tar.zst`, which
+#: Proxmox answers "no such template"), and `pct create` got as far as building a
+#: filesystem before rolling back.
+_PVE_TOOLS = frozenset({"qm", "pct", "pveam", "pvesm", "pvesh", "pveum", "pvecm",
+                        "pvenode", "ha-manager"})
 
 
 def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,

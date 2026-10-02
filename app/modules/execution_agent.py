@@ -978,7 +978,7 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
 _system_for_tool = system_for_tool
 
 
-def _build_prompt(node: dict, brief: dict) -> str:
+def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
     """Build execution prompt from node template + brief context.
 
     §17.854 (audit A3) — delegates to ``prompt_assembly.build_base_prompt`` so
@@ -992,7 +992,7 @@ def _build_prompt(node: dict, brief: dict) -> str:
     non-empty, a "Reviewer feedback" block is prepended (autonomous-only) so a
     retry sees the prior rejection instead of re-emitting the identical output.
     """
-    body = build_base_prompt(node, brief)
+    body = build_base_prompt(node, brief, environment)
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
 
@@ -1177,7 +1177,25 @@ async def execute_next_node(
         if not job:
             return {"status": "error", "message": f"Job {job_id} not found"}
         if job["status"] not in ("running", "executing", "planning"):
-            return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
+            # §17.1230 — an assist branch whose session is over, with work left,
+            # belonged to nobody. Live: the job sat in `assisted_executing` while
+            # its only assist session was `completed`, so /assist would not drive
+            # it (the session is finished) and /execute refused it (the status is
+            # not executable) — 20 pending steps reachable from no surface, and
+            # the status had to be corrected by hand in SQL. `handed_off` and
+            # `completed` are terminal for the SESSION, not for the WORK
+            # (§17.1208). Hand it back to the executor rather than refuse.
+            if str(job["status"]).startswith("assisted_") and not await _assist_session_live(db, job_id):
+                if await transition(db, job_id, to="executing",
+                                    expected_from=("assisted_executing", "assisted_running",
+                                                   "assisted_paused"),
+                                    reason="assist session over, work remains"):
+                    await db.commit()
+                    logger.warning("assist_branch_returned_to_executor job=%s was=%s",
+                                   job_id, job["status"])
+                    job = await _get_job(db, job_id) or job
+            if job["status"] not in ("running", "executing", "planning"):
+                return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
 
         # §17.777 — hard per-job budget gate. Before claiming/building/running
         # the next node, check the running spend (tokens + USD, tallied by
@@ -1190,6 +1208,43 @@ async def execute_next_node(
         _budget_stop = await enforce_job_budget(db, job_id)
         if _budget_stop is not None:
             return _budget_stop
+
+        # §17.1223 — the SINGLE-step path must ask the operator too.
+        #
+        # Both streaming loops peek before a claim and park the job when the
+        # next step is the operator's to decide (§17.1184) or changes a machine
+        # (§17.1186). `execute_next_node` called on its own — `POST /execute`,
+        # the Run-this-step button, the MCP `execute_next` tool — did not. It
+        # claimed the hands-on step, `_hand_back_for_approval` put it straight
+        # back to `pending`, and the caller got `{"status": "needs_approval"}`
+        # with NOTHING written to `jobs.metadata`: a status word naming an
+        # approval that was never requested, on a job whose steps are nearly
+        # all hands-on. Live, on the operator's home-lab job: `POST /execute`
+        # answered `needs_approval` for ADD50 while the job carried no
+        # `awaiting_decision` at all and the node stayed pending — the step
+        # they had just said yes to could not be run by any surface.
+        #
+        # Ordered after the status and budget gates on purpose: parking is a
+        # job-status write, and a job that is not executable must not be moved
+        # into `awaiting_decision`. Skipped when the caller pre-claimed, since
+        # the parallel frontier has already run this check itself.
+        if preclaimed_node is None:
+            try:
+                _peek = await _peek_next_node(job_id)
+                _ask_first = _peek is not None and (
+                    str(_peek.get("node_type") or "") == "decision"
+                    or (settings.execution_supervised_runs_enabled and _hands_on_peek(_peek))
+                )
+            except Exception as exc:
+                # Logged as an error, not a debug line: a silent miss here is
+                # the model deciding for the operator (same reasoning as
+                # `_pause_for_decision`'s own look-up guard).
+                logger.error("single_step_pause_peek_failed job=%s err=%s", job_id, exc)
+                _ask_first = False
+            if _ask_first:
+                _asked = await _pause_for_decision(job_id)
+                if _asked is not None:
+                    return dict(_asked)
 
         # §17.568 — parallel path passes an already-claimed node; serial path
         # (preclaimed_node None) claims here, byte-identical to before.
@@ -1555,6 +1610,11 @@ async def execute_next_node(
             "node_key": node_key,
             "title": title,
             "prompt_template": node.get("prompt_template"),
+            # §17.1237 — the step's DESCRIPTION. It was missing here, so nothing
+            # downstream could see it: not the prompt, not §17.1221's
+            # ask-first matching, not §17.1236's gate. See build_base_prompt.
+            "description": node.get("description"),
+            "node_type": node.get("node_type"),
             "domain": node.get("domain"),
             # Sprint W.1 — _build_prompt prepends a Reviewer feedback block
             # when retry_count > 0 AND a prior rejection reason is on the row.
@@ -1582,7 +1642,15 @@ async def execute_next_node(
     # retry-feedback loop on the subsequent /exec/retry.
     try:
         # Build raw prompt.
-        raw_prompt = _build_prompt(node_snapshot, brief)
+        # §17.1250 — the operator's standing constraints reach auto mode too.
+        try:
+            from app.modules.runbook_inputs import job_environment
+            async with async_session() as _edb:
+                _node_env = await job_environment(_edb, job_id)
+        except Exception as exc:
+            logger.warning("job_environment_unreadable job=%s err=%r", job_id, exc)
+            _node_env = {}
+        raw_prompt = _build_prompt(node_snapshot, brief, _node_env)
         # §17.1042 — the optimizer may rewrite the TASK only. Grounding blocks
         # and the upstream block are attached VERBATIM after it: live (parallel
         # run 2e74196b) the "minimum tokens" rewrite of the whole assembled
@@ -1629,6 +1697,19 @@ async def execute_next_node(
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
                 _node_sources.append({"kind": "milvus", "query": rag_query, "text": rag_context})
 
+        # §17.1224 — the values the operator already gave. Attached as a
+        # grounding block, not into the task text, so the optimizer cannot
+        # rewrite it away (§17.1042). Shared with the runbook drafter, which is
+        # the sibling that had it first and alone.
+        try:
+            from app.modules.supervised_runs import stored_values_block
+            _stored = await stored_values_block(
+                for_commands=(tool or "").lower() in ("shell", "mcp"))
+            if _stored:
+                _grounding_blocks.append(_stored)
+        except Exception as exc:
+            logger.warning("stored_values_block_failed job=%s node=%s err=%r",
+                           job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
@@ -1916,7 +1997,56 @@ async def execute_next_node(
         logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
 
     verify_status: Literal["pass", "fail", "skipped"]
-    if skip_verify:
+    # §17.1235 — a step that says, in its own words, that it cannot be carried
+    # out yet must not be recorded as finished. Live, ADD98 ("Prove it end to
+    # end: ask for one film and watch it") was `done` and opened with "This
+    # proof is blocked until the download client decision from ADD102 is
+    # resolved and ADD97 steps 1-2 are complete." No command ran. It counted
+    # toward the job's finished total, which is the dishonesty about "finished"
+    # that §17.1208/1214-1216 exist to stop — and the one signal nothing read
+    # was the step's own sentence. Checked before every verifier, because a
+    # verifier that reads "contains what the task requested, even partially"
+    # passes a well-written description of being stuck.
+    _self_blocked = None
+    try:
+        from app.modules.supervised_runs import declares_itself_blocked
+        _self_blocked = declares_itself_blocked(output)
+    except Exception as exc:
+        logger.warning("self_blocked_check_failed node=%s err=%r", node_key, exc)
+    # §17.1236 — and a step that forbade asking must not answer with a question.
+    _asked_anyway = None
+    try:
+        from app.modules.step_constraints import violation as _constraint_violation
+        _asked_anyway = _constraint_violation(
+            " ".join(str(node_snapshot.get(k) or "") for k in
+                     ("description", "prompt_template", "title")),
+            output)
+    except Exception as exc:
+        logger.warning("step_constraint_check_failed node=%s err=%r", node_key, exc)
+    # §17.1259 — instructions for a machine the engine can reach are not work.
+    _only_instructions = None
+    try:
+        from app.modules.supervised_runs import wrote_instructions_instead_of_doing_it
+        async with async_session() as _idb:
+            _only_instructions = await wrote_instructions_instead_of_doing_it(
+                output, node_snapshot, _idb)
+    except Exception as exc:
+        logger.warning("instructions_not_work_check_failed node=%s err=%r", node_key, exc)
+    if _self_blocked:
+        logger.warning("node_declares_itself_blocked node=%s sentence=%r", node_key, _self_blocked)
+        verify_status = "fail"
+        reason, confidence = (
+            f"the step's own output says it cannot be carried out yet: \"{_self_blocked}\" — "
+            "nothing was executed, so it is not finished", 0.0)
+    elif _only_instructions:
+        logger.warning("node_wrote_instructions_not_work node=%s", node_key)
+        verify_status = "fail"
+        reason, confidence = _only_instructions, 0.0
+    elif _asked_anyway:
+        logger.warning("node_asked_when_told_not_to node=%s", node_key)
+        verify_status = "fail"
+        reason, confidence = _asked_anyway, 0.0
+    elif skip_verify:
         verify_status = "skipped"
         reason, confidence = "verification skipped", 0.0
     else:
@@ -2321,6 +2451,35 @@ async def _peek_next_node(job_id: str) -> dict | None:
     return None
 
 
+async def _assist_session_live(db: AsyncSession, job_id: str) -> bool:
+    """§17.1230 — is an assist session still driving this job?
+
+    Anything but a finished session counts as live, so the executor never takes
+    a job out from under one. Fail-soft to True: on a read error the assist
+    branch keeps the job, which is the behaviour that existed before.
+    """
+    try:
+        row = (await db.execute(
+            text("SELECT 1 FROM assist_sessions WHERE job_id = :j "
+                 "AND COALESCE(status, '') NOT IN ('completed', 'handed_off', 'cancelled', 'failed') "
+                 "LIMIT 1"),
+            {"j": job_id})).first()
+        return row is not None
+    except Exception as exc:
+        logger.warning("assist_session_liveness_unreadable job=%s err=%r", job_id, exc)
+        return True
+
+
+def _order_of(node: dict) -> float:
+    """§17.1231 — a node's place in the plan, for comparing two pause candidates.
+    A missing order sorts LAST so it never jumps a step that has one."""
+    try:
+        v = node.get("execution_order")
+        return float(v) if v is not None else float("inf")
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 async def _pause_for_decision(job_id: str) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
@@ -2335,14 +2494,30 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         async with async_session() as db:
             if decision_pause.enabled():
                 node = await decision_pause.pending_decision(db, job_id)
-            if node is None:
-                # §17.1186 — no decision waiting: is the next step one that
-                # changes a machine, with a runner able to carry it out?
-                ch = await supervised_runs.channel(db)
-                if ch is not None:
-                    run_node = await supervised_runs.pending_hands_on(db, job_id)
-                if run_node is None:
-                    return None
+            # §17.1186 — is the next step one that changes a machine, with a
+            # runner able to carry it out?
+            ch = await supervised_runs.channel(db)
+            if ch is not None:
+                run_node = await supervised_runs.pending_hands_on(db, job_id)
+            if node is None and run_node is None:
+                return None
+            # §17.1231 — ask about whichever comes FIRST in the plan. A decision
+            # used to win unconditionally, so a hands-on step the operator had
+            # already approved could be claimed, handed back and never asked
+            # about: live, ADD50 was handed back twice while ADD99 (a decision
+            # 49 steps later) was parked instead, and the step they had just
+            # said yes to could not be reached from any surface. Plan order is
+            # the only ordering either of them has.
+            if node is not None and run_node is not None:
+                _d, _r = _order_of(node), _order_of(run_node)
+                if _r < _d:
+                    logger.info("pause_order_hands_on_first job=%s run=%s(%s) decision=%s(%s)",
+                                job_id, run_node.get("node_key"), _r, node.get("node_key"), _d)
+                    node = None
+                else:
+                    run_node = None
+            elif node is not None:
+                run_node = None
             target = node or run_node
             job = await _get_job(db, job_id)
             brief = _brief_text(job)
@@ -2362,10 +2537,13 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             return None
         spec, policy = ch
         _brief = brief_full if isinstance(brief_full, dict) else brief
-        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block)
+        # §17.1188 — pins, system map, facts. §17.1250 — and the operator's
+        # standing constraints, which every draft below must see, so it is read
+        # BEFORE the first one rather than after it.
         from app.modules.runbook_inputs import job_environment
         async with async_session() as db:
-            _env = await job_environment(db, job_id)          # §17.1188 — pins, system map, facts
+            _env = await job_environment(db, job_id)
+        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env)
         # §17.1213 — ask the host whether this block can work at all, before
         # offering it. ADD21 ran `pct exec 111` against a stopped container and
         # ADD82 ran `pct exec 106` against a VM; one `pct list` + `qm list`
@@ -2395,7 +2573,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         if fix:
             logger.warning("supervised_run_redraft job=%s node=%s refusals=%s", job_id,
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
-            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix)
+            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env)
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
                                                    preconditions=_pre)
@@ -2405,6 +2583,86 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     frame = second
                 elif len(second["refused"]) < len(frame["refused"]) and second["commands"]:
                     frame = second                            # closer; show the better of the two
+        # §17.1227 — a draft with NOTHING to run is the worst outcome of all, and
+        # neither trigger above catches it: the shape pass needs a refusal (there
+        # is none — there is nothing to refuse) and the coverage pass only
+        # replaces a draft with a complete one. Name the remedy — usually the
+        # HTTP API the draft's own Verify section is already calling.
+        if not frame.get("commands"):
+            try:
+                _nc = supervised_runs.no_commands_retry_note(
+                    " ".join(str(run_node.get(k) or "") for k in ("description", "prompt_template", "title")),
+                    runbook)
+                if _nc:
+                    logger.warning("supervised_run_no_commands_redraft job=%s node=%s runbook_chars=%d",
+                                   job_id, run_node.get("node_key"), len(runbook or ""))
+                    _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env)
+                    if _api:
+                        _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
+                                                          preconditions=_pre)
+                        # §17.1211's lesson: only ever trade UP. An empty frame
+                        # must never replace an empty frame's better sibling.
+                        if _apif.get("commands"):
+                            frame = _apif
+                            logger.warning("supervised_run_no_commands_redraft_clean job=%s node=%s commands=%d refused=%d",
+                                           job_id, run_node.get("node_key"),
+                                           len(_apif["commands"]), len(_apif.get("refused") or []))
+            except Exception as exc:
+                logger.warning("no_commands_redraft_failed job=%s node=%s err=%r", job_id,
+                               run_node.get("node_key"), exc)
+        # §17.1265 — and can the step be CHECKED? A draft whose Verify section
+        # the channel cannot run is approved with nothing judging it: live,
+        # ADD115 parked with three correct checks and `verify: []`, because each
+        # was one 227-character line with a `$(...)` in it. The run commands are
+        # kept; only the checks are redrawn.
+        try:
+            # §17.1269 — and only when the block can run at all. A frame already
+            # carrying a shape refusal has a bigger problem than its checks, and
+            # redrafting for the checks swapped a correct budget refusal for a
+            # draft of invalid Python: two unrunnable frames, the second one less
+            # informative. The refusal path above owns that case.
+            _nv = "" if frame.get("refused") else supervised_runs.verify_not_runnable(runbook)
+            if _nv:
+                logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
+                               job_id, run_node.get("node_key"), len(frame.get("verify") or []))
+                _vb = await supervised_runs.draft_runbook(run_node, _brief, up_block,
+                                                         retry_note=_nv, spec=spec, environment=_env)
+                if _vb:
+                    _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
+                                                   preconditions=_pre)
+                    # §17.1211's rule — only ever trade UP: the redraft must keep
+                    # the commands AND actually gain a runnable check.
+                    # §17.1269 — never trade a runnable block for a refused one.
+                    if _vf.get("commands") and _vf.get("verify") and not _vf.get("refused"):
+                        frame = _vf
+                        logger.warning("supervised_run_verify_redraft_clean job=%s node=%s commands=%d verify=%d",
+                                       job_id, run_node.get("node_key"),
+                                       len(_vf["commands"]), len(_vf["verify"]))
+        except Exception as exc:
+            logger.warning("verify_check_failed job=%s node=%s err=%r", job_id,
+                           run_node.get("node_key"), exc)
+        # §17.1254 — and does the block CHANGE anything? A draft of pure reads
+        # for a step that must change something would be approved, run cleanly
+        # and mark the step done having done nothing.
+        try:
+            _ro = supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            if _ro:
+                logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
+                               job_id, run_node.get("node_key"), len(frame.get("commands") or []))
+                _wr = await supervised_runs.draft_runbook(run_node, _brief, up_block,
+                                                          retry_note=_ro, spec=spec, environment=_env)
+                if _wr:
+                    _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
+                                                     preconditions=_pre)
+                    # only trade UP: a redraft that still only reads is no better
+                    if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
+                            _wrf["commands"], run_node):
+                        frame = _wrf
+                        logger.warning("supervised_run_all_reads_redraft_clean job=%s node=%s commands=%d",
+                                       job_id, run_node.get("node_key"), len(_wrf["commands"]))
+        except Exception as exc:
+            logger.warning("all_reads_check_failed job=%s node=%s err=%r", job_id,
+                           run_node.get("node_key"), exc)
         # §17.1215 — and does the block actually DO the step? The gate judges
         # shape and §17.1213 judges the machine; neither notices a draft that
         # quietly leaves out what the step spelled out. One redraft with the
@@ -2418,7 +2676,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
                 _again = await supervised_runs.draft_runbook(
-                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing))
+                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env)
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
                                                        env=_env, preconditions=_pre)
@@ -2457,32 +2715,14 @@ async def _pause_for_decision(job_id: str) -> dict | None:
 
 
 async def _decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry: dict) -> bool:
-    """§17.1200 — has this decision already been spent on an attempt?
+    """§17.1245 — delegates to `supervised_runs.decision_is_stale`.
 
-    The record carries the moment the operator answered. If the node has been
-    written since — it ran, or failed, or was reopened — the answer belongs to
-    that past attempt and the step must be asked about again. Anything
-    unparseable counts as stale: asking once more costs a click, while the
-    other way round marks a machine-changing step done without running it.
+    The rule lived here and only this file used it, while `pending_hands_on` in
+    supervised_runs skipped decided nodes without ever asking whether the
+    decision was spent. Name kept for the callers and tests that reference it.
     """
-    at = str((entry or {}).get("at") or "")
-    if not at:
-        return True
-    row = (await db.execute(
-        text("SELECT updated_at, status FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
-        {"jid": job_id, "nk": node_key})).mappings().first()
-    if not row:
-        return True
-    try:
-        from datetime import datetime
-        answered = datetime.fromisoformat(at)
-        touched = row["updated_at"]
-        if answered.tzinfo is None or touched is None:
-            return True
-        return touched > answered
-    except Exception as exc:
-        logger.warning("decision_staleness_unreadable job=%s node=%s err=%r", job_id, node_key, exc)
-        return True
+    from app.modules.supervised_runs import decision_is_stale
+    return await decision_is_stale(db, job_id, node_key, entry)
 
 
 async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, tool: str) -> dict | None:

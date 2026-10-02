@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "17"
+HELPER_VERSION = "18"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -769,6 +769,70 @@ def approval_message(approval_id: str, nonce: str, exp: int, command: str) -> by
     return f"{approval_id}\n{nonce}\n{exp}\n{command}".encode()
 
 
+#: §17.1271 — the bytes an approval covers for a FILE write. The signing
+#: primitive takes one string, so a write is canonicalised into one: the path
+#: and a digest of the content. The engine derives the same string from the same
+#: two values, which is what makes `verify_approval` work unchanged -- no second
+#: secret, the same key derivation, the same nonce replay protection.
+#:
+#: The digest and not the content: a 40 KB script does not belong in a log line
+#: or in an approval record, and a digest pins it exactly as well.
+WRITE_FILE_VERB = "write_file"
+#: Files may only be written under these, unless the operator widens it. /tmp is
+#: where a step's scratch script belongs and nothing there is part of the system.
+DEFAULT_WRITE_FILE_DIRS = ("/tmp",)
+#: A script, not a disk image. Past this, something has gone wrong.
+WRITE_FILE_MAX_BYTES = 256 * 1024
+
+
+def write_file_message(path: str, content: str) -> str:
+    """The one-line canonical form of "write exactly these bytes to this path"."""
+    import hashlib
+    digest = hashlib.sha256((content or "").encode()).hexdigest()
+    return f"{WRITE_FILE_VERB} {path} sha256:{digest}"
+
+
+def write_file_allowed(path: str, dirs: list[str]) -> tuple[bool, str]:
+    """``(ok, why)`` — may this runner write that path?
+
+    Every refusal here is about the PATH, decided before any content is looked
+    at, and each one is a way a write could leave the directories the operator
+    allowed:
+
+      * a relative path, because what it resolves to depends on the runner's cwd;
+      * `..` anywhere, which `realpath` would otherwise quietly walk out through;
+      * a parent directory that is not under an allowed root AFTER resolution,
+        so a symlinked parent cannot be used as a door;
+      * an existing symlink at the target, which would redirect the write to
+        whatever it points at -- the classic way /tmp becomes /etc.
+    """
+    import os
+    raw = str(path or "")
+    if not raw.startswith("/"):
+        return False, f"{raw!r} is not an absolute path"
+    if ".." in raw.split("/"):
+        return False, "a path with '..' in it is refused"
+    roots = [r for r in (dirs or []) if r]
+    if not roots:
+        return False, "no --write-file-allow directory — writing files is off on this runner"
+    parent = os.path.dirname(raw) or "/"
+    try:
+        real_parent = os.path.realpath(parent)
+    except OSError as exc:
+        return False, f"cannot resolve {parent!r} ({exc})"
+    if not os.path.isdir(real_parent):
+        return False, f"{parent!r} is not a directory on this machine"
+    inside = any(real_parent == os.path.realpath(r) or
+                 real_parent.startswith(os.path.realpath(r).rstrip("/") + "/")
+                 for r in roots)
+    if not inside:
+        return False, (f"{raw!r} is outside this runner's allowed directories "
+                       f"({', '.join(roots)})")
+    if os.path.islink(raw):
+        return False, f"{raw!r} is a symlink; the write would land somewhere else"
+    return True, ""
+
+
 _SEEN_NONCES: dict[str, int] = {}
 APPROVAL_MAX_TTL = 900
 
@@ -942,7 +1006,8 @@ def redact(text_out: str, secrets: dict) -> str:
 
 def build_server(token: str | None, sudo_allow: list[str] | None = None,
                  write_allow: list[str] | None = None, write_sudo: bool = False,
-                 secrets: dict | None = None, secrets_file: str | None = None):
+                 secrets: dict | None = None, secrets_file: str | None = None,
+                 write_file_allow: list[str] | None = None):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
@@ -956,6 +1021,11 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
     if ANY in writes and write_sudo and ANY not in allow:
         allow.append(ANY)
     store = dict(secrets or {})          # §17.1191 — values live here and nowhere else
+    # §17.1271 — where a written file may land. Defaults to /tmp so a step's
+    # scratch script works out of the box; nothing outside is writable unless
+    # the operator says so, and the write channel being on does not imply it.
+    write_file_dirs = [d.strip() for d in (write_file_allow if write_file_allow is not None
+                                           else DEFAULT_WRITE_FILE_DIRS) if d and d.strip()]
 
     @mcp.tool(description=f"Run ONE read-only shell command on this machine and return its output. "
                           f"Refuses anything that writes. (helper v{HELPER_VERSION})")
@@ -994,6 +1064,56 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
                             # §17.1191 — the NAMES this runner can resolve. Never the values:
                             # the engine writes `$NAME` into a command and this runner expands it.
                             "secrets": sorted(store)})
+
+    @mcp.tool(description="§17.1271 — write ONE file on this machine from content the engine sends, with its "
+                          "signed approval of that exact path and content (the operator approved the block "
+                          f"first). Confined to {', '.join(write_file_dirs) or '(nothing — off)'}. No shell is "
+                          f"involved, so the content needs no quoting. (helper v{HELPER_VERSION})")
+    async def write_file(path: str, content: str, approval: dict) -> str:
+        if not write_file_dirs:
+            return ("(refused by the local runner: no --write-file-allow directory — "
+                    "writing files is off here)")
+        body = content if isinstance(content, str) else ""
+        size = len(body.encode())
+        if size > WRITE_FILE_MAX_BYTES:
+            log.warning("REFUSED write_file (%d bytes): %s", size, path)
+            return (f"(refused by the local runner: {size} bytes is past the "
+                    f"{WRITE_FILE_MAX_BYTES}-byte limit for a written file)")
+        ok, why = write_file_allowed(str(path or ""), write_file_dirs)
+        if not ok:
+            log.warning("REFUSED write_file (%s): %s", why, path)
+            return f"(refused by the local runner: {why})"
+        # The approval covers the path AND a digest of the content, so neither
+        # can be swapped after the operator approved the block.
+        ok, why = verify_approval(write_file_message(str(path), body), approval, token or "")
+        if not ok:
+            log.warning("REFUSED write_file (%s): %s", why, path)
+            return f"(refused by the local runner: {why})"
+        import tempfile
+        target = str(path)
+        parent = os.path.dirname(target) or "/"
+        aid = str(approval.get("id", "?"))
+        try:
+            # Written beside the target and renamed, so a reader never sees a
+            # half-written script, and created 0600 by mkstemp so the content is
+            # not world-readable even for the instant before the rename.
+            fd, tmp = tempfile.mkstemp(dir=parent, prefix=".scaffold-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(body)
+                os.replace(tmp, target)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            log.warning("write_file FAILED id=%s %s: %s", aid, target, exc)
+            return f"(the local runner could not write {target}: {exc})"
+        lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
+        log.warning("WRITE_FILE id=%s %s (%d bytes, %d lines)", aid, target, size, lines)
+        return f"wrote {target} ({size} bytes, {lines} lines)"
 
     @mcp.tool(description="§17.1185 — run ONE command that WRITES, with the engine's signed approval of these exact "
                           "bytes (the operator approved the block first). Refused unless its head is on this runner's "
@@ -1446,6 +1566,9 @@ def main() -> int:
     ap.add_argument("--write-allow", nargs="*", default=[], metavar="PREFIX",
                     help="§17.1185 — command prefixes the engine may run through run_supervised with your per-block "
                          "approval (e.g. \"apt-get install\" \"pct set\" \"tee -a /etc/caddy/\"); empty = writes off")
+    ap.add_argument("--write-file-allow", nargs="*", default=None, metavar="DIR",
+                    help="directories the engine may write FILES into (§17.1271; default /tmp). "
+                         "Pass with no values to turn file writing off.")
     ap.add_argument("--write-sudo", action="store_true",
                     help="run write-allowed commands as `sudo -n` (--install sets this after writing the sudoers file)")
     ap.add_argument("--secrets-file", default=None, metavar="PATH",
@@ -1473,6 +1596,7 @@ def main() -> int:
         print(f"FAILED: {why}", file=sys.stderr)
         return 2
     mcp = build_server(args.token, sudo_allow=args.sudo_allow, write_allow=args.write_allow,
+                       write_file_allow=args.write_file_allow,
                        write_sudo=args.write_sudo, secrets=load_secrets(getattr(args, "secrets_file", None)),
                        secrets_file=getattr(args, "secrets_file", None))
     if args.stdio:

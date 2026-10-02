@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -71,7 +73,12 @@ def test_frame_offers_run_only_when_the_gate_is_clean():
 @pytest.mark.asyncio
 async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps():
     db = AsyncMock()
-    r1 = MagicMock(); r1.scalar.return_value = {"ADD50": {"by": "operator", "choice": "myself"}}
+    # §17.1245 — presence alone no longer hides a node: the decision has to still
+    # belong to the CURRENT attempt, so it carries `at` and the node's updated_at
+    # is older than it.
+    _answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+    r1 = MagicMock(); r1.scalar.return_value = {
+        "ADD50": {"by": "operator", "choice": "myself", "at": _answered.isoformat()}}
     r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
         {"node_key": "ADD50", "title": "Start container 111", "prompt_template": "Done when `pct status 111` reports running.",
          "depends_on": [], "tool": "LLM", "node_type": "task", "description": None, "retry_count": 0, "last_verification_reason": None},
@@ -84,8 +91,14 @@ async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps
         {"node_key": "ADD88", "title": "Install Caddy", "prompt_template": "Write the file via `tee -a`.", "depends_on": [], "tool": "LLM",
          "node_type": "task", "description": None, "retry_count": 0, "last_verification_reason": None},
     ]
-    db.execute = AsyncMock(side_effect=[r1, r2])
-    with patch.object(settings, "shell_tool_enabled", False), patch.object(settings, "mcp_tool_enabled", True):
+    r3 = MagicMock()   # ADD50's row: written BEFORE the answer, so the answer stands
+    r3.mappings.return_value.first.return_value = {"updated_at": _answered - timedelta(seconds=5)}
+    db.execute = AsyncMock(side_effect=[r1, r2, r3])
+    # §17.1260 added a pre-image lookup per node; this test is about SELECTION,
+    # so the recovery is stubbed rather than padding the mock sequence.
+    with patch.object(settings, "shell_tool_enabled", False), \
+         patch.object(settings, "mcp_tool_enabled", True), \
+         patch.object(sr, "recover_prior_attempt", AsyncMock(side_effect=lambda db, j, n: n)):
         node = await sr.pending_hands_on(db, "j")
     assert node["node_key"] == "ADD88" and node["hands_on_reason"] == "writes:tee -a"
     sql = db.execute.await_args_list[1].args[0].text
@@ -598,3 +611,279 @@ async def test_the_read_grant_is_recorded_as_a_prefix():
     assert got == ["qm agent", "pct config"]            # de-duplicated, narrowed to prefixes
     sql = " ".join(str(db.execute.await_args[0][0]).split())
     assert "needs_root_prefixes" in sql
+
+
+# ── §17.1223: the single-step path asks too ──────────────────────────────
+
+
+def _hands_on_row():
+    return {"id": "n1", "node_key": "ADD50", "title": "Start container 111 (control-panel)",
+            "tool": "LLM", "node_type": "task", "description": "pct start 111",
+            "prompt_template": "Run `pct start 111` on the host.", "depends_on": []}
+
+
+@pytest.mark.asyncio
+async def test_single_step_execute_parks_instead_of_returning_a_bare_needs_approval(monkeypatch):
+    """`POST /execute` on a hands-on step must PARK a question, not answer
+    `needs_approval` with nothing for the operator to approve.
+
+    Live: it returned `needs_approval` for ADD50 three times while
+    `jobs.metadata` carried no `awaiting_decision` and the node stayed
+    `pending` — the step the operator had just approved could not be run from
+    any surface.
+    """
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    monkeypatch.setattr(settings, "shell_tool_enabled", False)
+
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def _sess():
+        yield db
+
+    parked = {"job_id": "j", "status": "awaiting_decision", "node_key": "ADD50",
+              "kind": "run", "commands": ["pct start 111"]}
+    claimed = AsyncMock()
+    with patch.object(ea, "async_session", lambda: _sess()), \
+         patch.object(ea, "_get_job", AsyncMock(return_value={"id": "j", "status": "executing"})), \
+         patch.object(ea, "enforce_job_budget", AsyncMock(return_value=None)), \
+         patch.object(ea, "_peek_next_node", AsyncMock(return_value=_hands_on_row())), \
+         patch.object(ea, "_pause_for_decision", AsyncMock(return_value=parked)) as pause, \
+         patch.object(ea, "_get_next_node", claimed):
+        out = await ea.execute_next_node("j")
+
+    assert out["status"] == "awaiting_decision" and out["node_key"] == "ADD50"
+    assert pause.await_count == 1
+    # and it never claimed: a claim would flip the node to 'running' and the
+    # hand-back would have to put it back, which is the loop the fix removes.
+    assert claimed.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_single_step_execute_still_claims_an_ordinary_step(monkeypatch):
+    """The gate must not swallow steps that are nobody's decision — an
+    ordinary LLM step is claimed as before (the vacuity check for the test
+    above)."""
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def _sess():
+        yield db
+
+    ordinary = {**_hands_on_row(), "title": "Write the project README",
+                "description": "Summarise the design in prose.",
+                "prompt_template": "Summarise the design in prose."}
+    with patch.object(ea, "async_session", lambda: _sess()), \
+         patch.object(ea, "_get_job", AsyncMock(return_value={"id": "j", "status": "executing"})), \
+         patch.object(ea, "enforce_job_budget", AsyncMock(return_value=None)), \
+         patch.object(ea, "_peek_next_node", AsyncMock(return_value=ordinary)), \
+         patch.object(ea, "_pause_for_decision", AsyncMock(return_value={"x": 1})) as pause, \
+         patch.object(ea, "_get_next_node", AsyncMock(return_value=None)):
+        out = await ea.execute_next_node("j")
+
+    assert pause.await_count == 0
+    assert out.get("status") != "awaiting_decision"
+
+
+def test_single_step_pause_is_ordered_after_the_status_and_budget_gates():
+    """Parking is a job-status write: a job that is not executable must never
+    be moved into `awaiting_decision`."""
+    src = inspect.getsource(ea.execute_next_node)
+    assert src.index("not executable") < src.index("enforce_job_budget") < src.index("_peek_next_node(job_id)")
+    assert src.index("_peek_next_node(job_id)") < src.index("_get_next_node(db, job_id)")
+
+
+# ── §17.1224: stored values reach EVERY prompt path ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stored_values_block_names_only_and_forbids_re_asking():
+    with patch.object(sr, "known_secret_names", AsyncMock(return_value=[
+            {"name": "AIRVPN_WG_CONF", "hint": "AirVPN WireGuard config"},
+            {"name": "MASS_PASSWORD", "hint": "mass password"}])):
+        cmd = await sr.stored_values_block(for_commands=True)
+        prose = await sr.stored_values_block(for_commands=False)
+    for block in (cmd, prose):
+        assert "$AIRVPN_WG_CONF" in block and "$MASS_PASSWORD" in block
+        assert "AirVPN WireGuard config" in block
+    # prose steps are the ones that told the operator to go and fetch it
+    assert "generate it" in prose and "download" in prose
+    assert "expanded on the machine" in cmd
+
+
+@pytest.mark.asyncio
+async def test_stored_values_block_is_empty_when_nothing_is_stored():
+    with patch.object(sr, "known_secret_names", AsyncMock(return_value=[])):
+        assert await sr.stored_values_block() == ""
+    with patch.object(sr, "known_secret_names", AsyncMock(side_effect=RuntimeError("no store"))):
+        assert await sr.stored_values_block() == ""
+
+
+def test_both_prompt_paths_carry_the_stored_values_block():
+    """§17.1224 — the drafter had it alone and the executor wrote prose telling
+    the operator to go and generate a config already in the store (ADD102).
+    Both call the ONE helper; neither re-renders the text itself."""
+    draft = inspect.getsource(sr.draft_runbook)
+    node_exec = inspect.getsource(ea.execute_next_node)
+    assert "await stored_values_block()" in draft
+    assert "stored_values_block(" in node_exec
+    # attached as a grounding block, so the optimizer cannot rewrite it away
+    assert node_exec.index("stored_values_block(") < node_exec.index('raw_prompt = _task_prompt + "".join(_grounding_blocks)')
+    assert "_grounding_blocks.append(_stored)" in node_exec
+    # exactly one place renders the words
+    body = open("app/modules/supervised_runs.py").read()
+    assert body.count("VALUES ALREADY STORED") == 1
+    assert "VALUES ALREADY STORED" not in open("app/modules/execution_agent.py").read()
+
+
+# ── §17.1225: a lost response is not a failed command ────────────────────
+
+
+_DROP = "(runner error: mcp server 'pve-runner' tool 'run_supervised': MCPError: SSE stream ended without a response)"
+
+
+def _executed(ok_first=True, drop_second=True):
+    return [
+        {"command": "pct status 111", "ok": True, "exit": 0, "output": "status: stopped\n"},
+        {"command": "pct start 111", "ok": False, "exit": None, "output": _DROP, "unreachable": drop_second},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_with_the_goal_met_is_done_not_failed(monkeypatch):
+    """Live ADD50: `pct start 111` lost its SSE response, the container WAS
+    running, and the step was recorded failed while the engine told the operator
+    to run `pct status 111` — the command in its own verify list, on a host it
+    had an open read-only channel to."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim)
+    db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+
+    waiting = {"kind": "run", "node_key": "ADD50", "title": "Start container 111 (control-panel)",
+               "runbook": "## Run this", "commands": ["pct status 111", "pct start 111"],
+               "verify": ["pct status 111"], "refused": []}
+
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct status 111", "pct start 111"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed())), \
+         patch("app.modules.assist_local_runner.run_probes",
+               new=AsyncMock(return_value=("== V1 ==\nstatus: running\n",
+                                           [{"id": "V1", "command": "pct status 111"}]))), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=True)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")) as diag:
+        out = await sr.resolve_run(db, "j", "ADD50", "run", waiting)
+
+    assert out["outcome"] == "ran" and out["node_status"] == "done"
+    assert out["confirmed_after_drop"] is True
+    diag.assert_not_awaited()          # nothing to diagnose: it worked
+    written = " ".join(str(c.args[1]) for c in db.execute.await_args_list if len(c.args) > 1)
+    assert "status = 'done'" in " ".join(str(c.args[0]) for c in db.execute.await_args_list)
+    assert "response" in written and "lost" in written
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_with_the_goal_NOT_met_still_fails(monkeypatch):
+    """The vacuity check: the drop path must not become a rubber stamp."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim)
+    db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    waiting = {"kind": "run", "node_key": "ADD50", "title": "Start container 111",
+               "runbook": "## Run this", "commands": ["pct status 111", "pct start 111"],
+               "verify": ["pct status 111"], "refused": []}
+
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct status 111", "pct start 111"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed())), \
+         patch("app.modules.assist_local_runner.run_probes",
+               new=AsyncMock(return_value=("== V1 ==\nstatus: stopped\n",
+                                           [{"id": "V1", "command": "pct status 111"}]))), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=False)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="try this")):
+        out = await sr.resolve_run(db, "j", "ADD50", "run", waiting)
+
+    assert out["outcome"] == "failed" and out["node_status"] == "failed"
+    assert out["unknown_outcome"] is True
+    assert "did NOT show its goal" in out["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_command_failure_never_reaches_the_drop_path():
+    """A non-zero exit is a failure, whatever else happened in the block —
+    `indeterminate` requires that NOTHING actually failed."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    executed = [
+        {"command": "pct start 111", "ok": False, "exit": 255, "output": "container '111' not running!"},
+        {"command": "pct exec 111 -- true", "ok": False, "exit": None, "output": _DROP, "unreachable": True},
+    ]
+    waiting = {"kind": "run", "node_key": "X", "title": "t", "runbook": "r",
+               "commands": ["pct start 111", "pct exec 111 -- true"], "verify": ["pct status 111"], "refused": []}
+    goal = AsyncMock(return_value=True)          # would pass if it were consulted
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct start 111", "pct exec 111 -- true"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch("app.modules.assist_local_runner.run_probes", new=AsyncMock(return_value=("", []))) as probes, \
+         patch.object(sr, "_goal_confirmed", goal), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
+        out = await sr.resolve_run(db, "j", "X", "run", waiting)
+    assert out["outcome"] == "failed"
+    goal.assert_not_awaited()
+    probes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_confirmed_needs_every_check_confirmed():
+    with patch("app.modules.assist_state_check.judge_outputs",
+               new=AsyncMock(return_value=[{"verdict": "confirmed"}, {"verdict": "unknown"}])):
+        assert await sr._goal_confirmed("t", ["a", "b"], "== V1 ==\nx") is False
+    with patch("app.modules.assist_state_check.judge_outputs",
+               new=AsyncMock(return_value=[{"verdict": "confirmed"}, {"verdict": "confirmed"}])):
+        assert await sr._goal_confirmed("t", ["a", "b"], "== V1 ==\nx") is True
+    # no evidence, and a judge that blows up, are both "not confirmed"
+    assert await sr._goal_confirmed("t", ["a"], "   ") is False
+    with patch("app.modules.assist_state_check.judge_outputs", new=AsyncMock(side_effect=RuntimeError("x"))):
+        assert await sr._goal_confirmed("t", ["a"], "== V1 ==\nx") is False
+
+
+@pytest.mark.asyncio
+async def test_a_SPENT_decision_no_longer_hides_a_node(monkeypatch):
+    """§17.1245 — live ADD111: the operator approved it, the run died on the
+    five-second clock, the step was reset, and it could never be offered again
+    because their approval from the FAILED attempt was still on the job."""
+    answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+    db = AsyncMock()
+    r1 = MagicMock(); r1.scalar.return_value = {
+        "ADD111": {"by": "operator", "choice": "run", "at": answered.isoformat()}}
+    r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
+        {"node_key": "ADD111", "title": "Set up Pi-hole", "prompt_template": "Run `pct create 130 x`.",
+         "depends_on": [], "tool": "LLM", "node_type": "task", "description": None,
+         "retry_count": 0, "last_verification_reason": None},
+    ]
+    r3 = MagicMock()   # written AFTER the answer — the reset — so the answer is spent
+    r3.mappings.return_value.first.return_value = {"updated_at": answered + timedelta(minutes=3)}
+    db.execute = AsyncMock(side_effect=[r1, r2, r3])
+    with patch.object(settings, "shell_tool_enabled", False), \
+         patch.object(sr, "recover_prior_attempt", AsyncMock(side_effect=lambda db, j, n: n)):
+        node = await sr.pending_hands_on(db, "j")
+    assert node is not None and node["node_key"] == "ADD111", \
+        "a step reset after a failed approved run must be offered for approval again"

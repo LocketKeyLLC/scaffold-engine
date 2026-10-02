@@ -1,0 +1,18 @@
+Before we build the panel, one thing needs your call: **what should the panel be made of, and where should it live on the server?**
+
+Why it matters: the panel has to do the four jobs you named — edit the Palworld server's settings, take a movie or TV show name and send it to the downloader, give you quick access to the AI you're testing, and let you reach scaffold-engine. All four mean the panel has to talk to other things on the server. The choice below decides how easy that is to build and keep working.
+
+Here are the options, in plain words:
+
+**Option 1 — A small custom web page in its own container (Python).**
+The panel is a little program we write, running in its own isolated box on the server (a container — think of it as a mini-computer that only runs this one thing). You open it in your browser like any web page. Python is the language it's written in — the same family of tools your AI box already uses, so there's less new stuff to learn and maintain. Trade-off: it takes a bit of time to build, and the look is simple rather than fancy.
+
+**Option 2 — A small custom web page in its own container (Node.js + a modern frontend).**
+Same idea — a custom panel in its own container — but built with a different set of tools that make the page look and feel more polished, with smoother buttons and screens. Trade-off: more moving parts to keep updated over time, and a second set of tools to maintain alongside the AI stack.
+
+**Option 3 — A ready-made dashboard (like Homarr or Dashy) with links and buttons.**
+Instead of writing a custom panel, we install an existing dashboard program and arrange it to show the things you want. Fastest to get something on screen. Trade-off: it's mostly links and shortcuts — typing a movie name to download and editing the Palworld settings directly would need extra workarounds or separate small tools anyway, so the "one stop" feel is weaker.
+
+**Where it runs in all three cases:** on the Proxmox server itself, in its own container, reachable from your home network. Nothing is exposed to the outside unless we later decide to — and that's a separate question we haven't answered yet.
+
+Which of these sounds right — or would you rather I narrow it down by asking what you most want to be able to do first?

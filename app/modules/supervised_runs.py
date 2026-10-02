@@ -23,7 +23,10 @@ channel is open: hands-on steps are executable — one approval each.
 from __future__ import annotations
 
 import json
+import ast
+import asyncio
 import logging
+import shlex
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -80,7 +83,18 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
 _NOT_ALLOWED = "not on the write-allow list"
 
 
-_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty")
+#: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
+#: itself, so the redraft must recognise it as one.
+#: §17.1269 — every refusal the ENGINE makes about its own block's shape must be
+#: listed here, or `shape_retry_note` does not recognise it, no redraft happens,
+#: and the operator is handed a greyed-out Run with nothing to do about it. That
+#: is exactly what §17.1268 did on its first live outing: the budget refusal was
+#: correct, unregistered, and therefore a dead end. A test below walks every
+#: refusal-producing function and fails when one's text matches nothing here.
+_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
+                   "ON THE HOST", "not valid Python", "cannot even be split",
+                   "only passes a stored value",
+                   "waits on something off this machine")        # §17.1268
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -142,7 +156,11 @@ def shape_retry_note(frame: dict) -> str:
     return (
         "YOUR PREVIOUS DRAFT WAS REFUSED BY THE RUNNER'S GATE — rewrite it so every command can run.\n"
         f"{lines}\n"
-        "Rules that were broken, restated: each command runs alone, in its own shell. No `$(…)` or backticks "
+        "Rules that were broken, restated: each command runs alone, in its own shell. "
+        f"A command gets {_RUN_BUDGET_S} seconds, so work that waits on something off this machine many "
+        "times over must be cut into batches (`items[:20]`, or ten if each one waits on a remote service) "
+        "and sent as several commands, each one treating a thing that is already there as success. "
+        "No `$(…)` or backticks "
         "ANYWHERE — including to build a list for a loop; write the list out literally (`for i in 1 2 3; do …; "
         "done`) or, better, drop the loop and state the checks as separate commands. No heredoc: write a file with "
         "`printf '%s\\n' 'line' | tee /path`. No `>`/`>>` redirects. A retry/wait loop is rarely worth it here — "
@@ -214,6 +232,43 @@ async def record_wanted_prefixes(db: AsyncSession, job_id: str, frame: dict) -> 
     return wanted
 
 
+async def decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry: dict) -> bool:
+    """§17.1200/§17.1245 — has this decision already been spent on an attempt?
+
+    The record carries the moment the operator answered. If the node has been
+    written since — it ran, it failed, it was reopened — the answer belongs to
+    that past attempt and the step must be asked about again. Anything
+    unparseable counts as stale: asking once more costs a click, the other way
+    round marks a machine-changing step done without running it.
+
+    §17.1245 — this lived in `execution_agent` and only `_hand_back_for_approval`
+    used it. `pending_hands_on`, three functions below here, skipped ANY node with
+    a recorded decision and never asked whether that decision was spent. Live,
+    ADD111: the operator approved it, the run died on §17.1244's five-second
+    clock, the step was reset — and it could never be offered for approval again,
+    because their approval from the failed attempt was still on the job. One
+    implementation now, called from both.
+    """
+    at = str((entry or {}).get("at") or "")
+    if not at:
+        return True
+    row = (await db.execute(
+        text("SELECT updated_at FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+        {"jid": job_id, "nk": node_key})).mappings().first()
+    if not row:
+        return True
+    try:
+        from datetime import datetime
+        answered = datetime.fromisoformat(at)
+        touched = row["updated_at"]
+        if answered.tzinfo is None or touched is None:
+            return True
+        return touched > answered
+    except Exception as exc:
+        logger.warning("decision_staleness_unreadable job=%s node=%s err=%r", job_id, node_key, exc)
+        return True
+
+
 async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""
@@ -223,7 +278,7 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
-                   n.retry_count, n.last_verification_reason
+                   n.retry_count, n.last_verification_reason, n.execution_order, n.output_text
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending'
               AND NOT EXISTS (
@@ -241,7 +296,13 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     )).mappings().all()
     for r in rows:
         node = dict(r)
-        if node["node_key"] in decided:
+        # §17.1260 — `reset` nulls output_text and last_verification_reason, the
+        # two fields §17.1247 reads. Put them back from the pre-image.
+        node = await recover_prior_attempt(db, job_id, node)
+        # §17.1245 — a decision is consumed by the attempt it authorised. Skip the
+        # node only while that answer still belongs to THIS attempt.
+        _entry = decided.get(node["node_key"])
+        if _entry is not None and not await decision_is_stale(db, job_id, node["node_key"], _entry):
             continue
         if str(node.get("node_type") or "") == "decision":
             continue
@@ -393,11 +454,1215 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - No multi-line shell constructs, and no `if … then … fi` even on one line: each part of a command is judged on its own, and a `then`-prefixed part cannot be read. Write an idempotent step as a guard chain instead — `pct status 111 | grep -q running || pct start 111` — where the check and the fix are each a whole command.
 - Avoid loops. A retry/wait loop is rarely worth it here: the operator sees the result of each command, so one check is usually enough. If you truly need one, write the list out literally (`for i in 1 2 3; do …; done`) — NEVER build it with `$(seq …)`, which is command substitution and is refused wherever it appears.
 - Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
+- DO the work with an API or a CLI, never by describing the web UI. "Open the Prowlarr web UI and go to Settings → Apps → Add Application", "click Test, then Save" is not something this channel can carry out — it produces a runbook with no commands at all, and the step falls back to the operator doing it by hand. Almost every service here has an HTTP API: drive it with `curl` (`curl -s -X POST http://HOST:9696/api/v1/indexer -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d '{…}'`), or its own CLI where it has one.
+- If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
+- A `curl` that CHANGES something must fail loudly: add `--fail-with-body` (so an HTTP 400/401/404/500 exits non-zero and still shows the server's message). Without it `curl -s` exits 0 having fetched an error page, and a step that changed nothing is reported as done — live, nine `POST`s to an API answered "must be greater than 0" and every one "succeeded". A read under "## Verify" may stay a plain `curl -s`.
+- A service's own API key usually lives in that service's own config file on the machine, and reading it there beats depending on a stored copy: it cannot be stale, nothing secret has to cross into your commands, and the value never appears in the block or any log. An *arr app keeps it in the `<ApiKey>` element of the `config.xml` under its `-data=` directory (find that with `systemctl show <svc> -p ExecStart --value` rather than guessing the path). Prefer that to `$NAME` whenever the key is on a machine you can read.
+- WRITING A SCRIPT, exactly. Wrap each `printf` argument in DOUBLE quotes and use SINGLE quotes inside the code; then nothing needs escaping and the file parses. Never put a backslash before a quote in a `printf` argument -- the shell keeps the backslash and the interpreter chokes on it. Like this:
+    printf '%s\\n' "import json, urllib.request" "cfg = open('/tmp/config.xml').read()" "key = cfg.split('<ApiKey>')[1].split('<')[0]" "print(key[:4])" | tee /tmp/x.py
+  and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
+- AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
+- A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
+- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is.
+- WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
+- YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
+- A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
+- A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
 
+#: §17.1271 — only shown when the runner on the other end actually has the
+#: `write_file` tool. An older helper does not, and telling the drafter to use a
+#: notation that machine would refuse is how a capability becomes a trap.
+FILE_RULES = """
+WRITING A FILE: THIS MACHINE TAKES FILES DIRECTLY, so never build one with `printf … | tee`.
+Put it in its own section and the engine hands the content to the machine as-is -- no shell touches it,
+so NOTHING in it needs escaping. Write the code exactly as the interpreter will see it:
+
+## Write these files
+
+### /tmp/add_indexers.py
+```python
+import json, urllib.request
+entry = {"name": "Anidex"}
+print(f"added: {entry["name"]}")
+```
+
+## Run this
+
+```bash
+python3 /tmp/add_indexers.py
+```
+
+Quotes inside quotes are fine there, because there is no shell to confuse. That is the whole reason this
+exists: a script built with `printf '%s\n' '…'` has to escape its own quotes, and an escaped quote inside a
+single-quoted shell word is a literal backslash the interpreter then refuses. Use the section, and the
+problem cannot happen. Files are written before the commands run, in the order you list them, and the
+engine compiles a `.py` file before offering it -- so a syntax error is caught before the operator is asked.
+"""
+
+
+def no_commands_retry_note(step_text: str, runbook: str) -> str:
+    """§17.1227 — the draft described a web UI, so there is nothing to run.
+
+    Live, ADD96 ("Add the search sources to Prowlarr and connect it to Radarr
+    and Sonarr"): a 3,961-character runbook whose "## Run this" was nine steps
+    of *"Open the Prowlarr web UI"*, *"go to Indexers → Add Indexer"*, *"Click
+    Test to verify the connection, then Save"* — and whose "## Verify" section
+    called `curl -s http://…:9696/api/v1/indexer -H "X-Api-Key: …"` four times.
+    The drafter knew the API existed and used it only to CHECK. `commands` came
+    back empty, so Run was never offered, the frame suggested "I'll do it
+    myself", and the operator was handed nine screens of clicking on a host the
+    engine could reach.
+
+    Neither existing redraft trigger fires on this: `shape_retry_note` needs a
+    REFUSAL (there were none — there was nothing to refuse) and the coverage
+    pass only replaces a draft with one that is both non-empty and complete,
+    which a UI-clicking redraft never is. So the specific remedy has to be
+    named, the way §17.1196 names a gate refusal.
+    """
+    if not (runbook or "").strip():
+        return ""
+    verify = [c for c in _verify_commands_in(runbook) if c]
+    api = sorted({m.group(0) for c in verify for m in _API_PATH_RE.finditer(c)})
+    lines = [
+        "YOUR DRAFT HAS NOTHING TO RUN. The \"## Run this\" section came back with no commands — "
+        "it describes navigating a web UI, which this channel cannot carry out. A runbook with no "
+        "commands means the engine offers the operator nothing and they do the whole step by hand.",
+        "",
+        "Rewrite \"## Run this\" as shell commands, one self-contained command per line.",
+    ]
+    if api:
+        lines += [
+            "",
+            "Your OWN \"## Verify\" section already calls this service's HTTP API:",
+            *[f"  {a}" for a in api[:6]],
+            "",
+            "That is the same API that makes the change. Use it — `curl -s -X POST …` with "
+            "`-H \"X-Api-Key: $NAME\"` and a JSON body — instead of telling the operator where to "
+            "click. If a call needs a field you do not know, GET the relevant endpoint first and "
+            "say so in the step.",
+        ]
+    else:
+        lines += [
+            "",
+            "If the thing you are configuring has an HTTP API or a CLI, drive that. Do not write "
+            "\"open the UI and click\" as a step the engine is meant to run.",
+        ]
+    lines += [
+        "",
+        "If some part genuinely CANNOT be done without a browser, put only that part in a final "
+        "\"## By hand\" section and make every other part a command — a step that is 80% runnable "
+        "is worth far more than one that is 0% runnable.",
+    ]
+    return "\n".join(lines)
+
+
+#: `/api/v1/indexer`, `/api/v3/rootfolder` — an API path in a drafted command.
+_API_PATH_RE = re.compile(r"/api/v\d+/[A-Za-z0-9_/-]+")
+
+
+def _verify_commands_in(runbook: str) -> list[str]:
+    """The fenced commands under a "## Verify" heading only."""
+    m = re.search(r"^##+\s*Verify.*?$(.*)", runbook or "", re.M | re.S)
+    if not m:
+        return []
+    return [c for c in runbook_commands("## Run this\n" + m.group(1))]
+
+
+#: a `curl` that changes something: an explicit write method, or a body.
+_CURL_WRITE = re.compile(r"(?:^|\s)curl\b(?=.*(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary|-urlencode)?|-F|--form|-T|--upload-file)\b))", re.I)
+#: the flags that make its exit code mean something.
+_CURL_FAILS = re.compile(r"(?:--fail-with-body|--fail-early|\s--fail\b|\s-f\b|\s-[a-eg-zA-Z]*f[a-eg-zA-Z]*\s)")
+
+
+#: a runbook saying, in its own words, that it cannot be carried out yet.
+_SELF_BLOCKED = re.compile(
+    r"(?i)\b(?:is|are|remains?|stays?)\s+blocked\s+until\b"
+    r"|\bblocked\s+(?:until|on|by)\b"
+    r"|\bcannot\s+(?:proceed|continue|be\s+(?:done|completed|carried\s+out))\s+until\b"
+    r"|\bcan(?:not|'t)\s+be\s+(?:verified|proven|tested)\s+until\b"
+    r"|\bmust\s+wait\s+(?:for|until)\b"
+    r"|\bnot\s+possible\s+until\b")
+
+
+def declares_itself_blocked(text_value: str) -> Optional[str]:
+    """§17.1235 — the sentence in which a step says it is not done.
+
+    Live, ADD98 ("Prove it end to end: ask for one film and watch it"), recorded
+    `done`, whose FIRST line was
+
+        This proof is blocked until the download client decision from ADD102 is
+        resolved and ADD97 steps 1-2 are complete.
+
+    It produced prose, no command ran, it said in its own words that it could not
+    be carried out — and it counted toward the job's finished total. A step that
+    describes its own blockage is the clearest possible signal that the work did
+    not happen, and it was the one signal nothing read.
+
+    Deliberately narrow: only a self-declaration about THIS step. A runbook that
+    lists prerequisites ("Radarr container 103 is running") is describing a state
+    it expects, not announcing a failure, and must still pass.
+    """
+    for para in re.split(r"\n\s*\n", str(text_value or ""))[:6]:
+        m = _SELF_BLOCKED.search(para)
+        if m:
+            sentence = next((sn.strip() for sn in re.split(r"(?<=[.!?])\s+", para)
+                             if _SELF_BLOCKED.search(sn)), para.strip())
+            return " ".join(sentence.split())[:300]
+    return None
+
+
+#: an interpreter that EXECUTES whatever it is handed on stdin.
+_INTERPRETER = re.compile(r"^(?:ba|da|z|k)?sh\b|^python[0-9.]*\b|^perl\b|^ruby\b|^node\b")
+#: entering a guest — everything after `--` runs INSIDE it, and nothing after a
+#: pipe does.
+_GUEST_ENTRY = re.compile(r"^(?:pct\s+(?:exec|enter)|qm\s+guest\s+exec)\b")
+
+
+def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
+    """§17.1254 — a block that only LOOKS, for a step that must CHANGE something.
+
+    Live, ADD96 ("Add the search sources to Prowlarr and connect it to Radarr and
+    Sonarr"). One draft produced 24 commands: read the indexer schema, then a
+    `curl -X POST …/api/v1/indexer` per public tracker. The next draft of the SAME
+    step produced two — both `GET …/api/v1/indexer/schema`. Nothing added
+    anything. Run was offered, the gate was clean, and approving it would have
+    marked the step done having changed nothing: the false-`done` family §17.1233
+    and §17.1235 exist to close.
+
+    Nothing else catches this. The shape gate judges each command and two reads
+    are individually fine; §17.1227 needs ZERO commands; §17.1215's coverage pass
+    compares the block against commands quoted in the step TEXT, and this step
+    quotes none — it just says what to achieve.
+
+    So: when `step_classify` says the step changes a machine and every drafted
+    command is read-only, the block cannot be what the step is for. Returned as a
+    retry note, because the answer is a better draft and not a refusal the
+    operator has to interpret.
+    """
+    from app.modules.assist_supervised import read_only, split_segments
+    from app.modules.step_classify import step_is_hands_on
+    cmds = [str(c) for c in (commands or []) if str(c).strip()]
+    if not cmds:
+        return ""                                  # §17.1227 owns the empty case
+    on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+    if not on:
+        return ""                                  # a reading step may legitimately only read
+    for c in cmds:
+        for seg in split_segments(c):
+            if seg.strip() and not read_only(seg)[0]:
+                return ""                          # something changes; fine
+    lines = [
+        "EVERY COMMAND IN YOUR DRAFT ONLY LOOKS AT THINGS. This step has to CHANGE something -- "
+        "that is why it is being run through the channel -- and nothing in the block does.",
+        "",
+        "What you wrote:",
+    ]
+    lines += [f"  - {c[:150]}" for c in cmds[:8]]
+    lines += [
+        "",
+        "Reading is how you find out WHAT to change; it is not the change. Keep the reads if they "
+        "tell you something you need, then add the commands that actually do the work -- and make "
+        "them fail loudly (`--fail-with-body` on a `curl` that writes) so a rejection is not "
+        "mistaken for success. If the step genuinely cannot be done through this channel, say so in "
+        "one line instead of drafting a block that looks busy and changes nothing.",
+    ]
+    return "\n".join(lines)
+
+
+#: §17.1255 — an inline interpreter script whose quoting cannot work.
+_INLINE_SCRIPT = re.compile(
+    r"(?:python[0-9.]*|perl|ruby|node)\s+-(?:c|e)\s+'", re.I)
+
+
+#: §17.1255b — a file being WRITTEN that is itself code.
+_CODE_TARGET = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
+
+#: a single-quoted shell argument. Inside one, `\"` is never necessary — the
+#: quotes already protect a double quote — so it reaches the file or the
+#: interpreter as a literal backslash.
+_SQ_ARG = re.compile(r"'((?:[^']){0,4000}?)'")
+
+
+
+#: §17.1256 — a secret name a written script expects from its environment.
+_SCRIPT_ENV_READ = re.compile(
+    r"""os\.environ(?:\.get)?\s*[\[(]\s*["']([A-Z][A-Z0-9_]{2,60})["']"""
+    r"""|ENV\s*\[\s*["']([A-Z][A-Z0-9_]{2,60})["']"""
+    r"""|getenv\s*\(\s*["']([A-Z][A-Z0-9_]{2,60})["']""")
+
+#: the file a `tee` is writing, when that file is a script.
+_TEE_SCRIPT = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
+
+
+def script_secret_not_passed(commands: list[str]) -> list[dict]:
+    """§17.1256 — a written script reads a secret the command running it never gets.
+
+    The runner injects a secret only into commands whose TEXT references it:
+
+        needed = {n: v for n, v in env.items() if f"${n}" in cmd …}
+
+    So `printf … | tee /tmp/add_indexers.py` followed by a bare
+    `python3 /tmp/add_indexers.py` cannot work: the script asks for
+    `os.environ["PROWLARR_API_KEY"]` and the process is started with no such
+    variable. Live, ADD115 died on exactly that —
+
+        KeyError: 'PROWLARR_API_KEY'
+
+    and the redraft, told the reason by §17.1247, "fixed" it by switching to
+    `os.environ.get(...)`: no exception, `KEY = None`, and every POST would have
+    failed 401 instead. The model cannot reason its way here because the rule is
+    internal to the runner, so the engine has to say it.
+
+    The remedy is one prefix: `NAME="$NAME" python3 /tmp/x.py`, which puts the
+    reference in the command text where the runner looks, without the value ever
+    appearing in the block.
+    """
+    cmds = [str(c) for c in (commands or [])]
+    wanted: dict[str, set] = {}          # script path -> secret names it reads
+    for c in cmds:
+        tee = _TEE_SCRIPT.search(c)
+        if not tee:
+            continue
+        names = {g for m in _SCRIPT_ENV_READ.finditer(c) for g in m.groups() if g}
+        if names:
+            wanted.setdefault(tee.group(1), set()).update(names)
+    if not wanted:
+        return []
+    out: list[dict] = []
+    for c in cmds:
+        if _TEE_SCRIPT.search(c):
+            continue                      # the command that WRITES it is fine
+        for path, names in wanted.items():
+            if path not in c:
+                continue
+            missing = sorted(n for n in names if f"${n}" not in c and "${" + n + "}" not in c)
+            if not missing:
+                continue
+            first = missing[0]
+            out.append({"command": c, "why": (
+                f"this runs {path}, which reads {', '.join(missing)} from its environment — and the "
+                f"runner only passes a stored value into a command that MENTIONS it, so the script "
+                f"starts with no such variable and fails. Put the reference in this command: "
+                f'`{first}="${first}" python3 {path}`. The value still never appears in the block; '
+                f"the runner expands it on the machine.")})
+    return out
+
+
+#: §17.1257 — where a command hands source to another interpreter.
+_PY_DASH_C = re.compile(r"python[0-9.]*\s+-c\s+('[^']*'|\"[^\"]*\")")
+_PY_FILE_WRITE = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.py)\b", re.I)
+
+
+def _printf_lines(cmd: str) -> Optional[list[str]]:
+    """The lines a `printf '%s\\n' "a" "b" …` writes, or None if unsplittable."""
+    if "printf" not in cmd:
+        return None
+    body = cmd.split("printf", 1)[1].split("|", 1)[0]
+    try:
+        args = shlex.split(body)
+    except ValueError:
+        return None
+    return args[1:] if len(args) > 1 else []
+
+
+def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
+    """``[(what it is, the Python source)]`` this command hands to an interpreter.
+
+    A ``None`` source means the shell words could not even be split, which is a
+    finding in itself.
+    """
+    out: list[tuple[str, Optional[str]]] = []
+    m = _PY_DASH_C.search(cmd)
+    if m:
+        out.append(("the `python -c` payload", m.group(1)[1:-1]))
+    target = _PY_FILE_WRITE.search(cmd)
+    if target:
+        lines = _printf_lines(cmd)
+        if lines is None:
+            out.append((f"the script written to {target.group(1)}", None))
+        elif lines:
+            out.append((f"the script written to {target.group(1)}", "\n".join(lines)))
+    return out
+
+
+#: §17.1268 — the calls that wait on something outside this machine. A loop
+#: around one of these is where a command's time budget goes.
+_NETWORK_CALL = frozenset({
+    "urlopen", "request", "Request", "get", "post", "put", "delete", "patch",
+    "head", "getresponse", "connect", "sendall", "recv", "check_output", "run",
+    "call", "check_call", "Popen",
+})
+
+
+def _literal_names(tree) -> set[str]:
+    """Names this source assigns a literal collection to, and never anything else.
+
+    `apps = [{…Radarr…}, {…Sonarr…}]` then `for app in apps:` is two items and
+    always will be -- the apps half of ADD115, which must keep working. A name
+    that is ALSO assigned something else (a response, a filter over one) is not
+    counted, because then its size is whatever that was.
+    """
+    import ast
+    literal: set[str] = set()
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        for t in targets:
+            if not isinstance(t, ast.Name):
+                continue
+            (literal if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict))
+             else other).add(t.id)
+    return literal - other
+
+
+def _bounded(it, literal_names: set[str] | None = None) -> bool:
+    """Is this iterable something whose size the draft itself fixed?
+
+    A literal list or tuple is bounded by construction, whether it is written in
+    the loop or assigned to a name just above it. A slice or `islice` is the
+    author saying how many. A bare name holding whatever a service returned is
+    not.
+    """
+    import ast
+    names = literal_names or set()
+    if isinstance(it, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        return True
+    if isinstance(it, ast.Subscript):                   # public[:20]
+        return True
+    if isinstance(it, ast.Name):
+        return it.id in names
+    if isinstance(it, ast.Call):
+        name = getattr(it.func, "attr", None) or getattr(it.func, "id", None)
+        if name in ("islice", "range"):
+            return True
+        if name in ("enumerate", "list", "sorted", "reversed", "tuple"):
+            return bool(it.args) and _bounded(it.args[0], names)
+    return False
+
+
+def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
+    """§17.1268 — a block that cannot finish in the time it is given.
+
+    §17.1267 told the drafter a command gets 180 seconds and asked for batches.
+    The very next draft looped over all 89 indexers again -- each POST making the
+    service connection-test a remote tracker -- and put a `time.sleep(1)` INSIDE
+    the loop, which is strictly worse than the attempt that had just been killed.
+    A rule the prompt states and the draft ignores is not a fail-safe, so this is
+    the gate (feedback: fail-safes are a registry; gates must bite).
+
+    The question is the one that can be answered from the source: does a loop
+    whose body waits on something off this machine run over a collection the
+    draft itself did not bound? A literal list is bounded -- `for app in [radarr,
+    sonarr]` is two items, which is why the apps half of this very step passes.
+    A name holding whatever an API returned is not, and `public[:20]` is the
+    remedy, stated by the author.
+
+    Reuses §17.1257's payload extraction: the source is already in hand, and the
+    AST it compiles is already proof the code is real.
+    """
+    import ast
+    out: list[dict] = []
+    for cmd in commands or []:
+        for what, source in python_payloads(str(cmd)):
+            if not source:
+                continue
+            try:
+                tree = ast.parse(source)
+            except (SyntaxError, ValueError, RecursionError):
+                continue                      # §17.1257 reports that, not this
+            names = _literal_names(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.For, ast.AsyncFor)) or _bounded(node.iter, names):
+                    continue
+                calls = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                         and (getattr(c.func, "attr", None) or getattr(c.func, "id", None)) in _NETWORK_CALL]
+                if not calls:
+                    continue
+                sleeps = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                          and getattr(c.func, "attr", None) == "sleep"]
+                where = ast.unparse(node.iter)[:60]
+                out.append({"command": cmd, "why": (
+                    f"{what} loops over `{where}` -- however many that service returns -- and every pass "
+                    f"waits on something off this machine"
+                    + (", with a sleep inside the loop as well" if sleeps else "")
+                    + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
+                    f"record of how much of the work landed, so a run over 89 of anything cannot be "
+                    f"offered. Bound it: take a slice of a size YOU choose (`{where}[:20]`, or fewer) and send "
+                    f"several commands, each one resumable -- treat a thing that is already there as "
+                    f"success and move on. Pick the size so a batch finishes well inside the budget: if "
+                    f"every item waits on a remote service that may answer slowly or not at all, ten is "
+                    f"safer than twenty. Then a batch that runs out of time loses only itself.")})
+                break                         # one finding per payload is enough
+    if out:
+        logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
+def _unescape_in_single_quotes(cmd: str) -> str:
+    r"""``\"`` inside a ``'…'`` shell word becomes ``"``; everything else is left
+    exactly as it was.
+
+    POSIX single quotes have no escapes at all, so a backslash between them is a
+    literal backslash and reaches the interpreter. Removing it is the whole
+    repair, and it is only ever applied where the quoting says the backslash
+    cannot have been meant.
+    """
+    out: list[str] = []
+    i, in_single = 0, False
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "'":
+            in_single = not in_single
+            out.append(c)
+            i += 1
+            continue
+        if in_single and c == "\\" and i + 1 < len(cmd) and cmd[i + 1] == '"':
+            out.append('"')                 # drop the backslash, keep the quote
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def repair_shell_quoted_payloads(commands: list[str]) -> tuple[list[str], list[dict]]:
+    """§17.1270 — fix the engine's own recurring quoting mistake instead of
+    refusing it for the fourth time.
+
+    THREE of four drafts for ADD115 died on the same thing: a script written with
+    ``printf '%s\n' 'line' 'line' …`` containing ``print(f"added: {entry[\"name\"]}")``.
+    Inside a single-quoted shell word that backslash is literal, so the
+    interpreter is handed ``{entry[\"name\"]}`` and refuses it. §17.1257 catches it
+    every time, §17.1255's rule and a worked example are both in the prompt, and
+    the redraft makes the same mistake again -- so the prompt is not where this
+    gets fixed.
+
+    It does not need judgment. POSIX single quotes have no escapes, the backslash
+    cannot have been intended, and removing it is a transformation whose result
+    is PROVEN before use: the repaired command's payload must compile when the
+    original's did not. If it does not compile, nothing is changed and §17.1257
+    refuses as before. That is the deterministic half of the split this project
+    already relies on -- propagate what is provable, ask about what is not.
+
+    Returns the commands to use and a record of every repair, for the log and for
+    the operator-facing note (a changed command is never a silent change).
+    """
+    out: list[str] = []
+    repairs: list[dict] = []
+    for cmd in commands or []:
+        text_value = str(cmd)
+        if not payload_will_not_compile([text_value]):
+            out.append(text_value)
+            continue
+        candidate = _unescape_in_single_quotes(text_value)
+        if candidate != text_value and not payload_will_not_compile([candidate]):
+            out.append(candidate)
+            repairs.append({"command": text_value, "repaired": candidate, "why": (
+                "a quote was escaped inside a single-quoted shell word, where a backslash is "
+                "literal and reaches the interpreter. The backslashes were removed and the "
+                "payload compiles; nothing else was changed.")})
+        else:
+            out.append(text_value)          # §17.1257 reports it, unrepaired
+    if repairs:
+        logger.warning("payload_quotes_repaired count=%d first=%r",
+                       len(repairs), repairs[0]["command"][:120])
+    return out, repairs
+
+
+def payload_will_not_compile(commands: list[str]) -> list[dict]:
+    """§17.1257 — compile the code the block hands to another interpreter.
+
+    THE UNDERLYING ISSUE behind a run of near-identical defects. The engine
+    generates source for a second interpreter — `python3 -c '…'`, or a script
+    written out with `printf … | tee x.py` — and validated only the SHELL. Its own
+    shell parser says every one of these commands is fine, because they are:
+    `parse_error=False`. The defect is in the Python being handed over, and
+    nothing ever looked at it.
+
+    So each new way of malforming that payload needed its own pattern. §17.1255
+    added one for `-c` payloads with escaped quotes; §17.1255b added another when
+    the identical mistake appeared in a written script; three drafts in a row
+    produced it anyway, and so did three of my own attempts at the rule. That is
+    not a sequence of unrelated bugs, it is one missing check.
+
+    `ast.parse` answers it directly and generically, with the real compiler
+    message and a line number, and it catches shapes nobody has seen yet. It
+    supersedes §17.1255 and §17.1255b, which are deleted.
+
+    Note what this does NOT do: a payload can compile perfectly and still be
+    wrong (§17.1248's pipe crossing a guest boundary, §17.1256's missing secret,
+    §17.1234's silent HTTP failure). Those are semantics, not syntax, and they
+    keep their own rules. This closes the syntax family only — but it closes it
+    properly rather than one shape at a time.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        for what, src in python_payloads(cmd):
+            if src is None:
+                out.append({"command": cmd, "why": (
+                    f"{what} cannot even be split into shell words — the quoting is unbalanced, so "
+                    f"nothing can tell what the file would contain. Rewrite it with one short "
+                    f"argument per line and no escaped quotes.")})
+                continue
+            try:
+                ast.parse(src)
+            except SyntaxError as exc:
+                line = (src.splitlines()[exc.lineno - 1].strip()
+                        if exc.lineno and exc.lineno <= len(src.splitlines()) else "")
+                out.append({"command": cmd, "why": (
+                    f"{what} is not valid Python and would fail the moment it ran: "
+                    f"{exc.msg} (line {exc.lineno})"
+                    + (f" -- {line[:120]!r}" if line else "")
+                    + ". This was compiled before offering it, so the error is certain, not a "
+                      "guess. Fix the source: inside a single-quoted shell argument a backslash is "
+                      "literal, so never escape a quote there.")})
+            except (ValueError, RecursionError) as exc:
+                out.append({"command": cmd, "why": (
+                    f"{what} could not be compiled ({type(exc).__name__}), so it cannot be offered "
+                    f"as runnable.")})
+    return out
+
+
+#: §17.1258 — the same failure, over and over, instead of one diagnosis.
+_FAIL_LINE = re.compile(
+    r"(?im)^\s*(?:failed|error|skip(?:ped)?)\b[:\s].*?"
+    r"((?:HTTP\s*(?:Error\s*)?\d{3})|(?:\b[45]\d\d\b)|(?:Bad Request)|(?:Unauthorized)|(?:Forbidden))")
+
+
+#: §17.1263 — a status the REMOTE end owns. 400/401/403/422 say the request was
+#: wrong: ours to fix, and identical every time it is sent. 502/503/504, a
+#: refused connection or a timeout say the thing being configured is DOWN, which
+#: is that thing's problem. Live, ADD115: the first attempt sent 88 malformed
+#: bodies (one diagnosis, discarded 88 times — §17.1258 is right about that), and
+#: the attempt after it hit genuinely dead trackers. Treating the second like the
+#: first stops the step on the first corpse and adds none of the ones that work.
+_UNREACHABLE = re.compile(
+    r"(?i)\b(?:50[234]|bad gateway|service unavailable|gateway time-?out|timed?\s*out|"
+    r"timeout|connection refused|connection reset|no route to host|unable to connect|"
+    r"could not resolve|name or service not known|temporary failure in name resolution|"
+    # §17.1266 — measured on the real run. ADD115's second indexer came back
+    # "Unable to access 16mag.net, blocked by CloudFlare Protection", which none
+    # of the above matches, so a tracker that is simply unusable was classified
+    # as a malformed request and the step stopped at 2 of 89. A phrase list is
+    # always one phrase short; these are the classes a THIRD PARTY owns.
+    r"unable to (?:access|reach|retrieve|fetch)|blocked by|cloudflare|captcha|"
+    r"forbidden|unauthorized by|no such host|certificate|ssl error|handshake|"
+    r"site is down|offline|not responding|dns)\b")
+
+#: §17.1263 — a line reporting that one thing actually landed. If any did, the
+#: block was not spinning on one mistake; it was working through a list.
+_OK_LINE = re.compile(
+    r"(?im)^\s*(?:added|created|ok|success(?:fully)?|configured|installed|enabled|done)\b[:\s]")
+
+
+def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[str]:
+    """§17.1258 — a block that repeated a failing call instead of stopping at it.
+
+    ADD115's script read Prowlarr's schema correctly and then POSTed all 88 public
+    definitions. Every one came back `HTTP Error 400: Bad Request`, and the output
+    was 88 lines of
+
+        failed: Anidex - HTTP Error 400: Bad Request
+        failed: NewStudio - HTTP Error 400: Bad Request
+        …
+
+    Prowlarr says in the response BODY exactly which property it rejected -- the
+    first attempt at this step had already been told `'App Profile Id' must be
+    greater than '0'` -- and the script discarded that 88 times over. The
+    operator got no diagnosis and the engine learned nothing it could act on.
+
+    One failure is information. The same failure 88 times is the same information,
+    with the useful part thrown away. So when a run's output shows one error
+    repeated, the step fails with THAT as the reason, which §17.1247 then carries
+    into the next draft.
+    """
+    counts: dict[str, int] = {}
+    for m in _FAIL_LINE.finditer(output or ""):
+        counts[m.group(1).strip().lower()] = counts.get(m.group(1).strip().lower(), 0) + 1
+    if not counts:
+        return None
+    # §17.1263 — a dead third party is not the engine repeating its own mistake.
+    # Once something in the run has landed, an unreachable remote is a thing to
+    # skip and report, not a reason to abandon the rest of the list.
+    if _OK_LINE.search(output or ""):
+        counts = {e: c for e, c in counts.items() if not _UNREACHABLE.search(e)}
+        if not counts:
+            return None
+    err, n = max(counts.items(), key=lambda kv: kv[1])
+    if n < threshold:
+        return None
+    return (
+        f"the block hit the SAME failure {n} times -- {err!r} -- and carried on instead of stopping "
+        f"at the first one. One failure is information; the same failure {n} times is the same "
+        f"information with the useful part discarded. The service says in its RESPONSE BODY which "
+        f"field it rejected, and that body was never shown.\n\n"
+        f"Next attempt: do the operation ONCE, and if it fails print the full response body and "
+        f"stop. Fix the body from what the service says, then do the rest. Do not write a loop that "
+        f"swallows an error into a one-line summary.")
+
+
+async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) -> Optional[str]:
+    """§17.1259 — a step that wrote a runbook for a machine the engine can reach.
+
+    THE honest answer to "a step can be marked finished having done nothing". A
+    step with no shell backend writes instructions and the node still goes to
+    `done`. The `runbook_only` flag exists in the SSE payload; the STATUS does
+    not know, so the job's counts and every downstream dependency treat
+    instructions as work.
+
+    Live, and not cosmetic. ADD116 ("give the media-stack containers working
+    DNS") was marked done having produced 1,582 characters of prose. DNS stayed
+    broken on all five containers -- and because it was `done`, ADD115 unblocked
+    and ran straight into the wall ADD116 was created to remove. ADD97 and ADD98
+    did the same earlier; ADD98 is "prove it end to end: ask for one film and
+    watch it arrive", recorded finished having proven nothing.
+
+    The discriminator is WHOSE machine. If the prose carries commands for a host
+    the runner can reach, the engine could have run them and chose to describe
+    them instead -- that is not done. If the work is elsewhere (an app on the
+    operator's phone, a router with no API), prose is the correct and only
+    output, so the check stays silent.
+
+    Fail-soft: no channel, no commands in the prose, or an unreadable channel all
+    leave the step exactly as it was.
+    """
+    text_value = str(output or "")
+    if not text_value.strip() or "## Executed on" in text_value:
+        return None                      # it really ran; nothing to judge here
+    try:
+        from app.modules.step_classify import step_is_hands_on
+        cmds = runbook_commands(text_value)
+        if not cmds:
+            return None                  # pure guidance, nothing it could have run
+        ch = await channel(db)
+        if ch is None:
+            return None                  # no write channel: prose is all it could do
+        spec, _policy = ch
+        pre = await _unmet_for(cmds, spec)
+    except Exception as exc:
+        logger.warning("instructions_check_failed err=%r", exc)
+        return None
+    on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+    reachable = [c for c in cmds if _targets_this_host(c)]
+    if not reachable:
+        return None                      # the work is on something else entirely
+    return (
+        f"this step produced INSTRUCTIONS, not work. It wrote {len(cmds)} command"
+        f"{'' if len(cmds) == 1 else 's'} for a machine the engine can reach"
+        + (f" (for example `{reachable[0][:70]}`)" if reachable else "")
+        + ", the write channel to that machine is open, and none of them ran. A step that describes "
+          "what should happen has not made it happen, so it is not done -- and anything depending on "
+          "it would start from a false premise.\n\n"
+        "Either run it through the channel, or if it genuinely cannot be run there say so in one "
+        "line and name what blocks it."
+        + (f"\n\nThe host also already contradicts part of it: {pre[0]['why'][:160]}" if pre else ""))
+
+
+def _targets_this_host(cmd: str) -> bool:
+    """Is this a command for the Proxmox host or a guest on it?"""
+    head = (str(cmd).strip().split() or [""])[0]
+    return head in {"pct", "qm", "pvesm", "pveam", "pvesh", "pvenode", "systemctl",
+                    "ip", "sed", "tee", "printf", "apt-get", "apt", "curl", "dig", "getent"}
+
+
+async def _unmet_for(cmds: list[str], spec) -> list[dict]:
+    try:
+        from app.modules.runbook_preconditions import unmet
+        return await unmet(cmds, spec)
+    except Exception:
+        return []
+
+
+def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
+    """§17.1248 — a pipe after `pct exec` runs the right-hand side on the HOST.
+
+    Live, ADD111's resuming draft:
+
+        pct exec 130 -- curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
+
+    The shell splits that into `pct exec 130 -- curl …` and `bash /dev/stdin
+    --unattended`. So `curl` fetches the Pi-hole installer inside container 130
+    and hands it to a shell on the PROXMOX HOST — which would have installed
+    Pi-hole on the host itself, taking port 53 and the host's resolver with it.
+    The attempt before this one had it right, inside `bash -c "…"`; the redraft
+    moved the pipe out and nothing noticed, because every existing check judges
+    the segments separately and each of these segments is individually fine.
+
+    That is the whole point: the danger is not in either half, it is in the
+    boundary between them. Refused as a SHAPE problem so §17.1196's redraft
+    fixes it, with the correction named — put the pipeline inside the guest.
+    """
+    from app.modules.assist_supervised import split_segments
+    out: list[dict] = []
+    for c in commands or []:
+        segs = [x.strip() for x in split_segments(str(c)) if x.strip()]
+        if len(segs) < 2 or not _GUEST_ENTRY.search(segs[0]):
+            continue
+        # only a PIPE carries data across; `&&` / `;` just sequence host commands,
+        # which is a different (and legitimate) thing.
+        if "|" not in re.sub(r"\|\|", "", str(c)):
+            continue
+        after = [x for x in segs[1:] if _INTERPRETER.search(x)]
+        if not after:
+            continue
+        guest = re.search(r"\b(\d{3,5})\b", segs[0])
+        gid = guest.group(1) if guest else "the guest"
+        out.append({"command": str(c), "why": (
+            f"this pipes out of {gid} and into `{after[0].split()[0]}` ON THE HOST. Everything after "
+            f"`--` runs inside the guest; everything after the `|` does not — so the script fetched "
+            f"in {gid} would be executed by the Proxmox host itself. Put the whole pipeline inside "
+            f"the guest instead: `pct exec {gid} -- bash -c \"… | {after[0]}\"`, one self-contained "
+            f"command, and nothing crosses the boundary.")})
+    return out
+
+
+def curl_writes_without_fail(commands: list[str]) -> list[dict]:
+    """§17.1234 — ``[{command, why}]`` for every write-shaped `curl` whose exit
+    code cannot report an HTTP error.
+
+    The root cause under §17.1233: `curl -s` exits 0 when the server answers
+    400, so the runner reports success for a request the service rejected. Nine
+    of them in one block on ADD96, all rejected, the step marked done. Reported
+    as a SHAPE refusal, which the existing §17.1196 redraft already feeds back
+    to the drafter — so the engine fixes its own block instead of the operator
+    discovering it later.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        if _CURL_WRITE.search(cmd) and not _CURL_FAILS.search(cmd):
+            out.append({"command": cmd, "why": (
+                "this `curl` sends a change but cannot report an HTTP error: `curl -s` exits 0 "
+                "even when the server answers 400 or 401, so a request the service REJECTED "
+                "would be recorded as done. Add `--fail-with-body` so the failure is a non-zero "
+                "exit and the server's message is still shown.")})
+    return out
+
+
+async def host_inventory(spec) -> str:
+    """§17.1232 — the guests that exist, for the drafter that keeps guessing.
+
+    Live, ADD96's third draw: `curl -s -X POST http://<PROXMOX_HOST_IP>:9696/api/v1/indexer`.
+    Prowlarr is container 102 on that host, Radarr 103, Sonarr 104 — one `pct
+    list` says so, through the channel the engine had open. The drafter did not
+    know any guest existed, so it addressed a service listening inside a
+    container at the host's own address, and named the placeholder to match.
+    Nothing downstream can repair that: discovery resolves a name to a machine,
+    and the name pointed at the wrong machine.
+
+    Read-only, both listings, fail-soft to "" — a drafter without the inventory
+    writes what it wrote before.
+    """
+    if spec is None:
+        return ""
+    try:
+        from app.modules.runbook_discovery import _read, guests_by_name
+        cts = await _read(spec, "pct list")
+        vms = await _read(spec, "qm list")
+    except Exception as exc:
+        logger.warning("host_inventory_failed err=%r", exc)
+        return ""
+    lines: list[str] = []
+    for name, cid in sorted(guests_by_name(cts).items(), key=lambda kv: kv[1]):
+        lines.append(f"  container {cid} — {name}")
+    for m in re.finditer(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", vms or "", re.M):
+        if m.group(2).lower() != "name":
+            lines.append(f"  VM {m.group(1)} — {m.group(2)} ({m.group(3)})")
+    if not lines:
+        return ""
+    return ("\n\nGUESTS ON THIS HOST (read just now, and this is the whole list):\n"
+            + "\n".join(lines)
+            + "\n\nAddress a service at the guest it runs in. If a name here matches the "
+              "service your step is about, the placeholder for its address must be named after "
+              "that guest — `<NAME_IP>` — so the engine can read the address off the host and "
+              "fill it in. Use `pct exec <id> -- …` to act inside a container and `qm` for a VM; "
+              "`pct` cannot address a VM and `qm` cannot address a container.")
+
+
+async def known_secret_names() -> list[dict]:
+    """§17.1222 — ``[{name, hint}]`` for every value some store already holds.
+
+    NAMES ONLY. The value never leaves its store: the engine writes `$NAME` and
+    the runner expands it on the machine (§17.1191). Fail-soft — a drafter that
+    cannot read the store simply asks, which is the old behaviour.
+    """
+    try:
+        from app.database import async_session
+        from app.modules import runner_secrets as _rs
+        async with async_session() as db:
+            rows = await _rs.list_secrets(db)
+        return [{"name": r.get("name"), "hint": (r.get("hint") or "")[:120]}
+                for r in rows if r.get("name")]
+    except Exception:
+        return []
+
+
+async def stored_values_block(*, for_commands: bool = True) -> str:
+    """§17.1224 — the ONE rendering of "the operator already gave us this".
+
+    §17.1222 taught the runbook drafter the names of the stored values. Its own
+    docstring names the sibling it mirrors — "the executor's own node
+    generation" — and that sibling was never taught them, so the awareness
+    existed on exactly one of the three prompt paths. Live, on the home-lab
+    job: ADD102 ("Put the download client behind AirVPN") was written up as
+    prose by the executor, and its first two instructions were
+
+        Go to Config Generator … generate a configuration. Download the
+        resulting `.conf` file.
+        Go to Ports and request a new forwarded port.
+
+    while `AIRVPN_WG_CONF` sat in the store, labelled, from the operator's own
+    upload minutes earlier. Asking someone to go and fetch what they already
+    handed you is the precise complaint §17.1222 was written to answer, and it
+    survived because the fix was applied at one call site instead of the shared
+    layer (feedback: sibling call sites drift).
+
+    Names only — a value never enters a prompt. Fail-soft: a store that cannot
+    be read yields "", which is the old behaviour of asking.
+    """
+    try:
+        names = await known_secret_names()
+    except Exception as exc:
+        logger.warning("known_secret_names_failed err=%r", exc)
+        return ""
+    if not names:
+        return ""
+    listed = "\n".join(f"  ${n['name']}" + (f"  ({n['hint']})" if n.get("hint") else "")
+                       for n in names)
+    how = (
+        "Write `$NAME` directly in the command; it is expanded on the machine at run "
+        "time and never appears in the block, the transcript or any log. Do not invent "
+        "a placeholder for something already on this list, and do not write the value "
+        "itself even if you think you know it."
+        if for_commands else
+        "Refer to it as `$NAME`. The operator already supplied it and it is held for "
+        "them — do NOT write a step that tells them to create it, generate it, download "
+        "it, look it up or type it again, and do not write the value itself."
+    )
+    return ("\n\nVALUES ALREADY STORED — reference these by name and NEVER ask the "
+            "operator for them again:\n" + listed + "\n\n" + how)
+
+
+def executed_commands(report: str) -> list[str]:
+    """The commands an earlier attempt actually sent, in order, from its own
+    ``## Executed on`` report. `run_block` stops at the first failure, so the
+    LAST one is where it stopped and everything before it happened."""
+    i = (report or "").find("## Executed on")
+    if i < 0:
+        return []
+    body = report[i:]
+    end = body.find("\n## ", 1)
+    if end > 0:
+        body = body[:end]
+    return [m.group(1).strip() for m in re.finditer(r"^\$ (.+)$", body, re.M)]
+
+
+async def recover_prior_attempt(db: AsyncSession, job_id: str, node: dict) -> dict:
+    """§17.1260 — put back what `reset` deleted, so the next draft can read it.
+
+    The operator: "With the fails, shouldn't the engine also be using the
+    research component to assist it?" It does. `diagnose_failure` researched
+    ADD115's failure and produced a 6,548-character diagnosis. And then the retry
+    path deleted it: `_reset_keys` sets `output_text = NULL` and
+    `last_verification_reason = NULL`, which are precisely the two fields
+    §17.1247 reads to tell the next draft what happened.
+
+    So §17.1247 worked after a `reask` -- the node keeps its record -- and was
+    INERT after a `reset`, which is the ordinary way to retry a step. ADD115 has
+    seven reset pre-images, the largest holding 23,201 bytes of executed report
+    and researched diagnosis, every one of them written to `dag_node_edits` by
+    §17.1211 and never read back.
+
+    Nothing is lost, it was simply in the wrong place. This reads the most recent
+    `reset` pre-image and fills the blanks, so the engine stops paying for
+    research it then throws away. Fail-soft: anything unreadable leaves the node
+    as it was.
+    """
+    out = dict(node)
+    if str(out.get("output_text") or "").strip() and str(out.get("last_verification_reason") or "").strip():
+        return out                       # the live row still has it
+    try:
+        row = (await db.execute(
+            text("SELECT before FROM dag_node_edits "
+                 " WHERE job_id = :j AND node_key = :nk AND op = 'reset' "
+                 "   AND before ? 'output_text' "
+                 " ORDER BY created_at DESC LIMIT 1"),
+            {"j": job_id, "nk": out.get("node_key")})).scalar()
+    except Exception as exc:
+        logger.warning("prior_attempt_unreadable job=%s node=%s err=%r",
+                       job_id, out.get("node_key"), exc)
+        return out
+    before = _as_dict(row)
+    if not before:
+        return out
+    for field in ("output_text", "last_verification_reason"):
+        if not str(out.get(field) or "").strip() and str(before.get(field) or "").strip():
+            out[field] = before[field]
+    if out is not node:
+        logger.warning("prior_attempt_recovered job=%s node=%s chars=%d",
+                       job_id, out.get("node_key"), len(str(out.get("output_text") or "")))
+    return out
+
+
+def diagnosis_of(report: str) -> str:
+    """§17.1260 — the researched diagnosis an earlier attempt produced.
+
+    `diagnose_failure` writes it under "## What went wrong, and what to try" --
+    that is where the RESEARCH lands. `attempt_feedback` carried the one-line
+    reason and the command list and skipped this entirely, so the engine
+    researched a failure and then told the next draft only the headline.
+    """
+    i = (report or "").find("## What went wrong")
+    if i < 0:
+        return ""
+    body = report[i:]
+    nxt = body.find("\n## ", 4)
+    return (body[:nxt] if nxt > 0 else body).strip()
+
+
+#: §17.1268 — the one place the per-command budget is named for prose and gate
+#: alike; `assist_supervised.RUN_COMMAND_TIMEOUT_S` is what actually enforces it
+#: and a test ties the two together.
+_RUN_BUDGET_S = 180
+
+#: §17.1267 — the runner's own words when a command runs out of time.
+_TIMED_OUT = re.compile(r"(?i)timed?\s*out after (\d+)\s*s")
+
+
+def attempt_feedback(node: dict) -> str:
+    """§17.1247 — what the LAST attempt at this step did, and why it stopped.
+
+    The gap this closes is the one that made a human the feedback loop all
+    evening. A supervised run that fails on the machine records its reason on the
+    node and its diagnosis in the output; `pending_hands_on` even SELECTs
+    `retry_count` and `last_verification_reason` onto the dict it hands the
+    drafter — and `draft_runbook` never read either. It calls `build_base_prompt`
+    directly, so it never sees `_format_reviewer_feedback`, which only the
+    ordinary LLM node path uses. Every redraft of a failed hands-on step was a
+    FIRST attempt from the model's point of view.
+
+    ADD111 needed five runs. Four of them re-made a mistake the engine had
+    already seen: an invented template version, a dropped `pveam download`, a
+    privileged read that had already been refused. The engine held all of it. The
+    only path from the failure to the next draft was a person pasting it into the
+    step's description by hand.
+
+    Gated on the REASON, not on `retry_count`: `reset_node` deliberately does not
+    bump the counter, and a reset is how a supervised step gets another attempt,
+    so `_format_reviewer_feedback`'s `retry_count > 0` would have stayed silent
+    here even if it had been wired in.
+    """
+    reason = str(node.get("last_verification_reason") or "").strip()
+    if not reason:
+        return ""
+    ran = executed_commands(str(node.get("output_text") or ""))
+    # §17.1267 — a timeout is not a mistake in the commands, it is work that did
+    # not fit the budget, and the remedy is specific. Live, ADD115: the script
+    # classified every refusal correctly and was killed at 180s partway through
+    # 89 indexers, each POST of which makes the service connection-test a remote
+    # tracker. Without this the next draft reads "exited None: (timed out)" and
+    # has no reason to write anything different.
+    budget = _TIMED_OUT.search(reason)
+    lines = [
+        "\n\nTHE PREVIOUS ATTEMPT AT THIS STEP FAILED. Do not repeat it.",
+        "",
+        "Why it stopped:",
+        f"  {reason[:700]}",
+    ]
+    if ran:
+        lines += ["", "What it actually sent, in order — the run stops at the first failure, so "
+                      "everything above the last line DID happen on the machine:"]
+        for i, c in enumerate(ran, 1):
+            mark = "FAILED HERE" if i == len(ran) else "ok"
+            lines.append(f"  {i}. [{mark}] {c[:150]}")
+        lines += [
+            "",
+            "So write this draft to FINISH FROM THERE, not to start over. Guard anything "
+            "already done instead of repeating it — `pct status N >/dev/null 2>&1 || pct create N …`, "
+            "`pct status N | grep -q running || pct start N` — because a create or a start that "
+            "has already happened fails the second time and would stop this attempt at the very "
+            "first command.",
+        ]
+    if budget:
+        secs = budget.group(1)
+        lines += [
+            "",
+            f"THAT WAS A TIME BUDGET, NOT A MISTAKE. The command was killed at {secs}s with the work "
+            "part-finished, and because it was killed there is no record of how much of it landed. "
+            "The commands themselves may have been right.",
+            "",
+            "So do not send the same single command again — it will be killed at the same place. "
+            "Split the work into batches that each finish well inside the budget (around 20 items per "
+            "command), and make each batch RESUMABLE so re-running one costs nothing: treat a thing "
+            "that is already there as success and move on, never as an error. Then the batches can be "
+            "sent as separate commands, each one reporting what it did, and a batch that runs out of "
+            "time loses only itself.",
+        ]
+    lines += ["", "Address the reason above specifically. If it was a value you did not read off the "
+                  "machine, read it. If it was a command the runner may not run, do not send it again."]
+    # §17.1260 — and the diagnosis the engine already researched for this failure.
+    diag = diagnosis_of(str(node.get("output_text") or ""))
+    if diag:
+        lines += ["", "THE ENGINE ALREADY RESEARCHED THIS FAILURE. Its findings, which cost a web "
+                      "search and a model call and must not be ignored:", "", diag[:3000]]
+    return "\n".join(lines)
+
+
+#: §17.1262 — step wording that asks for the state of the world right now. Only
+#: these pull a web query: research costs a search and a model call, and most
+#: steps are about this machine, which the engine reads directly instead.
+#: Bare `working`, `available`, `reachable` and `alive` are deliberately ABSENT.
+#: "Give the containers working DNS" is about this machine and is answered by
+#: reading it (§17.1212/1229/1232); a web search there would be slower and worse.
+#: Only currency or liveness of something OUTSIDE this host earns a lookup.
+_NEEDS_CURRENCY = re.compile(
+    r"(?i)\b(?:currently|up[- ]to[- ]date|latest|newest"
+    r"|still\s+(?:works?|working|up|alive|available|maintained)"
+    r"|maintained|deprecated|retired|shut\s*down|defunct"
+    r"|as\s+many\s+as\s+possible|which\s+ones?)\b"
+    r"|\bcurrent(?:ly)?\s+(?:working|available|live|up|active|maintained)\b")
+
+
+#: §17.1262c — words that name the WORK rather than the THING. A currency
+#: question is about the thing: a search for "add every public indexer Prowlarr
+#: listed and connect it to Radarr" returns tutorials on how to add indexers,
+#: which is not what was asked. Measured live on ADD115: the query that went out
+#: was the step's title and the five sources were how-to pages.
+_TASK_WORD = frozenset("""
+add adds adding added install installs installing installed configure configures configured
+connect connects connecting connected set sets setting give gives given write writes writing
+create creates creating enable enables enabling disable remove removes delete update updates
+run runs running make makes making use uses using put puts point points pointing verify check
+every all each both listed list the a an and or but it its their them this that these those
+to for from of on in into with at by as step steps so then also again more most
+""".split())
+
+#: §17.1262c — the two kinds of currency question, by the cue the step used.
+#: "install the LATEST driver" wants a version; "which public indexers STILL
+#: WORK" wants liveness. Asking the second shape for the first would be wrong.
+_WANTS_VERSION = re.compile(r"(?i)\b(?:latest|newest|up[- ]to[- ]date|current(?:ly)?\s+(?:version|release))\b")
+
+
+def _subject_of(title: str) -> str:
+    """The THING a step is about — its title with the task words taken out.
+
+    Only the first clause: "Add every public indexer Prowlarr listed, and
+    connect it to Radarr and Sonarr" is two jobs, and the currency question
+    belongs to the first one.
+    """
+    head = re.split(r"[,:;]|\s+and\s+(?:connect|configure|set|install|point|enable|add|give)\b",
+                    str(title or ""), maxsplit=1)[0]
+    words = [w.strip(".,;:()'\"`") for w in head.split()]
+    keep = [w for w in words if w and w.lower() not in _TASK_WORD]
+    return " ".join(keep[:8])
+
+
+def currency_question(node: dict) -> str:
+    """The question to research for this step, or "" when it needs no web lookup.
+
+    §17.1262 — the operator, after 89 indexer adds found most trackers dead:
+    "this is the exact reason for the researcher component to be wired up to
+    fixing issues. It should find the most current up to date and available
+    indexers."
+
+    They are right, and the gap is structural in the same way as the others
+    today. Research IS wired into `diagnose_failure`, so the engine researches a
+    step AFTER it fails. It was never wired into DRAFTING one, so a step whose
+    content depends on the state of the world is written from the model's memory
+    and then discovers reality one 502 at a time.
+
+    Prowlarr's schema is the authority on what definitions EXIST -- shipped with
+    the version, static. It says nothing about which trackers are ALIVE this
+    week, which changes constantly. That second question is exactly what a web
+    search answers and what no amount of reading the machine can.
+
+    §17.1262c — and it has to be ASKED as a currency question. The first cut
+    searched the step's title, so the live query read "Prowlarr add all public
+    indexers connect Radarr Sonarr": grounded correctly, aimed at the wrong
+    thing, and five how-to pages came back. The subject is the step's thing with
+    the task words removed, and the framing comes from the cue the step used --
+    a version question for "latest", a liveness question for "still works".
+
+    Narrow on purpose: only step wording that actually asks about currency or
+    availability triggers a lookup. A step about this host's own disks or
+    containers is answered by reading the host (§17.1212/1229/1232), and
+    researching it would be slower and worse.
+    """
+    body = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not _NEEDS_CURRENCY.search(body):
+        return ""
+    subject = _subject_of(str((node or {}).get("title") or ""))
+    if not subject:
+        return ""
+    year = datetime.now(timezone.utc).year
+    if _WANTS_VERSION.search(body):
+        return f"{subject} latest version {year}"[:200]
+    return f"{subject} still working {year}"[:200]
+
+
+async def research_for_step(node: dict, environment: dict | None = None) -> str:
+    """§17.1262 — current external facts for a step whose content depends on them.
+
+    §17.1262b — the query carries the operator's SYSTEM, not just the step's own
+    words, because that is the difference between a generic list and a usable
+    one. "public indexers that still work" retrieves somebody else's setup; the
+    same question with this machine's nouns in it retrieves the ones that work
+    with what the operator actually runs. ``derive_need`` reads the step's goal
+    and the environment profile for named hardware, and ``finalize_query`` makes
+    those terms a rule rather than a hint — §17.1021 measured a generator
+    dropping the model number three times when merely asked.
+
+    Fail-soft in every direction: no currency wording, no sources, or any error
+    leaves the prompt exactly as it was. A draft without research is the old
+    behaviour, which is survivable; a draft blocked on a failed search is not.
+    """
+    question = currency_question(node)
+    if not question:
+        return ""
+    key = str((node or {}).get("node_key") or "?")
+    profile = str((environment or {}).get("profile") or "")
+    try:
+        from app.modules.assist_evidence import derive_need, finalize_query
+        from app.modules.assist_research_lib import _render_research_block, research_one
+        need = derive_need(
+            question,
+            title=str((node or {}).get("title") or ""),
+            goal_terms=question,
+            operator_notes=[ln.strip() for ln in profile.splitlines() if ln.strip()],
+        )
+        query = finalize_query(need, question, node_key=key) or question
+        res = await research_one(question=query,
+                                 node_key=key,
+                                 synthesize=False,
+                                 goal_terms=question,
+                                 context_hint=profile[:600] or None,
+                                 prerequisite_env=environment or None)
+        sources = (res or {}).get("sources") or []
+        block = _render_research_block(sources)
+    except Exception as exc:
+        logger.warning("step_research_failed node=%s err=%r",
+                       (node or {}).get("node_key"), exc)
+        return ""
+    if not block:
+        return ""
+    logger.warning("step_research_attached node=%s sources=%d q=%r",
+                   key, len(sources), query[:120])
+    return ("\n\n" + block
+            + "\n\nUse these to decide WHICH of the things this machine offers are worth using right "
+              "now. What the machine lists is what EXISTS; whether each one still works is what these "
+              "sources are for. Prefer the ones they confirm are alive, and do not spend the step on "
+              "ones they say are dead or retired.")
+
+
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
-                        for_channel: bool = True, retry_note: str = "") -> str:
+                        for_channel: bool = True, retry_note: str = "", spec=None,
+                        environment: dict | None = None) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them.
 
@@ -408,7 +1673,31 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app import model_router
     from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK, build_base_prompt
     b = brief if isinstance(brief, dict) else {"description": str(brief or "")}
-    prompt = build_base_prompt(node, b)
+    prompt = build_base_prompt(node, b, environment)
+    # §17.1222 — a value the operator already gave once must never be asked for
+    # again. The store, the `$NAME` reference and the out-of-band delivery all
+    # existed (§17.1191/1193); what did not was the drafter KNOWING the names,
+    # so it wrote "enter the password" into step after step for a password that
+    # had been typed once and labelled. The operator: "Entering secrets should
+    # be similar, like labeling it 'mass password' then applying it across the
+    # project." Names only — a value never enters a prompt.
+    # §17.1247 — what the last attempt at this step did, and why it stopped.
+    prompt += attempt_feedback(node)
+    # §17.1262 — what the machine lists is what EXISTS; whether it still works
+    # today is a web question, and research was only ever wired into diagnosing
+    # a failure rather than drafting the step.
+    if for_channel:
+        prompt += await research_for_step(node, environment)
+    prompt += await stored_values_block()
+    # §17.1232 — what machines exist, so the draft addresses the right one.
+    # §17.1242 — and what hardware is in it, so it stops asking about the GPUs.
+    if for_channel and spec is not None:
+        prompt += await host_inventory(spec)
+        try:
+            from app.modules.runbook_discovery import hardware_facts
+            prompt += await hardware_facts(spec)
+        except Exception as exc:
+            logger.warning("hardware_facts_failed err=%r", exc)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
     if retry_note:
@@ -426,6 +1715,17 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app.config import settings
     from app.utils.llm_retry import generate_until_nonempty
     system = EXECUTION_SYSTEM_RUNBOOK + ("\n" + CHANNEL_RULES if for_channel else "")
+    # §17.1271 — the file notation is offered only when the runner can take a
+    # file. Read from the cached policy here, in ONE place, rather than threaded
+    # through every draft call site: six sites that each had to remember would
+    # drift, which is how §17.1237 hid behind four green tests.
+    if for_channel and spec is not None:
+        try:
+            from app.modules.assist_supervised import write_policy
+            if ((await write_policy(spec)) or {}).get("can_write_files"):
+                system += "\n" + FILE_RULES
+        except Exception as exc:
+            logger.warning("file_rules_capability_unreadable err=%r", exc)
     # think=False from the first draw, not only as a rescue: on the generate
     # path model_router reads `response` and DISCARDS `thinking` (§17.683), so
     # the reasoning is pure cost here — §17.1126 measured the same-length
@@ -459,6 +1759,91 @@ def _section(text_out: str, name: str) -> str:
 _MULTILINE_RE = re.compile(r"<<-?\s*['\"]?\w+|^\s*(?:for|while|until)\s.*\bdo\s*$|^\s*if\s.*\bthen\s*$", re.M)
 
 
+#: §17.1271 — one written file inside a ``## Write these files`` section:
+#:
+#:     ### /tmp/add_indexers.py
+#:     ```python
+#:     <the script, exactly as the interpreter will see it>
+#:     ```
+#:
+#: The path is a sub-heading and the content is one fence. No shell is involved
+#: anywhere in that, which is the entire point.
+_FILE_HEAD_RE = re.compile(r"^\s{0,3}###\s+(/\S+)\s*$", re.M)
+#: A written file is a script, not a payload: past this something is wrong.
+FILE_MAX_BYTES = 256 * 1024
+#: Which contents the engine can CHECK before sending. Anything else is written
+#: as given -- the engine does not invent judgments it cannot make.
+_COMPILED_SUFFIXES = (".py",)
+
+
+def file_writes(text_out: str) -> list[dict]:
+    """``[{path, content}]`` the runbook asks to be written, in order.
+
+    Deliberately strict about the shape: a path heading must be followed by a
+    fence, because a path with prose under it is not a file and guessing would
+    write whatever the drafter was thinking out loud.
+    """
+    body = _section(text_out, "Write these files") or _section(text_out, "Write this file")
+    if not body.strip():
+        return []
+    out: list[dict] = []
+    heads = list(_FILE_HEAD_RE.finditer(body))
+    for i, h in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+        fences = _FENCE_RE.findall(body[h.end():end])
+        if not fences:
+            logger.warning("file_write_without_fence path=%r", h.group(1))
+            continue
+        out.append({"path": h.group(1).strip(), "content": fences[0]})
+    return out
+
+
+def file_writes_will_not_work(files: list[dict]) -> list[dict]:
+    """§17.1271 — refuse a written file the machine would reject or the
+    interpreter could not run, before the operator is asked to approve it.
+
+    The same bargain as §17.1257: the engine can compile what it is about to
+    hand to another interpreter, so it does, and a refusal here is certain
+    rather than a guess. What it cannot judge -- the content of a config file,
+    say -- it does not pretend to.
+    """
+    out: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        what = f"the file {path}"
+        if not path.startswith("/"):
+            out.append({"command": what, "why": (
+                f"{path!r} is not an absolute path, and the runner refuses a relative one because "
+                f"what it resolves to depends on where the runner happens to be running.")})
+            continue
+        if ".." in path.split("/"):
+            out.append({"command": what, "why": f"{path!r} contains '..', which the runner refuses."})
+            continue
+        size = len(body.encode())
+        if not body.strip():
+            out.append({"command": what, "why": "the file is empty — nothing was written in its fence."})
+            continue
+        if size > FILE_MAX_BYTES:
+            out.append({"command": what, "why": (
+                f"{size} bytes is past the {FILE_MAX_BYTES}-byte limit for a written file.")})
+            continue
+        if path.endswith(_COMPILED_SUFFIXES):
+            try:
+                compile(body, path, "exec")
+            except (SyntaxError, ValueError) as exc:
+                out.append({"command": what, "why": (
+                    f"{path} is not valid Python and would fail the moment it ran: {exc}. This was "
+                    f"compiled before offering it, so the error is certain, not a guess. Nothing here "
+                    f"goes through a shell, so write the code plainly -- quotes need no escaping.")})
+                continue
+            except RecursionError:
+                out.append({"command": what, "why": f"{path} could not be compiled, so it cannot be offered."})
+                continue
+    if out:
+        logger.warning("file_writes_refused count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
 def runbook_commands(text_out: str) -> list[str]:
     """The commands under ``## Run this`` (every fence there, in order);
     when the runbook has no such section, every fence in it.
@@ -481,7 +1866,121 @@ def runbook_commands(text_out: str) -> list[str]:
                 out.append(whole)
             continue
         out.extend(block_commands(fence))
+    if not out:
+        # §17.1238 — no fence at all: the drafter wrote the command inline in
+        # backticks. `verify_commands` two functions below has always accepted
+        # that form; this one never did, so the two siblings disagreed about what
+        # a command looks like.
+        #
+        # Live, ADD110 ("Start container 120 (caddy-proxy)") — a one-command step,
+        # drafted correctly:
+        #
+        #     ## Run this
+        #     `pct start 120`
+        #     ## Verify
+        #     `pct status 120` - expect `status: running`
+        #
+        # The Verify check was extracted and the Run command was not, so the
+        # frame carried ZERO commands, Run was not offered, and the step the
+        # operator had just asked for could not be carried out. §17.1227's
+        # no-commands redraft fired and could not help: the second draft was
+        # just as correct and just as invisible.
+        #
+        # Reuses `step_classify.step_commands`, which already reads fences AND
+        # inline literals with the guards that matter (a path or an assignment is
+        # not a command). Only when the fences yielded nothing, so a good fenced
+        # runbook can never have prose-derived commands mixed into it.
+        try:
+            from app.modules.step_classify import step_commands
+            seen: set[str] = set()
+            for cmd, _sentence in step_commands(body):
+                c = (cmd or "").strip()
+                if c and c not in seen:
+                    seen.add(c)
+                    out.append(c)
+            if out:
+                logger.warning("runbook_commands_from_inline count=%d first=%r", len(out), out[0][:80])
+        except Exception as exc:
+            logger.warning("inline_command_extract_failed err=%r", exc)
     return out[:MAX_RUN_COMMANDS]
+
+
+#: §17.1265 — a backticked line under ## Verify, at any length. The extractor
+#: below caps an inline literal at 200 characters, which is right for a command
+#: and wrong for COUNTING what the drafter wrote: ADD115's three checks were 227
+#: characters each, so nothing even reached the read-only judge.
+_VERIFY_CANDIDATE = re.compile(r"`([^`\n]{2,600})`")
+#: The shape that actually disqualified them — a command substitution. Measured:
+#: `read_only_command` returns False for the whole line, True for each half.
+_VERIFY_SUBST = re.compile(r"\$\(")
+
+
+def verify_not_runnable(runbook: str) -> str:
+    r"""§17.1265 — the Verify section wrote checks this channel cannot run.
+
+    Measured on the real draft, not inferred. ADD115 parked with checks written
+    under ``## Verify`` and ``verify: []`` in the frame -- twice, for two
+    different reasons:
+
+        curl … -H "X-Api-Key: $(pct exec 102 -- cat …)" | python3 -c "…"
+        curl … -H "X-Api-Key: $PROWLARR_API_KEY"        | python3 -c "…"
+
+    §17.1265's first cut asked whether a candidate used ``$(…)`` or ran past the
+    length a command takes, which was the first draft's reason and not the
+    second's: the redraft that followed piped into an interpreter instead, the
+    detector stayed silent, and the step parked unverifiable again. A detector
+    that names the shapes it has seen is one shape short, every time (the same
+    lesson as §17.1266's phrase list).
+
+    So the question is the one that actually matters: did the drafter write
+    something command-shaped under ``## Verify``, and did NONE of it survive? The
+    candidates come from ``step_commands``, which already tells a command from a
+    path or a value, and the survivors from ``verify_commands``. Candidates and
+    no survivors is the defect, whatever the reason -- and the step would
+    otherwise be judged only on what its own script chose to print.
+
+    The channel can verify this perfectly well: ``pct exec 102 -- cat <config>``
+    is a read and ``curl -s <url>`` is a read. What it cannot take is the two
+    welded into one clever line.
+    """
+    body = _section(runbook, "Verify")
+    if not body.strip() or verify_commands(runbook):
+        return ""
+    try:
+        from app.modules.step_classify import step_commands
+        cands = [c for c, _s in step_commands(body)]
+    except Exception as exc:                      # a judge that cannot run refuses nothing
+        logger.warning("verify_candidates_failed err=%r", exc)
+        return ""
+    if not cands:
+        return ""
+    def _why(c: str) -> str:
+        return ("it uses `$(...)` command substitution" if "$(" in c
+                else "it pipes into an interpreter" if "|" in c
+                else f"it is {len(c)} characters long" if len(c) > 200
+                else "running a script this step just wrote is not a check of anything"
+                if re.match(r"^(?:python3?|bash|sh)\s+/tmp/", c)
+                else "")
+    # Quote the candidate whose problem can be NAMED. Live, ADD115's first
+    # candidate was `python3 /tmp/add_indexers.py` while the informative ones --
+    # a pipe into an interpreter -- were four lines below it.
+    first = next((c for c in cands if _why(c)), cands[0])
+    why = _why(first) or "the read-only channel does not accept it as written"
+    logger.warning("verify_not_runnable candidates=%d why=%s first=%r", len(cands), why, first[:120])
+    return (
+        "YOUR VERIFY SECTION CANNOT BE RUN, so this step would be approved with nothing to check it "
+        f"against. This one could not be used because {why}:\n\n"
+        f"    {first[:300]}\n\n"
+        "A check goes through the read-only channel as ONE SIMPLE COMMAND: no `$(...)`, no pipe into "
+        "`python3 -c`, and not a script you wrote in this step (running it again is not a check). "
+        "Split it. Each half is allowed on its own -- read the value in one check and use it in the "
+        "next, and let the operator compare the two:\n\n"
+        "    ## Verify\n"
+        "    - the API key this service is using: `pct exec 102 -- cat /var/lib/prowlarr/config.xml`\n"
+        "    - how many indexers it now has (paste the key from the previous check): "
+        "`curl -s -H \"X-Api-Key: <PROWLARR_API_KEY>\" http://<PROWLARR_IP>:9696/api/v1/indexer`\n\n"
+        "Rewrite ## Verify as checks of that shape. Keep ## Run this exactly as it is -- it was "
+        "accepted, and only the checks are being redrawn.")
 
 
 def verify_commands(text_out: str) -> list[str]:
@@ -705,6 +2204,38 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     return cmds_out, verify_out, kept, resolved, [n for n in missing if n in blocked]
 
 
+#: how much of the runbook the frame carries. The frame rides in job metadata,
+#: so it cannot be unbounded.
+RUNBOOK_DISPLAY_CHARS = 12000
+
+
+def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
+    """§17.1252 — the operator approves what they READ, so a cut must say so.
+
+    The frame carried `runbook[:12000]` while `commands` was parsed from the FULL
+    text. Live, ADD96 ("add the search sources to Prowlarr"): its runbook is over
+    12,000 characters because every indexer is a `curl` with a JSON body, so the
+    stored prose stopped mid-command and parsing it back yields 19 commands —
+    while the block that would actually run has 24. Five commands were going to
+    execute that were not in what the operator was shown, with nothing saying the
+    text had been cut.
+
+    The command list in the frame is authoritative and complete; the prose is for
+    reading. So when the prose is cut, say it plainly, say how much is missing,
+    and point at the list that is not.
+    """
+    text_value = str(runbook or "")
+    if len(text_value) <= RUNBOOK_DISPLAY_CHARS:
+        return text_value
+    return (text_value[:RUNBOOK_DISPLAY_CHARS].rstrip()
+            + f"\n\n---\n\n**This write-up is cut off here.** It is "
+              f"{len(text_value):,} characters long and only the first "
+              f"{RUNBOOK_DISPLAY_CHARS:,} are shown. The full block is "
+              f"{len(cmds)} command{'' if len(cmds) == 1 else 's'} — every one of them is listed "
+              f"above the write-up, and that list is what runs. Read it rather than this text if "
+              f"the two seem to disagree.")
+
+
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
@@ -719,6 +2250,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     from app.modules.assist_supervised import gate_block
     cmds = runbook_commands(runbook)
     verify = verify_commands(runbook)
+    # §17.1271 — files the runbook asks to be written. They go across as MCP
+    # parameters with no shell involved, so their content needs no quoting; the
+    # engine compiles what it can before offering them.
+    files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     inputs = inputs_for(cmds, verify, runbook)
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
@@ -738,6 +2273,27 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     shape = substitute(cmds, _dummies) if _dummies else cmds
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     refused = list(refused) + list(preconditions or [])      # §17.1213
+    # §17.1234 — a write that cannot report an HTTP error is a SHAPE problem the
+    # engine made, so it joins the gate's refusals and the §17.1196 redraft gets
+    # a chance to fix it before the operator ever sees the block.
+    refused = refused + curl_writes_without_fail(cmds)
+    # §17.1248 — a pipe out of `pct exec` executes on the HOST.
+    refused = refused + pipe_escapes_the_guest(cmds)
+    # §17.1270 — repair the one quoting mistake that is provably a mistake, and
+    # prove the repair by compiling it, before anything is refused for it.
+    cmds, _repairs = repair_shell_quoted_payloads(cmds)
+    # §17.1271 — and judge the written files the same way the commands are judged.
+    refused = refused + file_writes_will_not_work(files)
+    # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
+    # §17.1257 — compile what the block hands to another interpreter. Supersedes
+    # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
+    refused = refused + payload_will_not_compile(cmds)
+    # §17.1256 — a written script that reads a secret the runner never passes.
+    refused = refused + script_secret_not_passed(cmds)
+    # §17.1268 — work that cannot finish in the time one command is given. A
+    # refusal rather than a rule, because §17.1267 put the budget in the prompt
+    # and the next draft looped over all 89 again with a sleep added.
+    refused = refused + loops_the_network_without_a_budget(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -756,6 +2312,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                     "tradeoff": "the step counts as a plan, not as executed"})
     options.append({"id": "skip", "label": "Skip this step", "fit": "not needed on this machine",
                     "tradeoff": "steps that depend on it may not make sense"})
+    # §17.1271 — writing a file IS work the block does, so a step whose commands
+    # are a single `python3 /tmp/x.py` plus the file it needs is a normal block.
+    _has_work = bool(cmds or files)
     q = ((f"Run step {node.get('node_key')} — {node.get('title') or ''} — on {runner}?"
           + (f" It needs {len(inputs)} value{'s' if len(inputs) != 1 else ''} from you first." if inputs else "")) if cmds and not refused
          else f"Step {node.get('node_key')} — {node.get('title') or ''} — changes a machine, and the engine cannot run it as written.")
@@ -768,8 +2327,17 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                  "some of its commands are not on the runner's allow-list — see the refusals")),
         "runner": runner, "commands": cmds, "verify": verify, "refused": refused,
         "inputs": inputs,
+        # §17.1271 — the operator approves the FILES as well as the commands, so
+        # the frame carries each path, its size and its content.
+        "files": [{"path": f["path"], "bytes": len(str(f["content"]).encode()),
+                   "lines": str(f["content"]).count("\n") + (0 if str(f["content"]).endswith("\n") else 1),
+                   "content": f["content"]} for f in files],
+        # §17.1270 — a command the engine CORRECTED is a changed command, and the
+        # operator approves what they are shown. Never a silent repair.
+        "engine_fixed": [r["why"] for r in _repairs],
         "secrets_resolved": secrets_resolved, "secrets_missing": secrets_missing,
-        "runbook": runbook[:12000], "allow": list(policy.get("allow") or []), "sudo": bool(policy.get("sudo")),
+        "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
+        "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
     }
 
@@ -953,38 +2521,121 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if refs:
         from app.modules import runner_secrets as _rs
         secret_env = await _rs.values_for(db, refs)
-    logger.warning("supervised_run_started job=%s node=%s runner=%s commands=%d secrets=%d",
-                   job_id, node_key, spec.name, len(runnable), len(secret_env))
-    executed = await _sw.run_block(spec, runnable, env=secret_env)
+    # §17.1271 — the files this block needs, written first and each one with its
+    # own signed approval. They come BEFORE the commands because the commands are
+    # what run them, and a failure to write stops the block exactly as a failed
+    # command does: the records share one shape and one sequence.
+    _files = [{"path": f["path"], "content": f["content"]}
+              for f in (waiting.get("files") or []) if (f or {}).get("path")]
+    logger.warning("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",
+                   job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
+    executed = await _sw.write_files_on(spec, _files) if _files else []
+    _wrote_all = len(executed) == len(_files) and all(e["ok"] for e in executed)
+    if _wrote_all:
+        executed = executed + await _sw.run_block(spec, runnable, env=secret_env)
     # §17.1201 — a read that answered "no" is not a failed block (`grep` exits 1
     # when the thing it looked for is gone, which is often the check passing).
-    ok = (bool(executed) and len(executed) == len(runnable)
+    # §17.1271 — every file and every command, all of them accounted for.
+    ok = (bool(executed) and len(executed) == len(_files) + len(runnable)
           and all(e["ok"] or e.get("informational") for e in executed))
+    # §17.1225 — a lost RESPONSE is not a failed COMMAND. `dropped` is computed
+    # here, before the verify decision, because the verify probes are exactly
+    # what settles an unknown outcome — see `_goal_confirmed`.
+    dropped = [e for e in executed if e.get("unreachable")]
+    hard_fail = [e for e in executed
+                 if not e["ok"] and not e.get("informational") and not e.get("unreachable")]
+    indeterminate = bool(dropped) and not hard_fail
     verify_out = ""
-    if ok and verify_cmds:
+    confirmed_after_drop = False
+    unreadable = False
+    refuted: list[dict] = []
+    if verify_cmds and (ok or indeterminate):
         try:
             pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
-            verify_out = "\n".join(
-                f"$ {e['command']}\n" + (re.search(rf"== {e['id']} ==\n(.*?)(?=\n== V\d+ ==|\Z)", pasted, re.S).group(1).rstrip()
-                                         if re.search(rf"== {e['id']} ==", pasted) else "(no output)")
-                for e in ran)
+            verify_out = _probe_report(pasted, ran)
+            if indeterminate:
+                # §17.1239 — the runner was still recovering from the dropped
+                # stream, so the check that would settle it came back EMPTY.
+                # Live, ADD110: `pct start 120` lost its response, `pct status
+                # 120` then printed nothing, the step was recorded failed — and
+                # the container was running. An unreadable check is not evidence
+                # against the work (§17.1204's rule, applied to our own probe);
+                # give the channel one more moment and ask again.
+                if not _has_evidence(pasted, ran):
+                    await asyncio.sleep(_RECHECK_DELAY_S)
+                    pasted2, ran2 = await _lr.run_probes(
+                        spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
+                    if _has_evidence(pasted2, ran2):
+                        pasted, ran = pasted2, ran2
+                        verify_out = _probe_report(pasted, ran)
+                        logger.warning("verify_recheck_got_evidence job=%s node=%s", job_id, node_key)
+                    else:
+                        unreadable = True
+                        logger.warning("verify_recheck_still_blank job=%s node=%s", job_id, node_key)
+                if not unreadable:
+                    confirmed_after_drop = await _goal_confirmed(
+                        str(waiting.get("title") or node_key), verify_cmds, pasted)
+            elif ok:
+                # §17.1233 — and judge them when the commands "succeeded" too.
+                #
+                # Live, ADD96: nine `curl -s -X POST` calls to Prowlarr's API,
+                # every one answered with a validation error array ("'App Profile
+                # Id' must be greater than '0'"), nothing added — and every one
+                # exited 0, because `curl -s` succeeds at fetching a 400. The
+                # step was recorded `done`. All four verify checks came back
+                # EMPTY, sitting in the same record, and nothing read them:
+                # §17.1225 judged the checks only when a response was lost.
+                # Judging the transport and not the answer is the whole bug.
+                #
+                # Asymmetric on purpose: only a `contradicted` verdict downgrades
+                # a step. An ambiguous check must never fail work that really
+                # happened, so `unknown` leaves the outcome alone.
+                _against = contradicted(await _verify_verdicts(
+                    str(waiting.get("title") or node_key), verify_cmds, pasted))
+                if _against:
+                    ok = False
+                    refuted = _against
+                    logger.warning("supervised_run_verify_contradicted job=%s node=%s checks=%d first=%r",
+                                   job_id, node_key, len(_against),
+                                   str(_against[0].get("reason"))[:140])
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
     output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
-    if ok:
+    # §17.1258 — a block that repeated one failure is not a success, whatever the
+    # exit codes said. The commands "worked"; the work did not.
+    _repeated = repeated_identical_failures(
+        "\n".join(str(e.get("output") or "") for e in executed))
+    if _repeated and ok:
+        ok = False
+        repeated_reason = _repeated
+        logger.warning("supervised_run_repeated_failure job=%s node=%s", job_id, node_key)
+    else:
+        repeated_reason = ""
+    if confirmed_after_drop:
+        output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
+                   f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
+                   "did not know whether it had run. The checks above were then read back off the "
+                   "machine and they show the step's goal already met, so it is recorded as done "
+                   "rather than retried — repeating a write that already happened is not a retry.")
+    if ok or confirmed_after_drop:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
                  "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
             {"jid": job_id, "nk": node_key, "out": output,
-             "why": f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"})
-        logger.warning("supervised_run_done job=%s node=%s commands=%d", job_id, node_key, len(executed))
-        return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out}
+             "why": (f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"
+                     if ok else
+                     f"supervised run through {spec.name}: the response to "
+                     f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
+                     f"the machine confirm the step's goal is met")})
+        logger.warning("supervised_run_done job=%s node=%s commands=%d confirmed_after_drop=%s",
+                       job_id, node_key, len(executed), confirmed_after_drop)
+        return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out,
+                "confirmed_after_drop": confirmed_after_drop}
     last = executed[-1] if executed else None
     # §17.1201 — the runner's connection dropped. Nobody knows whether the
     # command ran, and a write whose outcome is unknown is a different decision
     # from one that definitely failed. Say so, and do not pretend to an exit
     # code ("exited None" was what the operator saw).
-    dropped = [e for e in executed if e.get("unreachable")]
     # §17.1198 — a command that failed because the runner could not read is not
     # a broken machine. The write grant covers writes; a READ-ONLY command in
     # the same block deliberately runs unprivileged, and on a Proxmox host that
@@ -998,13 +2649,26 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
     reason = mask_secrets(
         (f"the connection to {spec.name} dropped while `{dropped[-1]['command'][:80]}` was running "
-         f"({dropped[-1]['output'][:120]}). Whether it ran on the machine is UNKNOWN — check before retrying, "
-         f"because a repeat of a write that already happened is not the same as a retry of one that did not.")
+         f"({dropped[-1]['output'][:120]}). "
+         + ("The step's own verify checks could not be read either — they came back empty twice — so "
+            "whether it ran on the machine is UNKNOWN. Read the state yourself before retrying: a "
+            "repeat of a write that already happened is not a retry."
+            if unreadable else
+            "The step's own verify checks were then read back off the machine and did NOT show its goal "
+            "met, so it is recorded as stopped." if verify_cmds else
+            "Whether it ran on the machine is UNKNOWN and this step carries no verify check to settle it — "
+            "check before retrying, because a repeat of a write that already happened is not the same as a "
+            "retry of one that did not."))
         if dropped else
         (f"`{needs_root[-1]['command'][:80]}` could not read on that machine — the runner is unprivileged for "
          f"READ commands (the write grant covers writes only). Allow it to read as root: Settings → Machines, "
          f"or Capabilities → “Give the runner administrator rights for specific commands”.")
         if needs_root else
+        ("every command exited 0, but this step's own verify checks say the work did not land: "
+         + "; ".join(str(v.get("reason") or v.get("claim") or "")[:120] for v in refuted[:3])
+         + ". A command that fetched an error page still exits 0 — the check is what settles it.")
+        if refuted else
+        repeated_reason if repeated_reason else
         ("the runner ran nothing" if not last else
          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}")), values, need)
@@ -1026,6 +2690,90 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                    job_id, node_key, bool(diagnosis), reason[:200])
     return {"outcome": "failed", "node_status": "failed", "executed": executed, "reason": reason,
             "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
+
+
+async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str) -> list[dict]:
+    """§17.1233 — the state-check judge's verdicts for this step's own checks.
+
+    One place builds the probes so the drop path (§17.1225) and the success path
+    read the SAME evidence the same way.
+    """
+    if not verify_cmds or not (pasted or "").strip():
+        return []
+    try:
+        from app.modules.assist_state_check import judge_outputs
+        probes = [{"id": f"V{i}", "kind": "state", "claim": title, "command": c}
+                  for i, c in enumerate(verify_cmds, 1)]
+        return await judge_outputs(probes, pasted)
+    except Exception as exc:
+        logger.warning("verify_judge_failed err=%r", exc)
+        return []
+
+
+def contradicted(verdicts: list[dict]) -> list[dict]:
+    """The checks that positively say the goal is NOT met.
+
+    Only `contradicted` counts — never `unknown`. A step that really worked must
+    not be marked failed because a check was ambiguous, so the asymmetry is
+    deliberate: evidence AGAINST downgrades, absence of evidence does not.
+    """
+    return [v for v in verdicts or [] if str(v.get("verdict") or "") == "contradicted"]
+
+
+#: §17.1239 — how long to let a dropped channel settle before re-reading.
+_RECHECK_DELAY_S = 4
+
+
+def _probe_report(pasted: str, ran: list[dict]) -> str:
+    """The `$ cmd` / output block the operator reads. One renderer, so a
+    re-check renders identically to the first read."""
+    out = []
+    for e in ran or []:
+        m = re.search(rf"== {e['id']} ==\n(.*?)(?=\n== V\d+ ==|\Z)", pasted or "", re.S)
+        out.append(f"$ {e['command']}\n" + (m.group(1).rstrip() if m else "(no output)"))
+    return "\n".join(out)
+
+
+def _has_evidence(pasted: str, ran: list[dict]) -> bool:
+    """Did the probes actually say anything?
+
+    A marker present with nothing under it is evidence ("the list is empty");
+    a marker that never arrived is not. All-missing means the channel did not
+    answer, which must not be read as the work having failed (§17.1204).
+    """
+    for e in ran or []:
+        if re.search(rf"== {e['id']} ==", pasted or ""):
+            return True
+    return False
+
+
+async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bool:
+    """§17.1225 — did the step's own checks, read back off the machine, show its
+    goal already met?
+
+    Used only when a command's RESPONSE was lost (`unreachable`) and nothing
+    actually failed. The engine already had the means to answer this and did not
+    use them: live, ADD50 ran `pct status 111` (stopped) then `pct start 111`,
+    whose SSE stream ended before it answered. The step was recorded FAILED and
+    the operator was told to "run `pct status 111` and tell me what it shows" —
+    the very command sitting in the step's own verify list, on a host the engine
+    had an open read-only channel to. The container was running. The start had
+    worked; only the answer was lost.
+
+    Reuses the state-check judge (§17.1050) — its deterministic pre-pass settles
+    an obvious case with no model draw, and the model reads the rest against the
+    step's goal. Requires EVERY check to be confirmed: a step recorded done on
+    partial evidence is the failure mode this whole seam exists to prevent, and
+    the honest fallback (`failed`, outcome unknown) is what happens today.
+    """
+    verdicts = await _verify_verdicts(title, verify_cmds, pasted)
+    if not verdicts or len(verdicts) != len(verify_cmds):
+        return False
+    ok = all(str(v.get("verdict") or "") == "confirmed" for v in verdicts)
+    logger.warning("goal_confirmed_after_drop title=%r checks=%d confirmed=%s verdicts=%s",
+                   title[:60], len(verdicts), ok,
+                   [str(v.get("verdict")) for v in verdicts])
+    return ok
 
 
 def _executed_report(runbook: str, runner: str, executed: list[dict], verify_out: str) -> str:

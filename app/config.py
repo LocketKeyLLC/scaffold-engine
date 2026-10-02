@@ -1986,7 +1986,13 @@ class Settings(BaseSettings):
     mcp_servers_config: str = Field(default="[]")
     # Per-call ceiling (seconds) for an outbound MCP tool invocation and for
     # tool-list introspection — bounds a hung external server.
-    mcp_call_timeout: float = Field(default=60.0, ge=1.0, le=600.0)
+    #
+    # §17.1244 — this MUST be at least the per-command timeout the supervised
+    # runner is asked for (`assist_supervised.RUN_COMMAND_TIMEOUT_S`, 180). It was
+    # 60, so the engine abandoned at 70s a command it had told the runner it
+    # could spend 180s on: the write was still going on the machine and the step
+    # was recorded as a dropped connection. A test ties the two together.
+    mcp_call_timeout: float = Field(default=240.0, ge=1.0, le=600.0)
     # Idle TTL (seconds) for a cached client session before it is torn down.
     mcp_session_ttl: float = Field(default=300.0, ge=10.0, le=3600.0)
 

@@ -1311,6 +1311,43 @@
       },
       "DecideResult": {
         "properties": {
+          "confirmed_after_drop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmed After Drop"
+          },
+          "diagnosis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diagnosis"
+          },
+          "executed": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executed"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -1335,6 +1372,17 @@
             "title": "Outcome",
             "type": "string"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "resolved": {
             "enum": [
               "operator",
@@ -1352,6 +1400,28 @@
             "default": "executing",
             "title": "Status",
             "type": "string"
+          },
+          "unknown_outcome": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unknown Outcome"
+          },
+          "verify": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verify"
           }
         },
         "required": [
@@ -1360,6 +1430,46 @@
           "resolved"
         ],
         "title": "DecideResult",
+        "type": "object"
+      },
+      "DecisionReviseInput": {
+        "description": "§17.1241 — body for POST /nodes/{job_id}/{node_key}/revise.",
+        "properties": {
+          "choice": {
+            "description": "What the operator's answer is NOW, in their words.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Choice",
+            "type": "string"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "choice"
+        ],
+        "title": "DecisionReviseInput",
         "type": "object"
       },
       "DedupLogEntry": {
@@ -3762,6 +3872,34 @@
           }
         },
         "title": "NodeResetInput",
+        "type": "object"
+      },
+      "NodeSatisfiedInput": {
+        "description": "§17.1226 — body for POST /nodes/{job_id}/{node_key}/satisfied.",
+        "properties": {
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
+          "evidence": {
+            "description": "What shows the step's goal is already met — the commands read back and their output. Written into the node.",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence"
+        ],
+        "title": "NodeSatisfiedInput",
         "type": "object"
       },
       "ProbeInput": {
@@ -11632,6 +11770,138 @@
           }
         ],
         "summary": "Node Reset"
+      }
+    },
+    "/nodes/{job_id}/{node_key}/revise": {
+      "post": {
+        "description": "§17.1241 — the operator changed their mind about an answered decision.\nRewrites the record and rebuilds what was built on the old answer.",
+        "operationId": "node_revise_decision_nodes__job_id___node_key__revise_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_key",
+            "required": true,
+            "schema": {
+              "title": "Node Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionReviseInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Node Revise Decision"
+      }
+    },
+    "/nodes/{job_id}/{node_key}/satisfied": {
+      "post": {
+        "description": "§17.1226 — this step's goal is already met; record it with the evidence\nand cascade nothing. See `node_editor.mark_satisfied`.",
+        "operationId": "node_satisfied_nodes__job_id___node_key__satisfied_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_key",
+            "required": true,
+            "schema": {
+              "title": "Node Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeSatisfiedInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Node Satisfied"
       }
     },
     "/observability/alerts": {

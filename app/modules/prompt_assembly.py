@@ -633,12 +633,34 @@ def _brief_essentials(brief: dict) -> str:
                      + "\n".join(f"- {i[:200]}" for i in inputs))
     feedback = (brief.get("user_feedback") or "").strip()
     if feedback:
-        parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
+        # §17.1218 — "already decided … do not re-ask" was applied to answers
+        # that decided NOTHING. Three of this operator's eight ambiguities came
+        # back "unsure", went in under that heading, and the planner dutifully
+        # did not re-ask — it built a control panel to a spec they had just said
+        # they did not have. Split them: an answer is honoured, a non-answer is
+        # a decision still owed to the operator.
+        from app.modules.unanswered import decision_brief, parse_feedback, unresolved
+        pairs = parse_feedback(feedback)
+        answered = [p for p in pairs if p["answered"]]
+        if answered:
+            parts.append("Operator answers (already decided — honor, do not re-ask):\n"
+                         + "\n".join(f"Q: {p['question']}\nA: {p['answer']}" for p in answered)[:1200])
+        elif not pairs:
+            parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
+        note = decision_brief(unresolved(brief))
+        if note:
+            parts.append(note.strip())
     return "\n\n".join(parts)
 
 
-def build_base_prompt(node: dict, brief: dict) -> str:
-    """The bare task prompt, before grounding or upstream injection."""
+def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
+    """The bare task prompt, before grounding or upstream injection.
+
+    §17.1250 — ``environment`` is the operator's ledger (``{"profile": …}``). It
+    was invisible here, so it was invisible to AUTO mode entirely: every consumer
+    of ``environment.profile`` was an assist module, and this function — the one
+    place every step's guide AND runbook is assembled — never mentioned it.
+    """
     template = node.get("prompt_template") or ""
     title = node.get("title") or ""
     goal = (brief or {}).get("description", "") if brief else ""
@@ -647,6 +669,53 @@ def build_base_prompt(node: dict, brief: dict) -> str:
         goal = goals[0] if goals else ""
     essentials = _brief_essentials(brief or {})
     tail = f"\n\n{essentials}" if essentials else ""
+    # §17.1237 — the step's own description, which nothing rendered.
+    #
+    # `prompt_template` and `title` were the whole task; `description` was read
+    # only as a matching hint for §17.1221 below, and the autonomous executor did
+    # not even put it in its node snapshot. So the column the planner writes the
+    # step's specification into, and the ONE field an operator (or a repair) can
+    # edit without invalidating the node, was invisible to the model.
+    #
+    # Live, ADD100: the operator's corrections were written into `description`
+    # — three capabilities not four, outside access now IN scope, pick the
+    # approach and do not ask — and the step then ignored all of them across
+    # three attempts, asking again in three different phrasings. It was never
+    # disobeying: it never saw them. A `PATCH /nodes/{job}/{key}` setting
+    # `description` was a no-op for auto mode.
+    #
+    # Rendered as instructions, because that is what they are, and skipped when
+    # the template already carries the same text so nothing is said twice.
+    # §17.1250 — the operator's environment, which auto mode never saw.
+    #
+    # The profile is where their standing constraints live: "root@pve in ONE
+    # interactive shell" (§17.700) and, recorded tonight, "the router is reached
+    # through the My Spectrum APP, not a LAN web page — do NOT write a step that
+    # says open a browser to 192.168.1.1 and log in".
+    #
+    # ADD112 then wrote exactly that: "check the router's admin page directly …
+    # Open a browser to `http://<gateway-ip>` and log in with the credentials
+    # printed on the router's label." Not disobedience — the constraint had no
+    # path to the prompt. Same shape as §17.1237's missing description.
+    prof = str((environment or {}).get("profile") or "").strip()
+    if prof:
+        tail += ("\n\nTHE OPERATOR'S ENVIRONMENT — standing constraints, not suggestions. A step "
+                 "that contradicts any of this is wrong however well it is written:\n" + prof)
+    desc = str(node.get("description") or "").strip()
+    if desc and desc not in template:
+        tail += ("\n\nWHAT THIS STEP MUST DO — from the plan, including any correction the "
+                 "operator has made to it. This is the specification; where it disagrees with "
+                 "the task line above, this wins:\n" + desc)
+    # §17.1221 — the question belongs to the STEP, asked when the operator gets
+    # here, not to the plan. This is the one place every step's guide and runbook
+    # is assembled, so a step that depends on something undecided opens by asking
+    # it — the same way a run pause asks for the values it needs (§17.1187).
+    try:
+        from app.modules.unanswered import ask_first_block, questions_for_step
+        tail += ask_first_block(questions_for_step(
+            title, brief or {}, description=str(node.get("description") or "")))
+    except Exception:                      # a prompt must never fail to assemble
+        pass
     if template:
         return f"{template}\n\nContext: {goal}{tail}"
     return (
@@ -771,7 +840,12 @@ async def assemble_step_context(
     upstream = await fetch_upstream_outputs(db, job_id, depends_on)
     upstream, truncated_keys = truncate_upstream_outputs(upstream)
 
-    base_prompt = build_base_prompt(node, brief)
+    from app.modules.runbook_inputs import job_environment
+    try:
+        _env = await job_environment(db, job_id)
+    except Exception:
+        _env = {}
+    base_prompt = build_base_prompt(node, brief, _env)
 
     grounding = ""
     grounding_kind = None

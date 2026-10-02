@@ -89,9 +89,25 @@ def summarize(nodes: list[dict]) -> dict:
         })
     blockers.sort(key=lambda b: -b["unblocks"])
 
+    # §17.1217 — WHAT IT IS ON NOW. The assist session's `current_node_key` is
+    # session state: it freezes wherever the walkthrough stopped, and once the
+    # steps are handed to the executor it points at a step nobody is working on.
+    # Live, the console showed ADD65 (failed, handed off) as the current step
+    # while the actual ready work was ADD50 and ADD82 — "if we are on add 50,
+    # why is it on ADD 65 on the web ui? shouldn't it be showing the user what
+    # its doing?" The DAG knows; the cursor does not.
+    nxt = None
+    if ready:
+        k = sorted(ready)[0]
+        nxt = {"node_key": k, "title": (by_key[k].get("title") or "")[:120]}
+    elif blockers:
+        b = blockers[0]
+        nxt = {"node_key": b["node_key"], "title": b["title"], "blocked": True}
+
     return {
         "finished": not pending and not failed,
         "known": True,
+        "next": nxt,
         "total": len(nodes),
         "counts": counts,
         "done": counts.get("done", 0) + counts.get("skipped", 0),

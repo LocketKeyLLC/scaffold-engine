@@ -60,7 +60,7 @@ async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
     delegated = await delegated_decisions(db, job_id)
     row = (await db.execute(
         text("""
-            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on
+            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.execution_order
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending' AND n.node_type = 'decision'
               AND NOT (n.node_key = ANY(:delegated))
@@ -244,9 +244,17 @@ async def resolve_decision(
                  "at": now, "result": res["outcome"], "node_status": res.get("node_status"),
                  "inputs": sorted((inputs or {}).keys())}       # names only — a value may be a secret
         outcome = res["outcome"]
+        # §17.1261 — what actually happened has to reach the caller. The
+        # early-return path above splats this detail; the final return dropped it,
+        # so a run that worked answered `executed: 0` and a run that failed gave
+        # no `reason`, no `verify` and none of the researched `diagnosis`. Errors
+        # carried detail, successes did not. The commands and their output are
+        # already masked by `resolve_run` (§17.1193), so this leaks nothing.
+        run_detail = {k: v for k, v in res.items() if k not in ("outcome", "node_key", "record")}
     elif delegate:
         entry = {"by": "engine", "at": now}
         outcome = "delegated"
+        run_detail = {}
     else:
         rec = decision_record(choice or "", note, waiting)
         upd = await db.execute(
@@ -259,6 +267,7 @@ async def resolve_decision(
             return {"outcome": "node_gone"}
         entry = {"by": "operator", "choice": (choice or "").strip(), "note": (note or "").strip(), "at": now}
         outcome = "resolved"
+        run_detail = {}
     decisions = _as_dict(md.get("decisions"))
     decisions[node_key] = entry
     await db.execute(
@@ -269,7 +278,7 @@ async def resolve_decision(
     await transition(db, job_id, to="executing", expected_from=(STATUS,), reason=f"decided:{node_key}")
     await db.commit()
     logger.info("decision_pause_%s job=%s node=%s", outcome, job_id, node_key)
-    return {"outcome": outcome, "node_key": node_key, "record": entry}
+    return {"outcome": outcome, "node_key": node_key, "record": entry, **run_detail}
 
 
 def _as_dict(v: Any) -> dict:
