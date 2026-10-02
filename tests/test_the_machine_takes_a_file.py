@@ -1602,7 +1602,8 @@ def test_the_live_1148_runbook_has_its_run_command_after_the_file():
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, rb, spec, policy, env={"profile": "You work as root@pve."})
     assert frame["commands"] and frame["files"]
-    assert sr.refusal_kinds(frame) == {"reads the neighbour table cold"}, [r["why"][:90] for r in frame["refused"]]
+    assert sr.refusal_kinds(frame) == {"reads the neighbour table cold", "is not waiting for the guest"}, \
+        [r["why"][:90] for r in frame["refused"]]      # §17.1288m — its wait pinged the router
 
 
 def test_a_file_nothing_runs_is_a_registered_refusal():
@@ -1650,7 +1651,8 @@ def test_the_live_1151_runbook_is_refused_for_what_is_wrong_and_not_for_the_swee
     frame = sr.frame_run(ADD82, rb, spec, policy, env=env)
     kinds = sr.refusal_kinds(frame)
     assert kinds == {"inside an ssh command line", "reads the address itself and asks the operator for it",
-                     "is this host's own address"}, [r["why"][:90] for r in frame["refused"]]
+                     "is this host's own address", "is not waiting for the guest"}, \
+        [r["why"][:90] for r in frame["refused"]]      # §17.1288m — the wait pinged the host in a loop
     assert "runs in the runner's own shell on the Proxmox HOST" not in kinds, "the sweep + neigh read is not a host write"
 
 
@@ -1673,3 +1675,43 @@ def test_the_hosts_own_address_is_not_the_guests():
     host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
     assert sr.targets_the_host_as_the_guest(["ssh root@192.168.1.156 nvidia-smi"], host_step, env) == [], "a host step may address the host"
     assert sr.targets_the_host_as_the_guest(["ping 192.168.1.156"], ADD82, {}) == [], "no map, no verdict"
+
+
+# ───── §17.1288m — the held password by name; never argv; a wait pings the guest
+
+POLICY_MASS = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+
+
+def test_the_live_1155_runbook_is_refused_for_its_three_faults():
+    from app.modules import supervised_runs as sr
+    rb = _fx("add82_runbook_1155.md")
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, rb, spec, POLICY_MASS, env={"profile": "root@pve"})
+    kinds = sr.refusal_kinds(frame)
+    assert kinds == {"asks the operator for a password the runner holds",
+                     "is not waiting for the guest"}, [r["why"][:100] for r in frame["refused"]]
+    assert "run" not in {o["id"] for o in frame["options"]}
+
+
+def test_a_new_password_placeholder_is_refused_when_the_mass_password_is_held():
+    from app.modules import supervised_runs as sr
+    hits = sr.asks_for_a_secret_the_store_holds(["PALWORLD_PASSWORD"], POLICY_MASS, ADD82)
+    assert len(hits) == 1 and 'MASS_PASSWORD="$MASS_PASSWORD" bash' in hits[0]["why"] and "${MASS_PASSWORD}" in hits[0]["why"]
+    assert sr.asks_for_a_secret_the_store_holds(["PALWORLD_PASSWORD"], {"secrets": []}, ADD82) == [], "nothing held, nothing to reuse"
+    assert sr.asks_for_a_secret_the_store_holds(["PROWLARR_API_KEY"], POLICY_MASS, ADD82) == [], "an API key is not a password"
+    host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
+    assert sr.asks_for_a_secret_the_store_holds(["SOME_PASSWORD"], POLICY_MASS, host_step) == [], "only on a guest step"
+
+
+def test_a_wait_that_pings_a_fixed_address_is_refused():
+    from app.modules import supervised_runs as sr
+    router = [{"path": "/tmp/x.sh", "content": "qm start 106\nfor i in 1 2 3; do\n    ping -c 1 -W 2 192.168.1.1 >/dev/null 2>&1 && break\n    sleep 5\ndone\n"}]
+    hits = sr.waits_on_a_fixed_address(["bash /tmp/x.sh"], ADD82, router)
+    assert len(hits) == 1 and "192.168.1.1` is not waiting for the guest" in hits[0]["why"]
+    one_line = ["for i in 1 2 3; do ping -c 1 -W 2 192.168.1.156 >/dev/null 2>&1 && break; sleep 5; done"]
+    assert sr.waits_on_a_fixed_address(one_line, ADD82) and "not waiting for the guest" in sr.waits_on_a_fixed_address(one_line, ADD82)[0]["why"]
+    found = [{"path": "/tmp/x.sh", "content": 'IP=$(ip neigh show | grep -i "$MAC" | awk \'{print $1}\')\nfor i in 1 2 3; do\n    ping -c 1 -W 2 "$IP" && break\n    sleep 5\ndone\n'}]
+    assert sr.waits_on_a_fixed_address(["bash /tmp/x.sh"], ADD82, found) == [], "pinging the found address is the wait"
+    assert sr.waits_on_a_fixed_address(["ping -c 1 192.168.1.1"], ADD82) == [], "a single ping outside a loop is a check, not a wait"
+    host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
+    assert sr.waits_on_a_fixed_address(one_line, host_step) == [], "only on a guest step"
