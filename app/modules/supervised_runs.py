@@ -2239,7 +2239,6 @@ _PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9_]{1,40})>")
 # §17.1193 — the same shape the runner reads: `$NAME` / `${NAME}`.
 _SECRET_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{0,63})\}?")
 _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,~-]{1,200}$")
-_SECRET_NAME_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
 
 
 def placeholders(commands: list[str]) -> list[str]:
@@ -2267,10 +2266,23 @@ def input_hints(runbook: str) -> dict[str, str]:
     return hints
 
 
+def step_text(node: dict) -> str:
+    """§17.1275 — the step's own words: title, description, template. NOT the
+    runbook: that is the drafter's text, and its `root@pve` execution-context
+    line would read as an account on the target."""
+    seen: list[str] = []
+    for k in ("title", "description", "prompt_template"):
+        v = str((node or {}).get(k) or "").strip()
+        if v and v not in seen:
+            seen.append(v)
+    return "\n".join(seen)
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply."""
     hints = input_hints(runbook)
-    return [{"name": n, "hint": hints.get(n, ""), "secret": bool(_SECRET_NAME_RE.search(n))}
+    from app.modules.runbook_inputs import secret_name       # §17.1275 — one definition
+    return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)}
             for n in placeholders(list(commands) + list(verify))]
 
 
@@ -2486,7 +2498,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
-        inputs = suggest_inputs(inputs, env)
+        inputs = suggest_inputs(inputs, env, text=step_text(node))   # §17.1275 — and what the step says
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
     # place); the real commands are gated again at resolve, once the operator
     # has supplied the values.

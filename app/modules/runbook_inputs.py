@@ -26,6 +26,20 @@ _CIDR_RE = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3})/(\d{1,2})\b")
 _PORT_RE = re.compile(r"(?:\bport\s+|:)(\d{2,5})\b", re.I)
 _ID_RE = re.compile(r"\b(?:VM|CT|LXC|container|vmid|ctid)\s*(\d{3,5})\b", re.I)
 _SECRET_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
+#: §17.1275 — a PUBLIC key is public material: masking it, encrypting it and
+#: refusing to suggest it only stops the operator seeing what was installed.
+_PUBLIC_RE = re.compile(r"PUBLIC|PUBKEY|PUB_KEY|_PUB\b", re.I)
+#: `aedefruscio@192.168.1.129` in a step's own words — whose account, on which machine.
+_USER_AT_HOST_RE = re.compile(r"(?<![\w<.-])([a-z_][a-z0-9_-]{0,31})@((?:\d{1,3}\.){3}\d{1,3}|[a-z0-9][a-z0-9.-]*[a-z0-9])\b")
+
+
+def secret_name(name: str) -> bool:
+    """§17.1275 — ONE definition of "this placeholder holds a secret", shared with
+    `supervised_runs.inputs_for` (sibling call sites drift). `OPERATOR_PUBLIC_KEY`
+    matched `KEY` and was kept encrypted, masked and never suggested — for a value
+    whose whole purpose is to be handed out."""
+    n = str(name or "")
+    return bool(_SECRET_RE.search(n)) and not _PUBLIC_RE.search(n)
 _GENERIC = frozenset({"IP", "ADDR", "ADDRESS", "ID", "NAME", "VALUE", "THE", "OF", "NEW", "TARGET", "HOST", "VM", "CT",
                       "LXC", "CONTAINER", "PORT", "PREFIX", "CIDR", "GATEWAY", "GW", "DNS", "USER", "HOSTNAME",
                       "VMID", "CTID", "NAMESERVER", "VLAN"})
@@ -75,12 +89,35 @@ def _add(out: list[dict], value: str, source: str, confidence: str) -> None:
     out.append({"value": value, "source": source[:120], "confidence": confidence})
 
 
-def suggest_for(name: str, env: dict) -> list[dict]:
+def _step_ips(text: str, words: list[str]) -> list[str]:
+    """The IPv4 literals a step's text states, the one nearest each mention of
+    the placeholder's own words first. `<PROWLARR_IP>` beside "Radarr
+    (192.168.1.22) at Prowlarr (192.168.1.21)" must offer .21 alone; with no
+    distinguishing word, or none within reach of an address, every address the
+    step names is offered (the step is about them) and only a single one
+    prefills."""
+    spans = [(m.start(), m.end(), m.group()) for m in _IP_RE.finditer(text or "")]
+    ips = list(dict.fromkeys(ip for _s, _e, ip in spans))
+    if not words or len(ips) < 2:
+        return ips
+    low = (text or "").lower()
+    near: list[str] = []
+    for w in words:
+        for wm in re.finditer(rf"(?<![a-z0-9]){re.escape(w.lower())}(?![a-z0-9])", low):
+            gap = lambda sp: max(0, wm.start() - sp[1], sp[0] - wm.end())   # noqa: E731
+            best = min(spans, key=gap)
+            if gap(best) <= 40 and best[2] not in near:
+                near.append(best[2])
+    return near or ips
+
+
+def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
     """Ranked ``[{value, source, confidence}]`` for one placeholder name.
-    ``confidence`` is ``pinned`` (prefill), ``map`` or ``fact`` (offered)."""
+    ``confidence`` is ``pinned`` (prefill), ``step`` (the step's own text —
+    prefills when it is the only one), ``map`` or ``fact`` (offered)."""
     out: list[dict] = []
     env = env or {}
-    if _SECRET_RE.search(name):
+    if secret_name(name):
         return out
     subs = env.get("substitutions") or {}
     if isinstance(subs, dict):
@@ -89,6 +126,29 @@ def suggest_for(name: str, env: dict) -> list[dict]:
                 _add(out, str(v), f"pinned as {k}", "pinned")
     kind = _kind(name)
     words = _words(name)
+    # §17.1275 — the step's OWN words. Live, ADD26 was titled "Install the SSH
+    # public key on the AI VM (192.168.1.129)", its description said `ssh
+    # aedefruscio@192.168.1.129`, and the frame asked for <AI_VM_IP> with no
+    # suggestion and offered `root` for <AI_VM_USER> — the Proxmox shell's user,
+    # for an account on the VM. The drafter's own hint even said "task line
+    # suggests `aedefruscio`" and asked anyway. A value the step states is the
+    # operator's (or the planner's) decision about THIS step and outranks the
+    # shell; it is below a pin, which is the operator's decision by name.
+    step_users: list[str] = []
+    if text:
+        pairs = _USER_AT_HOST_RE.findall(text)
+        step_users = list(dict.fromkeys(u for u, _h in pairs))
+        if kind == "user":
+            for u in step_users:
+                host = next(h for uu, h in pairs if uu == u)
+                _add(out, u, f"the step's own text (`{u}@{host}`)", "step")
+        elif kind == "ip":
+            for ip in _step_ips(text, words):
+                _add(out, ip, "the step's own text", "step")
+        elif kind == "hostname":
+            for _u, h in pairs:
+                if not _IP_RE.fullmatch(h):
+                    _add(out, h, f"the step's own text (`{_u}@{h}`)", "step")
     state = env.get("system_state") or {}
     if isinstance(state, dict):
         for sid, ent in state.items():
@@ -109,7 +169,10 @@ def suggest_for(name: str, env: dict) -> list[dict]:
     profile = str(env.get("profile") or "")
     m = re.search(r"\b([a-z_][a-z0-9_-]*)@([a-z0-9][a-z0-9.-]*)", profile, re.I)
     if m:
-        if kind == "user":
+        # §17.1275 — when the step names whose account it is, the shell's user
+        # is not an alternative: `root` on the Proxmox host is the wrong answer
+        # for an account on the VM, and offering it beside the right one is noise.
+        if kind == "user" and not step_users:
             _add(out, m.group(1), "the shell you work in", "map")
         elif kind == "hostname":
             _add(out, m.group(2), "the shell you work in", "map")
@@ -148,14 +211,18 @@ def suggest_for(name: str, env: dict) -> list[dict]:
     return out
 
 
-def suggest_inputs(inputs: list[dict], env: Optional[dict]) -> list[dict]:
+def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "") -> list[dict]:
     """The frame's ``inputs`` with ``suggestions`` and a prefilled ``value``
-    when the operator pinned that exact name."""
+    when the operator pinned that exact name — or (§17.1275) when the step's own
+    text states exactly one candidate. Two candidates in the text are both
+    offered and neither prefilled, the §17.1212 two-disks rule."""
     out = []
     for i in inputs:
-        sugg = suggest_for(str(i.get("name") or ""), env or {})
+        sugg = suggest_for(str(i.get("name") or ""), env or {}, text)
         pinned = next((s["value"] for s in sugg if s["confidence"] == "pinned"), "")
-        out.append({**i, "suggestions": sugg, "value": pinned})
+        stepped = [s["value"] for s in sugg if s["confidence"] == "step"]
+        value = pinned or (stepped[0] if len(stepped) == 1 else "")
+        out.append({**i, "suggestions": sugg, "value": value})
     return out
 
 
