@@ -126,6 +126,27 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
                 _add(out, str(v), f"pinned as {k}", "pinned")
     kind = _kind(name)
     words = _words(name)
+    # §17.1288 — what the system map says about the HOST and about the guest
+    # this placeholder is named after. Live, ADD82 asked for <PALWORLD_IP> and
+    # prefilled 192.168.1.156 -- the Proxmox host's own address, the only one
+    # the step's text named (its web console, `https://192.168.1.156:8006`) --
+    # and offered `root`, the host shell's user, for an account inside VM 106.
+    # The map knows both: `host` carries that address and `106 vm palworld-server`
+    # is the guest the name points at. A guest's address is never the host's,
+    # and the host shell's user is no candidate for an account inside a guest.
+    state = env.get("system_state") or {}
+    state = state if isinstance(state, dict) else {}
+    host_addrs: set[str] = set()
+    about_guest = False
+    for sid, ent in state.items():
+        if not isinstance(ent, dict):
+            continue
+        attrs = ent.get("attrs") if isinstance(ent.get("attrs"), dict) else {}
+        ekind = str(ent.get("kind") or "")
+        if ekind in ("host", "node") and attrs.get("ip"):
+            host_addrs.add(str(attrs["ip"]).split("/")[0])
+        if ekind in ("vm", "ct") and words and _mentions(f"{attrs.get('name') or attrs.get('hostname') or ''} {sid}", words):
+            about_guest = True
     # §17.1275 — the step's OWN words. Live, ADD26 was titled "Install the SSH
     # public key on the AI VM (192.168.1.129)", its description said `ssh
     # aedefruscio@192.168.1.129`, and the frame asked for <AI_VM_IP> with no
@@ -149,7 +170,6 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
             for _u, h in pairs:
                 if not _IP_RE.fullmatch(h):
                     _add(out, h, f"the step's own text (`{_u}@{h}`)", "step")
-    state = env.get("system_state") or {}
     if isinstance(state, dict):
         for sid, ent in state.items():
             if not isinstance(ent, dict):
@@ -172,7 +192,7 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
         # §17.1275 — when the step names whose account it is, the shell's user
         # is not an alternative: `root` on the Proxmox host is the wrong answer
         # for an account on the VM, and offering it beside the right one is noise.
-        if kind == "user" and not step_users:
+        if kind == "user" and not step_users and not about_guest:     # §17.1288 — nor for a guest's account
             _add(out, m.group(1), "the shell you work in", "map")
         elif kind == "hostname":
             _add(out, m.group(2), "the shell you work in", "map")
@@ -208,6 +228,10 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
         elif kind == "vlan":
             for v in re.findall(r"\bvlan\s*(?:id\s*)?(\d{1,4})\b", text, re.I):
                 _add(out, v, src, "fact")
+    if about_guest and kind == "ip" and host_addrs:
+        # §17.1288 — a pin is the operator's decision by name and stays; every
+        # other source offering the host's own address for a guest is wrong.
+        out = [o for o in out if o.get("confidence") == "pinned" or o.get("value") not in host_addrs]
     return out
 
 

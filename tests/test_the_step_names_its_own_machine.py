@@ -301,3 +301,35 @@ def test_a_bash_file_is_syntax_checked_and_its_secret_must_be_passed():
     missing = sr.script_secret_not_passed(["bash /tmp/a.sh"], good)
     assert missing and 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh' in missing[0]["why"]
     assert sr.script_secret_not_passed(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh'], good) == []
+
+
+# ───── §17.1288 — the host's own address is never a guest's; the host shell's user is not a guest's account
+
+ENV_MAP = {"profile": ENV["profile"],
+           "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
+                            "106": {"kind": "vm", "attrs": {"name": "palworld-server"}},
+                            "120": {"kind": "ct", "attrs": {"hostname": "caddy-proxy", "ip": "192.168.1.26"}}}}
+ADD82_TEXT = ("Install qemu-guest-agent inside the palworld-server guest (VM 106) and confirm it answers.\n"
+              "  1. Open https://192.168.1.156:8006, select VM 106 (palworld-server), click Console.\n")
+
+
+def test_the_hosts_own_address_is_not_offered_for_a_guest():
+    out = ri.suggest_inputs(_inputs("PALWORLD_IP"), ENV_MAP, text=ADD82_TEXT)
+    assert out[0]["suggestions"] == [] and out[0]["value"] == "", out[0]
+    out = ri.suggest_inputs(_inputs("PROXMOX_HOST_IP"), ENV_MAP, text=ADD82_TEXT)
+    assert "192.168.1.156" in [s["value"] for s in out[0]["suggestions"]], "the host's address for the host"
+    out = ri.suggest_inputs(_inputs("CADDY_IP"), ENV_MAP, text=ADD82_TEXT)
+    assert [s["value"] for s in out[0]["suggestions"]] == ["192.168.1.26"], "a guest's own address from the map still is"
+
+
+def test_a_pin_of_the_hosts_address_for_a_guest_is_the_operators_call():
+    env = {**ENV_MAP, "substitutions": {"PALWORLD_IP": "192.168.1.156"}}
+    out = ri.suggest_inputs(_inputs("PALWORLD_IP"), env, text=ADD82_TEXT)
+    assert out[0]["value"] == "192.168.1.156"
+
+
+def test_the_shells_user_is_not_offered_for_an_account_inside_a_guest():
+    out = ri.suggest_inputs(_inputs("PALWORLD_USER"), ENV_MAP, text=ADD82_TEXT)
+    assert out[0]["suggestions"] == [], out[0]
+    out = ri.suggest_inputs(_inputs("TARGET_USER"), ENV_MAP, text="Rotate the log files on the host.")
+    assert [s["value"] for s in out[0]["suggestions"]] == ["root"], "the host's own step keeps the shell's user"

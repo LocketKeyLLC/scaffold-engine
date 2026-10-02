@@ -1311,3 +1311,85 @@ def test_the_head_only_runner_gate_ignores_a_placeholder_too():
     assert sr.compound_write_on_a_head_only_runner([loop], policy) == []
     hit = sr.compound_write_on_a_head_only_runner(["qm status 110 | grep -q running || qm start 110"], policy)
     assert hit and "qm start 110" in hit[0]["why"]
+
+
+# ───── §17.1288 — the first frame that reached the VM, read line by line
+
+ADD82_RUN = 'MASS_PASSWORD="$MASS_PASSWORD" PALWORLD_USER="<PALWORLD_USER>" bash /tmp/install_agent_106.sh'
+ADD82_VERIFY = ["qm agent 106 ping",
+                "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> 'systemctl is-active qemu-guest-agent'"]
+
+
+def _add82_files(content=None):
+    return [{"path": "/tmp/install_agent_106.sh", "content": content or _fx("add82_install_agent_106.sh")}]
+
+
+def test_a_placeholder_only_the_verify_uses_is_refused():
+    from app.modules import supervised_runs as sr
+    hits = sr.verify_needs_a_value_the_run_never_used([ADD82_RUN], ADD82_VERIFY, _add82_files())
+    assert [h["command"] for h in hits] == [ADD82_VERIFY[1]]
+    assert "<PALWORLD_IP>" in hits[0]["why"] and "PALWORLD_USER" not in hits[0]["why"], "the user IS used by the run"
+    assert sr.verify_needs_a_value_the_run_never_used([ADD82_RUN], ["qm agent 106 ping"], _add82_files()) == []
+    assert sr.verify_needs_a_value_the_run_never_used(
+        ["curl -s http://<PROWLARR_IP>:9696/ping"], ["curl -s http://<PROWLARR_IP>:9696/api/v1/health"]) == [], \
+        "a placeholder the run used may check too"
+
+
+def test_the_live_scripts_secret_rides_the_ssh_command_line():
+    from app.modules import supervised_runs as sr
+    hits = sr.secret_in_an_ssh_command_line([ADD82_RUN], _add82_files())
+    assert len(hits) == 1 and "$MASS_PASSWORD" in hits[0]["why"] and "expands on the REMOTE" in hits[0]["why"]
+    assert hits[0]["command"].startswith("/tmp/install_agent_106.sh: ssh -o BatchMode=yes")
+    assert "<<< \"$MASS_PASSWORD\"" in hits[0]["why"], "the remedy is stdin"
+    double = _fx("add82_install_agent_106.sh").replace(
+        "'echo \"$MASS_PASSWORD\" | sudo -S apt-get update && echo \"$MASS_PASSWORD\" | sudo -S apt-get install -y qemu-guest-agent && echo \"$MASS_PASSWORD\" | sudo -S systemctl enable --now qemu-guest-agent'",
+        '"echo $MASS_PASSWORD | sudo -S apt-get update"')
+    hits = sr.secret_in_an_ssh_command_line([ADD82_RUN], _add82_files(double))
+    assert len(hits) == 1 and "process list" in hits[0]["why"]
+    fixed = _fx("add82_install_agent_106.sh").replace(
+        "'echo \"$MASS_PASSWORD\" | sudo -S apt-get update && echo \"$MASS_PASSWORD\" | sudo -S apt-get install -y qemu-guest-agent && echo \"$MASS_PASSWORD\" | sudo -S systemctl enable --now qemu-guest-agent'",
+        "\"sudo -S -p '' bash -c 'apt-get update && apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent'\" <<< \"$MASS_PASSWORD\"")
+    assert sr.secret_in_an_ssh_command_line([ADD82_RUN], _add82_files(fixed)) == [], "the stdin form passes"
+    assert sr.secret_in_an_ssh_command_line(
+        ['SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$U@$IP"'], []) == [], \
+        "sshpass's environment is not a command line"
+    assert sr.secret_in_an_ssh_command_line(['ssh u@h "systemctl is-active $UNIT"'], []) == [], "not every variable is a secret"
+
+
+def test_the_live_script_reads_the_neighbour_table_cold():
+    from app.modules import supervised_runs as sr
+    hits = sr.reads_the_neighbour_table_cold([ADD82_RUN], _add82_files())
+    assert len(hits) == 1 and hits[0]["command"].startswith("/tmp/install_agent_106.sh: IP=$(ip neigh show")
+    assert "nmap -sn" in hits[0]["why"] and "seq 1 254" in hits[0]["why"]
+    warmed = _fx("add82_install_agent_106.sh").replace(
+        "# 3. Wait for the guest", 'nmap -sn 192.168.1.0/24 >/dev/null\n# 3. Wait for the guest')
+    assert sr.reads_the_neighbour_table_cold([ADD82_RUN], _add82_files(warmed)) == []
+    swept = _fx("add82_install_agent_106.sh").replace(
+        "# 3. Wait for the guest",
+        'for h in $(seq 1 254); do ping -c 1 -W 1 "192.168.1.$h" >/dev/null 2>&1 & done; wait\n# 3. Wait for the guest')
+    assert sr.reads_the_neighbour_table_cold([ADD82_RUN], _add82_files(swept)) == []
+    assert sr.reads_the_neighbour_table_cold(["ip neigh show | grep -i bc:24:11:e8:9f:7a"], []), "a bare read is cold too"
+    assert sr.reads_the_neighbour_table_cold(["ip addr show vmbr0"], []) == []
+
+
+def test_frame_run_refuses_the_live_add82_script_for_all_three():
+    from app.modules import supervised_runs as sr
+    runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106.sh") +
+               "\n```\n\n## Run this\n```bash\n" + ADD82_RUN + "\n```\n\n## Verify\n- `" + ADD82_VERIFY[0] +
+               "`\n- `" + ADD82_VERIFY[1] + "`\n")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, runbook, spec, policy)
+    assert frame["commands"] and frame["files"]
+    kinds = sr.refusal_kinds(frame)
+    assert {"appears only in the verify", "inside an ssh command line", "reads the neighbour table cold"} <= kinds, kinds
+    assert "runs in the runner's own shell on the Proxmox HOST" not in kinds, "the script does reach the guest"
+    assert "run" not in {o["id"] for o in frame["options"]}
+    for r in frame["refused"]:
+        assert any(s in r["why"] for s in sr._SHAPE_REFUSALS), f"unredraftable refusal: {r['why'][:80]}"
+
+
+def test_the_1288_refusals_are_registered_for_redraft():
+    from app.modules import supervised_runs as sr
+    for sig in ("appears only in the verify", "inside an ssh command line", "reads the neighbour table cold"):
+        assert sig in sr._SHAPE_REFUSALS

@@ -103,7 +103,10 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "has no 'needs_input' verdict",                 # §17.1279
                    "a secret cannot be written into a file",       # §17.1280
                    "elevates only the first command of a line",    # §17.1283
-                   "runs in the runner's own shell on the Proxmox HOST")   # §17.1285
+                   "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
+                   "appears only in the verify",                   # §17.1288
+                   "inside an ssh command line",                   # §17.1288b
+                   "reads the neighbour table cold")               # §17.1288c
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -537,9 +540,9 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
   'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
-- REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
-- A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address (run `nmap -sn <the bridge's /24>` first if it does not). Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
-- YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
+- REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. A secret never rides an ssh COMMAND LINE: `ssh host 'echo "$MASS_PASSWORD" | sudo -S …'` expands on the remote, where it is unset, and the double-quoted form puts the value in both machines' process lists. Feed it on stdin: `ssh -o BatchMode=yes user@host "sudo -S -p '' bash -c 'apt-get update && apt-get install -y x'" <<< "$MASS_PASSWORD"`. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
+- A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address -- but ONLY after a sweep has made the host talk to it (`nmap -sn <the bridge's /24> >/dev/null` when nmap is present, else `for h in $(seq 1 254); do ping -c 1 -W 1 <net>.$h >/dev/null 2>&1 & done; wait`); a VM that booted and spoke to the router alone never appears, however long you wait, so sweep before every read. Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
+- YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next. A check uses what the run used: a placeholder that appears only in a verify is a value the operator would type for nothing -- check from the host (`qm agent N ping`, `qm agent N exec -- systemctl is-active <unit>`) or in the script's last lines.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
@@ -2826,6 +2829,109 @@ def step_text(node: dict) -> str:
     return "\n".join(seen)
 
 
+def verify_needs_a_value_the_run_never_used(commands: list[str], verify: list[str],
+                                            files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288 — a placeholder that appears ONLY in a verify command is a value
+    the operator is asked to type that the run itself never uses. Live, ADD82's
+    script found VM 106's address from its MAC and the verify still said
+    `ssh <PALWORLD_USER>@<PALWORLD_IP> 'systemctl is-active …'` -- the frame
+    asked for `PALWORLD_IP` with the hint "if the operator already knows it
+    (otherwise the script discovers it)", and prefilled the host's own address.
+    An input is never optional here; a check uses what the run used."""
+    used = set(placeholders([str(c) for c in commands or []] +
+                            [str((f or {}).get("content") or "") for f in files or []]))
+    out: list[dict] = []
+    for v in verify or []:
+        extra = [n for n in placeholders([str(v)]) if n not in used]
+        if not extra:
+            continue
+        out.append({"command": str(v), "why": (
+            f"`<{extra[0]}>` appears only in the verify: the run never uses it, so the operator would be "
+            f"typing a value for the check alone -- and when the run itself finds that value (an address "
+            f"read from a MAC), nobody has it to type. A check uses what the run used: from the host "
+            f"(`qm agent N ping`, `qm agent N exec -- systemctl is-active <unit>`, `pct exec N -- …`), or as "
+            f"the last lines of the script, over the same ssh the script opened. Drop the placeholder "
+            f"from the verify or use it in the run too.")})
+    return out
+
+
+_SSH_WORD_RE = re.compile(r"(?<![\w./-])ssh(?![\w-])")
+_QUOTED_ARG_RE = re.compile(r"""\s(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
+_ENV_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,60})\}?")
+
+
+def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
+    and must not be made to. Live, ADD82's script ran
+
+        ssh … "$USERNAME@$IP" 'echo "$MASS_PASSWORD" | sudo -S apt-get update && …'
+
+    Single-quoted, `$MASS_PASSWORD` expands on the REMOTE, where it is unset:
+    sudo reads an empty password and the script dies at the first install (after
+    the key was copied, so a rerun looks different). Double-quoted it expands
+    here, and the value rides ssh's argv on the host and the remote's command
+    line -- both process lists. The secret goes on ssh's STDIN, which the remote
+    sudo reads: `ssh -o BatchMode=yes user@host "sudo -S -p '' bash -c '…'" <<< "$NAME"`."""
+    from app.modules.runbook_inputs import secret_name
+    texts = [("command", str(c)) for c in commands or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    out: list[dict] = []
+    for where, body in texts:
+        for sm in _SSH_WORD_RE.finditer(body):
+            rest = body[sm.end():].split("\n", 1)[0]     # every quoted argument on the ssh's own line
+            hit = next((m for m in _QUOTED_ARG_RE.finditer(rest)
+                        if not rest[:m.start()].rstrip().endswith("<<<")     # the here-string IS the remedy
+                        and any(secret_name(n) for n in _ENV_REF_RE.findall(
+                            m.group(1) if m.group(1) is not None else m.group(2)))), None)
+            if hit is None:
+                continue
+            names = [n for n in _ENV_REF_RE.findall(hit.group(1) if hit.group(1) is not None else hit.group(2))
+                     if secret_name(n)]
+            line = body[body.rfind("\n", 0, sm.start()) + 1:].split("\n", 1)[0].strip()
+            single = hit.group(2) is not None
+            out.append({"command": line[:200] if where == "command" else f"{where}: {line[:160]}", "why": (
+                f"`${names[0]}` is inside an ssh command line"
+                + (f": single-quoted, it expands on the REMOTE, where `{names[0]}` is not set, so sudo reads an "
+                   f"empty password and the step fails there"
+                   if single else
+                   ": double-quoted, the value is spliced into ssh's arguments on this host and into the remote's "
+                   "command line, where any process list shows it")
+                + f". A secret goes to the remote on ssh's STDIN, which `sudo -S` reads: "
+                  f"`ssh -o BatchMode=yes user@host \"sudo -S -p '' bash -c '<the commands, && between them>'\" "
+                  f"<<< \"${names[0]}\"` -- one ssh, one sudo, the value in no command line.")})
+            break
+    return out
+
+
+_NEIGH_READ_RE = re.compile(r"\bip\s+(?:-4\s+|-6\s+)?(?:neigh|neighbour|neighbor|n)\b|\barp\s+-[an]\b")
+_SWEEP_RE = re.compile(r"\bnmap\s+-sn\b|\barp-scan\b|\bfping\b|\bping\b[^\n]*\$\(seq\b|\bseq\b[^\n]*\n?[^\n]*\bping\b|\{1\.\.25[0-4]\}[^\n]*\bping\b|\bping\b[^\n]*\{1\.\.25[0-4]\}")
+
+
+def reads_the_neighbour_table_cold(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288c — `ip neigh` lists the machines THIS host has exchanged packets
+    with; a VM that just booted and talked only to the router is not in it,
+    and waiting does not put it there. Live, ADD82's script waited 60 s for
+    VM 106's MAC to appear and would have exited "did not appear in ip neigh;
+    is its network up?" -- the host had `nmap` the whole time, and the rule
+    (§17.1286) said to sweep first. A rule the drafter skips becomes a gate."""
+    texts = [("command", str(c)) for c in commands or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    out: list[dict] = []
+    for where, body in texts:
+        m = _NEIGH_READ_RE.search(body)
+        if not m or _SWEEP_RE.search(body[:m.start()]):
+            continue
+        line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+        out.append({"command": line[:200] if where == "command" else f"{where}: {line[:160]}", "why": (
+            "reads the neighbour table cold: `ip neigh` lists only the machines this host has already exchanged "
+            "packets with, so a guest that just booted and spoke to the router alone never appears, however long "
+            "the loop waits. Warm the table FIRST, then read it: `nmap -sn <the bridge's /24> >/dev/null` when "
+            "nmap is on the host, else `NET=$(ip -4 route get 1 | sed -n 's/.* src \\([0-9.]*\\)\\.[0-9]*.*/\\1/p'); "
+            "for h in $(seq 1 254); do ping -c 1 -W 1 \"$NET.$h\" >/dev/null 2>&1 & done; wait` -- inside the wait "
+            "loop is fine, as long as a sweep comes before every read.")})
+    return out
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
                files: Optional[list[dict]] = None) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply.
@@ -3172,6 +3278,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds, shape_files)
+    # §17.1288 — a check must use what the run used; a secret rides no ssh
+    # command line; the neighbour table is read warm. Three readings of one frame.
+    refused = refused + verify_needs_a_value_the_run_never_used(cmds, verify, shape_files)
+    refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
+    refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1268 — work that cannot finish in the time one command is given. A
     # refusal rather than a rule, because §17.1267 put the budget in the prompt
     # and the next draft looped over all 89 again with a sleep added.
