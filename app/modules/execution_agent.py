@@ -2583,6 +2583,39 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     frame = second
                 elif len(second["refused"]) < len(frame["refused"]) and second["commands"]:
                     frame = second                            # closer; show the better of the two
+                else:
+                    # §17.1277 — the rejected redraft's reasons, in full: they are
+                    # otherwise invisible (the frame keeps the first draft).
+                    logger.warning("supervised_run_redraft_rejected job=%s node=%s refusals=%s", job_id,
+                                   run_node.get("node_key"),
+                                   "; ".join(r["why"] for r in second.get("refused") or [])[:800])
+                    # A redraft refused for something DIFFERENT fixed what it was
+                    # shown and broke what the first draft had right (live: draft 1
+                    # hang-safe + unbatched, draft 2 batched + not hang-safe). That
+                    # is progress, not a loop -- one more try, told both. Bounded
+                    # here: a third refusal parks on the best frame we have.
+                    k1, k2 = supervised_runs.refusal_kinds(frame), supervised_runs.refusal_kinds(second)
+                    if second["commands"] and k2 and not (k1 & k2):
+                        fix2 = supervised_runs.shape_retry_note(second, previous=frame)
+                        if fix2:
+                            logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s",
+                                           job_id, run_node.get("node_key"), sorted(k1), sorted(k2))
+                            again = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix2,
+                                                                        spec=spec, environment=_env)
+                            if again:
+                                third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
+                                                                  preconditions=_pre)
+                                if third["commands"] and not third["refused"]:
+                                    logger.warning("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
+                                                   job_id, run_node.get("node_key"), len(third["commands"]))
+                                    frame = third
+                                elif third["commands"] and len(third["refused"]) < min(len(frame["refused"]),
+                                                                                       len(second["refused"])):
+                                    frame = third                 # closer than either; show the best
+                                else:
+                                    logger.warning("supervised_run_redraft_again_rejected job=%s node=%s refusals=%s",
+                                                   job_id, run_node.get("node_key"),
+                                                   "; ".join(r["why"] for r in third.get("refused") or [])[:800])
         # §17.1227 — a draft with NOTHING to run is the worst outcome of all, and
         # neither trigger above catches it: the shape pass needs a refusal (there
         # is none — there is nothing to refuse) and the coverage pass only
