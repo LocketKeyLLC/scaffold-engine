@@ -3233,7 +3233,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     refuted: list[dict] = []
     if verify_cmds and (ok or indeterminate):
         try:
-            pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
+            pasted, ran = await run_verify(spec, verify_cmds, secret_env)      # §17.1281
             verify_out = _probe_report(pasted, ran)
             if indeterminate:
                 # §17.1239 — the runner was still recovering from the dropped
@@ -3245,8 +3245,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 # give the channel one more moment and ask again.
                 if not _has_evidence(pasted, ran):
                     await asyncio.sleep(_RECHECK_DELAY_S)
-                    pasted2, ran2 = await _lr.run_probes(
-                        spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
+                    pasted2, ran2 = await run_verify(spec, verify_cmds, secret_env)   # §17.1281
                     if _has_evidence(pasted2, ran2):
                         pasted, ran = pasted2, ran2
                         verify_out = _probe_report(pasted, ran)
@@ -3282,6 +3281,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                                    str(_against[0].get("reason"))[:140])
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
+    # §17.1281 — nothing a run printed reaches the record, the response or the
+    # log with an engine-held value or a secret-shaped token in it.
+    for e in executed:
+        e["output"] = scrub_run_output(e.get("output"), secret_env)
+    verify_out = scrub_run_output(verify_out, secret_env)
     output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
     # §17.1258 — a block that repeated one failure is not a success, whatever the
     # exit codes said. The commands "worked"; the work did not.
@@ -3413,6 +3417,59 @@ def contradicted(verdicts: list[dict]) -> list[dict]:
 
 #: §17.1239 — how long to let a dropped channel settle before re-reading.
 _RECHECK_DELAY_S = 4
+
+
+async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]) -> tuple[str, list[dict]]:
+    """§17.1281 — run a step's verify checks and return ``(pasted, ran)`` in the
+    ``== V1 ==`` marker form `_probe_report`, `_has_evidence` and the judge read.
+
+    Live, ADD115's four `curl -s -H "X-Api-Key: $PROWLARR_API_KEY" …` checks came
+    back BLANK: `run_probes` sends through `run_readonly`, which expands nothing,
+    so the request carried an empty key, got a 401, and `curl -s` printed nothing
+    -- the judge said "unknown" and `done` stood on checks that answered nothing.
+    A check that references a stored value goes through the supervised path with
+    the same `env` the block had (the runner expands `$NAME` there, and redacts
+    it); a plain check keeps the read-only path.
+    """
+    from app.modules import assist_local_runner as _lr
+    from app.modules import assist_supervised as _sw
+    probes = [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)]
+    with_ref = [p for p in probes if _SECRET_REF_RE.search(p["command"])]
+    plain = [p for p in probes if p not in with_ref]
+    pasted, ran = "", []
+    if plain:
+        pasted, ran = await _lr.run_probes(spec, plain)
+    if with_ref:
+        done = await _sw.run_block(spec, [p["command"] for p in with_ref], env=env or {})
+        chunks = []
+        for p, rec in zip(with_ref, done, strict=False):     # run_block stops at the first failure
+            out = str(rec.get("output") or "")
+            if rec.get("refused") or rec.get("unreachable"):
+                ran.append({"id": p["id"], "command": p["command"], "ok": False, "ran": False,
+                            "why": out[:200] or "did not run"})
+                continue                                   # no marker: not evidence (§17.1204)
+            chunks.append(f'== {p["id"]} ==\n{out.rstrip()}\n')
+            ran.append({"id": p["id"], "command": p["command"], "ok": True, "ran": True})
+        pasted += "".join(chunks)
+    ran.sort(key=lambda r: int(str(r["id"])[1:]))
+    return pasted, ran
+
+
+def scrub_run_output(text_out: str, held: Optional[dict[str, str]]) -> str:
+    """§17.1281 — what a run printed, with every engine-held value and every
+    secret-shaped token masked before it is stored, returned or logged. The
+    runner redacts values from ITS store and the values the engine SENT; a value
+    the engine holds but did not send on this call (a read-only probe that `cat`s
+    a config file) came back in clear."""
+    out = str(text_out or "")
+    for v in sorted((v for v in (held or {}).values() if v and len(v) >= 6), key=len, reverse=True):
+        out = out.replace(v, "***")
+    try:
+        from app.modules.redaction import redact_secrets
+        out, _kinds = redact_secrets(out)
+    except Exception as exc:                        # pragma: no cover - defensive
+        logger.warning("scrub_run_output_failed err=%r", exc)
+    return out
 
 
 def _probe_report(pasted: str, ran: list[dict]) -> str:

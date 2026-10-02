@@ -34,6 +34,11 @@ _HOUSE = [
     ("OpenAI-style key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
     ("API key header", re.compile(r"(?i)(x-api-key\s*[:=]\s*)([A-Za-z0-9._~+/=-]{16,})")),
     ("Bearer token", re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{16,})")),
+    # §17.1281 — a verify check `cat`'d Prowlarr's config.xml into the node's
+    # record: the key the engine stores by reference reached the record in clear.
+    ("*arr API key", re.compile(r"(?i)(<apikey>\s*)([A-Za-z0-9]{16,64})")),
+    ("XML password", re.compile(r"(?i)(<password>\s*)([^<\s]{4,})")),
+    ("JSON api key", re.compile(r"(?i)(\"api[_-]?key\"\s*:\s*\")([A-Za-z0-9._~+/=-]{16,})")),
 ]
 _MAX_LINE = 4000
 
