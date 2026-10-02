@@ -838,4 +838,4 @@ def test_run_supervised_uses_elevate():
     body = src[i:src.index("\n    @mcp.tool", i + 10)] if "\n    @mcp.tool" in src[i + 10:] else src[i:]
     assert "run_cmd = elevate(command, keep)" in body
     assert "f\"sudo -n {keep}{_SUDO_RE" not in body, "the head-only form is gone"
-    assert _load_runner_script().HELPER_VERSION == "19"
+    assert int(_load_runner_script().HELPER_VERSION) >= 19   # §17.1288l bumped it to 20 (tables mirrored)

@@ -432,6 +432,8 @@ _READ_HEAD_DENY_FLAGS = {
     "netcat": {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec"},
     "yq":    {"-i", "--inplace", "--in-place"},         # edits in place
     "jq":    {"-i", "--in-place"},
+    # §17.1288l — nmap's ping sweep is a read; a report to disk or an NSE script is not
+    "nmap":  {"-oN", "-oX", "-oG", "-oA", "-oS", "--script", "-sC", "-A"},
 }
 
 # awk reads in every idiom the corpus uses (`… | awk 'NR==2{print $1}'`) and
@@ -648,9 +650,6 @@ def read_only_command(cmd: str) -> bool:
             return False
         if not head_reads(argv):   # §17.1173 — and the head must be a KNOWN reader
             return False
-        if argv[0] == "nmap" and any(a.startswith("-o") or a.startswith("--script") or a == "-sC" or a == "-A"
-                                      for a in argv[1:]):
-            return False               # §17.1288l — writes a report, or runs NSE scripts
         if argv[0] in ("curl", "wget") and any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T", "-o", "-O") for a in argv[1:]):
             # curl/wget that WRITE (a method override, a body, or a download to disk)
             # — `-o /dev/null` is the one read-only shape
