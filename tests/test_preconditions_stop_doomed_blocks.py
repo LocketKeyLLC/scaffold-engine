@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pathlib as pathlib_mod
 import pytest
 
 from app.modules import runbook_preconditions as pc
@@ -276,3 +277,72 @@ async def test_a_start_through_a_variable_counts():
     assert pc._resolve_ids('VMID=106\nqm start "$VMID"\nqm status ${VMID} | grep -q running') == \
         'VMID=106\nqm start 106\nqm status 106 | grep -q running'
     assert pc._resolve_ids('X=5\nqm start "$X"') == 'X=5\nqm start "$X"', "a non-id value is left alone"
+
+
+# ───── §17.1288p — a VM whose disk has never been written has no OS to log into
+
+LVS = _script("pve_lvs_2026_10_02.txt")
+PLAN_OS = PLAN + [{"node_key": "ADD5", "title": "Install Ubuntu Server 22.04 on VM 106", "status": "done"},
+                  {"node_key": "ADD53", "title": "Set VM 106's scsi0 disk to 40G on local-lvm", "status": "done"}]
+
+
+def _host_full(pct=PCT_LIST, qm=QM_LIST, lvs=LVS, isos="ubuntu-22.04.3-live-server-amd64.iso\nubuntu-26.04-live-server-amd64.iso\n"):
+    async def fake(spec, tool, args):
+        r = MagicMock(); r.structured = None; r.is_error = False
+        c = args["command"]
+        r.text = {"pct list": pct, "qm list": qm}.get(c, "")
+        if c.startswith("lvs"):
+            r.text = lvs
+        if c.startswith("ls /var/lib/vz/template/iso"):
+            r.text = isos
+        return r
+    return fake
+
+
+def test_lvs_parses_thin_and_thick_volumes():
+    d = pc.parse_lvs(LVS)
+    assert d["106"] == [{"name": "vm-106-disk-0", "data_percent": 0.0}]
+    assert d["101"][0]["data_percent"] == 20.01 and d["100"][0]["data_percent"] is None
+    assert "data" not in d and "root" not in d
+
+
+@pytest.mark.asyncio
+async def test_the_script_that_ran_twice_is_refused_for_the_empty_disk():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/install_agent_106.sh", "content": _script("add82_install_agent_106_v4.sh")}]
+    with patch("app.modules.mcp_client.call_tool", new=_host_full()):
+        out = await pc.unmet([RUN], _spec(), plan=PLAN_OS, files=files, node=ADD82)
+    whys = [o["why"] for o in out]
+    hit = next((w for w in whys if "has never been written" in w), "")
+    assert hit, whys
+    assert "vm-106-disk-0" in hit and "ADD5" in hit and "ubuntu-22.04.3-live-server-amd64.iso" in hit
+    assert "Ubuntu must be installed on VM 106 before this step" in hit
+
+
+@pytest.mark.asyncio
+async def test_a_written_disk_or_a_thick_one_is_not_refused():
+    node110 = {"node_key": "ADD49", "title": "Make aiserver (VM 110) reachable on SSH port 22", "description": ""}
+    with patch("app.modules.mcp_client.call_tool", new=_host_full(qm=QM_LIST.replace("110 ai-vm                stopped", "110 ai-vm                running"))):
+        out = await pc.unmet(["ssh -o BatchMode=yes aedefruscio@192.168.1.129 true"], _spec(), plan=PLAN_OS, node=node110)
+    assert all("has never been written" not in o["why"] for o in out), [o["why"][:80] for o in out]
+    with patch("app.modules.mcp_client.call_tool", new=_host_full()):
+        out = await pc.unmet(["qm status 106 | grep -q running || qm start 106"], _spec(), plan=PLAN_OS, node=ADD82)
+    assert all("has never been written" not in o["why"] for o in out), "a start needs no OS"
+
+
+@pytest.mark.asyncio
+async def test_the_inventory_carries_disks_and_isos():
+    with patch("app.modules.mcp_client.call_tool", new=_host_full()):
+        inv = await pc.read_inventory(_spec())
+    assert inv["disks"]["106"][0]["data_percent"] == 0.0 and inv["isos"][0].startswith("ubuntu-22.04.3")
+
+
+def test_the_empty_disk_fact_is_recorded_for_the_plan():
+    from app.modules import execution_agent as ea
+    from app.modules import supervised_runs as sr
+    src = pathlib_mod.Path(ea.__file__).read_text(encoding="utf-8")
+    assert "async def _record_engine_fact(" in src and "ENGINE MEASURED:" in src
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert '"has never been written" in str(_r.get("why")' in body and "_record_engine_fact(job_id" in body
+    assert "has never been written" in sr._SHAPE_REFUSALS, "the redraft is told, and the chain counts it"

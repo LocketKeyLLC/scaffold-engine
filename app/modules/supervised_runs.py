@@ -119,6 +119,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is ALREADY",                                   # §17.1240
                    "is already taken on this host",                # §17.1243
                    "there is no guest",                            # §17.1213
+                   "has never been written",                       # §17.1288p
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
