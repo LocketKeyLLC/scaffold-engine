@@ -1278,3 +1278,36 @@ def test_a_mix_of_a_reaching_write_and_a_host_side_write_names_the_host_side_one
     from app.modules import supervised_runs as sr
     found = sr.commands_never_reach_the_guest(["qm set 106 --agent 1", "sudo apt-get install -y qemu-guest-agent"], ADD82)
     assert found and found[0]["command"] == "sudo apt-get install -y qemu-guest-agent"
+
+
+# ───── §17.1287c — a loop of reads is not a write
+
+def test_a_wait_loop_is_not_a_write_the_guest_gate_refuses():
+    from app.modules import supervised_runs as sr
+    loop = "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 <PALWORLD_IP> >/dev/null 2>&1 && break; sleep 5; done"
+    reaching = ["qm start 106", loop, 'ssh user@<PALWORLD_IP> "sudo apt-get install -y qemu-guest-agent"']
+    assert sr.commands_never_reach_the_guest(reaching, ADD82) == [], "the start acts on 106, the loop reads, the ssh reaches"
+    assert sr.commands_never_reach_the_guest([loop, "sudo apt-get install -y qemu-guest-agent"], ADD82)[0]["command"] == "sudo apt-get install -y qemu-guest-agent"
+
+
+def test_writing_segments_judges_the_programs_not_the_shells_words():
+    from app.modules import supervised_runs as sr
+    loop = "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 <PALWORLD_IP> >/dev/null 2>&1 && break; sleep 5; done"
+    assert sr.writing_segments(loop) == [], "ping, sleep, break, do, done: nothing writes"
+    assert sr.writing_segments("qm status 110 | grep -q running || qm start 110") == ["qm start 110"]
+    assert sr.writing_segments("sudo apt-get update && sudo apt-get install -y qemu-guest-agent") == [
+        "sudo apt-get update", "sudo apt-get install -y qemu-guest-agent"]
+    assert sr.writing_segments("cat /etc/hosts") == []
+    assert sr.writing_segments("ping -c 1 <HOST_IP>") == [], "a placeholder is a value, not a redirect"
+    assert sr.writing_segments("until ping -c 1 -W 2 <HOST_IP>; do sleep 5; done") == []
+    assert sr.writing_segments("for h in a b; do ssh user@$h 'sudo apt-get install -y x'; done") == [
+        "ssh user@$h 'sudo apt-get install -y x'"], "a loop that WRITES still writes"
+
+
+def test_the_head_only_runner_gate_ignores_a_placeholder_too():
+    from app.modules import supervised_runs as sr
+    policy = {"sudo": True, "helper": "18"}
+    loop = "for i in 1 2 3; do ping -c 1 -W 2 <PALWORLD_IP> >/dev/null 2>&1 && break; sleep 5; done"
+    assert sr.compound_write_on_a_head_only_runner([loop], policy) == []
+    hit = sr.compound_write_on_a_head_only_runner(["qm status 110 | grep -q running || qm start 110"], policy)
+    assert hit and "qm start 110" in hit[0]["why"]
