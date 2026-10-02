@@ -244,3 +244,60 @@ async def test_only_read_only_commands_are_sent():
     assert sent, "something must have been asked"
     for c in sent:
         assert read_only_command(c), f"not read-only: {c}"
+
+
+# ───── §17.1286 — a VM with no guest agent is still reachable
+
+QM_CONFIG_106 = "agent: 1\nname: palworld-server\nnet0: virtio=BC:24:11:E8:9F:7A,bridge=vmbr0\nscsi0: oasis:vm-106-disk-0,size=100G\n"
+IP_NEIGH = ("192.168.1.23 dev vmbr0 lladdr bc:24:11:b1:b3:b4 STALE\n"
+            "192.168.1.129 dev vmbr0 lladdr bc:24:11:b4:af:15 STALE\n"
+            "192.168.1.44 dev vmbr0 lladdr bc:24:11:e8:9f:7a REACHABLE\n")
+
+
+def test_the_mac_is_read_off_qm_config_and_matched_in_the_neighbour_table():
+    assert rd.vm_macs(QM_CONFIG_106) == ["bc:24:11:e8:9f:7a"]
+    assert rd.address_by_mac(IP_NEIGH, ["BC:24:11:E8:9F:7A"]) == ["192.168.1.44"]
+    assert rd.address_by_mac(IP_NEIGH, ["bc:24:11:00:00:00"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_vm_without_an_agent_is_found_by_its_mac():
+    running = QM_LIST.replace("106 palworld-server      stopped", "106 palworld-server      running")
+    with patch("app.modules.mcp_client.call_tool", new=_runner({
+            "pct list": "VMID Status Lock Name\n", "qm list": running,
+            "qm agent 106 network-get-interfaces": "No QEMU guest agent configured",
+            "qm config 106": QM_CONFIG_106, "ip neigh show": IP_NEIGH})):
+        out = await rd.discover_inputs(_inputs("PALWORLD_VM_IP"), [], _spec())
+    assert out[0]["value"] == "192.168.1.44", out[0]
+    assert "ip neigh" in out[0]["suggestions"][0]["source"]
+
+
+def test_the_rules_and_the_refusal_say_how_to_reach_a_vm_without_an_agent():
+    assert "A VM WITH NO GUEST AGENT IS STILL REACHABLE" in sr.CHANNEL_RULES
+    assert 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/' in sr.CHANNEL_RULES and "ip neigh show" in sr.CHANNEL_RULES
+    found = sr.commands_never_reach_the_guest(["sudo apt-get install -y qemu-guest-agent"],
+                                             {"title": "Install and enable QEMU Guest Agent in VM 106"})
+    assert found and "would have installed" in found[0]["why"] and "net0 MAC" in found[0]["why"]
+    assert "live, this installed" not in found[0]["why"]
+
+
+def test_a_script_that_reaches_the_guest_satisfies_the_guest_gate():
+    node = {"title": "Install and enable QEMU Guest Agent in VM 106"}
+    script = ('set -e\nqm start 106 || true\nfor i in $(seq 1 12); do ip neigh show | grep -qi bc:24:11:e8:9f:7a && break; sleep 5; done\n'
+              'IP=$(ip neigh show | grep -i bc:24:11:e8:9f:7a | awk \'{print $1}\')\n'
+              'SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new aedefruscio@$IP\n'
+              'ssh aedefruscio@$IP "sudo apt-get install -y qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent"\n')
+    files = [{"path": "/tmp/vm106_agent.sh", "content": script}]
+    assert sr.commands_never_reach_the_guest(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/vm106_agent.sh'], node, files) == []
+    assert sr.commands_never_reach_the_guest(["bash /tmp/vm106_agent.sh"], node), "without the file in view the command reaches nothing"
+
+
+def test_a_bash_file_is_syntax_checked_and_its_secret_must_be_passed():
+    good = [{"path": "/tmp/a.sh", "content": 'IP=$(ip neigh | head -1)\nssh u@$IP "echo $MASS_PASSWORD" \n'}]
+    bad = [{"path": "/tmp/b.sh", "content": "if [ -f x ]; then\n  echo unterminated\n"}]
+    assert sr.file_writes_will_not_work(good) == []
+    found = sr.file_writes_will_not_work(bad)
+    assert found and "not valid bash" in found[0]["why"]
+    missing = sr.script_secret_not_passed(["bash /tmp/a.sh"], good)
+    assert missing and 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh' in missing[0]["why"]
+    assert sr.script_secret_not_passed(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh'], good) == []
