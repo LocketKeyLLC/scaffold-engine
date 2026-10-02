@@ -836,3 +836,27 @@ def test_the_dead_party_judgment_is_wired_into_the_failure_reason():
     assert "dead_reason if dead_reason else" in body[j:j + 3000], "the judgment must reach the reason the next draft reads"
     assert body.index("dead_reason if dead_reason else") < body.index("repeated_reason if repeated_reason else"), \
         "a corpse is judged before a repeat"
+
+
+# ───── §17.1278b — the body's SHAPE decides, not a phrase list
+
+def test_the_live_phrase_list_script_is_refused():
+    from app.modules import supervised_runs as sr
+    found = sr.classifies_by_key_presence(["python3 /tmp/add_indexers.py 0 10"],
+                                          _file("/tmp/add_indexers.py", _fx("add115_file_phrase_list.py")))
+    assert found and "by a phrase list" in found[0]["why"]
+    assert "'unable to connect'" in found[0]["why"] and "CloudFlare" in found[0]["why"]
+    assert any(s in found[0]["why"] for s in sr._SHAPE_REFUSALS)
+
+
+def test_the_shape_rule_alone_passes():
+    from app.modules import supervised_runs as sr
+    src = ("prop = (first.get('propertyName') or '').strip()\nif prop:\n    sys.exit(1)\nelse:\n"
+           "    unreachable.append(name)\nif 'should be unique' in body_text.lower():\n    already += 1\n")
+    assert sr.classifies_by_key_presence([], _file("/tmp/ok.py", src)) == []
+
+
+def test_the_cloudflare_output_is_judged_as_a_corpse_too():
+    from app.modules import supervised_runs as sr
+    why = sr.stopped_on_a_dead_party(_fx("add115_output_stopped_on_cloudflare.txt"))
+    assert why and "0Magnet" in why and "CloudFlare" in why and "no field named" in why
