@@ -1456,3 +1456,59 @@ def test_the_pause_tries_a_third_time_on_a_repeated_kind_too():
     tree = ast.parse(src)
     calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
     assert any(any(k.arg == "repeated" for k in c.keywords) for c in calls), "the third note must carry `repeated`"
+
+
+# ───── §17.1288h — a literal account into the step's guest is a guess
+
+ADD82_RUN_V3 = 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/install_agent_106.sh'
+
+
+def _v3_files(content=None):
+    return [{"path": "/tmp/install_agent_106.sh", "content": content or _fx("add82_install_agent_106_v3.sh")}]
+
+
+def test_root_into_vm_106_is_an_assumption():
+    from app.modules import supervised_runs as sr
+    hits = sr.ssh_assumes_the_guests_account([ADD82_RUN_V3], ADD82, {}, _v3_files())
+    assert len(hits) == 1 and hits[0]["command"].startswith('/tmp/install_agent_106.sh: SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id')
+    assert "`root@" in hits[0]["why"] and "is an assumption" in hits[0]["why"]
+    assert "<PALWORLD_USER>@$IP" in hits[0]["why"], hits[0]["why"]
+
+
+def test_a_placeholder_account_a_pin_or_the_step_text_is_not_a_guess():
+    from app.modules import supervised_runs as sr
+    asked = _fx("add82_install_agent_106_v3.sh").replace('root@"$IP"', '<PALWORLD_USER>@"$IP"')
+    assert sr.ssh_assumes_the_guests_account([ADD82_RUN_V3], ADD82, {}, _v3_files(asked)) == []
+    pinned = {"substitutions": {"PALWORLD_USER": "root"}}
+    assert sr.ssh_assumes_the_guests_account([ADD82_RUN_V3], ADD82, pinned, _v3_files()) == [], "a pin names the account"
+    add26 = {"node_key": "ADD26", "title": "Install the SSH public key on the AI VM (192.168.1.129)",
+             "description": "ssh aedefruscio@192.168.1.129 must work without a password afterwards. VM 110."}
+    cmds = ['SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new aedefruscio@192.168.1.129']
+    assert sr.ssh_assumes_the_guests_account(cmds, add26, {}, []) == [], "the step's own text names it"
+    host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
+    assert sr.ssh_assumes_the_guests_account(["ssh root@192.168.1.1 uptime"], host_step, {}, []) == [], "not a step about a guest"
+    assert sr.ssh_assumes_the_guests_account(["ssh root@pve uptime"], ADD82, {}, []) == [], "the host's own shell"
+
+
+def test_frame_run_refuses_the_live_fourth_draft_for_the_guessed_account_only():
+    from app.modules import supervised_runs as sr
+    runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106_v3.sh") +
+               "\n```\n\n## Run this\n```bash\n" + ADD82_RUN_V3 + "\n```\n\n## Verify\n- `qm agent 106 ping`\n")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
+    assert sr.refusal_kinds(frame) == {"is an assumption"}, [r["why"][:90] for r in frame["refused"]]
+    assert "run" not in {o["id"] for o in frame["options"]}
+    fixed = runbook.replace('root@"$IP"', '<PALWORLD_USER>@"$IP"')
+    frame = sr.frame_run(ADD82, fixed, spec, policy, env={"profile": "You work as root@pve."})
+    assert frame["refused"] == [] and [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"]
+    assert frame["inputs"][0]["suggestions"] == [], "the host shell's root is not offered for the guest"
+    assert "run" in {o["id"] for o in frame["options"]}
+
+
+def test_the_guest_word_for_the_placeholder():
+    from app.modules import supervised_runs as sr
+    assert sr._guest_word("Install qemu-guest-agent inside the palworld-server guest (VM 106)", "106") == "PALWORLD"
+    assert sr._guest_word("Start VM 106 (palworld-server)", "106") == "PALWORLD"
+    assert sr._guest_word("Do a thing in VM 106", "106") == "VM106"
+    assert sr._guest_word("Do a thing in VM 106", "106", {"system_state": {"106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}) == "PALWORLD"
