@@ -1184,3 +1184,35 @@ def test_the_head_only_gate_is_wired_into_frame_run():
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
     assert "compound_write_on_a_head_only_runner(cmds, policy)" in body
+
+
+# ───── §17.1284b/c — the shell's own words are not writes; ssh needs a password and a wait
+
+WAIT_LOOP = "for i in 1 2 3 4 5 6 7 8 9 10; do ping -c 1 -W 2 192.168.1.129 >/dev/null 2>&1 && break; sleep 5; done"
+
+
+def test_a_wait_loop_of_reads_passes_the_head_only_gate():
+    from app.modules import supervised_runs as sr
+    assert sr.compound_write_on_a_head_only_runner([WAIT_LOOP], {"sudo": True, "helper": "18"}) == [], \
+        "`break`, `sleep`, `done` are not writes"
+    assert sr.compound_write_on_a_head_only_runner(["qm status 110 | grep -q running || qm start 110"], {"sudo": True, "helper": "18"}), \
+        "the real write after an operator is still refused"
+
+
+@pytest.mark.parametrize("seg", ["do", "done", "break", "then", "fi", "exit 1", "true", ":", "continue"])
+def test_shell_words_are_not_commands(seg):
+    from app.modules import supervised_runs as sr
+    assert sr._shell_keyword_only(seg)
+
+
+@pytest.mark.parametrize("seg", ["qm start 110", "done something", "pct exec 1 -- true"])
+def test_a_program_is_not_a_shell_word(seg):
+    from app.modules import supervised_runs as sr
+    assert not sr._shell_keyword_only(seg)
+
+
+def test_the_rules_say_how_ssh_gets_a_held_password_and_a_wait():
+    from app.modules import supervised_runs as sr
+    r = sr.CHANNEL_RULES
+    assert 'SSHPASS="$MASS_PASSWORD" sshpass -e' in r and "StrictHostKeyChecking=accept-new" in r
+    assert "apt-get install -y sshpass" in r and "A VM you just STARTED is not up yet" in r

@@ -664,15 +664,26 @@ async def mark_satisfied(
 
 async def reset_node(
     job_id: str, node_key: str, *, edited_by: str | None = None, db: AsyncSession,
+    cascade: bool = False,
 ) -> dict:
-    """Reset ANY-status node to pending + cascade transitive downstream.
-    Generalizes retry_failed_node beyond FAILED; does NOT bump retry_count."""
+    """Reset ANY-status node to pending; with ``cascade=True`` also its
+    transitive downstream. Generalizes retry_failed_node beyond FAILED; does
+    NOT bump retry_count.
+
+    §17.1284 — the cascade is OPT-IN. Resetting ADD26 (failed, to retry it)
+    reset sixteen nodes behind it, un-doing one `done` and twelve `skipped`
+    steps the operator had settled weeks earlier -- recoverable only because
+    §17.1211's pre-image existed, the shape §17.1216 recorded as still open. A
+    retry of a failed step is the common case and touches nothing else; work
+    built on an answer that CHANGED is `revise_decision`'s job, and it cascades
+    on purpose. What was NOT touched is returned as ``downstream_kept``."""
     nodes = await _load_nodes(db, job_id)
     node = next((n for n in nodes if n["node_key"] == node_key), None)
     if not node:
         return {"error": f"node {node_key} not found", "http_status": 404}
 
-    downstream = _transitive_downstream(nodes, node_key)
+    all_downstream = _transitive_downstream(nodes, node_key)
+    downstream = all_downstream if cascade else set()
     reset_keys = sorted({node_key} | downstream)
     await _reset_keys(db, job_id, reset_keys)
     await _reopen_job(db, job_id)
@@ -686,7 +697,8 @@ async def reset_node(
         "node_reset job=%s node=%s downstream=%s", job_id, node_key, sorted(downstream),
     )
     return {"status": "ok", "node_key": node_key, "reset": reset_keys,
-            "downstream_reset": sorted(downstream)}
+            "downstream_reset": sorted(downstream),
+            "downstream_kept": sorted(all_downstream - downstream)}
 
 
 async def revise_decision(
