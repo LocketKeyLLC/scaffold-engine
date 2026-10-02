@@ -831,7 +831,7 @@ def test_the_dead_party_judgment_is_wired_into_the_failure_reason():
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("async def resolve_run(")
     body = src[i:]
-    assert "dead_reason = (stopped_on_a_dead_party(" in body
+    assert "dead_reason = ((stopped_on_a_dead_party(" in body
     j = body.index("reason = mask_secrets(")
     assert "dead_reason if dead_reason else" in body[j:j + 3000], "the judgment must reach the reason the next draft reads"
     assert body.index("dead_reason if dead_reason else") < body.index("repeated_reason if repeated_reason else"), \
@@ -894,3 +894,55 @@ def test_the_rules_carry_the_helper_verbatim():
     from app.modules import supervised_runs as sr
     assert sr.WHOSE_FAULT_HELPER.strip() in sr.CHANNEL_RULES
     assert "paste this helper" in sr.CHANNEL_RULES
+
+
+# ───── §17.1279 — a template is not a bad request
+
+def _helper():
+    from app.modules import supervised_runs as sr
+    ns: dict = {}
+    exec(sr.WHOSE_FAULT_HELPER, ns)
+    return ns["whose_fault"]
+
+
+def test_the_given_helper_tells_the_four_verdicts_apart():
+    wf = _helper()
+    template = [{"propertyName": "BaseUrl", "errorMessage": "'Base Url' must not be empty.", "attemptedValue": ""},
+                {"propertyName": "BaseUrl", "errorMessage": "must be valid URL that starts with http(s)://", "attemptedValue": ""}]
+    assert wf(template) == "needs_input", "Torrent RSS Feed wants a URL only the operator has"
+    assert wf([{"propertyName": "AppProfileId", "errorMessage": "'App Profile Id' must be greater than '0'", "attemptedValue": 0}]) == "bad_request"
+    assert wf([{"propertyName": "AppProfileId", "errorMessage": "required", "attemptedValue": None}]) == "bad_request", "null is not a typed-empty field"
+    assert wf([{"propertyName": "", "errorMessage": "Unable to access 16mag.net, blocked by CloudFlare Protection."}]) == "unreachable"
+    assert wf([{"propertyName": "Name", "errorMessage": "Should be unique", "attemptedValue": "YTS"}]) == "duplicate"
+    assert wf("not a list") == "unreachable", "garbage is not a named field"
+
+
+def test_a_stale_pasted_helper_is_refused_and_the_current_one_passes():
+    from app.modules import supervised_runs as sr
+    stale = _file("/tmp/add_indexers.py", _fx("add115_file_stale_helper.py"))
+    found = sr.classifies_by_key_presence(["python3 /tmp/add_indexers.py 0 10"], stale)
+    assert found and "has no 'needs_input' verdict" in found[0]["why"] and "def whose_fault" in found[0]["why"]
+    current = _file("/tmp/c.py", "import json\n" + sr.WHOSE_FAULT_HELPER + "\nif status == 400:\n    v = whose_fault(json.loads(raw))\n")
+    assert sr.classifies_by_key_presence([], current) == []
+
+
+def test_the_template_stop_is_judged_by_name_and_field():
+    from app.modules import supervised_runs as sr
+    why = sr.stopped_on_a_template(_fx("add115_output_stopped_on_a_template.txt"))
+    assert why and "Torrent RSS Feed" in why and "BaseUrl" in why and "not a bad request" in why
+    assert sr.stopped_on_a_template(_fx("add115_output_stopped_on_cloudflare.txt")) is None, "a corpse is the other judgment's"
+    assert sr.stopped_on_a_dead_party(_fx("add115_output_stopped_on_a_template.txt")) is None, "and a template is not a corpse"
+
+
+def test_the_template_judgment_reaches_the_reason():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def resolve_run(")
+    assert "or stopped_on_a_template(" in src[i:]
+
+
+def test_unreachable_lines_are_not_repeated_failures():
+    """38 `unreachable: <name>` lines across a run must never read as one error repeated."""
+    from app.modules import supervised_runs as sr
+    out = "\n".join(f"unreachable: tracker{i} (HTTP 400: blocked by CloudFlare)" for i in range(38))
+    assert sr.repeated_identical_failures(out) is None
