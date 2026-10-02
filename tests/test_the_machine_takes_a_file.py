@@ -703,3 +703,62 @@ def test_the_pause_tries_a_third_time_when_the_kinds_differ():
     calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
     assert any(any(k.arg == "previous" for k in c.keywords) for c in calls), "the second note must carry the first attempt"
     assert "supervised_run_redraft_again_rejected" in body, "a third refusal parks on the best frame and says so"
+
+
+# ───── §17.1277b — bounded through assignment; the batching shape stated up front
+
+def test_the_correct_argv_redraft_passes_both_gates():
+    """The live redraft the budget gate refused: `batch = public[start:end]`
+    then `for entry in batch:` -- a slice the author chose, by another name."""
+    import ast
+    from app.modules import supervised_runs as sr
+    src = _fx("add115_file_argv_batched.py")
+    files = _file("/tmp/add_indexers.py", src)
+    cmds = [f"python3 /tmp/add_indexers.py {a} {min(a + 10, 89)}" for a in range(0, 89, 10)]
+    assert "batch" in sr._bounded_names(ast.parse(src))
+    assert sr.loops_the_network_without_a_budget(cmds, files) == []
+    assert sr.loop_dies_on_one_dead_party(cmds, files) == []
+
+
+def test_a_name_assigned_a_slice_is_bounded_and_a_comprehension_is_not():
+    import ast
+    from app.modules import supervised_runs as sr
+    tree = ast.parse("public = [d for d in schema if d]\nbatch = public[a:b]\nagain = batch\n")
+    names = sr._bounded_names(tree)
+    assert "batch" in names and "again" in names and "public" not in names
+
+
+def test_the_budget_arithmetic_sees_through_the_name():
+    from app.modules import supervised_runs as sr
+    src = "import urllib.request\npublic = fetch()\nbatch = public[:10]\nfor e in batch:\n    urllib.request.urlopen(e, timeout=60)\n"
+    found = sr.loops_the_network_without_a_budget([], _file("/tmp/t.py", src))
+    assert found and "600" in found[0]["why"]
+
+
+def test_a_name_reassigned_to_a_response_is_still_unbounded():
+    import ast
+    from app.modules import supervised_runs as sr
+    assert "items" not in sr._bounded_names(ast.parse("items = [1, 2]\nitems = fetch()\n"))
+
+
+def test_file_rules_state_the_batching_shape_and_the_enforced_budget():
+    from app.modules import supervised_runs as sr
+    from app.modules.assist_supervised import RUN_COMMAND_TIMEOUT_S
+    r = sr.FILE_RULES
+    assert "sys.argv" in r and "items[start:end]" in r and "python3 /tmp/add_indexers.py 10 20" in r
+    assert f"{int(RUN_COMMAND_TIMEOUT_S)}-second budget" in r, "the number in the prompt must be the one enforced"
+    assert "INSIDE one script is still one" in r
+
+
+def test_a_range_over_the_lists_length_is_not_bounded():
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request\npublic = fetch()\nfor i in range(0, len(public), 10):\n    batch = public[i:i + 10]\n"
+           "    for e in batch:\n        urllib.request.urlopen(e, timeout=15)\n")
+    found = sr.loops_the_network_without_a_budget([], _file("/tmp/r.py", src))
+    assert found and "range(0, len(public), 10)" in found[0]["why"], "name the OUTERMOST unbounded loop"
+
+
+def test_a_range_of_a_constant_is_bounded():
+    from app.modules import supervised_runs as sr
+    src = "import urllib.request\nfor i in range(3):\n    urllib.request.urlopen('http://x', timeout=15)\n"
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/c.py", src)) == []

@@ -543,6 +543,25 @@ exists: a script built with `printf '%s\n' '…'` has to escape its own quotes, 
 single-quoted shell word is a literal backslash the interpreter then refuses. Use the section, and the
 problem cannot happen. Files are written before the commands run, in the order you list them, and the
 engine compiles a `.py` file before offering it -- so a syntax error is caught before the operator is asked.
+
+BATCHING ON THIS CHANNEL (one command is one 180-second budget): a script that works through a list a
+service returned MUST take its slice bounds as arguments and be run once per batch -- write it ONCE, then
+list one command per batch:
+
+```python
+import sys
+start, end = int(sys.argv[1]), int(sys.argv[2])
+for item in items[start:end]:
+    ...   # one item, with (urllib.error.URLError, TimeoutError, OSError) caught and recorded as unreachable
+```
+
+```bash
+python3 /tmp/add_indexers.py 0 10
+python3 /tmp/add_indexers.py 10 20
+```
+
+Ten per batch when each item waits on a remote service. A loop over batches INSIDE one script is still one
+command and is refused.
 """
 
 
@@ -985,11 +1004,65 @@ def _bounded(it, literal_names: set[str] | None = None) -> bool:
         return it.id in names
     if isinstance(it, ast.Call):
         name = getattr(it.func, "attr", None) or getattr(it.func, "id", None)
-        if name in ("islice", "range"):
+        if name == "islice":
             return True
+        if name == "range":
+            # §17.1277b — `range(0, len(public), 10)` is however long `public` is;
+            # `range(10)` is ten. The live in-script batching hid behind the former.
+            return bool(it.args) and all(_counts_as_bounded(a, names) for a in it.args)
         if name in ("enumerate", "list", "sorted", "reversed", "tuple"):
             return bool(it.args) and _bounded(it.args[0], names)
     return False
+
+
+def _counts_as_bounded(expr, names: set[str]) -> bool:
+    """A range argument the author fixed: a literal, a bounded name, or the
+    length of something bounded."""
+    import ast
+    if isinstance(expr, ast.Constant):
+        return isinstance(expr.value, (int, float))
+    if isinstance(expr, ast.Name):
+        return expr.id in names
+    if isinstance(expr, ast.Call) and _callee(expr) == "len" and expr.args:
+        return _bounded(expr.args[0], names)
+    if isinstance(expr, ast.BinOp):
+        return _counts_as_bounded(expr.left, names) and _counts_as_bounded(expr.right, names)
+    return False
+
+
+def _bounded_names(tree) -> set[str]:
+    """§17.1277b — names whose EVERY assignment is itself bounded, to a fixed
+    point. `batch = public[start:end]` then `for entry in batch:` is a slice the
+    author chose, exactly as `for entry in public[start:end]:` is; the live
+    redraft wrote the first form and the budget gate, which knew only literal
+    collections by name, refused the correct answer. `public = [d for d in
+    schema …]` stays unbounded: a comprehension over a response is the response."""
+    import ast
+    assigns: dict[str, list] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for t in targets:
+            if isinstance(t, ast.Name):
+                assigns.setdefault(t.id, []).append(node.value)
+    bounded: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, vals in assigns.items():
+            if name not in bounded and vals and all(v is not None and _bounded(v, bounded) for v in vals):
+                bounded.add(name)
+                changed = True
+    return bounded
+
+
+def _single_assignment(tree, name: str):
+    """The value a name is assigned exactly once, else None."""
+    import ast
+    vals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)]
+    return vals[0] if len(vals) == 1 else None
 
 
 def _literal_iter(it, literal_names: set[str]) -> bool:
@@ -1202,22 +1275,38 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
             tree = ast.parse(source)
         except (SyntaxError, ValueError, RecursionError):
             continue                      # §17.1257 reports that, not this
-        names = _literal_names(tree)
+        names = _bounded_names(tree)            # §17.1277b — bounded through assignment, not merely literal
         ctx = _net_context(tree)
         wrappers = _network_wrappers(tree)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(tree):
             if not isinstance(node, (ast.For, ast.AsyncFor)):
                 continue
             calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _is_network_call(c, ctx, wrappers)]
             if not calls:
                 continue
+            # §17.1277b — the budget is spent by the OUTERMOST loop: `for i in
+            # range(0, len(public), 10): for e in public[i:i+10]: …` runs the
+            # whole list in one command however bounded the inner slice looks.
+            chain, up = [node], parents.get(node)
+            while up is not None:
+                if isinstance(up, (ast.For, ast.AsyncFor)):
+                    chain.append(up)
+                up = parents.get(up)
+            unbounded = [f for f in chain if not _bounded(f.iter, names)]
+            if unbounded:
+                node = unbounded[-1]                  # name the outermost one
             where = ast.unparse(node.iter)[:60]
             # the thing to slice is the collection, not `enumerate(collection)`
             coll = (ast.unparse(node.iter.args[0])[:60]
                     if isinstance(node.iter, ast.Call) and _callee(node.iter) in ("enumerate", "list", "sorted", "reversed", "tuple")
                     and node.iter.args else where)
-            if _bounded(node.iter, names):
-                n, tos = _slice_bound(node.iter), _request_timeouts(tree)
+            if not unbounded:
+                # the arithmetic sees through `batch = public[:10]`
+                it = node.iter
+                if isinstance(it, ast.Name) and _single_assignment(tree, it.id) is not None:
+                    it = _single_assignment(tree, it.id)
+                n, tos = _slice_bound(it), _request_timeouts(tree)
                 if n and tos and n * max(tos) > _RUN_BUDGET_S:
                     out.append({"command": label, "why": (
                         f"{what} loops over `{where}` -- {n} items -- and each request may wait "
