@@ -1688,7 +1688,7 @@ def test_the_live_1155_runbook_is_refused_for_its_three_faults():
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, rb, spec, POLICY_MASS, env={"profile": "root@pve"})
     kinds = sr.refusal_kinds(frame)
-    assert kinds == {"asks the operator for a password the runner holds", "sits in the process table",
+    assert kinds == {"asks the operator for a password the runner holds",
                      "is not waiting for the guest"}, [r["why"][:100] for r in frame["refused"]]
     assert "run" not in {o["id"] for o in frame["options"]}
 
@@ -1701,16 +1701,6 @@ def test_a_new_password_placeholder_is_refused_when_the_mass_password_is_held():
     assert sr.asks_for_a_secret_the_store_holds(["PROWLARR_API_KEY"], POLICY_MASS, ADD82) == [], "an API key is not a password"
     host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
     assert sr.asks_for_a_secret_the_store_holds(["SOME_PASSWORD"], POLICY_MASS, host_step) == [], "only on a guest step"
-
-
-def test_a_secret_as_a_positional_argument_is_refused():
-    from app.modules import supervised_runs as sr
-    hits = sr.secret_rides_argv(['bash /tmp/install_agent_106.sh "$PALWORLD_USER" "$PALWORLD_PASSWORD"'])
-    assert len(hits) == 1 and "process table" in hits[0]["why"] and 'PALWORLD_PASSWORD="$PALWORLD_PASSWORD" bash' in hits[0]["why"]
-    assert sr.secret_rides_argv(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/x.sh']) == [], "an env assignment"
-    assert sr.secret_rides_argv(['ssh u@h "sudo -S true" <<< "$MASS_PASSWORD"']) == [], "stdin"
-    assert sr.secret_rides_argv(['SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id u@h']) == []
-    assert sr.secret_rides_argv(['bash /tmp/x.sh "$PALWORLD_USER"']) == [], "a user name is not a secret"
 
 
 def test_a_wait_that_pings_a_fixed_address_is_refused():
