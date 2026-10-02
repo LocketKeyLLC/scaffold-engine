@@ -119,7 +119,9 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is ALREADY",                                   # §17.1240
                    "is already taken on this host",                # §17.1243
                    "there is no guest",                            # §17.1213
-                   "and nothing runs it")                          # §17.1288k
+                   "and nothing runs it",                          # §17.1288k
+                   "reads the address itself and asks the operator for it",   # §17.1288l
+                   "is this host's own address")                   # §17.1288l
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -3086,6 +3088,71 @@ def _guest_word(subject: str, gid: str, env: Optional[dict] = None) -> str:
     return f"VM{gid}"
 
 
+_ADDRESS_READ_RE = re.compile(r"\bip\s+(?:-4\s+)?(?:neigh|neighbour|neighbor|n)\b|\barp\s+-[an]\b|network-get-interfaces|\bqm\s+agent\s+\d+\s+ping\b")
+_IP_PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9_]*_(?:IP|ADDR|ADDRESS))>")
+
+
+def reads_the_address_and_asks_for_it(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288l — a block that READS a guest's address (`ip neigh show | grep
+    <mac>`) and then writes `<PALWORLD_IP>` for the operator to type is asking
+    for a value it has already found -- and nobody has it to type (the VM
+    was stopped a minute ago). Live, trace 1151: four top-level commands, the
+    neigh read in the second, the placeholder in the third and fourth. Values
+    pass between commands only inside ONE bash script (`IP=$(…)`), which is
+    the rule the draft skipped."""
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    joined = "\n".join(texts)
+    if not _ADDRESS_READ_RE.search(joined):
+        return []
+    out: list[dict] = []
+    for c in commands or []:
+        m = _IP_PLACEHOLDER_RE.search(str(c))
+        if m:
+            out.append({"command": str(c)[:200], "why": (
+                f"this block reads the address itself and asks the operator for it: `<{m.group(1)}>` here, while "
+                f"another command reads `ip neigh` for the guest's MAC. The operator cannot type what the block "
+                f"finds at run time. Carry it: ONE bash script under ## Write these files -- "
+                f"`IP=$(ip neigh show | grep -i \"$MAC\" | awk '{{print $1}}' | head -n1)` -- and use `$IP` in the "
+                f"ssh-copy-id and the ssh; run it as `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`.")})
+            break
+    return out
+
+
+_TARGETED_RE = re.compile(r"\b(?:ping|ssh|ssh-copy-id|scp|sftp|nc|curl|wget)\b[^\n|;&]*?(?:[\w.-]+@)?((?:\d{1,3}\.){3}\d{1,3})\b")
+
+
+def targets_the_host_as_the_guest(commands: list[str], node: Optional[dict], env: Optional[dict],
+                                  files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288l — on a step about a guest, a ping/ssh/ssh-copy-id aimed at the
+    HOST's own address (the system map's `host` entry) is aimed at the wrong
+    machine. Live, trace 1151 waited for VM 106 by pinging 192.168.1.156 --
+    the Proxmox host, the only address the step's text names (its web
+    console) -- which answers at once whether or not the VM is up."""
+    subject = step_text(node) if node else ""
+    if not _GUEST_SUBJECT_RE.search(subject):
+        return []
+    state = (env or {}).get("system_state") or {}
+    host_addrs = {str((e.get("attrs") or {}).get("ip") or "").split("/")[0]
+                  for e in (state.values() if isinstance(state, dict) else [])
+                  if isinstance(e, dict) and str(e.get("kind") or "") in ("host", "node")}
+    host_addrs.discard("")
+    if not host_addrs:
+        return []
+    gid = _GUEST_SUBJECT_RE.search(subject).group(1)
+    texts = [("command", str(c)) for c in commands or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    for where, body in texts:
+        for m in _TARGETED_RE.finditer(body):
+            if m.group(1) in host_addrs:
+                line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+                return [{"command": line[:200] if where == "command" else f"{where}: {line[:160]}", "why": (
+                    f"`{m.group(1)}` is this host's own address (the system map's host entry), not guest {gid}'s -- "
+                    f"a ping or ssh at it reaches the Proxmox host, which answers whether or not the VM is up. "
+                    f"The guest's address is read from its MAC (`qm config {gid}` → net0 → sweep → `ip neigh show`) "
+                    f"inside the script; the only address the step's text names is the host's web console.")}]
+    return []
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
                files: Optional[list[dict]] = None) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply.
@@ -3456,6 +3523,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
+    # §17.1288l — an address the block reads is not an input; the host's own
+    # address is not the guest's.
+    refused = refused + reads_the_address_and_asks_for_it(cmds, files)
+    refused = refused + targets_the_host_as_the_guest(cmds, node, env, files)
     # §17.1288k — a file written and never run is a draft with nothing to run,
     # said as a refusal so the redraft is told and the chain goes on.
     if files and not cmds:

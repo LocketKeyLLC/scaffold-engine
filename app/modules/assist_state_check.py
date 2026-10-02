@@ -333,6 +333,11 @@ _READ_ONLY_HEADS = frozenset({
     "who", "ps", "pgrep", "pidof", "top", "htop",
     # network reads
     "ss", "netstat", "ping", "ping6", "traceroute", "tracepath", "mtr", "arp",
+    # §17.1288l — a SWEEP is a read: the engine's own §17.1286 rule asks for
+    # `nmap -sn <subnet>` before `ip neigh`, and the guest gate refused the
+    # draft that obeyed it. nmap's output flags (`-o*`) and scripts are
+    # denied below.
+    "arp-scan", "fping", "nmap",
     "dig", "nslookup", "host", "whois", "getconf", "ethtool", "iw", "iwconfig",
     # package and module queries (binaries that cannot install)
     "dpkg-query", "apt-cache", "rpm", "modinfo", "ldconfig", "ldd",
@@ -643,6 +648,9 @@ def read_only_command(cmd: str) -> bool:
             return False
         if not head_reads(argv):   # §17.1173 — and the head must be a KNOWN reader
             return False
+        if argv[0] == "nmap" and any(a.startswith("-o") or a.startswith("--script") or a == "-sC" or a == "-A"
+                                      for a in argv[1:]):
+            return False               # §17.1288l — writes a report, or runs NSE scripts
         if argv[0] in ("curl", "wget") and any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T", "-o", "-O") for a in argv[1:]):
             # curl/wget that WRITE (a method override, a body, or a download to disk)
             # — `-o /dev/null` is the one read-only shape

@@ -1624,3 +1624,52 @@ def test_the_chain_goes_on_from_a_draft_that_has_files_but_no_command():
     body = src[i:src.index("\nasync def ", i + 10)]
     assert '(second["commands"] or second.get("files")) and k2' in body
     assert '(third["commands"] or third.get("files")) and k3' in body
+
+
+# ───── §17.1288l — a sweep is a read; an address the block reads is not an input; the host is not the guest
+
+def test_a_sweep_is_a_read():
+    from app.modules.assist_state_check import read_only_command
+    from app.modules import supervised_runs as sr
+    assert read_only_command("nmap -sn 192.168.1.0/24 >/dev/null 2>&1")
+    assert read_only_command("arp-scan --localnet") and read_only_command("fping -g 192.168.1.0/24")
+    assert not read_only_command("nmap -sn 192.168.1.0/24 -oN /tmp/hosts.txt"), "a report is a write"
+    assert not read_only_command("nmap --script vuln 192.168.1.5"), "NSE scripts are not a read"
+    live = ("for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 192.168.1.156 >/dev/null 2>&1 && break; sleep 5; done; "
+            "nmap -sn 192.168.1.0/24 >/dev/null 2>&1 || true; ip neigh show | grep -i bc:24:11:e8:9f:7a")
+    assert sr.writing_segments(live) == []
+
+
+def test_the_live_1151_runbook_is_refused_for_what_is_wrong_and_not_for_the_sweep():
+    from app.modules import supervised_runs as sr
+    rb = _fx("add82_runbook_2057_third.md")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    env = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
+                                                    "106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
+    frame = sr.frame_run(ADD82, rb, spec, policy, env=env)
+    kinds = sr.refusal_kinds(frame)
+    assert kinds == {"inside an ssh command line", "reads the address itself and asks the operator for it",
+                     "is this host's own address"}, [r["why"][:90] for r in frame["refused"]]
+    assert "runs in the runner's own shell on the Proxmox HOST" not in kinds, "the sweep + neigh read is not a host write"
+
+
+def test_an_address_the_block_reads_is_not_asked_for():
+    from app.modules import supervised_runs as sr
+    cmds = ["ip neigh show | grep -i bc:24:11:e8:9f:7a", 'SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id <PALWORLD_USER>@<PALWORLD_IP>']
+    hits = sr.reads_the_address_and_asks_for_it(cmds)
+    assert len(hits) == 1 and "<PALWORLD_IP>" in hits[0]["why"] and "IP=$(ip neigh show" in hits[0]["why"]
+    assert sr.reads_the_address_and_asks_for_it(["ssh u@<PALWORLD_IP> true"]) == [], "no read, no contradiction"
+    script = [{"path": "/tmp/x.sh", "content": 'IP=$(ip neigh show | grep -i "$MAC" | awk \'{print $1}\')\nssh u@$IP true\n'}]
+    assert sr.reads_the_address_and_asks_for_it(['bash /tmp/x.sh'], script) == [], "carried inside the script"
+
+
+def test_the_hosts_own_address_is_not_the_guests():
+    from app.modules import supervised_runs as sr
+    env = {"system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}}}}
+    hits = sr.targets_the_host_as_the_guest(["for i in 1 2 3; do ping -c 1 -W 2 192.168.1.156 && break; sleep 5; done"], ADD82, env)
+    assert len(hits) == 1 and "192.168.1.156` is this host's own address" in hits[0]["why"]
+    assert sr.targets_the_host_as_the_guest(["ping -c 1 192.168.1.129"], ADD82, env) == []
+    host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
+    assert sr.targets_the_host_as_the_guest(["ssh root@192.168.1.156 nvidia-smi"], host_step, env) == [], "a host step may address the host"
+    assert sr.targets_the_host_as_the_guest(["ping 192.168.1.156"], ADD82, {}) == [], "no map, no verdict"
