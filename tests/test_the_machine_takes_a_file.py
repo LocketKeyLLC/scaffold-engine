@@ -762,3 +762,77 @@ def test_a_range_of_a_constant_is_bounded():
     from app.modules import supervised_runs as sr
     src = "import urllib.request\nfor i in range(3):\n    urllib.request.urlopen('http://x', timeout=15)\n"
     assert sr.loops_the_network_without_a_budget([], _file("/tmp/c.py", src)) == []
+
+
+# ───── §17.1278 — whether a field is NAMED, not whether the key is present
+#
+# The clean argv-batched block ran: batch 1 stopped on its FIRST indexer with
+# `"propertyName": ""` + "Unable to connect to indexer … 502" -- an availability
+# error by the engine's own §17.1266 rule -- because the script tested
+# `"propertyName" in str(resp)`. The key is always there.
+
+def test_the_live_script_that_tested_the_key_is_refused():
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/add_indexers.py", _fx("add115_file_key_presence.py"))
+    found = sr.classifies_by_key_presence(["python3 /tmp/add_indexers.py 0 10"], files)
+    assert found and found[0]["command"] == "the file /tmp/add_indexers.py"
+    why = found[0]["why"]
+    assert "'propertyName' in str(resp)" in why, "quote the test it made (ast-rendered)"
+    assert "NAMED" in why and "e.get('propertyName') or ''" in why
+    assert any(s in why for s in sr._SHAPE_REFUSALS), "must be redraftable"
+
+
+def test_testing_whether_a_field_is_named_passes():
+    from app.modules import supervised_runs as sr
+    src = ("errors = resp if isinstance(resp, list) else []\n"
+           "named = any((e.get('propertyName') or '').strip() for e in errors)\n"
+           "if named:\n    sys.exit(1)\n")
+    assert sr.classifies_by_key_presence([], _file("/tmp/ok.py", src)) == []
+
+
+@pytest.mark.parametrize("line", [
+    'if "propertyName" in resp:',
+    'if "propertyName" in body_text:',
+    'if "propertyName" not in str(resp):',
+    "if 'propertyName' in json.dumps(resp):",
+])
+def test_every_membership_test_of_the_key_is_caught(line):
+    from app.modules import supervised_runs as sr
+    assert sr.classifies_by_key_presence([], _file("/tmp/k.py", f"{line}\n    pass\n"))
+
+
+def test_the_key_presence_gate_sees_the_files_in_frame_run():
+    import ast
+    from app.modules import supervised_runs as sr
+    tree = ast.parse(pathlib.Path(sr.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "frame_run")
+    calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "classifies_by_key_presence"]
+    assert calls and len(calls[0].args) == 2 and ast.unparse(calls[0].args[1]) == "files"
+
+
+def test_the_live_output_is_judged_as_stopped_on_a_dead_party():
+    from app.modules import supervised_runs as sr
+    why = sr.stopped_on_a_dead_party(_fx("add115_output_stopped_on_a_corpse.txt"))
+    assert why and "Anidex" in why and "no field named" in why and "502" in why
+    assert "nothing in the body was wrong" in why
+
+
+def test_a_named_field_is_a_real_validation_failure():
+    from app.modules import supervised_runs as sr
+    body = 'VALIDATION FAILURE on X: [{"propertyName": "Name", "errorMessage": "Should be unique"}]'
+    assert sr.stopped_on_a_dead_party(body) is None
+    assert sr.stopped_on_a_dead_party('[{"propertyName": "", "errorMessage": "must be between 1 and 50"}]') is None, \
+        "an empty field with a non-availability message is not a corpse"
+    assert sr.stopped_on_a_dead_party("") is None
+
+
+def test_the_dead_party_judgment_is_wired_into_the_failure_reason():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def resolve_run(")
+    body = src[i:]
+    assert "dead_reason = (stopped_on_a_dead_party(" in body
+    j = body.index("reason = mask_secrets(")
+    assert "dead_reason if dead_reason else" in body[j:j + 3000], "the judgment must reach the reason the next draft reads"
+    assert body.index("dead_reason if dead_reason else") < body.index("repeated_reason if repeated_reason else"), \
+        "a corpse is judged before a repeat"
