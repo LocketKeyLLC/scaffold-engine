@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "18"
+HELPER_VERSION = "19"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -672,6 +672,36 @@ def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
 
 _SUDO_RE = re.compile(r"^\s*sudo\s+(?:-[A-Za-z]+\s+)*")
 
+
+def has_shell_operator(command: str) -> bool:
+    """`|`, `||`, `&&` or `;` outside quotes — a line the shell splits."""
+    q = None
+    for ch in command or "":
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch in "|&;":
+            return True
+    return False
+
+
+def elevate(command: str, keep: str = "") -> str:
+    """§17.1283 (helper 19) — the elevated form of an approved command.
+
+    `sudo -n` prefixed to a compound line elevates ONLY its first simple
+    command: live, `qm status 110 | grep -q running || qm start 110` -- the
+    idempotent guard the engine itself recommends -- ran its check as root and
+    its `qm start` unprivileged, and died on pmxcfs. A line the shell would
+    split is handed to one root shell whole; `--preserve-env` still carries the
+    secret names, which the inner shell expands, so no value enters argv.
+    """
+    body = _SUDO_RE.sub("", command or "", count=1).strip()
+    if has_shell_operator(body):
+        return f"sudo -n {keep}bash -c {shlex.quote(body)}"
+    return f"sudo -n {keep}{body}"
+
 # ---------------------------------------------------------------------------
 # §17.1185 — supervised writes. THE SAME helpers live in
 # app/modules/assist_supervised.py (the engine gates before it asks for an
@@ -1173,7 +1203,7 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
             # `sudo -n` drops the environment; the names this command needs are
             # passed through explicitly so the value still never enters argv.
             keep = ("--preserve-env=" + ",".join(refs) + " ") if refs else ""
-            run_cmd = f"sudo -n {keep}{_SUDO_RE.sub('', command, count=1).strip()}"
+            run_cmd = elevate(command, keep)       # §17.1283 — the WHOLE line, not its first word
         aid = str(approval.get("id", "?"))
         log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)   # `$NAME`, never its value
         proc = await asyncio.create_subprocess_shell(

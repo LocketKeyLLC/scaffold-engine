@@ -1156,3 +1156,31 @@ def test_resolve_run_checks_values_against_the_block_they_go_into():
     body = src[i:i + 6000]
     assert "check_inputs([i[\"name\"] for i in asked], inputs," in body
     assert "texts=commands + verify_cmds +" in body, "files count too"
+
+
+# ───── §17.1283 — a runner that elevates only the head of a line
+
+GUARD = "qm status 110 | grep -q running || qm start 110"
+
+
+def test_a_compound_write_on_a_v18_runner_is_refused_with_the_one_line_remedy():
+    from app.modules import supervised_runs as sr
+    found = sr.compound_write_on_a_head_only_runner([GUARD], {"sudo": True, "helper": "18", "allow": ["ANY"]})
+    assert found and "qm start 110" in found[0]["why"] and "ONE command per line" in found[0]["why"]
+    assert "helper 19" in found[0]["why"]
+    assert any(s in found[0]["why"] for s in sr._SHAPE_REFUSALS), "redraftable: the fix needs no operator"
+
+
+def test_helper_19_or_no_sudo_or_a_read_compound_passes():
+    from app.modules import supervised_runs as sr
+    assert sr.compound_write_on_a_head_only_runner([GUARD], {"sudo": True, "helper": "19"}) == []
+    assert sr.compound_write_on_a_head_only_runner([GUARD], {"sudo": False, "helper": "18"}) == [], "no sudo: nothing to elevate"
+    assert sr.compound_write_on_a_head_only_runner(["qm status 110 | grep -q running"], {"sudo": True, "helper": "18"}) == [], "reads after the head are fine"
+    assert sr.compound_write_on_a_head_only_runner(["qm start 110"], {"sudo": True, "helper": "18"}) == [], "a single command is elevated whole already"
+
+
+def test_the_head_only_gate_is_wired_into_frame_run():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
+    assert "compound_write_on_a_head_only_runner(cmds, policy)" in body

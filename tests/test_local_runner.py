@@ -800,3 +800,42 @@ def test_the_helper_version_was_bumped_for_the_startup_change():
     operator must be walked through, so it has to move the number."""
     runner = _load_runner_script()
     assert int(runner.HELPER_VERSION) >= 10
+
+
+# ───── §17.1283 (helper 19) — the WHOLE line is elevated, not its first word
+
+def test_a_compound_line_is_elevated_as_a_whole():
+    r = _load_runner_script()
+    guard = "qm status 110 | grep -q running || qm start 110"
+    out = r.elevate(guard)
+    assert out.startswith("sudo -n bash -c ") and "qm start 110" in out, out
+    import shlex
+    assert shlex.split(out)[-1] == guard, "the line reaches one root shell verbatim"
+
+
+def test_a_simple_command_is_elevated_as_before():
+    r = _load_runner_script()
+    assert r.elevate("qm start 110") == "sudo -n qm start 110"
+    assert r.elevate("sudo -E qm start 110") == "sudo -n qm start 110", "a leading sudo is still peeled"
+
+
+def test_the_secret_names_still_travel_into_the_inner_shell():
+    r = _load_runner_script()
+    out = r.elevate('curl -H "X-Api-Key: $PROWLARR_API_KEY" http://x | head -1', "--preserve-env=PROWLARR_API_KEY ")
+    assert out.startswith("sudo -n --preserve-env=PROWLARR_API_KEY bash -c ") and "$PROWLARR_API_KEY" in out
+
+
+def test_operators_inside_quotes_do_not_count():
+    r = _load_runner_script()
+    assert r.has_shell_operator("echo 'a | b && c'") is False
+    assert r.has_shell_operator('echo "a; b"') is False
+    assert r.has_shell_operator("a | b") and r.has_shell_operator("a && b") and r.has_shell_operator("a; b")
+
+
+def test_run_supervised_uses_elevate():
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    i = src.index("async def run_supervised(")
+    body = src[i:src.index("\n    @mcp.tool", i + 10)] if "\n    @mcp.tool" in src[i + 10:] else src[i:]
+    assert "run_cmd = elevate(command, keep)" in body
+    assert "f\"sudo -n {keep}{_SUDO_RE" not in body, "the head-only form is gone"
+    assert _load_runner_script().HELPER_VERSION == "19"
