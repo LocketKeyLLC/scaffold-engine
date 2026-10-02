@@ -1089,3 +1089,70 @@ def test_resolve_run_verifies_through_run_verify_and_scrubs_before_the_record():
     assert body.count("await run_verify(spec, verify_cmds, secret_env)") >= 2, "both the first read and the §17.1239 re-read"
     assert body.index('e["output"] = scrub_run_output(e.get("output"), secret_env)') < body.index("_executed_report(runbook, spec.name, executed, verify_out)")
     assert "verify_out = scrub_run_output(verify_out, secret_env)" in body
+
+
+# ───── §17.1282 — a value is safe WHERE IT IS SPLICED
+#
+# ADD26: the engine read the host's own public key off the machine, offered it,
+# prefilled it into `echo "<OPERATOR_SSH_PUBKEY>" >> ~/.ssh/authorized_keys` -- and
+# refused it at approval: "no spaces". The bare-token rule was applied to a value
+# that sits inside double quotes.
+
+PUBKEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCrD5xn6976YO6y3l8gucPeYqql2ErgozFVzkfq/xkvdaAgaR9TBi61MgpczUIuBD2jVwrbadqUKISa4r1Nz" * 3 + " root@pve"
+ADD26_CMDS = ["qm status 110 | grep -q running || qm start 110",
+              "ssh-copy-id -i /root/.ssh/id_rsa.pub <AI_VM_USER>@192.168.1.129",
+              "ssh <AI_VM_USER>@192.168.1.129 'mkdir -p ~/.ssh && echo \"<OPERATOR_SSH_PUBKEY>\" >> ~/.ssh/authorized_keys'"]
+
+
+def test_the_hosts_own_key_is_accepted_where_it_is_spliced():
+    from app.modules import supervised_runs as sr
+    clean, problems = sr.check_inputs(["AI_VM_USER", "OPERATOR_SSH_PUBKEY"],
+                                      {"AI_VM_USER": "aedefruscio", "OPERATOR_SSH_PUBKEY": PUBKEY}, texts=ADD26_CMDS)
+    assert problems == [], problems
+    assert clean["OPERATOR_SSH_PUBKEY"] == PUBKEY and len(PUBKEY) > 200 and " " in PUBKEY
+
+
+def test_the_contexts_are_read_off_the_block():
+    from app.modules import supervised_runs as sr
+    assert sr.placeholder_contexts("AI_VM_USER", ADD26_CMDS) == {"bare"}, "the user is a bare word in both ssh commands"
+    assert sr.placeholder_contexts("OPERATOR_SSH_PUBKEY", ADD26_CMDS) == {"sq"}, \
+        "the OUTERMOST quoting decides: the key sits inside the ssh payload's single quotes, where its inner double quotes are literal"
+    assert sr.placeholder_contexts("K", ['echo "<K>" >> f']) == {"dq"}
+    assert sr.placeholder_contexts("NOPE", ADD26_CMDS) == set()
+
+
+def test_a_bare_placeholder_keeps_the_one_token_rule():
+    from app.modules import supervised_runs as sr
+    _, problems = sr.check_inputs(["AI_VM_USER"], {"AI_VM_USER": "aede fruscio"}, texts=ADD26_CMDS)
+    assert problems and "no spaces" in problems[0]["why"]
+    _, problems = sr.check_inputs(["X"], {"X": "a b"})
+    assert problems, "without texts the historical rule stands everywhere"
+
+
+def test_quoted_values_still_refuse_what_would_escape_the_quotes():
+    from app.modules import supervised_runs as sr
+    dq = ['echo "<K>" > f']
+    for bad in ['has"quote', "has$dollar", "has`tick", "has\\\\slash", "has\\nnewline"]:
+        _, problems = sr.check_inputs(["K"], {"K": bad}, texts=dq)
+        assert problems and "double quotes" in problems[0]["why"], bad
+    assert sr.check_inputs(["K"], {"K": "it's fine"}, texts=dq)[1] == [], "a single quote inside double quotes is harmless"
+    sq = ["echo '<K>' > f"]
+    assert sr.check_inputs(["K"], {"K": "it's not"}, texts=sq)[1], "a single quote inside single quotes ends them"
+    assert sr.check_inputs(["K"], {"K": 'say "hi" $x'}, texts=sq)[1] == [], "double quotes and $ are literal inside single quotes"
+    _, problems = sr.check_inputs(["K"], {"K": "x" * 5000}, texts=dq)
+    assert problems and "4096" in problems[0]["why"]
+
+
+def test_a_placeholder_used_both_bare_and_quoted_meets_the_strictest_rule():
+    from app.modules import supervised_runs as sr
+    texts = ['echo "<K>"', "cat <K>"]
+    assert sr.check_inputs(["K"], {"K": "a b"}, texts=texts)[1], "bare anywhere means one token"
+
+
+def test_resolve_run_checks_values_against_the_block_they_go_into():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def resolve_run(")
+    body = src[i:i + 6000]
+    assert "check_inputs([i[\"name\"] for i in asked], inputs," in body
+    assert "texts=commands + verify_cmds +" in body, "files count too"
