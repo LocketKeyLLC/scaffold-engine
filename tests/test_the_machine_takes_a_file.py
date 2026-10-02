@@ -641,3 +641,65 @@ def test_the_frame_says_which_channel_it_was_drawn_for():
     on = sr.frame_run({"node_key": "X", "title": "t"}, runbook, spec, {"allow": ["ANY"], "can_write_files": True})
     off = sr.frame_run({"node_key": "X", "title": "t"}, runbook, spec, {"allow": ["ANY"], "can_write_files": False})
     assert on["file_channel"] is True and off["file_channel"] is False
+
+
+# ───── §17.1277 — a redraft that trades one refusal for another gets one more try, told both
+#
+# Live, after §17.1276b: draft 1 was hang-safe and unbatched (refused: budget);
+# the redraft batched by argv -- nine `python3 /tmp/add_indexers.py N M` -- and
+# dropped the hang handling (refused: hang). §17.1269 kept draft 1. Each draft
+# fixed the refusal it was shown and lost what the other had right, and the
+# loop allowed exactly one redraft.
+
+def test_the_batched_redraft_passes_the_budget_and_fails_only_the_hang_gate():
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/add_indexers.py", _fx("add115_file_batched_not_hangsafe.py"))
+    cmds = [f"python3 /tmp/add_indexers.py {a} {a + 10}" for a in range(0, 90, 10)]
+    assert sr.loops_the_network_without_a_budget(cmds, files) == [], "public[start:end] at timeout=15 is a batch"
+    found = sr.loop_dies_on_one_dead_party(cmds, files)
+    assert found and "api_request" in found[0]["why"], "it catches HTTPError and RuntimeError only"
+
+
+def test_the_two_live_drafts_were_refused_for_disjoint_kinds():
+    from app.modules import supervised_runs as sr
+    one = {"refused": sr.loops_the_network_without_a_budget(["python3 /tmp/a.py"], _file("/tmp/a.py", _fx("add115_file_hangsafe2.py")))}
+    two = {"refused": sr.loop_dies_on_one_dead_party(["python3 /tmp/a.py 0 10"], _file("/tmp/a.py", _fx("add115_file_batched_not_hangsafe.py")))}
+    k1, k2 = sr.refusal_kinds(one), sr.refusal_kinds(two)
+    assert k1 and k2 and not (k1 & k2), (k1, k2)
+
+
+def test_refusal_kinds_reads_the_registry_markers():
+    from app.modules import supervised_runs as sr
+    assert sr.refusal_kinds({"refused": [{"why": "x dies at the first one that hangs y"}]}) == {"dies at the first one that hangs"}
+    assert sr.refusal_kinds({"refused": [{"why": "a permission refusal"}]}) == set()
+    assert sr.refusal_kinds({}) == set()
+
+
+def test_the_note_told_both_keeps_what_the_earlier_draft_had_right():
+    from app.modules import supervised_runs as sr
+    first = {"refused": [{"command": "the file /tmp/x.py", "why": "the file /tmp/x.py loops over `public` -- waits on something off this machine."}], "file_channel": True}
+    second = {"refused": [{"command": "the file /tmp/x.py", "why": "the file /tmp/x.py … dies at the first one that hangs."}], "file_channel": True}
+    note = sr.shape_retry_note(second, previous=first)
+    assert "THE DRAFT BEFORE THAT was refused for something different" in note
+    assert "loops over `public`" in note and "dies at the first one that hangs" in note
+    assert "Do not trade one refusal for another" in note
+    assert "THE DRAFT BEFORE THAT" not in sr.shape_retry_note(second), "without a previous attempt the note is unchanged"
+
+
+def test_the_pause_tries_a_third_time_when_the_kinds_differ():
+    """Wiring: the second redraft exists, is gated on disjoint kinds, is told
+    both, and a rejected redraft's reasons are logged in full."""
+    import ast
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:]
+    j = body.index("\nasync def ", 10) if "\nasync def " in body[10:] else len(body)
+    body = body[:j]
+    assert "supervised_run_redraft_rejected" in body, "a rejected redraft's reasons must be logged in full"
+    assert "refusal_kinds(frame)" in body and "refusal_kinds(second)" in body
+    assert "not (k1 & k2)" in body, "the third attempt is only for DISJOINT kinds -- a loop is not progress"
+    tree = ast.parse(src)
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
+    assert any(any(k.arg == "previous" for k in c.keywords) for c in calls), "the second note must carry the first attempt"
+    assert "supervised_run_redraft_again_rejected" in body, "a third refusal parks on the best frame and says so"

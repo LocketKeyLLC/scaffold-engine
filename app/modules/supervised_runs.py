@@ -134,7 +134,16 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
     return wanted
 
 
-def shape_retry_note(frame: dict) -> str:
+def refusal_kinds(frame: dict) -> set[str]:
+    """§17.1277 — which SHAPE rules a frame was refused for (the `_SHAPE_REFUSALS`
+    markers its refusals carry). Two frames refused for DISJOINT kinds are a
+    draft that fixed one thing and broke another, not a draft going round in
+    circles -- and that one deserves one more try, told both."""
+    return {s for r in (frame or {}).get("refused") or []
+            for s in _SHAPE_REFUSALS if s in str(r.get("why") or "")}
+
+
+def shape_retry_note(frame: dict, previous: Optional[dict] = None) -> str:
     """§17.1196 — the correction to feed back when the engine's own gate refused
     the engine's own block for its SHAPE, or ``""`` when there is nothing to fix.
 
@@ -155,6 +164,18 @@ def shape_retry_note(frame: dict) -> str:
     if any(str(r.get("why") or "").startswith(_NOT_ALLOWED) for r in (frame or {}).get("refused") or []):
         return ""
     lines = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}" for r in shapes)
+    # §17.1277 — live, draft 1 was hang-safe and unbatched, draft 2 batched by
+    # argv and dropped the hang handling: each fixed the refusal it was shown
+    # and lost what the other had right. When the previous attempt was refused
+    # for something ELSE, say so, so the next draft keeps both.
+    if previous and (previous or {}).get("refused"):
+        prev = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}"
+                          for r in previous["refused"])
+        lines += ("\n\nTHE DRAFT BEFORE THAT was refused for something different:\n" + prev +
+                  "\nThis draft fixed that and was refused for the points above instead. The next draft "
+                  "must satisfy BOTH: keep every correction the earlier draft already had right (its "
+                  "exception handling, its batching, its checks) and add what is still missing. Do not "
+                  "trade one refusal for another.")
     # §17.1276b — the restated rules must fit the channel the frame was drawn
     # for. Told in the refusal to batch by argv and in THIS summary to "write a
     # file with printf | tee" and "cut into batches and send several commands",
