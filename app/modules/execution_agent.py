@@ -2548,20 +2548,35 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         # offering it. ADD21 ran `pct exec 111` against a stopped container and
         # ADD82 ran `pct exec 106` against a VM; one `pct list` + `qm list`
         # answers both, through the channel the engine was already using.
-        _pre: list[dict] = []
+        # §17.1288f — the inventory is read ONCE; every draft (the redrafts, the
+        # coverage and verify passes) is judged against it, files included --
+        # the first draft's preconditions said nothing about a script the
+        # third draft wrote.
+        _inv: dict | None = None
+        _plan_rows: list[dict] = []
         try:
-            from app.modules.runbook_preconditions import unmet
+            from app.modules.runbook_preconditions import read_inventory, unmet
             async with async_session() as db:
                 _plan = (await db.execute(
                     text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
                     {"j": job_id})).mappings().all()
-            _pre = await unmet(supervised_runs.runbook_commands(runbook), spec,
-                               plan=[dict(r) for r in _plan])
+            _plan_rows = [dict(r) for r in _plan]
+            _inv = await read_inventory(spec)
         except Exception as exc:
             logger.warning("preconditions_failed job=%s node=%s err=%r",
                            job_id, run_node.get("node_key"), exc)
+
+        async def _pre_for(rb: str) -> list[dict]:
+            try:
+                _f = supervised_runs.file_writes(rb) if (policy or {}).get("can_write_files") else []
+                return await unmet(supervised_runs.runbook_commands(rb), spec, plan=_plan_rows,
+                                   files=_f, node=run_node, inventory=_inv)
+            except Exception as exc:
+                logger.warning("preconditions_failed job=%s node=%s err=%r",
+                               job_id, run_node.get("node_key"), exc)
+                return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
-                                          preconditions=_pre)
+                                          preconditions=await _pre_for(runbook))
         # §17.1196 — the engine wrote a block its OWN gate refuses, and handed
         # the operator the dead end: "the runner is active but the run button is
         # greyed out?? how do we continue?" A SHAPE refusal is the engine's
@@ -2576,7 +2591,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env)
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
-                                                   preconditions=_pre)
+                                                   preconditions=await _pre_for(retry))
                 if second["commands"] and not second["refused"]:
                     logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
                                    job_id, run_node.get("node_key"), len(second["commands"]))
@@ -2608,7 +2623,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                                                         spec=spec, environment=_env)
                             if again:
                                 third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
-                                                                  preconditions=_pre)
+                                                                  preconditions=await _pre_for(again))
                                 if third["commands"] and not third["refused"]:
                                     logger.warning("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
                                                    job_id, run_node.get("node_key"), len(third["commands"]))
@@ -2636,7 +2651,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env)
                     if _api:
                         _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
-                                                          preconditions=_pre)
+                                                          preconditions=await _pre_for(_api))
                         # §17.1211's lesson: only ever trade UP. An empty frame
                         # must never replace an empty frame's better sibling.
                         if _apif.get("commands"):
@@ -2666,7 +2681,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                                          retry_note=_nv, spec=spec, environment=_env)
                 if _vb:
                     _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
-                                                   preconditions=_pre)
+                                                   preconditions=await _pre_for(_vb))
                     # §17.1211's rule — only ever trade UP: the redraft must keep
                     # the commands AND actually gain a runnable check.
                     # §17.1269 — never trade a runnable block for a refused one.
@@ -2690,7 +2705,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                                           retry_note=_ro, spec=spec, environment=_env)
                 if _wr:
                     _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
-                                                     preconditions=_pre)
+                                                     preconditions=await _pre_for(_wr))
                     # only trade UP: a redraft that still only reads is no better
                     if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
                             _wrf["commands"], run_node):
@@ -2716,7 +2731,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env)
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
-                                                       env=_env, preconditions=_pre)
+                                                       env=_env, preconditions=await _pre_for(_again))
                     # §17.1211's lesson in miniature: never replace a working
                     # block with an empty one.
                     # §17.1287 — and never a RUNNABLE block for a refused one: live, this
