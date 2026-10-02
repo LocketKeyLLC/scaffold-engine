@@ -860,3 +860,37 @@ def test_the_cloudflare_output_is_judged_as_a_corpse_too():
     from app.modules import supervised_runs as sr
     why = sr.stopped_on_a_dead_party(_fx("add115_output_stopped_on_cloudflare.txt"))
     assert why and "0Magnet" in why and "CloudFlare" in why and "no field named" in why
+
+
+# ───── §17.1278c — a 400 branch that never reads the field; the classifier, given
+
+def test_the_live_script_that_never_read_the_field_is_refused():
+    from app.modules import supervised_runs as sr
+    found = sr.classifies_by_key_presence(["python3 /tmp/add_indexers.py 0 10"],
+                                          _file("/tmp/add_indexers.py", _fx("add115_file_no_field_test.py")))
+    assert found and "without reading the body's `propertyName`" in found[0]["why"]
+    assert "def whose_fault(errors):" in found[0]["why"], "the remedy is the code, not a sentence"
+    assert any(s in found[0]["why"] for s in sr._SHAPE_REFUSALS)
+
+
+def test_the_given_helper_passes_every_gate_it_is_pasted_under():
+    from app.modules import supervised_runs as sr
+    src = ("import json, urllib.request, urllib.error\n" + sr.WHOSE_FAULT_HELPER +
+           "\nstatus, raw = post()\nif status == 400:\n    verdict = whose_fault(json.loads(raw))\n"
+           "    if verdict == 'bad_request':\n        sys.exit(1)\n")
+    files = _file("/tmp/h.py", src)
+    assert sr.classifies_by_key_presence([], files) == []
+    assert sr.payload_will_not_compile([]) == []
+    assert sr.file_writes_will_not_work(files) == []
+
+
+def test_a_400_branch_without_the_field_is_the_defect_not_any_400_mention():
+    """A script with no 400 branch at all is not refused for lacking the field."""
+    from app.modules import supervised_runs as sr
+    assert sr.classifies_by_key_presence([], _file("/tmp/x.py", "import urllib.request\nurllib.request.urlopen('http://x')\n")) == []
+
+
+def test_the_rules_carry_the_helper_verbatim():
+    from app.modules import supervised_runs as sr
+    assert sr.WHOSE_FAULT_HELPER.strip() in sr.CHANNEL_RULES
+    assert "paste this helper" in sr.CHANNEL_RULES
