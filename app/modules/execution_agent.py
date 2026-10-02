@@ -2635,6 +2635,36 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                     logger.warning("supervised_run_redraft_again_rejected job=%s node=%s refusals=%s",
                                                    job_id, run_node.get("node_key"),
                                                    "; ".join(r["why"] for r in third.get("refused") or [])[:800])
+                                    # §17.1288i — three drafts, each fixing what it was told and
+                                    # refused for something NEW, is a ladder with one rung left,
+                                    # not a loop: live, draft 3 of ADD82 satisfied every shape
+                                    # rule and was refused only because VM 106 is stopped. One
+                                    # last draft, told everything; then the best frame by
+                                    # refusals, a later draft winning a tie (it has every note).
+                                    k3 = supervised_runs.refusal_kinds(third)
+                                    if third["commands"] and k3 and not (k3 & (k1 | k2)):
+                                        fix3 = supervised_runs.shape_retry_note(third, previous=second)
+                                        if fix3:
+                                            logger.warning("supervised_run_redraft_last job=%s node=%s third=%s",
+                                                           job_id, run_node.get("node_key"), sorted(k3))
+                                            last = await supervised_runs.draft_runbook(run_node, _brief, up_block,
+                                                                                       retry_note=fix3, spec=spec,
+                                                                                       environment=_env)
+                                            if last:
+                                                fourth = supervised_runs.frame_run(run_node, last, spec, policy, env=_env,
+                                                                                   preconditions=await _pre_for(last))
+                                                if fourth["commands"] and not fourth["refused"]:
+                                                    logger.warning("supervised_run_redraft_last_clean job=%s node=%s commands=%d",
+                                                                   job_id, run_node.get("node_key"), len(fourth["commands"]))
+                                                    frame = fourth
+                                                else:
+                                                    logger.warning("supervised_run_redraft_last_rejected job=%s node=%s refusals=%s",
+                                                                   job_id, run_node.get("node_key"),
+                                                                   "; ".join(r["why"] for r in fourth.get("refused") or [])[:800])
+                                                    cands = [f for f in (fourth, third, second, frame) if f.get("commands")]
+                                                    frame = min(cands, key=lambda f: len(f.get("refused") or []))
+                                    elif third["commands"] and len(third["refused"]) <= len(frame["refused"]) and not (k3 & k1):
+                                        frame = third             # a tie, but it fixed what the first was refused for
         # §17.1227 — a draft with NOTHING to run is the worst outcome of all, and
         # neither trigger above catches it: the shape pass needs a refusal (there
         # is none — there is nothing to refuse) and the coverage pass only

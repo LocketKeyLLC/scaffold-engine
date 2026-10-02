@@ -1389,6 +1389,7 @@ _GUEST_SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5}
 #: any `pct <verb> N` / `qm <verb> N` either reaches the guest (exec, enter,
 #: guest exec) or is the host's own work ON it (start, set, config, …) — both
 #: are the step addressing its subject.
+_REACH_TOOL_INSTALL_RE = re.compile(r"\bapt(?:-get)?\s+install\b[^\n|;&]*\b(?:sshpass|nmap|openssh-client|arp-scan|fping)\b")
 _GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+)\s+(\d{3,5})\b")
 
 
@@ -1415,7 +1416,10 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     if not ids or not commands:
         return []
     cmds = [str(c) for c in commands]
-    writes = [c for c in cmds if writing_segments(c)]      # §17.1287c — a loop of reads is not a write
+    writes = [c for c in cmds if writing_segments(c) and not _REACH_TOOL_INSTALL_RE.search(c)]
+    # §17.1287c — a loop of reads is not a write. §17.1288i — installing the
+    # MEANS of reaching the guest on the host (`apt-get install -y sshpass`,
+    # nmap) is the rule's own remedy, not a write that misses the guest.
     if not writes:
         return []                                           # reads only: nothing is installed anywhere
     # §17.1287b — it is the WRITES that must reach the guest. The next live draft

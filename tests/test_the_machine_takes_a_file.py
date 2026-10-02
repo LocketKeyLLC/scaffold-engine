@@ -1512,3 +1512,43 @@ def test_the_guest_word_for_the_placeholder():
     assert sr._guest_word("Start VM 106 (palworld-server)", "106") == "PALWORLD"
     assert sr._guest_word("Do a thing in VM 106", "106") == "VM106"
     assert sr._guest_word("Do a thing in VM 106", "106", {"system_state": {"106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}) == "PALWORLD"
+
+
+# ───── §17.1288i — a ladder with one rung left is not a loop
+
+def test_the_live_1142_runbook_passes_every_shape_gate():
+    from app.modules import supervised_runs as sr
+    runbook = _fx("add82_runbook_1142.md")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
+    assert frame["refused"] == [], [r["why"][:90] for r in frame["refused"]]
+    assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"] and frame["inputs"][0]["suggestions"] == []
+    stopped = [{"command": "ssh …", "why": "VM 106 is stopped (`qm list`, read just now) and nothing in this block starts it"}]
+    frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "x"}, preconditions=stopped)
+    assert len(frame["refused"]) == 1 and "run" not in {o["id"] for o in frame["options"]}
+
+
+def test_the_pause_climbs_one_more_rung_when_every_draft_made_progress():
+    """Wiring: a third draft refused for kinds disjoint from BOTH earlier drafts
+    gets one last draft; the best frame wins, a later draft winning a tie."""
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert "not (k3 & (k1 | k2))" in body, "the fourth draft is only for a third refused for something NEW"
+    assert "supervised_run_redraft_last" in body and "supervised_run_redraft_last_rejected" in body
+    assert "cands = [f for f in (fourth, third, second, frame) if f.get(\"commands\")]" in body, \
+        "the latest draft must come first so it wins a tie on refusals"
+    assert "len(third[\"refused\"]) <= len(frame[\"refused\"]) and not (k3 & k1)" in body, \
+        "a third draft that fixed what the first was refused for wins a tie with it"
+    assert body.count("supervised_runs.draft_runbook(") == body.count("preconditions=await _pre_for("), \
+        "every draft is framed against its own preconditions"
+
+
+def test_installing_the_means_of_reaching_the_guest_is_not_a_host_write_that_misses_it():
+    from app.modules import supervised_runs as sr
+    ok = ["apt-get install -y sshpass", 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/install_agent_106.sh']
+    files = [{"path": "/tmp/install_agent_106.sh", "content": _fx("add82_install_agent_106_v3.sh")}]
+    assert sr.commands_never_reach_the_guest(ok, ADD82, files) == []
+    assert sr.commands_never_reach_the_guest(["apt-get install -y sshpass", "sudo apt-get install -y qemu-guest-agent"], ADD82, files)[0]["command"] == "sudo apt-get install -y qemu-guest-agent"
