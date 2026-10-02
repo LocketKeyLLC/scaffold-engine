@@ -102,7 +102,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "without reading the body's `propertyName`",    # §17.1278c
                    "has no 'needs_input' verdict",                 # §17.1279
                    "a secret cannot be written into a file",       # §17.1280
-                   "elevates only the first command of a line")    # §17.1283
+                   "elevates only the first command of a line",    # §17.1283
+                   "runs in the runner's own shell on the Proxmox HOST")   # §17.1285
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -1326,6 +1327,50 @@ def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[d
     if out:
         logger.warning("compound_write_on_head_only_runner count=%d helper=%s", len(out), helper)
     return out
+
+
+_GUEST_SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
+#: any `pct <verb> N` / `qm <verb> N` either reaches the guest (exec, enter,
+#: guest exec) or is the host's own work ON it (start, set, config, …) — both
+#: are the step addressing its subject.
+_GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+)\s+(\d{3,5})\b")
+
+
+def commands_never_reach_the_guest(commands: list[str], node: Optional[dict]) -> list[dict]:
+    """§17.1285 — a step ABOUT a guest whose commands all run on the host.
+
+    Live, ADD82 "Install and enable QEMU Guest Agent in VM 106" drafted
+    `sudo apt-get update` / `apt-get install -y qemu-guest-agent` /
+    `systemctl enable --now qemu-guest-agent` -- four commands that would run in
+    the runner's own shell on the Proxmox HOST, installing the agent on the
+    wrong machine, with `qm agent 106 ping` as the check that would then
+    contradict it. The subject was in the title, the inventory in the prompt,
+    and §17.1213 (a block the host contradicts) has no view of this: nothing
+    addressed 106 at all, so there was nothing to contradict.
+
+    Narrow: the step's text names a guest id, at least one command changes a
+    machine, and NO command addresses any guest (`pct exec N`, `qm guest exec N`,
+    an `ssh` into a machine, or a host-side `qm`/`pct` operation ON the guest,
+    which is legitimately the host's work about it).
+    """
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
+    if not ids or not commands:
+        return []
+    from app.modules.assist_state_check import read_only_command
+    cmds = [str(c) for c in commands]
+    if not any(not read_only_command(c) for c in cmds):
+        return []                                           # reads only: nothing is installed anywhere
+    if any(_GUEST_ADDRESS_RE.search(c) or re.search(r"\bssh\b", c) for c in cmds):
+        return []                                           # something reaches a guest, or works ON one from the host
+    gid = ids[0]
+    return [{"command": cmds[0], "why": (
+        f"every command in this block runs in the runner's own shell on the Proxmox HOST, and the step is about "
+        f"VM/CT {gid} -- live, this installed qemu-guest-agent on the host instead of in VM 106. Reach the guest "
+        f"or do not run: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
+        f"(needs the agent) or `ssh <user>@<its address>`; a host-side operation ON the guest is `qm …/pct … {gid}`. "
+        f"If none of those is possible yet (no agent, no ssh), say so and leave the step to the operator rather "
+        f"than changing the wrong machine.")}]
 
 
 def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -3053,6 +3098,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
+    # §17.1285 — a step about a guest whose commands never leave the host.
+    refused = refused + commands_never_reach_the_guest(cmds, node)
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
