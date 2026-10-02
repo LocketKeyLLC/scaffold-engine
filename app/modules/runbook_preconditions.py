@@ -131,6 +131,21 @@ def key_known_for(gid: str, name: str, plan: Optional[list[dict]]) -> Optional[s
     return None
 
 
+_ID_ASSIGN_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=[\"']?(\d{3,5})[\"']?\s*$", re.M)
+
+
+def _resolve_ids(text_value: str) -> str:
+    """§17.1288j — `VMID=106` then `qm start "$VMID"` addresses 106. Live, the
+    one draft that had everything right was refused for "nothing starts it"
+    because the start said `"$VMID"`. Only whole-line numeric assignments are
+    resolved; the value is a guest id or it is nothing to us."""
+    out = str(text_value or "")
+    for m in _ID_ASSIGN_RE.finditer(out):
+        name, val = m.group(1), m.group(2)
+        out = re.sub(rf'"?\$\{{{re.escape(name)}\}}"?|"?\${re.escape(name)}\b"?', val, out)
+    return out
+
+
 def _first_line_with(texts: list[str], pattern: "re.Pattern[str]") -> str:
     for t in texts:
         for ln in str(t).split("\n"):
@@ -156,7 +171,8 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     that holds no key of this host's, are both contradictions the engine can
     see before sending anything.
     """
-    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    texts = [_resolve_ids(t) for t in [str(c) for c in commands or []]
+             + [str((f or {}).get("content") or "") for f in files or []]]
     guests = guests_in(texts)
     subject = str((node or {}).get("title") or "") + "\n" + str((node or {}).get("description") or "")
     subjects = list(dict.fromkeys(_SUBJECT_RE.findall(subject))) if node else []

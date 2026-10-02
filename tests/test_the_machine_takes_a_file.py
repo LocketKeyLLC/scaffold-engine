@@ -1552,3 +1552,38 @@ def test_installing_the_means_of_reaching_the_guest_is_not_a_host_write_that_mis
     files = [{"path": "/tmp/install_agent_106.sh", "content": _fx("add82_install_agent_106_v3.sh")}]
     assert sr.commands_never_reach_the_guest(ok, ADD82, files) == []
     assert sr.commands_never_reach_the_guest(["apt-get install -y sshpass", "sudo apt-get install -y qemu-guest-agent"], ADD82, files)[0]["command"] == "sudo apt-get install -y qemu-guest-agent"
+
+
+# ───── §17.1288j — the one draft that had everything right (trace 1145)
+
+def test_the_live_1145_runbook_is_clean_at_the_frame():
+    from app.modules import supervised_runs as sr
+    runbook = _fx("add82_runbook_1145.md")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
+    assert frame["refused"] == [], [r["why"][:120] for r in frame["refused"]]
+    assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"] and "run" in {o["id"] for o in frame["options"]}
+
+
+def test_a_name_the_script_assigns_is_not_read_from_the_environment():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/x.sh", "content": 'PASS="${MASS_PASSWORD:?required}"\nSSHPASS="$PASS" sshpass -e ssh-copy-id u@h\n'}]
+    assert sr.script_secret_not_passed(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/x.sh'], files) == []
+    hits = sr.script_secret_not_passed(["bash /tmp/x.sh"], files)
+    assert hits and "MASS_PASSWORD" in hits[0]["why"] and "PASS=" not in hits[0]["why"].split("reads", 1)[1][:30]
+    unassigned = [{"path": "/tmp/y.sh", "content": 'SSHPASS="$PASS" sshpass -e ssh-copy-id u@h\n'}]
+    assert sr.script_secret_not_passed(["bash /tmp/y.sh"], unassigned), "a name read and never assigned still is"
+
+
+def test_the_machines_contradictions_are_redraftable():
+    """§17.1288j — a precondition refusal reaches the retry note and counts as a kind."""
+    from app.modules import supervised_runs as sr
+    pre = [{"command": "ssh …", "why": "VM 106 is stopped (`qm list`, read just now) and nothing in this block starts it -- start it first, guarded: `qm status 106 | grep -q running || qm start 106`"},
+           {"command": "ssh …", "why": "nothing has put this host's key on guest 106: no finished step installed one there and this block copies none"}]
+    frame = {"refused": pre, "file_channel": True}
+    assert sr.refusal_kinds(frame) == {"is stopped (`", "nothing has put this host's key on guest"}
+    note = sr.shape_retry_note(frame)
+    assert "qm status 106 | grep -q running || qm start 106" in note and "nothing has put this host's key" in note
+    for marker in ("is a VM on this host, not a container", "is ALREADY", "there is no guest"):
+        assert marker in sr._SHAPE_REFUSALS

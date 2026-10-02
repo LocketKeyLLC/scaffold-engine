@@ -107,7 +107,18 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "appears only in the verify",                   # §17.1288
                    "inside an ssh command line",                   # §17.1288b
                    "reads the neighbour table cold",               # §17.1288c
-                   "is an assumption")                             # §17.1288h
+                   "is an assumption",                             # §17.1288h
+                   # §17.1288j — the machine's contradictions (runbook_preconditions)
+                   # are the drafter's to fix too: live, draft 3 was told nothing
+                   # about the stopped VM and draft 4 nothing about the key, so
+                   # each "fixed" the shape note and lost what the other had.
+                   "is stopped (`",                                # §17.1288f / §17.1213
+                   "nothing has put this host's key on guest",     # §17.1288g
+                   "is a VM on this host, not a container",        # §17.1213
+                   "is a container on this host, not a VM",        # §17.1213
+                   "is ALREADY",                                   # §17.1240
+                   "is already taken on this host",                # §17.1243
+                   "there is no guest")                            # §17.1213
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -850,6 +861,10 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
         if path.endswith(".sh"):          # §17.1286 — a bash script reads a secret as `$NAME`
             from app.modules.runbook_inputs import secret_name
             names |= {m.group(1) for m in _SECRET_REF_RE.finditer(content) if secret_name(m.group(1))}
+            # §17.1288j — a name the script ASSIGNS (`PASS="${MASS_PASSWORD:?…}"`)
+            # is its own variable, not one read from the environment; live, the
+            # one draft that had everything right was refused for `$PASS`.
+            names = {n for n in names if not re.search(rf"^\s*(?:export\s+)?{re.escape(n)}=", content, re.M)}
         if path and names:
             wanted.setdefault(path, set()).update(names)
     if not wanted:
