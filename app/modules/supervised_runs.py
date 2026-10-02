@@ -1365,15 +1365,27 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         return []
     from app.modules.assist_state_check import read_only_command
     cmds = [str(c) for c in commands]
-    if not any(not read_only_command(c) for c in cmds):
+    writes = [c for c in cmds if not read_only_command(c)]
+    if not writes:
         return []                                           # reads only: nothing is installed anywhere
-    texts = cmds + [str((f or {}).get("content") or "") for f in files or []]   # §17.1286 — a script may do the reaching
-    if any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) for t in texts):
-        return []                                           # something reaches a guest, or works ON one from the host
+    # §17.1287b — it is the WRITES that must reach the guest. The next live draft
+    # was the same host-side install with `qm agent 106 ping` tacked on the end,
+    # and that one read satisfied a gate that asked whether ANY command named
+    # the guest. A write reaches a guest when it addresses one (`pct exec N`,
+    # `qm guest exec N`, an ssh), IS the host's own operation on one (`qm set
+    # N`, `pct start N`), or runs a written file that does.
+    def _reaches(cmd: str) -> bool:
+        texts = [cmd] + [str((f or {}).get("content") or "") for f in files or []
+                         if (f or {}).get("path") and str(f["path"]) in cmd]
+        return any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) for t in texts)
+    unreached = [c for c in writes if not _reaches(c)]
+    if not unreached:
+        return []
     gid = ids[0]
-    return [{"command": cmds[0], "why": (
-        f"every command in this block runs in the runner's own shell on the Proxmox HOST, and the step is about "
-        f"VM/CT {gid} -- live, this would have installed qemu-guest-agent on the host instead of in VM 106. Reach "
+    return [{"command": unreached[0], "why": (
+        f"`{unreached[0][:70]}` runs in the runner's own shell on the Proxmox HOST, and the step is about "
+        f"VM/CT {gid} -- live, this would have installed qemu-guest-agent on the host instead of in VM 106 (a "
+        f"`qm agent {gid} ping` beside it is a read and reaches nothing). Every command that CHANGES something must reach "
         f"the guest: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
         f"(needs the agent) or over ssh -- and a VM WITHOUT the agent is reached by finding its address from its MAC "
         f"(`qm config {gid}` → net0 MAC → `ip neigh show`, after `qm start {gid}` and a wait) and "

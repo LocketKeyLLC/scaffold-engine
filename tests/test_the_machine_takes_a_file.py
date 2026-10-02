@@ -1255,3 +1255,26 @@ def test_the_guest_gate_is_wired_into_frame_run():
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
     assert "commands_never_reach_the_guest(cmds, node, shape_files)" in body, "the gate reads the files too (§17.1286)"
+
+
+# ───── §17.1287b — it is the WRITES that must reach the guest
+
+def test_a_read_only_ping_beside_a_host_side_install_does_not_satisfy_the_guest_gate():
+    from app.modules import supervised_runs as sr
+    found = sr.commands_never_reach_the_guest(ADD82_CMDS + ["qm agent 106 ping"], ADD82)
+    assert found and found[0]["command"] == "sudo apt-get update"
+    assert "reaches nothing" in found[0]["why"]
+
+
+def test_a_file_run_by_the_write_reaches_the_guest_for_it():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/vm106_agent.sh", "content": 'ssh u@$IP "apt-get install -y qemu-guest-agent"\n'}]
+    assert sr.commands_never_reach_the_guest(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/vm106_agent.sh'], ADD82, files) == []
+    other = [{"path": "/tmp/other.sh", "content": 'ssh u@$IP true\n'}]
+    assert sr.commands_never_reach_the_guest(["bash /tmp/vm106_agent.sh"], ADD82, other), "a file the write does not run reaches nothing for it"
+
+
+def test_a_mix_of_a_reaching_write_and_a_host_side_write_names_the_host_side_one():
+    from app.modules import supervised_runs as sr
+    found = sr.commands_never_reach_the_guest(["qm set 106 --agent 1", "sudo apt-get install -y qemu-guest-agent"], ADD82)
+    assert found and found[0]["command"] == "sudo apt-get install -y qemu-guest-agent"
