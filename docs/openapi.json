@@ -1311,6 +1311,43 @@
       },
       "DecideResult": {
         "properties": {
+          "confirmed_after_drop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmed After Drop"
+          },
+          "diagnosis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diagnosis"
+          },
+          "executed": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executed"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -1335,6 +1372,17 @@
             "title": "Outcome",
             "type": "string"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "resolved": {
             "enum": [
               "operator",
@@ -1352,6 +1400,28 @@
             "default": "executing",
             "title": "Status",
             "type": "string"
+          },
+          "unknown_outcome": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unknown Outcome"
+          },
+          "verify": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verify"
           }
         },
         "required": [
