@@ -1587,3 +1587,40 @@ def test_the_machines_contradictions_are_redraftable():
     assert "qm status 106 | grep -q running || qm start 106" in note and "nothing has put this host's key" in note
     for marker in ("is a VM on this host, not a container", "is ALREADY", "there is no guest"):
         assert marker in sr._SHAPE_REFUSALS
+
+
+# ───── §17.1288k — the run command after the files is still the run command
+
+def test_the_live_1148_runbook_has_its_run_command_after_the_file():
+    from app.modules import supervised_runs as sr
+    rb = _fx("add82_runbook_1148.md")
+    assert sr.runbook_commands(rb) == ['PALWORLD_USER="<PALWORLD_USER>" MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/install_guest_agent.sh']
+    files = sr.file_writes(rb)
+    assert [f["path"] for f in files] == ["/tmp/install_guest_agent.sh"]
+    assert "bash /tmp/install_guest_agent.sh" not in files[0]["content"], "the run fence is not part of the file"
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, rb, spec, policy, env={"profile": "You work as root@pve."})
+    assert frame["commands"] and frame["files"]
+    assert sr.refusal_kinds(frame) == {"reads the neighbour table cold"}, [r["why"][:90] for r in frame["refused"]]
+
+
+def test_a_file_nothing_runs_is_a_registered_refusal():
+    from app.modules import supervised_runs as sr
+    rb = "## Write these files\n### /tmp/x.sh\n```bash\necho hi\n```\n\n## Verify\n- `qm agent 106 ping`\n"
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": [], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, rb, spec, policy)
+    assert frame["commands"] == [] and frame["files"]
+    assert "and nothing runs it" in sr.refusal_kinds(frame)
+    assert "bash /tmp/x.sh" in frame["refused"][-1]["why"]
+    assert sr.shape_retry_note(frame), "the redraft is told"
+
+
+def test_the_chain_goes_on_from_a_draft_that_has_files_but_no_command():
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert '(second["commands"] or second.get("files")) and k2' in body
+    assert '(third["commands"] or third.get("files")) and k3' in body
