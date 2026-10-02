@@ -155,17 +155,38 @@ def shape_retry_note(frame: dict) -> str:
     if any(str(r.get("why") or "").startswith(_NOT_ALLOWED) for r in (frame or {}).get("refused") or []):
         return ""
     lines = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}" for r in shapes)
+    # §17.1276b — the restated rules must fit the channel the frame was drawn
+    # for. Told in the refusal to batch by argv and in THIS summary to "write a
+    # file with printf | tee" and "cut into batches and send several commands",
+    # the live redraft followed the summary and batched inside one script.
+    file_channel = bool((frame or {}).get("file_channel"))
+    batching = (
+        f"A command gets {_RUN_BUDGET_S} seconds, so work that waits on something off this machine many "
+        "times over must be cut into batches: write the script ONCE under ## Write these files, taking the "
+        "slice bounds as arguments (`start, end = int(sys.argv[1]), int(sys.argv[2])`; `for item in "
+        "items[start:end]:`), and list one command per batch under ## Run this (`python3 /tmp/x.py 0 10`, "
+        "`python3 /tmp/x.py 10 20`, …) — ten per batch when each item waits on a remote service. Never a loop "
+        "over batches inside one script: one command is one budget. Each batch treats a thing that is already "
+        "there as success. A loop over third parties catches `(urllib.error.URLError, TimeoutError, OSError)` "
+        "around the call and records the item as unreachable. "
+        if file_channel else
+        f"A command gets {_RUN_BUDGET_S} seconds, so work that waits on something off this machine many "
+        "times over must be cut into batches (`items[:20]`, or ten if each one waits on a remote service) "
+        "and sent as several commands, each one treating a thing that is already there as success. ")
+    files = ("No heredoc and no `printf | tee`: a file goes under ## Write these files, written exactly as the "
+             "interpreter will see it. "
+             if file_channel else
+             "No heredoc: write a file with `printf '%s\\n' 'line' | tee /path`. ")
     return (
         "YOUR PREVIOUS DRAFT WAS REFUSED BY THE RUNNER'S GATE — rewrite it so every command can run.\n"
         f"{lines}\n"
         "Rules that were broken, restated: each command runs alone, in its own shell. "
-        f"A command gets {_RUN_BUDGET_S} seconds, so work that waits on something off this machine many "
-        "times over must be cut into batches (`items[:20]`, or ten if each one waits on a remote service) "
-        "and sent as several commands, each one treating a thing that is already there as success. "
+        + batching +
         "No `$(…)` or backticks "
         "ANYWHERE — including to build a list for a loop; write the list out literally (`for i in 1 2 3; do …; "
-        "done`) or, better, drop the loop and state the checks as separate commands. No heredoc: write a file with "
-        "`printf '%s\\n' 'line' | tee /path`. No `>`/`>>` redirects. A retry/wait loop is rarely worth it here — "
+        "done`) or, better, drop the loop and state the checks as separate commands. "
+        + files +
+        "No `>`/`>>` redirects. A retry/wait loop is rarely worth it here — "
         "the operator sees the result of each command, so a single check is usually enough."
     )
 
@@ -892,10 +913,13 @@ def _is_network_call(call, ctx: tuple[set[str], set[str]], wrappers: set[str] = 
 #: §17.1268 — the calls that wait on something outside this machine. A loop
 #: around one of these is where a command's time budget goes.
 _NETWORK_CALL = frozenset({
-    "urlopen", "request", "Request", "get", "post", "put", "delete", "patch",
+    "urlopen", "request", "get", "post", "put", "delete", "patch",
     "head", "getresponse", "connect", "sendall", "recv", "check_output", "run",
     "call", "check_call", "Popen",
 })
+# §17.1276b — `urllib.request.Request(...)` BUILDS a request and sends nothing;
+# the live draft built it outside the wrapper's `try` and the hang gate read
+# that as an unguarded network call. Constructors are never the network.
 
 
 def _literal_names(tree) -> set[str]:
@@ -1167,6 +1191,10 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
             if not calls:
                 continue
             where = ast.unparse(node.iter)[:60]
+            # the thing to slice is the collection, not `enumerate(collection)`
+            coll = (ast.unparse(node.iter.args[0])[:60]
+                    if isinstance(node.iter, ast.Call) and _callee(node.iter) in ("enumerate", "list", "sorted", "reversed", "tuple")
+                    and node.iter.args else where)
             if _bounded(node.iter, names):
                 n, tos = _slice_bound(node.iter), _request_timeouts(tree)
                 if n and tos and n * max(tos) > _RUN_BUDGET_S:
@@ -1188,7 +1216,7 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
             # range(0, len(public), 10)`) -- still one command, still one budget.
             batching = (
                 f" On the file channel that means: write the script ONCE taking the slice bounds as "
-                f"arguments (`start, end = int(sys.argv[1]), int(sys.argv[2])`; `for item in {where}[start:end]:`), "
+                f"arguments (`start, end = int(sys.argv[1]), int(sys.argv[2])`; `for item in {coll}[start:end]:`), "
                 f"and list one command per batch under ## Run this -- `python3 {path} 0 10`, `python3 {path} 10 20`, "
                 f"… -- never a loop over batches inside one script, because one command is one budget."
                 if is_file else "")
@@ -1199,7 +1227,7 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
                 + (", with a sleep inside the loop as well" if sleeps else "")
                 + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
                 f"record of how much of the work landed, so a run over 89 of anything cannot be "
-                f"offered. Bound it: take a slice of a size YOU choose (`{where}[:20]`, or fewer) and send "
+                f"offered. Bound it: take a slice of a size YOU choose (`{coll}[:20]`, or fewer) and send "
                 f"several commands, each one resumable -- treat a thing that is already there as "
                 f"success and move on. Pick the size so a batch finishes well inside the budget: if "
                 f"every item waits on a remote service that may answer slowly or not at all, ten is "
@@ -2652,6 +2680,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         "inputs": inputs,
         # §17.1271 — the operator approves the FILES as well as the commands, so
         # the frame carries each path, its size and its content.
+        "file_channel": bool((policy or {}).get("can_write_files")),   # §17.1276b
         "files": [{"path": f["path"], "bytes": len(str(f["content"]).encode()),
                    "lines": str(f["content"]).count("\n") + (0 if str(f["content"]).endswith("\n") else 1),
                    "content": f["content"]} for f in files],
