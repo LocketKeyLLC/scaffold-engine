@@ -98,7 +98,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "dies at the first one that hangs",            # §17.1274
                    "against a",                                    # §17.1274 slice × timeout
                    "whether the KEY `propertyName` appears",       # §17.1278
-                   "by a phrase list")                             # §17.1278b
+                   "by a phrase list",                             # §17.1278b
+                   "without reading the body's `propertyName`")    # §17.1278c
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -493,6 +494,21 @@ async def write_prefixes_for_job(db: AsyncSession, job_id: str) -> list[dict]:
 # So when the engine may run the block, the drafter is told what "runnable"
 # means here. The operator-facing runbook (assist guidance) keeps the old
 # freedom — a human pasting a block CAN run a heredoc.
+#: §17.1278c — the classifier, given rather than described. Three drafts in one
+#: night each misread the sentence a different way (key present; phrase list;
+#: never looked), so the drafter gets the code and the gate checks it was used.
+WHOSE_FAULT_HELPER = """
+def whose_fault(errors):
+    # a *arr 400 body is a list of {propertyName, errorMessage}
+    msgs = " ".join(str(e.get("errorMessage", "")) for e in errors if isinstance(e, dict)).lower()
+    if "unique" in msgs or "already exists" in msgs:
+        return "duplicate"
+    if any(str(e.get("propertyName") or "").strip() for e in errors if isinstance(e, dict)):
+        return "bad_request"          # a field is NAMED: our body is wrong -- stop and print it
+    return "unreachable"              # no field named: that tracker is down -- record it and go on
+"""
+
+
 CHANNEL_RULES = """
 Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, one command at a time):
 - Each line under "## Run this" must be ONE self-contained command. They are run in order, each in its OWN shell, so no shell state carries between them: never `cd` and then name a file relatively — write absolute paths (`wget -O /tmp/x.run …`, then `/tmp/x.run`).
@@ -510,7 +526,9 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
 - ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
-- WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
+- WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
+""" + WHOSE_FAULT_HELPER + """
+  'unreachable' -> record the name, continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
@@ -1288,6 +1306,20 @@ def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] 
             # Protection` was not on the list and batch 1 stopped at indexer 2.
             if _UNREACHABLE.search(left.value) and not re.search(r"(?i)unique|already", left.value):
                 phrases.append(left.value)
+        # §17.1278c — the third way round: a 400 branch that never reads the field
+        # at all. Prowlarr answers 400 for a dead tracker too, so "400 → validation
+        # failure → stop" turns every corpse into a bad request.
+        if not out and "propertyname" not in source.lower() and any(
+                isinstance(n, ast.Compare) and any(isinstance(c, ast.Constant) and c.value == 400
+                                                  for c in ast.walk(n))
+                for n in ast.walk(tree)):
+            out.append({"command": label, "why": (
+                f"{what} decides what a 400 means without reading the body's `propertyName` at all -- and "
+                f"Prowlarr answers 400 for a tracker it cannot REACH as well as for a bad request, so this block "
+                f"turns every dead tracker into a 'validation failure' and stops at the first (live: 0Magnet, "
+                f"`blocked by CloudFlare Protection`, `\"propertyName\": \"\"`). The verdict is in the body: "
+                f"paste and call `{WHOSE_FAULT_HELPER.strip()}` -- 'unreachable' is recorded by name and the loop "
+                f"continues; 'bad_request' stops and prints the body; 'duplicate' counts as already present.")})
         if phrases and not out:
             out.append({"command": label, "why": (
                 f"{what} decides whether a tracker is unreachable by a phrase list ({', '.join(repr(p) for p in phrases[:4])}"
