@@ -1021,3 +1021,71 @@ def test_every_payload_gate_in_frame_run_judges_the_filled_files():
               "loop_dies_on_one_dead_party", "classifies_by_key_presence"):
         assert f"{g}(cmds, shape_files)" in body or f"{g}(shape_files)" in body, g
     assert "secrets_in_files(files, inputs)" in body
+
+
+# ───── §17.1281 — a check that answers nothing is not a check; a secret never reaches the record
+#
+# ADD115 ran clean and was marked done -- on four verify checks that came back
+# BLANK: `curl -s -H "X-Api-Key: $PROWLARR_API_KEY"` through `run_readonly`, which
+# expands nothing, so the request carried an empty key. And the fifth check
+# `cat`'d config.xml: the key the engine stores by reference reached the stored
+# record in clear.
+
+@pytest.mark.asyncio
+async def test_a_check_that_references_a_secret_runs_with_the_blocks_environment(monkeypatch):
+    from app.modules import assist_local_runner as lr, assist_supervised as sw, supervised_runs as sr
+    sent = {"readonly": [], "supervised": [], "env": None}
+
+    async def fake_probes(spec, probes, **kw):
+        sent["readonly"] += [p["command"] for p in probes]
+        return "".join(f'== {p["id"]} ==\nplain-answer\n' for p in probes), [{"id": p["id"], "command": p["command"], "ok": True, "ran": True} for p in probes]
+
+    async def fake_block(spec, cmds, *, env=None, **kw):
+        sent["supervised"] += cmds; sent["env"] = env
+        return [{"command": c, "output": '[{"id": 1}]', "exit": 0, "ok": True, "refused": False, "unreachable": False} for c in cmds]
+
+    monkeypatch.setattr(lr, "run_probes", fake_probes)
+    monkeypatch.setattr(sw, "run_block", fake_block)
+    cmds = ["pct exec 102 -- cat /var/lib/prowlarr/config.xml",
+            'curl -s -H "X-Api-Key: $PROWLARR_API_KEY" http://192.168.1.21:9696/api/v1/indexer',
+            "pct list"]
+    pasted, ran = await sr.run_verify(type("S", (), {"name": "r"})(), cmds, {"PROWLARR_API_KEY": "k"})
+    assert sent["readonly"] == [cmds[0], cmds[2]] and sent["supervised"] == [cmds[1]]
+    assert sent["env"] == {"PROWLARR_API_KEY": "k"}, "the referenced value travels with the check"
+    assert "== V2 ==\n[{\"id\": 1}]" in pasted and "== V1 ==\nplain-answer" in pasted and "== V3 ==" in pasted
+    assert [r["id"] for r in ran] == ["V1", "V2", "V3"]
+    assert sr._has_evidence(pasted, ran)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_or_unreachable_check_leaves_no_marker(monkeypatch):
+    from app.modules import assist_supervised as sw, supervised_runs as sr
+
+    async def fake_block(spec, cmds, *, env=None, **kw):
+        return [{"command": c, "output": "(refused by the local runner: no)", "exit": None, "ok": False, "refused": True, "unreachable": False} for c in cmds]
+
+    monkeypatch.setattr(sw, "run_block", fake_block)
+    pasted, ran = await sr.run_verify(type("S", (), {"name": "r"})(), ['curl -H "X-Api-Key: $K" http://x'], {"K": "v"})
+    assert pasted == "" and ran and ran[0]["ran"] is False, "no marker: not evidence (§17.1204)"
+
+
+def test_scrub_masks_held_values_and_secret_shapes():
+    from app.modules import supervised_runs as sr
+    text = ("<Config>\n  <ApiKey>d1203e8a86644c0dbde984de037c3a70</ApiKey>\n  <Password>hunter22</Password>\n"
+            '$ curl -s -H "X-Api-Key: zzzzzzzzzzzzzzzzzzzz" http://x\n{"apiKey": "abcdefabcdefabcdefabcdef"}\nvalue=SECRETVALUE123\n')
+    out = sr.scrub_run_output(text, {"MASS_PASSWORD": "SECRETVALUE123"})
+    assert "d1203e8a86644c0dbde984de037c3a70" not in out and "</ApiKey>" in out, out
+    assert "hunter22" not in out and "zzzzzzzzzzzzzzzzzzzz" not in out and "abcdefabcdefabcdefabcdef" not in out
+    assert "SECRETVALUE123" not in out and "***" in out
+    assert sr.scrub_run_output("already present: YTS\nunreachable: Anidex", {}) == "already present: YTS\nunreachable: Anidex"
+
+
+def test_resolve_run_verifies_through_run_verify_and_scrubs_before_the_record():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def resolve_run(")
+    body = src[i:src.index("\nasync def _verify_verdicts(", i)]
+    assert "_lr.run_probes(" not in body, "every verify check in resolve_run goes through run_verify"
+    assert body.count("await run_verify(spec, verify_cmds, secret_env)") >= 2, "both the first read and the §17.1239 re-read"
+    assert body.index('e["output"] = scrub_run_output(e.get("output"), secret_env)') < body.index("_executed_report(runbook, spec.name, executed, verify_out)")
+    assert "verify_out = scrub_run_output(verify_out, secret_env)" in body
