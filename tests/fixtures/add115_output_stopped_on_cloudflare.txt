@@ -1,0 +1,13 @@
+using appProfileId 1
+total public indexers in schema: 89
+unreachable: Anidex
+VALIDATION FAILURE on 0Magnet:
+  full body: [
+  {
+    "isWarning": false,
+    "propertyName": "",
+    "errorMessage": "Unable to access 16mag.net, blocked by CloudFlare Protection.",
+    "severity": "error"
+  }
+]
+STOPPED due to validation failure. Added so far: 0, already present: 0, unreachable: 1

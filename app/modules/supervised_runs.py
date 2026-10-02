@@ -97,7 +97,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "waits on something off this machine",         # §17.1268
                    "dies at the first one that hangs",            # §17.1274
                    "against a",                                    # §17.1274 slice × timeout
-                   "whether the KEY `propertyName` appears")       # §17.1278
+                   "whether the KEY `propertyName` appears",       # §17.1278
+                   "by a phrase list")                             # §17.1278b
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -1264,11 +1265,14 @@ def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] 
             tree = ast.parse(source)
         except (SyntaxError, ValueError, RecursionError):
             continue
+        phrases: list[str] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare) or not node.ops or not isinstance(node.ops[0], (ast.In, ast.NotIn)):
                 continue
             left = node.left
-            if isinstance(left, ast.Constant) and isinstance(left.value, str) and left.value.strip().lower() == "propertyname":
+            if not (isinstance(left, ast.Constant) and isinstance(left.value, str)):
+                continue
+            if left.value.strip().lower() == "propertyname":
                 out.append({"command": label, "why": (
                     f"{what} decides whose fault a 400 is by whether the KEY `propertyName` appears in the "
                     f"body (`{ast.unparse(node)[:80]}`) -- it always does: Prowlarr sends `\"propertyName\": \"\"` "
@@ -1278,6 +1282,21 @@ def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] 
                     f"for e in errors)` -- stop and print the body only when it is; otherwise record the item as "
                     f"unreachable and continue.")})
                 break
+            # §17.1278b — the same rule, broken the other way round: the field
+            # test is right and then a PHRASE LIST decides availability, with
+            # "unknown 400 → stop" as the default. Live, `blocked by CloudFlare
+            # Protection` was not on the list and batch 1 stopped at indexer 2.
+            if _UNREACHABLE.search(left.value) and not re.search(r"(?i)unique|already", left.value):
+                phrases.append(left.value)
+        if phrases and not out:
+            out.append({"command": label, "why": (
+                f"{what} decides whether a tracker is unreachable by a phrase list ({', '.join(repr(p) for p in phrases[:4])}"
+                f"{', …' if len(phrases) > 4 else ''}) -- and a phrase list is always one phrase short: live, "
+                f"`Unable to access 16mag.net, blocked by CloudFlare Protection.` matched none of them and the "
+                f"block stopped on the second indexer of ten, calling it a validation failure. The body's SHAPE "
+                f"decides, not its words: a 400 whose `propertyName` is EMPTY is an availability error, whatever "
+                f"the message says -- record the item as unreachable and continue; a 400 that NAMES a field is "
+                f"a bad request -- stop and print it. No phrase list, and no 'unknown → stop' default.")})
     if out:
         logger.warning("classifies_by_key_presence count=%d", len(out))
     return out
