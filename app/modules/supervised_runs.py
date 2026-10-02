@@ -1289,6 +1289,35 @@ def _shell_keyword_only(segment: str) -> bool:
     return bool(words) and words[0] in _SHELL_WORDS and all(w in _SHELL_WORDS or w.isdigit() for w in words)
 
 
+_LOOP_HEAD_RE = re.compile(r"^(?:for|while|until|if|elif|select)\b")
+
+
+def writing_segments(cmd: str) -> list[str]:
+    """§17.1287c — the segments of a (compound) command that WRITE. The shell's
+    own words (`do`, `done`, `break`), loop/branch heads (`for i in 1 2 3`,
+    `if …`) and read-only programs are not writes. Placeholders are judged
+    as a dummy value (§17.1187): `<PALWORLD_IP>` is a redirect to the parser.
+    Live, the ADD82 redraft's wait -- `for i in 1 … 12; do ping -c 1 -W 2
+    <PALWORLD_IP> >/dev/null 2>&1 && break; sleep 5; done` -- was refused by the
+    guest gate as a write that reaches no guest: the whole loop is unjudgeable
+    as one command, and the placeholder broke the ping's own judgment."""
+    from app.modules.assist_state_check import read_only_command
+    from app.modules.assist_supervised import split_segments
+    shape = _PLACEHOLDER_RE.sub("x", str(cmd or ""))
+    if read_only_command(shape):
+        return []
+    out: list[str] = []
+    for seg in split_segments(shape):
+        seg = seg.strip()
+        if not seg or _shell_keyword_only(seg) or _LOOP_HEAD_RE.match(seg):
+            continue
+        if seg.startswith("do ") or seg.startswith("then "):
+            seg = seg.split(" ", 1)[1].strip()
+        if seg and not read_only_command(seg):
+            out.append(seg)
+    return out
+
+
 def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[dict]) -> list[dict]:
     """§17.1283 — a runner older than helper 19 prefixes `sudo -n` to the
     command STRING, so only the first simple command of a line is elevated.
@@ -1307,7 +1336,6 @@ def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[d
         helper = 0
     if not pol.get("sudo") or helper >= WHOLE_LINE_SUDO_HELPER:
         return []
-    from app.modules.assist_state_check import read_only_command
     from app.modules.assist_supervised import split_segments
     out: list[dict] = []
     for cmd in commands or []:
@@ -1318,8 +1346,9 @@ def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[d
         # words, not commands: the first live outing refused the drafter's wait
         # loop (`for …; do ping … && break; sleep 5; done`) for them, the
         # redraft dropped the wait, and ssh ran into a VM one second into its boot.
-        writes = [sg for sg in segs[1:]
-                  if sg.strip() and not _shell_keyword_only(sg) and not read_only_command(sg)]
+        # §17.1287c — one classifier with the guest gate (placeholders judged as a value).
+        first = _PLACEHOLDER_RE.sub("x", segs[0]).strip()
+        writes = [sg for sg in writing_segments(str(cmd)) if sg != first]
         if not writes:
             continue
         out.append({"command": str(cmd), "why": (
@@ -1363,9 +1392,8 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
     if not ids or not commands:
         return []
-    from app.modules.assist_state_check import read_only_command
     cmds = [str(c) for c in commands]
-    writes = [c for c in cmds if not read_only_command(c)]
+    writes = [c for c in cmds if writing_segments(c)]      # §17.1287c — a loop of reads is not a write
     if not writes:
         return []                                           # reads only: nothing is installed anywhere
     # §17.1287b — it is the WRITES that must reach the guest. The next live draft
