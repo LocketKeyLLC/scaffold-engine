@@ -156,6 +156,28 @@ def vms_by_name(text_out: str) -> dict[str, tuple[str, str]]:
     return out
 
 
+_NET_MAC = re.compile(r"^net\d+:\s*\w+=([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})", re.M)
+_NEIGH = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})\s+(?:dev\s+\S+\s+)?lladdr\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.M | re.I)
+
+
+def vm_macs(qm_config: str) -> list[str]:
+    """The MAC of each NIC in `qm config` (`net0: virtio=BC:24:11:E8:9F:7A,bridge=vmbr0`)."""
+    return [m.group(1).lower() for m in _NET_MAC.finditer(qm_config or "")]
+
+
+def address_by_mac(ip_neigh: str, macs: list[str]) -> list[str]:
+    """§17.1286 — a VM with no guest agent still has a NIC the host has seen:
+    its address is the `ip neigh` entry whose lladdr is the VM's MAC. Live, VM
+    110's `bc:24:11:b4:af:15` sat in the host's neighbour table beside
+    192.168.1.129 while the engine told the operator it had "no way in"."""
+    want = {m.lower() for m in macs}
+    out: list[str] = []
+    for m in _NEIGH.finditer(ip_neigh or ""):
+        if m.group(2).lower() in want and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
 def agent_ipv4s(text_out: str) -> list[str]:
     """Guest addresses out of `qm agent <id> network-get-interfaces`, loopback
     excluded, deduplicated, in order."""
@@ -378,9 +400,15 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
             logger.warning("runbook_input_not_readable name=%s kind=ip vmid=%s status=%s", n, vid, status)
             continue
         addrs = agent_ipv4s(await _read(spec, f"qm agent {vid} network-get-interfaces"))
+        how = f"qm agent {vid} network-get-interfaces"
+        if not addrs:
+            # §17.1286 — no agent: the host's neighbour table knows the NIC.
+            macs = vm_macs(await _read(spec, f"qm config {vid}"))
+            addrs = address_by_mac(await _read(spec, "ip neigh show"), macs) if macs else []
+            how = f"ip neigh, the entry for VM {vid}'s MAC"
         if not addrs:
             continue
-        names[n]["suggestions"] = [_sugg(a, runner, f"qm agent {vid} network-get-interfaces") for a in addrs[:MAX_PER_INPUT]]
+        names[n]["suggestions"] = [_sugg(a, runner, how) for a in addrs[:MAX_PER_INPUT]]
         if len(addrs) == 1:
             names[n]["value"] = addrs[0]
         logger.warning("runbook_input_discovered name=%s kind=ip vmid=%s found=%d prefilled=%s",

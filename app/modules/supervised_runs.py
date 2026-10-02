@@ -538,6 +538,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 """ + WHOSE_FAULT_HELPER + """
   'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
 - REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
+- A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address (run `nmap -sn <the bridge's /24>` first if it does not). Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
@@ -822,7 +823,11 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
             wanted.setdefault(tee.group(1), set()).update(names)
     for f in files or []:                 # §17.1274 — a file written through the channel is a script too
         path = str((f or {}).get("path") or "")
-        names = {g for m in _SCRIPT_ENV_READ.finditer(str((f or {}).get("content") or "")) for g in m.groups() if g}
+        content = str((f or {}).get("content") or "")
+        names = {g for m in _SCRIPT_ENV_READ.finditer(content) for g in m.groups() if g}
+        if path.endswith(".sh"):          # §17.1286 — a bash script reads a secret as `$NAME`
+            from app.modules.runbook_inputs import secret_name
+            names |= {m.group(1) for m in _SECRET_REF_RE.finditer(content) if secret_name(m.group(1))}
         if path and names:
             wanted.setdefault(path, set()).update(names)
     if not wanted:
@@ -842,7 +847,7 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
                 f"this runs {path}, which reads {', '.join(missing)} from its environment — and the "
                 f"runner only passes a stored value into a command that MENTIONS it, so the script "
                 f"starts with no such variable and fails. Put the reference in this command: "
-                f'`{first}="${first}" python3 {path}`. The value still never appears in the block; '
+                f'`{first}="${first}" {"bash" if path.endswith(".sh") else "python3"} {path}`. The value still never appears in the block; '
                 f"the runner expands it on the machine.")})
     return out
 
@@ -1336,7 +1341,8 @@ _GUEST_SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5}
 _GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+)\s+(\d{3,5})\b")
 
 
-def commands_never_reach_the_guest(commands: list[str], node: Optional[dict]) -> list[dict]:
+def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
+                                   files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1285 — a step ABOUT a guest whose commands all run on the host.
 
     Live, ADD82 "Install and enable QEMU Guest Agent in VM 106" drafted
@@ -1361,16 +1367,20 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict]) ->
     cmds = [str(c) for c in commands]
     if not any(not read_only_command(c) for c in cmds):
         return []                                           # reads only: nothing is installed anywhere
-    if any(_GUEST_ADDRESS_RE.search(c) or re.search(r"\bssh\b", c) for c in cmds):
+    texts = cmds + [str((f or {}).get("content") or "") for f in files or []]   # §17.1286 — a script may do the reaching
+    if any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) for t in texts):
         return []                                           # something reaches a guest, or works ON one from the host
     gid = ids[0]
     return [{"command": cmds[0], "why": (
         f"every command in this block runs in the runner's own shell on the Proxmox HOST, and the step is about "
-        f"VM/CT {gid} -- live, this installed qemu-guest-agent on the host instead of in VM 106. Reach the guest "
-        f"or do not run: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
-        f"(needs the agent) or `ssh <user>@<its address>`; a host-side operation ON the guest is `qm …/pct … {gid}`. "
-        f"If none of those is possible yet (no agent, no ssh), say so and leave the step to the operator rather "
-        f"than changing the wrong machine.")}]
+        f"VM/CT {gid} -- live, this would have installed qemu-guest-agent on the host instead of in VM 106. Reach "
+        f"the guest: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
+        f"(needs the agent) or over ssh -- and a VM WITHOUT the agent is reached by finding its address from its MAC "
+        f"(`qm config {gid}` → net0 MAC → `ip neigh show`, after `qm start {gid}` and a wait) and "
+        f"`SSHPASS=\"$MASS_PASSWORD\" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, "
+        f"as ONE bash script under ## Write these files run with `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`. "
+        f"A host-side operation ON the guest is `qm …/pct … {gid}`. The step is the operator's only when ssh itself "
+        f"is refused -- say which command refused and why.")}]
 
 
 def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -2540,6 +2550,17 @@ def file_writes_will_not_work(files: list[dict]) -> list[dict]:
             out.append({"command": what, "why": (
                 f"{size} bytes is past the {FILE_MAX_BYTES}-byte limit for a written file.")})
             continue
+        if path.endswith(".sh"):                      # §17.1286 — a bash script is checked the way python is
+            try:
+                import subprocess
+                r = subprocess.run(["bash", "-n"], input=body.encode(), capture_output=True, timeout=5)
+                if r.returncode != 0:
+                    out.append({"command": what, "why": (
+                        f"{path} is not valid bash and would fail the moment it ran: "
+                        f"{r.stderr.decode(errors='replace').strip()[:200]}")})
+                    continue
+            except Exception:                         # no bash here: nothing to say
+                pass
         if path.endswith(_COMPILED_SUFFIXES):
             try:
                 compile(body, path, "exec")
@@ -3099,7 +3120,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     # §17.1285 — a step about a guest whose commands never leave the host.
-    refused = refused + commands_never_reach_the_guest(cmds, node)
+    refused = refused + commands_never_reach_the_guest(cmds, node, shape_files)
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)

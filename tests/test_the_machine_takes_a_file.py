@@ -1254,4 +1254,4 @@ def test_the_guest_gate_is_wired_into_frame_run():
     from app.modules import supervised_runs as sr
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
-    assert "commands_never_reach_the_guest(cmds, node)" in body
+    assert "commands_never_reach_the_guest(cmds, node, shape_files)" in body, "the gate reads the files too (§17.1286)"
