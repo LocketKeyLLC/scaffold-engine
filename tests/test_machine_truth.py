@@ -347,7 +347,10 @@ async def test_after_an_os_install_is_recorded_done_the_voided_steps_are_reopene
     did = await mt.after_step_done("job", {"node_key": "ADD117", "title": PLAN_106[7]["title"]})
     assert [c[:3] for c in calls if c[0] == "reset"] == [("reset", "T23", False), ("reset", "T24", False)], calls
     assert any(c[0] == "fact" and "reinstalled the OS of guest 106" in c[2] for c in calls)
-    assert len(did) == 2 and did[0].startswith("reopened T23")
+    assert [d for d in did if d.startswith("reopened")] == ["reopened T23: Install PalWorld server (voided by ADD117)",
+                                                            "reopened T24: Configure PalWorld service (voided by ADD117)"], did
+    # §17.1329 — ADD47 is skipped, in-guest and older than the reinstall: reported, not reopened
+    assert [d for d in did if d.startswith("skips a reinstall")] and "ADD47" in did[-1]
     assert await mt.after_step_done("job", {"node_key": "ADD84", "title": "Grow the VM 106 filesystem"}) == [], "only an OS install voids anything"
     src = pathlib.Path(__import__("app.modules.supervised_runs", fromlist=["x"]).__file__).read_text(encoding="utf-8")
     assert "_mt.after_step_done(job_id, {" in src, "the run's done write calls it"
