@@ -232,15 +232,31 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
                        + (f" — {cov.get('node_key')} '{str(cov.get('title'))[:50]}' is the pending step that does" if cov
                           else (f" — {done.get('node_key')} is reopened to do it again" if done else ""))),
         })
-    # Running: the guest is stopped, yet a finished step started it (cheap; the block starts it itself).
+    # Running: the guest is stopped, yet a finished step started it. §17.1307 — the
+    # start step is REOPENED (unless this step is itself a start): live, ADD110
+    # "Start container 120" stood `done` on a runner error while `pct list` said
+    # stopped, and the block that followed (install Caddy, write the Caddyfile)
+    # would have started the container and written blind -- the §17.1302 read
+    # cannot look inside a stopped guest, so the validated Caddyfile already in
+    # it was invisible. Reopening the start puts the running state back under its
+    # own approval first; the next pause then reads the step's checks for real.
     if truth.status == "stopped" and "running" in needs:
         done = _done(_START_RE)
         if done:
+            this_is_a_start = bool(_START_RE.search(str((node or {}).get("title") or "")))
+            kind = "VM" if truth.kind == "vm" else "container"
             out.append({
                 "kind": "record_contradicted:start",
                 "evidence": f"`{'qm' if truth.kind == 'vm' else 'pct'} list`: {gid} stopped",
-                "fact": None, "reopen": None, "covered_by": None, "blocks": False,
-                "remedy": f"{done.get('node_key')} started it once; it is stopped again — the block starts it, guarded",
+                "fact": (None if this_is_a_start else
+                         f"{FACT_PREFIX}: {kind} {gid} is stopped (`{'qm' if truth.kind == 'vm' else 'pct'} list`), "
+                         f"though {done.get('node_key')} '{str(done.get('title'))[:60]}' is recorded done -- reopened"),
+                "reopen": None if this_is_a_start else str(done.get("node_key")),
+                "covered_by": None, "blocks": False,
+                "remedy": (f"{done.get('node_key')} started it once; it is stopped again — the block starts it, guarded"
+                           if this_is_a_start else
+                           f"{done.get('node_key')} started it once; it is stopped again — reopened so the start runs first "
+                           f"and this step's checks can be read inside the running guest"),
             })
     # Reachability: a VM that transmits nothing on its bridge is not up, whatever `qm list` says.
     if truth.kind == "vm" and truth.status == "running" and truth.transmits is False and truth.has_os is not False \

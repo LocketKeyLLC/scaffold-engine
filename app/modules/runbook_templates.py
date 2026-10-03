@@ -300,7 +300,10 @@ RUN_IN_CONTAINER = Template(
     name="run_in_container",
     title="Run commands inside container {GID}",
     applies=lambda node, truth: _subject_kind(node, truth) == "ct" and not _HOST_SIDE_RE.search(_text(node)),
-    params=[Param("GID", "subject"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line")],
+    params=[Param("GID", "subject"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line"),
+            # §17.1307 — parity with run_in_vm_via_agent: a check INSIDE the guest is what §17.1302 can read
+            Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the container whose output shows this step's "
+                                            "goal is met (for example `caddy validate --config /etc/caddy/Caddyfile`, `systemctl is-active caddy`)")],
     files={"/tmp/in_ct_{GID}.sh": r'''#!/usr/bin/env bash
 # Run this step's commands inside container {GID} as root.
 set -uo pipefail
@@ -316,7 +319,7 @@ pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null ||
 pct exec "$GID" -- bash /root/.scaffold_step.sh
 '''},
     run="bash /tmp/in_ct_{GID}.sh",
-    verify=["pct status {GID}"],
+    verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent)
     risk="Runs this step's commands as root inside container {GID}.",
 )
 

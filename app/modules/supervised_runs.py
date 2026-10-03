@@ -116,6 +116,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "fails before it starts",                       # §17.1213 needs-running / §17.1301
                    "'s address: the engine measured",             # §17.1303 measured address beats a written one
                    "is a placeholder, not a value",                # §17.1306
+                   "appears nowhere the engine holds",             # §17.1307
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
                    "is a container on this host, not a VM",        # §17.1213
@@ -3165,6 +3166,37 @@ _PLACEHOLDER_VALUE_RE = re.compile(
 _DOMAIN_IN_FACT_RE = re.compile(r"\b((?:[a-z0-9-]+\.)+(?:duckdns\.org|com|org|net|io|dev|xyz|me|us|cc|tv))\b", re.I)
 
 
+_EMAIL_LITERAL_RE = re.compile(r"(?<![\w.+-])([a-z0-9][\w.+-]*@(?:[a-z0-9-]+\.)+[a-z]{2,})(?![\w-])", re.I)
+
+
+def invented_email_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
+                            node: Optional[dict]) -> list[dict]:
+    """§17.1307 — an e-mail address in written content that appears in no fact,
+    no pin and not in the step's own text was made up. Live, ADD88's Caddyfile
+    opened with `email aedefruscio@defrusciohomelab.duckdns.org` -- the operator's
+    account name glued to their DuckDNS domain, a mailbox that does not exist,
+    handed to the ACME CA as the contact. A contact address is the operator's to
+    give: `<ACME_EMAIL>` on the frame, or leave the option out."""
+    held = " ".join([str(f.get("text") if isinstance(f, dict) else f) for f in ((env or {}).get("facts") or [])]
+                    + [f"{k}={v}" for k, v in ((env or {}).get("substitutions") or {}).items()]
+                    + [str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")]).lower()
+    texts = [(str(c), "command") for c in commands or []] + \
+            [(str((f or {}).get("content") or ""), str((f or {}).get("path") or "file")) for f in files or []]
+    out: list[dict] = []
+    for body, where in texts:
+        for m in _EMAIL_LITERAL_RE.finditer(body):
+            addr = m.group(1)
+            if addr.lower() in held or "$" in addr or "<" in addr:
+                continue
+            line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+            out.append({"command": (line[:200] if where == "command" else f"{where}: {line[:160]}"), "why": (
+                f"`{addr}` appears nowhere the engine holds -- not in the facts, the pins or the step -- so it was "
+                f"made up, and a contact address is the operator's to give. Write `<ACME_EMAIL>` (filled once on the "
+                f"frame) or leave the option out.")})
+            break
+    return out
+
+
 def placeholder_values_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict]) -> list[dict]:
     """§17.1306 — `admin@example.com` in a file the block writes is not a value,
     it is the model saying it had none. Live, ADD88's Caddyfile came back as
@@ -3760,6 +3792,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + targets_the_host_as_the_guest(cmds, node, env, files)
     # §17.1306 — a sample value written to disk is a config that is wrong on purpose.
     refused = refused + placeholder_values_in_files(cmds, files, env)
+    refused = refused + invented_email_in_files(cmds, files, env, node)       # §17.1307
     # §17.1288m — the held password is referenced, not asked for again; a
     # wait pings the guest, not the router. (A secret as an ARGUMENT by name,
     # `--key $TOKEN`, is the §17.1191/1193 contract and is not refused.)

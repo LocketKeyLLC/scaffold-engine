@@ -73,6 +73,32 @@ async def test_the_draw_carries_the_context_into_the_prompt(monkeypatch):
         return type("R", (), {"text": "```bash\napt-get install -y caddy\n```"})()
     monkeypatch.setattr(lr, "generate_until_nonempty", fake)
     await rt.fill_free_params(rt.RUN_IN_CONTAINER, NODE, "brief", upstream="ADD56: the 406-byte Caddyfile …", environment=ENV)
-    assert len(seen) == 1 and "ADD56: the 406-byte Caddyfile" in seen[0] and "defrusciohomelab.duckdns.org" in seen[0]
+    assert len(seen) == 2, "REMOTE_COMMANDS and VERIFY_INSIDE (§17.1307): one draw each"
+    assert all("ADD56: the 406-byte Caddyfile" in s and "defrusciohomelab.duckdns.org" in s for s in seen), "every draw sees the plan"
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     assert "upstream=upstream, environment=environment)   # §17.1306" in src, "the drafter hands the draw what it hands the model path"
+
+
+# ───── §17.1307 — an e-mail the engine holds nowhere was made up
+
+FRAME2 = json.loads((FX / "add88_frame_template2_2026_10_03.json").read_text(encoding="utf-8"))
+
+
+def test_the_live_invented_acme_email_is_refused():
+    assert "aedefruscio@defrusciohomelab.duckdns.org" in FRAME2["files"][0]["content"]
+    frame = _frame(FRAME2["runbook"])
+    hits = [r for r in frame["refused"] if "appears nowhere the engine holds" in r["why"]]
+    assert len(hits) == 1, [r["why"][:100] for r in frame["refused"]]
+    assert "aedefruscio@defrusciohomelab.duckdns.org" in hits[0]["why"] and "<ACME_EMAIL>" in hits[0]["why"]
+    assert not any("is a placeholder, not a value" in r["why"] for r in frame["refused"]), "the real domain is not a placeholder"
+    assert sr.shape_retry_note({"refused": hits, "commands": frame["commands"]}), "registered: the chain redrafts"
+
+
+def test_an_email_the_engine_holds_or_a_placeholder_passes():
+    files = [{"path": "/etc/caddy/Caddyfile", "content": "{\n  email ops@defrusciohomelab.duckdns.org\n}\n"}]
+    held = {**ENV, "facts": ENV["facts"] + ["The operator's ACME contact is ops@defrusciohomelab.duckdns.org"]}
+    assert sr.invented_email_in_files([], files, held, NODE) == []
+    assert sr.invented_email_in_files([], [{"path": "/etc/caddy/Caddyfile", "content": "{ email <ACME_EMAIL> }\n"}], ENV, NODE) == []
+    assert sr.invented_email_in_files([], [{"path": "/x", "content": 'ssh "$USER_NAME@$IP" true\n'}], ENV, NODE) == [], "a shell variable pair is not an address"
+    step = {**NODE, "description": NODE["description"] + " Use admin@homelab.example as the contact."}
+    assert sr.invented_email_in_files([], [{"path": "/x", "content": "email admin@homelab.example\n"}], ENV, step) == [], "named by the step"
