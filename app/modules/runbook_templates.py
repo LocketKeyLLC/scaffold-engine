@@ -283,12 +283,13 @@ RUN_IN_VM_VIA_AGENT = Template(
                                 and not _CONSOLE_RE.search(_text(node)) and not _BOOT_WATCH_RE.search(_text(node)),
     params=[
         Param("GID", "subject"),
+        Param("STEP", "node_key"),
         Param("REMOTE_COMMANDS", "model", "the commands to run inside the guest, as root, one per line"),
         Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the guest whose output shows this step's "
                                         "goal is met (for example `df -h /`, `systemctl is-active nginx`, `dpkg -l curl`)"),
     ],
-    files={"/tmp/in_vm_{GID}_agent.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside VM {GID} through its QEMU guest agent: no ssh, no account, no key, no address.\nset -uo pipefail\nGID={GID}\nqm status "$GID" | grep -q running || qm start "$GID"\nfor i in $(seq 1 12); do qm agent "$GID" ping >/dev/null 2>&1 && break; sleep 5; done\nqm agent "$GID" ping >/dev/null 2>&1 || { echo "FAILED: the guest agent in VM $GID did not answer within 60 s"; exit 1; }\ncat > /tmp/in_vm_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n# --timeout 110 + the 60 s agent wait stays inside the runner\'s 180 s budget for one command.\nqm guest exec "$GID" --timeout 110 --pass-stdin 1 -- bash -s < /tmp/in_vm_{GID}_remote.sh > /tmp/in_vm_{GID}_agent.out \\\n  || { cat /tmp/in_vm_{GID}_agent.out; echo "FAILED: qm guest exec $GID did not run the script"; exit 1; }\n# the agent answers JSON {exitcode, out-data, err-data}: print the guest\'s output, exit with the guest\'s code\npython3 - /tmp/in_vm_{GID}_agent.out <<\'PYJ\'\nimport json, sys\nd = json.loads(open(sys.argv[1]).read() or "{}")\nsys.stdout.write(d.get("out-data") or "")\nsys.stderr.write(d.get("err-data") or "")\nsys.exit(int(d.get("exitcode", 1)))\nPYJ\n'},
-    run="bash /tmp/in_vm_{GID}_agent.sh",
+    files={"/tmp/in_vm_{GID}_agent.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside VM {GID} through its QEMU guest agent: no ssh, no account, no key, no address.\nset -uo pipefail\nGID={GID}\nqm status "$GID" | grep -q running || qm start "$GID"\nfor i in $(seq 1 12); do qm agent "$GID" ping >/dev/null 2>&1 && break; sleep 5; done\nqm agent "$GID" ping >/dev/null 2>&1 || { echo "FAILED: the guest agent in VM $GID did not answer within 60 s"; exit 1; }\ncat > /tmp/in_vm_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { qm guest exec "$GID" --timeout 60 -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n    qm guest exec "$GID" --timeout 60 --pass-stdin 1 -- bash -c "cat > /root/.scaffold_step.sh" < /tmp/in_vm_{GID}_remote.sh >/dev/null \\\n      || { echo "FAILED: could not write the script into VM $GID through the agent"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash /root/.scaffold_step.sh" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    result="$(ginfo "systemctl show -p Result --value $UNIT" | tr -d \'[:space:]\')"\n    code="$(ginfo "systemctl show -p ExecMainStatus --value $UNIT" | tr -d \'[:space:]\')"\n    ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n    ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    if [ "$result" = "success" ] || { [ -z "$result" ] && [ "$code" = "0" ]; }; then echo "$UNIT finished (exit ${code:-0})"; exit 0; fi\n    echo "FAILED: $UNIT ended with Result=$result exit=${code:-?}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
+    run=['bash /tmp/in_vm_{GID}_agent.sh start', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh last'],   # §17.1317 — start, then wait x7, then last
     # §17.1304 — the inside check ALONE: `qm agent ping` prints nothing, and a check that cannot speak to the
     # goal is an `unknown` that keeps §17.1302 from recording an already-met step.
     verify=['qm guest exec {GID} -- bash -c "{VERIFY_INSIDE}"'],
@@ -300,25 +301,12 @@ RUN_IN_CONTAINER = Template(
     name="run_in_container",
     title="Run commands inside container {GID}",
     applies=lambda node, truth: _subject_kind(node, truth) == "ct" and not _HOST_SIDE_RE.search(_text(node)),
-    params=[Param("GID", "subject"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line"),
+    params=[Param("GID", "subject"), Param("STEP", "node_key"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line"),
             # §17.1307 — parity with run_in_vm_via_agent: a check INSIDE the guest is what §17.1302 can read
             Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the container whose output shows this step's "
                                             "goal is met (for example `caddy validate --config /etc/caddy/Caddyfile`, `systemctl is-active caddy`)")],
-    files={"/tmp/in_ct_{GID}.sh": r'''#!/usr/bin/env bash
-# Run this step's commands inside container {GID} as root.
-set -uo pipefail
-GID={GID}
-pct status "$GID" | grep -q running || pct start "$GID"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done
-cat > /tmp/in_ct_{GID}_remote.sh <<'REMOTE'
-set -e
-export DEBIAN_FRONTEND=noninteractive
-{REMOTE_COMMANDS}
-REMOTE
-pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }
-pct exec "$GID" -- bash /root/.scaffold_step.sh
-'''},
-    run="bash /tmp/in_ct_{GID}.sh",
+    files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash /root/.scaffold_step.sh" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    result="$(ginfo "systemctl show -p Result --value $UNIT" | tr -d \'[:space:]\')"\n    code="$(ginfo "systemctl show -p ExecMainStatus --value $UNIT" | tr -d \'[:space:]\')"\n    ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n    ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    if [ "$result" = "success" ] || { [ -z "$result" ] && [ "$code" = "0" ]; }; then echo "$UNIT finished (exit ${code:-0})"; exit 0; fi\n    echo "FAILED: $UNIT ended with Result=$result exit=${code:-?}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
+    run=['bash /tmp/in_ct_{GID}.sh start', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh last'],   # §17.1317
     verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent)
     risk="Runs this step's commands as root inside container {GID}.",
 )
@@ -450,6 +438,8 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
             vals[p.name] = gid
         elif p.source == "default":
             vals[p.name] = p.default
+        elif p.source == "node_key":
+            vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
         elif p.source == "truth":
             if p.name == "NEEDS_KEY":
                 vals[p.name] = "no" if getattr(truth, "key_known_by", None) else "yes"
@@ -656,6 +646,25 @@ def keep_a_copy_before_overwrites(remote_commands: str) -> str:
     return "\n".join(out)
 
 
+_STEAMCMD_RE = re.compile(r"(?P<path>(?:\S*/)?steamcmd(?:\.sh)?)\s+(?=.*\+app_update)")
+
+
+def bootstrap_steamcmd_first(remote_commands: str) -> str:
+    """§17.1317 — a fresh SteamCMD must run once (`+quit`) before an `app_update`
+    works; live, T23's first `+app_update 2394010` ended `Failed installing AppID
+    2394010 (Missing configuration)` with an empty /opt/palworld. One bootstrap
+    line before the first install, and only once."""
+    out: list[str] = []
+    done = False
+    for ln in str(remote_commands or "").split("\n"):
+        m = _STEAMCMD_RE.search(ln) if not done and not ln.lstrip().startswith("#") else None
+        if m:
+            out.append(f"{m.group('path')} +quit >/dev/null 2>&1 || true   # bootstrap: a fresh SteamCMD updates itself and exits")
+            done = True
+        out.append(ln)
+    return "\n".join(out)
+
+
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
                            environment: Optional[dict] = None, retry_note: str = "") -> dict:
     """Ask the model for the free parameters only, one short draw each
@@ -703,5 +712,5 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
         if p.name == "VERIFY_INSIDE":
             out[p.name] = fenced.split("\n", 1)[0].strip()
         else:
-            out[p.name] = keep_a_copy_before_overwrites(fenced)             # §17.1314
+            out[p.name] = bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced))   # §17.1314, §17.1317
     return out
