@@ -277,7 +277,7 @@ def test_the_rules_and_the_refusal_say_how_to_reach_a_vm_without_an_agent():
     assert 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/' in sr.CHANNEL_RULES and "ip neigh show" in sr.CHANNEL_RULES
     found = sr.commands_never_reach_the_guest(["sudo apt-get install -y qemu-guest-agent"],
                                              {"title": "Install and enable QEMU Guest Agent in VM 106"})
-    assert found and "would have installed" in found[0]["why"] and "net0 MAC" in found[0]["why"]
+    assert found and "would change the HOST instead of guest 106" in found[0]["why"] and "net0 MAC" in found[0]["why"]   # §17.1288q wording
     assert "live, this installed" not in found[0]["why"]
 
 
