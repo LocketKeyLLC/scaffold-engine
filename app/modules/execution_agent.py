@@ -2604,7 +2604,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     logger.warning("machine_truth_reconciled job=%s node=%s did=%s", job_id, run_node.get("node_key"), _did)
                     # §17.1309 — a reopened step this one now waits for is asked about FIRST:
                     # this frame would park a step whose guest the reopened one starts.
-                    if any(d.startswith("reopened ") for d in _did) and any(" now waits for " in d for d in _did) and _depth < 6:
+                    if any(" now waits for " in d for d in _did) and _depth < 6:     # §17.1309 reopen, §17.1313 insert
                         logger.warning("decision_pause_restart_after_reopen job=%s node=%s did=%s", job_id, run_node.get("node_key"), _did)
                         return await _pause_for_decision(job_id, _depth + 1)
             except Exception as exc:

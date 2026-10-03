@@ -455,3 +455,22 @@ async def test_an_exec_without_a_start_is_still_refused_and_the_order_matters():
     assert len(bare) == 1 and "fails before it starts" in bare[0]["why"]
     assert len(after) == 1, "a start AFTER the exec does not help the exec"
     assert in_file == [], "the engine's own template shape: guarded start in the script, then push + exec"
+
+
+# ───── §17.1313 — a download inside a guest that resolves nothing is refused, naming the fix
+
+@pytest.mark.asyncio
+async def test_a_download_inside_a_guest_that_cannot_resolve_is_refused_with_the_resolver_fix():
+    from app.modules.machine_truth import GuestTruth
+    t = GuestTruth(gid="120", kind="ct", status="running", resolves=False, dns_hint="192.168.1.30 1.1.1.1")
+    node = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": ""}
+    files = [{"path": "/tmp/in_ct_120.sh", "content": "GID=120\ncat > /tmp/r.sh <<'REMOTE'\napt-get update\nREMOTE\npct push \"$GID\" /tmp/r.sh /root/r.sh\npct exec \"$GID\" -- bash /root/r.sh\n"}]
+    with patch("app.modules.mcp_client.call_tool", new=_host(pct=PCT_LIST_120.replace("120        stopped", "120        running"))):
+        out = await pc.unmet(["bash /tmp/in_ct_120.sh"], _spec(), node=node, files=files, truth=t)
+        fine = await pc.unmet(["bash /tmp/in_ct_120.sh"], _spec(), node=node, files=files, truth=GuestTruth(gid="120", kind="ct", status="running", resolves=True))
+        none = await pc.unmet(["pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile"], _spec(), node=node, truth=t)
+    hits = [r for r in out if "cannot resolve names" in r["why"]]
+    assert len(hits) == 1 and 'pct set 120 --nameserver "192.168.1.30 1.1.1.1"' in hits[0]["why"] and "apt-get update" in hits[0]["command"]
+    from app.modules.supervised_runs import shape_retry_note
+    assert shape_retry_note({"refused": hits, "commands": ["bash /tmp/in_ct_120.sh"]}), "registered"
+    assert not any("cannot resolve names" in r["why"] for r in fine + none), "a resolving guest, or a block that downloads nothing, is fine"

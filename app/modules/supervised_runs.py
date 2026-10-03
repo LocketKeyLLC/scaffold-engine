@@ -118,6 +118,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is a placeholder, not a value",                # §17.1306
                    "appears nowhere the engine holds",             # §17.1307
                    "appears in nothing the engine holds",          # §17.1312
+                   "cannot resolve names",                         # §17.1313
                    "content cut",                                  # §17.1312 (the template draw was cut twice)
                    "ends inside a heredoc",                        # §17.1310
                    "nothing has put this host's key on guest",     # §17.1288g
