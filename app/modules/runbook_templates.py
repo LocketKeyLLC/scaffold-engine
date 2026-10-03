@@ -29,7 +29,12 @@ logger = logging.getLogger("scaffold")
 
 TEMPLATE_MARK = "<!-- runbook-template:"
 _TEMPLATE_MARK_RE = re.compile(r"<!-- runbook-template: ([a-z_]+) -->")
-_INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|operating system|os\b|server \d\d\.\d\d)", re.I)
+#: §17.1297 — the OS install is the VERB and the OS within one short span ("Install Ubuntu 22.04 on VM 106",
+#: "install an operating system"), not any step whose text has "install" somewhere and "Ubuntu" elsewhere:
+#: ADD65 "Verify QEMU Guest Agent responds on VM 106" was templated as an OS install.
+_INSTALL_OS_RE = re.compile(
+    r"\b(?:re)?install(?:ing|ed)?\s+(?:the\s+|an?\s+|a\s+fresh\s+)?(?:ubuntu|debian|operating system|os\b|cloud image|"
+    r"ubuntu server \d\d\.\d\d|server \d\d\.\d\d)", re.I)
 #: host-side work ON a guest — the drafter's normal path handles these (a `qm set`, a resize, a start)
 _HOST_SIDE_RE = re.compile(
     r"\b(?:resize|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"

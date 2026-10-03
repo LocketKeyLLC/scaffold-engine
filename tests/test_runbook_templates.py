@@ -251,3 +251,16 @@ def test_the_wait_parses_nmaps_report_the_way_the_live_host_prints_it():
     assert out == "192.168.1.106", out
     out2 = subprocess.run(["awk", "-v", "m=0c:62:a6:77:7e:11", awk], input=report, capture_output=True, text=True).stdout.strip()
     assert out2 == "192.168.1.211", "a named host's ip is the parenthesised one"
+
+
+# ───── §17.1297 — the install intent is the OS, not the word
+
+def test_a_step_that_mentions_installing_the_agent_on_ubuntu_is_not_an_os_install():
+    add65 = {"node_key": "ADD65", "title": "Verify QEMU Guest Agent responds on VM 106",
+             "description": "ADD82 installs qemu-guest-agent inside the Ubuntu guest (VM 106); confirm `qm agent 106 ping` answers from the host."}
+    assert rt.intent_of(add65) != "install_os_cloudinit"
+    assert rt.select_template(add65, _truth("vm")) is not rt.INSTALL_OS_CLOUDINIT
+    assert rt.intent_of(ADD117) == "install_os_cloudinit"
+    assert rt.intent_of({"node_key": "X", "title": "Install Ubuntu Server 22.04 on VM 106", "description": ""}) == "install_os_cloudinit"
+    assert rt.intent_of({"node_key": "X", "title": "Reinstall the operating system on VM 106", "description": ""}) == "install_os_cloudinit"
+    assert rt.intent_of(ADD82) == "guest_work"
