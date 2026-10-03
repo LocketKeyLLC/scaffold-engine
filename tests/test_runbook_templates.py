@@ -314,7 +314,7 @@ def test_the_agent_template_reaches_the_guest_without_ssh_account_key_or_address
     assert 'sys.exit(int(d.get("exitcode", 1)))' in body, "the guest's exit code is the command's exit code"
     frame = _frame(rb, ADD84)
     assert frame["commands"] == ["bash /tmp/in_vm_106_agent.sh"]
-    assert frame["verify"][0] == 'qm guest exec 106 -- bash -c "df -h /"', "the verify runs INSIDE the guest, so §17.1302 can read it"
+    assert frame["verify"] == ['qm guest exec 106 -- bash -c "df -h /"'], "the verify runs INSIDE the guest, alone, so §17.1302 can read it (§17.1304)"
     assert sr.verify_commands(rb) == frame["verify"], "both checks are read-only through the wrapper"
 
 
@@ -332,3 +332,16 @@ async def test_the_model_fills_each_free_parameter_once_and_the_check_is_one_lin
     vals = await rt.fill_free_params(rt.RUN_IN_VM_VIA_AGENT, ADD84, "brief")
     assert vals == {"REMOTE_COMMANDS": "growpart /dev/sda 1\nresize2fs /dev/sda1", "VERIFY_INSIDE": "df -h /"}
     assert len(drawn) == 2 and drawn[1][0] is rt.FREE_PARAM_SYSTEM_VERIFY and "READ-ONLY" in drawn[1][0]
+
+
+# ───── §17.1304 — resize is a word, not a task
+
+def test_resize2fs_inside_the_guest_is_not_host_side_work():
+    """Live, ADD84's text ("growpart + resize2fs … inside the guest") matched the
+    bare `resize` and lost the agent template to the model path."""
+    assert not rt._HOST_SIDE_RE.search(ADD84["title"] + " " + ADD84["description"])
+    assert rt.select_template(ADD84, _truth("vm", agent=True)) is rt.RUN_IN_VM_VIA_AGENT
+    assert rt.intent_of(ADD84) == "guest_work"
+    for host_side in ("Resize VM 106's disk to 100G", "qm resize 106 scsi0 +50G on the host", "Grow the VM 106 disk",
+                      "Re-attach VM 106's detached disk and grow it to 100G"):
+        assert rt._HOST_SIDE_RE.search(host_side), host_side

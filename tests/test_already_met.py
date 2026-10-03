@@ -190,3 +190,33 @@ async def test_the_drop_path_can_now_confirm_from_the_runbooks_own_expectations(
         verdicts = await sr._verify_verdicts("Configure VM 100", ["qm status 100"], "== V1 ==\nstatus: running\n",
                                              expects={"qm status 100": "status: running"})
     assert [v["verdict"] for v in verdicts] == ["confirmed"]
+
+
+# ───── §17.1304 — the guest agent's JSON is unwrapped before anyone reads it
+
+RAW_QM_JSON = (FX / "live_truth_2026_10_02" / "qm_guest_exec_df_raw_2026_10_03.json").read_text(encoding="utf-8")
+
+
+def test_the_agents_json_is_unwrapped_for_a_guest_exec_and_nothing_else():
+    from app.modules.assist_local_runner import unwrap_guest_exec
+    out = unwrap_guest_exec("qm guest exec 106 -- bash -c 'df -h /'", RAW_QM_JSON)
+    assert out.startswith("Filesystem") and "/dev/sda1        97G" in out and "exitcode" not in out
+    assert unwrap_guest_exec("df -h /", RAW_QM_JSON) == RAW_QM_JSON, "a host command's JSON is its own output"
+    assert unwrap_guest_exec("qm guest exec 106 -- true", "not json") == "not json"
+    failed = unwrap_guest_exec("qm guest exec 106 -- growpart /dev/sda 1",
+                               '{"exitcode": 1, "exited": 1, "out-data": "NOCHANGE: partition 1 is size 209711071.\\n"}')
+    assert "NOCHANGE" in failed and "(guest exit code 1)" in failed
+
+
+@pytest.mark.asyncio
+async def test_run_probes_hands_the_judge_the_guests_text(monkeypatch):
+    from app.modules import assist_local_runner as lr
+    import app.modules.mcp_client as mc
+
+    async def fake_call(spec, tool, args):
+        r = MagicMock(); r.structured = None; r.is_error = False; r.text = RAW_QM_JSON
+        return r
+    monkeypatch.setattr(mc, "call_tool", fake_call)
+    pasted, ran = await lr.run_probes(_spec(), [{"id": "V1", "command": "qm guest exec 106 -- bash -c 'df -h /'"}])
+    assert pasted.startswith("== V1 ==\nFilesystem") and ran[0]["ran"] is True
+    assert "exitcode" not in pasted

@@ -1,0 +1,5 @@
+{
+   "exitcode" : 0,
+   "exited" : 1,
+   "out-data" : "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        97G  2.3G   95G   3% /\n"
+}
