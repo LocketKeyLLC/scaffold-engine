@@ -595,6 +595,20 @@ def strip_guest_wrappers(text: str) -> str:
     return "\n".join(out)
 
 
+class ContentCut(RuntimeError):
+    """§17.1312 — the model's content for a free parameter was cut mid-line (its
+    fence never closed) twice, at the normal cap and at three times it."""
+
+
+def content_is_cut(raw_text: str) -> bool:
+    """An opening fence with no closing fence is a draw that ran out of tokens.
+    Live, ADD100's 139-line server.js ended `const runRes = await axios.post(
+    SCAFFOLD_ENGINE_URL` -- the template closed its own heredoc after it, every
+    gate passed, and the file would have replaced a working backend with
+    half a program."""
+    return str(raw_text or "").count("```") % 2 == 1
+
+
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
                            environment: Optional[dict] = None, retry_note: str = "") -> dict:
     """Ask the model for the free parameters only, one short draw each
@@ -615,16 +629,29 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     note = (f"THE PREVIOUS ATTEMPT WAS REFUSED BY THE ENGINE'S GATE -- fix exactly this and keep everything else:\n"
             f"{str(retry_note).strip()[:2500]}\n\n") if str(retry_note or "").strip() else ""
     out: dict[str, str] = {}
+    base_cap = min(1500, int(getattr(settings, "node_generation_max_tokens", 1500) or 1500))
     for p in free:
         prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n{context}{note}"
                   f"Write the {p.hint} for this step.")
-        resp = await generate_until_nonempty(
-            model_router.generate, prompt, {"role": "model_general", "think": False},
-            system=(FREE_PARAM_SYSTEM_VERIFY if p.name == "VERIFY_INSIDE" else FREE_PARAM_SYSTEM), temperature=0.1,
-            max_tokens=min(1500, int(getattr(settings, "node_generation_max_tokens", 1500) or 1500)),
-            draws=2, label=f"template {template.name} {node.get('node_key')} {p.name}",
-        )
-        text = (getattr(resp, "text", "") or "").strip()
+        text = ""
+        # §17.1312 — a draw whose fence never closes was cut by the cap; try once
+        # more at three times the cap, then refuse rather than ship half a file.
+        for cap in (base_cap, base_cap * 3):
+            resp = await generate_until_nonempty(
+                model_router.generate, prompt, {"role": "model_general", "think": False},
+                system=(FREE_PARAM_SYSTEM_VERIFY if p.name == "VERIFY_INSIDE" else FREE_PARAM_SYSTEM), temperature=0.1,
+                max_tokens=cap,
+                draws=2, label=f"template {template.name} {node.get('node_key')} {p.name}",
+            )
+            text = (getattr(resp, "text", "") or "").strip()
+            if not content_is_cut(text):
+                break
+            logger.warning("template_param_cut template=%s node=%s param=%s cap=%d chars=%d", template.name,
+                           node.get("node_key"), p.name, cap, len(text))
+        else:
+            raise ContentCut(f"the model's {p.name} for {node.get('node_key')} was cut mid-line at {base_cap * 3} tokens "
+                             f"({len(text)} chars): the step's content is too large for one draw -- split the step, or write the "
+                             f"file in parts")
         fenced = strip_guest_wrappers(model_fence(text))                     # §17.1311
         out[p.name] = fenced.split("\n", 1)[0].strip() if p.name == "VERIFY_INSIDE" else fenced
     return out

@@ -31,7 +31,8 @@ def _truth(kind, agent=False, key=None):
 
 def _frame(runbook, node):
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
-    return sr.frame_run(node, runbook, spec, POLICY, env=ENV)
+    # §17.1312 — the gate compares every written address with the ledger; the live ledger pins PALWORLD_IP
+    return sr.frame_run(node, runbook, spec, POLICY, env={**ENV, "substitutions": {"PALWORLD_IP": "192.168.1.106", **(ENV.get("substitutions") or {})}})
 
 
 def test_every_template_passes_every_gate():

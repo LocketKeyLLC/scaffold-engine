@@ -117,6 +117,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "'s address: the engine measured",             # §17.1303 measured address beats a written one
                    "is a placeholder, not a value",                # §17.1306
                    "appears nowhere the engine holds",             # §17.1307
+                   "appears in nothing the engine holds",          # §17.1312
+                   "content cut",                                  # §17.1312 (the template draw was cut twice)
                    "ends inside a heredoc",                        # §17.1310
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
@@ -2534,6 +2536,12 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                 return rendered
         except Exception as exc:
             logger.warning("runbook_template_failed node=%s err=%r", node.get("node_key"), exc)
+            # §17.1312 — content cut twice is not a reason to hand the step to the
+            # model path (which would write the same half-file without a template
+            # around it): say so in a runbook the frame refuses and the operator reads.
+            if type(exc).__name__ == "ContentCut":
+                return ("<!-- runbook-cut -->\n## Why this cannot run yet\n\n"
+                        f"{exc}\n\n## Run this\n\n```bash\necho \"content cut\"\n```\n")
     prompt = build_base_prompt(node, b, environment)
     # §17.1222 — a value the operator already gave once must never be asked for
     # again. The store, the `$NAME` reference and the out-of-band delivery all
@@ -3257,6 +3265,48 @@ def invented_email_in_files(commands: list[str], files: Optional[list[dict]], en
     return out
 
 
+_IPV4_LITERAL_RE = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])")
+_UNSOURCED_SKIP = {"0.0.0.0", "127.0.0.1", "255.255.255.0", "255.255.0.0", "255.0.0.0", "8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9"}
+
+
+def unsourced_addresses_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
+                                 node: Optional[dict], upstream: str = "") -> list[dict]:
+    """§17.1312 — an IPv4 literal written into a file or a command must appear in
+    something the engine holds: a fact, a pin, the system map, the step's own
+    text, or an upstream output. Live, ADD100's server.js said Pi-hole is
+    `192.168.1.130` (the container's ID, not an address) and the engine is at
+    `192.168.1.110:8080`; ADD88's Caddyfile sent Jellyfin to `192.168.1.101`.
+    Every gate was green. A value with no source is the model's guess, and a
+    guess written into a config is wrong on purpose."""
+    e = env or {}
+    if not (e.get("facts") or e.get("substitutions") or e.get("system_state")):
+        return []                       # no ledger to compare against: blindness invents nothing
+    held = (json.dumps(e, default=str) + " " + str(upstream or "") + " "
+            + " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))
+    held_ips = set(_IPV4_LITERAL_RE.findall(held))
+    texts = [(str(c), "command") for c in commands or []] + \
+            [(str((f or {}).get("content") or ""), str((f or {}).get("path") or "file")) for f in files or []]
+    out: list[dict] = []
+    for body, where in texts:
+        missing = []
+        for ip in dict.fromkeys(_IPV4_LITERAL_RE.findall(body)):
+            # a `.1` is the subnet's router by convention (the engine's own templates default the
+            # gateway to it); a `.0`/`.255` is a network or broadcast; the rest need a source
+            if ip in held_ips or ip in _UNSOURCED_SKIP or ip.rsplit(".", 1)[1] in ("0", "1", "255"):
+                continue
+            missing.append(ip)
+        if not missing:
+            continue
+        first = missing[0]
+        line = body[body.rfind("\n", 0, body.find(first)) + 1:].split("\n", 1)[0].strip()
+        out.append({"command": (line[:200] if where == "command" else f"{where}: {line[:160]}"), "why": (
+            f"`{'`, `'.join(missing[:4])}` appears in nothing the engine holds -- no fact, pin, system map entry, "
+            f"step text or earlier output names {'it' if len(missing) == 1 else 'them'} -- so {'it is' if len(missing) == 1 else 'they are'} "
+            f"a guess written into {where if where != 'command' else 'the command'}. Use an address the facts or pins hold, "
+            f"read it off the machine first (`pct exec N -- hostname -I`, `ip neigh`), or write a `<NAME_IP>` the operator fills.")})
+    return out
+
+
 def placeholder_values_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict]) -> list[dict]:
     """§17.1306 — `admin@example.com` in a file the block writes is not a value,
     it is the model saying it had none. Live, ADD88's Caddyfile came back as
@@ -3753,7 +3803,7 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 
 
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
-              preconditions: Optional[list[dict]] = None) -> dict:
+              preconditions: Optional[list[dict]] = None, upstream: str = "") -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -3812,6 +3862,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _secret_files = secrets_in_files(files, inputs)
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     refused = list(refused) + list(preconditions or [])      # §17.1213
+    # §17.1312 — the drafter said the template's content was cut twice; the frame says it
+    # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
+    if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
+        _why = " ".join(_section(runbook, "Why this cannot run yet").split())[:400]
+        refused = refused + [{"command": (cmds[0] if cmds else "(content cut)"), "why": f"content cut: {_why}"}]
     # §17.1234 — a write that cannot report an HTTP error is a SHAPE problem the
     # engine made, so it joins the gate's refusals and the §17.1196 redraft gets
     # a chance to fix it before the operator ever sees the block.
@@ -3853,6 +3908,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1306 — a sample value written to disk is a config that is wrong on purpose.
     refused = refused + placeholder_values_in_files(cmds, files, env)
     refused = refused + invented_email_in_files(cmds, files, env, node)       # §17.1307
+    refused = refused + unsourced_addresses_in_files(cmds, files, env, node, upstream)   # §17.1312
     # §17.1288m — the held password is referenced, not asked for again; a
     # wait pings the guest, not the router. (A secret as an ARGUMENT by name,
     # `--key $TOKEN`, is the §17.1191/1193 contract and is not refused.)
