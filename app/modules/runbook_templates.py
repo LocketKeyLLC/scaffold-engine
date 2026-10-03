@@ -543,8 +543,10 @@ def plan_context(upstream: str = "", environment: Optional[dict] = None) -> str:
 
 FREE_PARAM_SYSTEM_VERIFY = (
     "You fill ONE parameter of a fixed, already-approved script: a single READ-ONLY command that runs inside a "
-    "guest machine and whose output shows whether this step's goal is already met (df, ls, cat, systemctl "
-    "is-active, dpkg -l, ss, ip). Output exactly one ```bash fence containing that one command and nothing else: "
+    "guest machine and whose output shows whether THIS step's goal is already met (df, ls, cat, systemctl "
+    "is-active, dpkg -l, ss, ip). Check what this step itself leaves behind: for an install, the binary, "
+    "directory or file it installs (`ls -la /opt/palworld/PalServer.sh`), not a service a later step creates. "
+    "Output exactly one ```bash fence containing that one command and nothing else: "
     "no sudo, no writes, no pipes to files, no placeholders, no comments."
 )
 
@@ -681,6 +683,21 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     # 17-line content … five handle_path blocks" came back as a stub with
     # `admin@example.com` and `:80 { respond … }`. Same reader, same evidence.
     context = plan_context(upstream, environment)
+    # §17.1318 — parity with the model path, the rest of it: what the LAST attempt at
+    # this step ran and why it stopped (§17.1247 `attempt_feedback`, recovered from the
+    # pre-image after a reset), and the step's research (§17.1262). Live, T23's agent
+    # draft installed Ubuntu's `steamcmd` package and never downloaded the game: the
+    # draw had the title "Install PalWorld server", an empty description, and nothing
+    # about the ssh attempt an hour earlier that had the method right (SteamCMD app
+    # 2394010) and failed on the first-run quirk.
+    try:
+        from app.modules import supervised_runs as _sr
+        prior = _sr.attempt_feedback(node) or ""
+        research = await _sr.research_for_step(node, environment) if environment is not None else ""
+    except Exception as exc:                             # fail-soft: the draw without them is the old behaviour
+        logger.warning("template_draw_context_failed node=%s err=%r", node.get("node_key"), exc)
+        prior, research = "", ""
+    context = context + (prior.strip() + "\n\n" if prior.strip() else "") + (research.strip() + "\n\n" if research.strip() else "")
     # §17.1308 — the previous attempt's refusal, quoted back: fix exactly that, keep the rest.
     note = (f"THE PREVIOUS ATTEMPT WAS REFUSED BY THE ENGINE'S GATE -- fix exactly this and keep everything else:\n"
             f"{str(retry_note).strip()[:2500]}\n\n") if str(retry_note or "").strip() else ""

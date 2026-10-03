@@ -499,3 +499,44 @@ def test_steamcmd_bootstraps_once_before_the_first_install():
     assert sum(1 for l in out if "+quit >/dev/null" in l) == 1, "once"
     assert out[2].startswith("/opt/steamcmd/steamcmd.sh +force_install_dir")
     assert rt.bootstrap_steamcmd_first("apt-get update") == "apt-get update"
+
+
+# ───── §17.1318 — the draw reads the last attempt and the research
+
+@pytest.mark.asyncio
+async def test_the_draw_carries_the_last_attempt_and_the_research(monkeypatch):
+    import app.utils.llm_retry as lr
+    seen = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        seen.append((system, prompt))
+        return type("R", (), {"text": "```bash\n/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+
+    async def fake_research(node, environment=None):
+        return "RESEARCH (current): Palworld dedicated server = SteamCMD app 2394010; needs lib32gcc-s1."
+    monkeypatch.setattr(sr, "research_for_step", fake_research)
+    node = {"node_key": "T23", "title": "Install PalWorld server", "description": "",
+            "last_verification_reason": "supervised run stopped — `ssh … steamcmd.sh … +app_update 2394010` exited 8",
+            "output_text": "## Executed on pve-runner\n$ ssh -o BatchMode=yes aedefruscio@192.168.1.106 \"sudo -S -p '' bash -c '/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit'\"\nFailed installing AppID 2394010 (Missing configuration)\n"}
+    vals = await rt.fill_free_params(rt.RUN_IN_VM_VIA_AGENT, node, "brief", upstream="", environment={"profile": "root@pve", "facts": []})
+    assert vals["REMOTE_COMMANDS"].splitlines()[0].startswith("/opt/steamcmd/steamcmd.sh +quit"), "§17.1317 bootstrap still first"
+    prompt = seen[0][1]
+    assert "exited 8" in prompt and "app_update 2394010" in prompt, "the last attempt, what it ran and why it stopped"
+    assert "RESEARCH (current)" in prompt, "the step's research"
+    assert "not a service a later step creates" in rt.FREE_PARAM_SYSTEM_VERIFY
+
+
+@pytest.mark.asyncio
+async def test_a_failed_research_or_feedback_leaves_the_draw_as_it_was(monkeypatch):
+    import app.utils.llm_retry as lr
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        return type("R", (), {"text": "```bash\napt-get install -y curl\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+
+    async def boom(node, environment=None):
+        raise RuntimeError("search down")
+    monkeypatch.setattr(sr, "research_for_step", boom)
+    vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, ADD100, "brief", environment={"profile": "x"})
+    assert vals["REMOTE_COMMANDS"] == "apt-get install -y curl"
