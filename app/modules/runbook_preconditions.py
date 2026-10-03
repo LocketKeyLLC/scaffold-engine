@@ -42,7 +42,9 @@ _PCT_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)", re.M)
 _QM_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", re.M)
 
 #: Verbs that need the guest actually RUNNING, not merely defined.
-_NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull"})
+#: §17.1300 — `reboot` too: live, ADD68's block ran `pct reboot 111` on a STOPPED container (a stopped
+#: guest cannot reboot; `pct start` is the verb). `shutdown`/`stop` on a stopped guest are §17.1240's.
+_NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull", "reboot"})
 
 #: §17.1240 — verbs whose job is ALREADY DONE, which is not the same as working.
 #: `pct start` on a running container exits non-zero ("already running"), so a
@@ -326,10 +328,14 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             status = cts.get(gid) if is_ct else vms.get(gid)
             if status and status != "running":
                 fix = _step_that_starts(gid, plan)
-                out.append({"command": cmd, "why": (
-                    f"{'container' if is_ct else 'VM'} {gid} is {status}, so `{tool} {verb}` fails before it starts."
-                    + (f" {fix} is the step that starts it, and it has not run yet." if fix
-                       else f" Start it first (`{tool} start {gid}`)."))})
+                kind = "container" if is_ct else "VM"
+                if verb == "reboot":
+                    tail = f" A stopped guest cannot reboot: write `{tool} start {gid}` instead, which also applies the new config."
+                elif fix:
+                    tail = f" {fix} is the step that starts it, and it has not run yet."
+                else:
+                    tail = f" Start it first (`{tool} start {gid}`)."
+                out.append({"command": cmd, "why": f"{kind} {gid} is {status}, so `{tool} {verb}` fails before it starts." + tail})
         elif verb in _ALREADY:
             status = cts.get(gid) if is_ct else vms.get(gid)
             if status and status == _ALREADY[verb] and not _guarded(cmd, tool, verb, gid):
