@@ -517,6 +517,13 @@ def model_fence(text: str) -> str:
     out = []
     for ln in body.split("\n"):
         ln = re.sub(r"^\s*\$\s+", "", ln.rstrip())
+        # §17.1310 — a fence marker is never content. Live, ADD100's draw opened a
+        # second fence the regex did not pair; the raw text kept a "```bash" line,
+        # the template wrote it INTO the script's fenced block, `file_writes` closed
+        # the file there (9 of 29 lines), bash warned "here-document … delimited by
+        # end-of-file", exited 0, and the step was recorded done having done nothing.
+        if ln.strip().startswith("```"):
+            continue
         if ln.strip() and not ln.strip().startswith("#"):
             out.append(ln)
     return "\n".join(out)
