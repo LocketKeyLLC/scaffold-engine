@@ -519,6 +519,26 @@ def model_fence(text: str) -> str:
     return "\n".join(out)
 
 
+def plan_context(upstream: str = "", environment: Optional[dict] = None) -> str:
+    """§17.1306 — what earlier steps established and what the facts/pins say,
+    for the free-parameter draw. Capped; secrets travel by name only, and the
+    environment holds none (the runner's store does)."""
+    parts: list[str] = []
+    up = str(upstream or "").strip()
+    if up:
+        parts.append("WHAT EARLIER STEPS ESTABLISHED (reproduce content they specify; do not invent substitutes):\n" + up[:6000])
+    env = environment or {}
+    facts = [str(f.get("text") if isinstance(f, dict) else f) for f in (env.get("facts") or [])]
+    facts = [f.strip() for f in facts if f and f.strip()][:40]
+    if facts:
+        parts.append("KNOWN FACTS ABOUT THIS SYSTEM:\n" + "\n".join(f"- {f[:220]}" for f in facts))
+    subs = env.get("substitutions") or {}
+    if isinstance(subs, dict) and subs:
+        parts.append("PINNED VALUES (use these, never a placeholder like example.com):\n"
+                     + "\n".join(f"- {k} = {v}" for k, v in list(subs.items())[:40]))
+    return ("\n\n".join(parts) + "\n\n") if parts else ""
+
+
 FREE_PARAM_SYSTEM_VERIFY = (
     "You fill ONE parameter of a fixed, already-approved script: a single READ-ONLY command that runs inside a "
     "guest machine and whose output shows whether this step's goal is already met (df, ls, cat, systemctl "
@@ -532,11 +552,16 @@ FREE_PARAM_SYSTEM = (
     "nothing else: no sudo prefix (they already run as root), no prompts (apt-get with -y, "
     "DEBIAN_FRONTEND is set), no placeholders, no comments, no explanations outside the fence. "
     "Package installs and service enables are the usual content; do not start, stop, resize or "
-    "reconfigure the VM or container itself -- that is the host's business and the script's."
+    "reconfigure the VM or container itself -- that is the host's business and the script's. "
+    "Content the step specifies (a config file, a unit, a key) is reproduced from what earlier steps and "
+    "the facts established -- never a stand-in such as example.com, admin@example.com or a sample site: "
+    "a value you do not have is a <NAME> placeholder the operator fills. A config file written whole begins "
+    "with a truncating write (tee FILE <<'EOF'); only your own later blocks append with tee -a."
 )
 
 
-async def fill_free_params(template: Template, node: dict, brief_text: str) -> dict:
+async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
+                           environment: Optional[dict] = None) -> dict:
     """Ask the model for the free parameters only, one short draw each
     (§17.1303: REMOTE_COMMANDS, and for the agent template the ONE read-only
     check inside the guest that shows the goal met)."""
@@ -546,9 +571,14 @@ async def fill_free_params(template: Template, node: dict, brief_text: str) -> d
     from app import model_router                    # §17.1290b — live: importing it from app.modules was an ImportError
     from app.config import settings
     from app.utils.llm_retry import generate_until_nonempty
+    # §17.1306 — the model path's prompt carries the upstream outputs and the
+    # facts; the template draw carried neither, so ADD88's "Caddyfile with the
+    # 17-line content … five handle_path blocks" came back as a stub with
+    # `admin@example.com` and `:80 { respond … }`. Same reader, same evidence.
+    context = plan_context(upstream, environment)
     out: dict[str, str] = {}
     for p in free:
-        prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n"
+        prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n{context}"
                   f"Write the {p.hint} for this step.")
         resp = await generate_until_nonempty(
             model_router.generate, prompt, {"role": "model_general", "think": False},

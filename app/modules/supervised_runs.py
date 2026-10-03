@@ -115,6 +115,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is stopped (`",                                # §17.1288f / §17.1213
                    "fails before it starts",                       # §17.1213 needs-running / §17.1301
                    "'s address: the engine measured",             # §17.1303 measured address beats a written one
+                   "is a placeholder, not a value",                # §17.1306
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
                    "is a container on this host, not a VM",        # §17.1213
@@ -2499,7 +2500,8 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
             from app.modules import runbook_templates as rt
             tpl = rt.select_template(node, truth)
             if tpl is not None:
-                model_vals = await rt.fill_free_params(tpl, node, str(b if isinstance(b, str) else json.dumps(b, default=str)))
+                model_vals = await rt.fill_free_params(tpl, node, str(b if isinstance(b, str) else json.dumps(b, default=str)),
+                                                       upstream=upstream, environment=environment)   # §17.1306
                 rendered = rt.render(tpl, rt.values_for(tpl, node, truth, environment, model_vals))
                 logger.warning("runbook_from_template node=%s template=%s chars=%d", node.get("node_key"), tpl.name, len(rendered))
                 return rendered
@@ -3155,6 +3157,46 @@ def reads_the_address_and_asks_for_it(commands: list[str], files: Optional[list[
 _TARGETED_RE = re.compile(r"\b(?:ping|ssh|ssh-copy-id|scp|sftp|nc|curl|wget)\b[^\n|;&]*?(?:[\w.-]+@)?((?:\d{1,3}\.){3}\d{1,3})\b")
 
 
+#: §17.1306 — sample values a model writes when it has no real one.
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"(?<![\w.-])(?:[\w.+-]+@)?(?:example|yourdomain|your-domain|mydomain|my-domain|changeme|change-me|placeholder)"
+    r"\.(?:com|org|net|local|test)\b|\b(?:CHANGE_?ME|changeme|YOUR_(?:DOMAIN|EMAIL|PASSWORD|TOKEN|API_KEY|HOST))\b"
+    r"|\byour-?(?:domain|email|password)\.?(?:here)?\b|\bsome\.?domain\.(?:com|org)\b", re.I)
+_DOMAIN_IN_FACT_RE = re.compile(r"\b((?:[a-z0-9-]+\.)+(?:duckdns\.org|com|org|net|io|dev|xyz|me|us|cc|tv))\b", re.I)
+
+
+def placeholder_values_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict]) -> list[dict]:
+    """§17.1306 — `admin@example.com` in a file the block writes is not a value,
+    it is the model saying it had none. Live, ADD88's Caddyfile came back as
+    `{ email admin@example.com } :80 { respond "Caddy is running" }` while the
+    facts named `defrusciohomelab.duckdns.org` and the step named five
+    reverse-proxy blocks. A placeholder written to disk is a config that is
+    wrong on purpose; the honest forms are the real value or a `<NAME>` the
+    operator fills on the frame."""
+    texts = [(str(c), "command") for c in commands or []] + \
+            [(str((f or {}).get("content") or ""), str((f or {}).get("path") or "file")) for f in files or []]
+    facts = [str(f.get("text") if isinstance(f, dict) else f) for f in ((env or {}).get("facts") or [])]
+    known = []
+    for f in facts:
+        for m in _DOMAIN_IN_FACT_RE.finditer(f):
+            d = m.group(1).lower()
+            if "example." not in d and d not in known:
+                known.append(d)
+    known.sort(key=lambda d: (0 if d.endswith("duckdns.org") else 1, d))
+    out: list[dict] = []
+    for body, where in texts:
+        m = _PLACEHOLDER_VALUE_RE.search(body)
+        if not m:
+            continue
+        line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+        hint = (f" The facts name `{known[0]}`; use it." if known else
+                " Nothing the engine holds names one: write `<DOMAIN>` (or the value's own <NAME>) and the operator fills it on the frame.")
+        out.append({"command": (line[:200] if where == "command" else f"{where}: {line[:160]}"), "why": (
+            f"`{m.group(0)}` is a placeholder, not a value: written to {where if where != 'command' else 'the command'} it "
+            f"becomes a config that is wrong on purpose and a step recorded done for it." + hint)})
+    return out
+
+
 def targets_the_host_as_the_guest(commands: list[str], node: Optional[dict], env: Optional[dict],
                                   files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288l — on a step about a guest, a ping/ssh/ssh-copy-id aimed at the
@@ -3716,6 +3758,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # address is not the guest's.
     refused = refused + reads_the_address_and_asks_for_it(cmds, files)
     refused = refused + targets_the_host_as_the_guest(cmds, node, env, files)
+    # §17.1306 — a sample value written to disk is a config that is wrong on purpose.
+    refused = refused + placeholder_values_in_files(cmds, files, env)
     # §17.1288m — the held password is referenced, not asked for again; a
     # wait pings the guest, not the router. (A secret as an ARGUMENT by name,
     # `--key $TOKEN`, is the §17.1191/1193 contract and is not refused.)
