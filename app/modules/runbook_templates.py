@@ -38,6 +38,8 @@ _HOST_SIDE_RE = re.compile(
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 #: §17.1291 — a step about the guest's CONSOLE is host-side work on its serial socket, not an ssh
 _CONSOLE_RE = re.compile(r"\b(?:serial console|console|serial0|socat|qemu-server/\d+\.serial)\b", re.I)
+#: §17.1292 — "capture the boot", "boot log", "reset … console": the console WHILE the guest boots
+_BOOT_WATCH_RE = re.compile(r"\b(?:boot (?:log|console|messages)|capture .{0,40}boot|watch .{0,40}boot|reset .{0,60}console)\b", re.I)
 _FENCE_RE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
 
 
@@ -273,7 +275,8 @@ pct exec "$GID" -- bash /root/.scaffold_step.sh
 READ_GUEST_CONSOLE = Template(
     name="read_guest_console",
     title="Read VM {GID}'s serial console",
-    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_CONSOLE_RE.search(_text(node))),
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_CONSOLE_RE.search(_text(node)))
+                                and not _BOOT_WATCH_RE.search(_text(node)),
     params=[Param("GID", "subject")],
     files={},
     # §17.1291 — one newline in (harmless at a login prompt or a boot log), six seconds of the screen out.
@@ -285,7 +288,34 @@ READ_GUEST_CONSOLE = Template(
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, READ_GUEST_CONSOLE, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+WATCH_GUEST_BOOT = Template(
+    name="watch_guest_boot",
+    title="Reset VM {GID} and capture its boot on the serial console",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_BOOT_WATCH_RE.search(_text(node))),
+    params=[Param("GID", "subject"), Param("SECONDS_TO_WATCH", "default", default="140")],
+    files={"/tmp/watch_boot_{GID}.sh": r"""#!/usr/bin/env bash
+# §17.1292 -- the guest's boot, as its serial console shows it: GRUB, the kernel, cloud-init's datasource and
+# network lines, the login prompt. Live: VM 106 booted Ubuntu from its new disk and had no address under
+# either seed; a quiet console after a newline said only that nobody was listening. The boot log says why.
+set -uo pipefail
+GID={GID}
+LOG=/tmp/console_{GID}.log
+: | tee "$LOG" >/dev/null
+timeout {SECONDS_TO_WATCH} socat -u UNIX-CONNECT:/var/run/qemu-server/$GID.serial0 STDOUT | tee "$LOG" >/dev/null &
+CAP=$!
+sleep 2
+if qm status "$GID" | grep -q running; then qm reset "$GID"; else qm start "$GID"; fi
+wait "$CAP" || true
+echo "=== VM $GID console, first {SECONDS_TO_WATCH}s after reset ($(wc -c < "$LOG") bytes) ==="
+tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
+"""},
+    run="bash /tmp/watch_boot_{GID}.sh",
+    verify=["qm status {GID}"],
+    risk="Hard-resets VM {GID} (it has no state worth keeping until it reaches the network) and prints its console for {SECONDS_TO_WATCH} seconds.",
+)
+
+
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
 
 
 def _text(node: dict) -> str:

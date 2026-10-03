@@ -191,3 +191,20 @@ def test_a_console_step_selects_the_console_template_and_passes_every_gate():
     assert frame["commands"] == ["printf '\\n' | timeout 8 socat -t 6 - UNIX-CONNECT:/var/run/qemu-server/106.serial0"]
     assert frame["inputs"] == [] and frame["files"] == [] and "run" in {o["id"] for o in frame["options"]}
     assert frame["verify"] == ["qm config 106 | grep -E '^serial0:'"]
+
+
+# ───── §17.1292 — the boot, as the console shows it
+
+ADD119 = {"node_key": "ADD119", "title": "Reset VM 106 and capture its serial console during boot (why it has no address)",
+          "description": "A newline on the console produced nothing; the boot log says why the guest has no address."}
+
+
+def test_a_boot_watch_step_selects_its_template_and_passes_every_gate():
+    assert rt.select_template(ADD119, _truth("vm")) is rt.WATCH_GUEST_BOOT
+    assert rt.select_template(ADD118, _truth("vm")) is rt.READ_GUEST_CONSOLE, "a plain console read is still the peek"
+    rb = rt.render(rt.WATCH_GUEST_BOOT, rt.values_for(rt.WATCH_GUEST_BOOT, ADD119, _truth("vm"), ENV))
+    frame = _frame(rb, ADD119)
+    assert frame["refused"] == [], [r["why"][:120] for r in frame["refused"]]
+    body = frame["files"][0]["content"]
+    assert "timeout 140 socat -u UNIX-CONNECT:/var/run/qemu-server/$GID.serial0 STDOUT | tee" in body
+    assert 'qm reset "$GID"' in body and frame["commands"] == ["bash /tmp/watch_boot_106.sh"] and frame["inputs"] == []
