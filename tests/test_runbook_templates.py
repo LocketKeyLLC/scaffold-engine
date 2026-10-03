@@ -401,3 +401,35 @@ async def test_a_redraft_keeps_the_template_and_hands_the_refusal_to_the_draw(mo
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("async def draft_runbook(")
     assert "if truth is not None and for_channel:" in src[i:i + 3000] and "not retry_note and for_channel" not in src[i:i + 3000]
+
+
+# ───── §17.1311 — the model wraps what the template already wraps
+
+def test_guest_wrappers_the_template_supplies_are_stripped_from_the_models_lines():
+    import json as _json
+    fr = _json.loads((pathlib.Path(__file__).parent / "fixtures" / "add88_frame_template3_2026_10_03.json").read_text(encoding="utf-8"))
+    assert 'bash -c "pct exec 120 -- caddy validate' in fr["verify"][0], "the live double wrap: inside the container, `pct` does not exist"
+    assert rt.strip_guest_wrappers("pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile") == "caddy validate --config /etc/caddy/Caddyfile"
+    assert rt.strip_guest_wrappers("qm guest exec 106 --timeout 110 -- bash -c 'df -h /'") == "df -h /"
+    assert rt.strip_guest_wrappers("sudo pct exec 120 -- bash -c \"systemctl is-active caddy\"") == "systemctl is-active caddy"
+    assert rt.strip_guest_wrappers("pct exec 120 -- apt-get update\napt-get install -y caddy\npct exec 120 -- systemctl enable --now caddy") == "apt-get update\napt-get install -y caddy\nsystemctl enable --now caddy"
+    assert rt.strip_guest_wrappers("df -h /") == "df -h /" and rt.strip_guest_wrappers("echo 'pct exec 120 -- x'") == "echo 'pct exec 120 -- x'"
+    assert rt.strip_guest_wrappers("lxc-attach -n 120 -- caddy version") == "caddy version"
+
+
+@pytest.mark.asyncio
+async def test_the_draw_strips_the_wrapper_before_the_template_wraps_it(monkeypatch):
+    import app.utils.llm_retry as lr
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\npct exec 120 -- caddy validate --config /etc/caddy/Caddyfile\n```"})()
+        return type("R", (), {"text": "```bash\npct exec 120 -- apt-get update\npct exec 120 -- apt-get install -y caddy\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    node = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": ""}
+    vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, node, "brief")
+    assert vals == {"REMOTE_COMMANDS": "apt-get update\napt-get install -y caddy", "VERIFY_INSIDE": "caddy validate --config /etc/caddy/Caddyfile"}
+    rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, node, mt.GuestTruth(gid="120", kind="ct", status="running"), ENV, vals))
+    frame = _frame(rb, node)
+    assert frame["verify"] == ['pct exec 120 -- bash -c "caddy validate --config /etc/caddy/Caddyfile"'], frame["verify"]
+    assert frame["refused"] == []

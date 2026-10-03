@@ -570,6 +570,31 @@ FREE_PARAM_SYSTEM = (
 )
 
 
+#: §17.1311 — the host-side wrapper the template ALREADY supplies around the guest's commands.
+_GUEST_WRAPPER_RE = re.compile(
+    r"^\s*(?:sudo\s+)?(?:pct\s+exec\s+\d+|qm\s+guest\s+exec\s+\d+|lxc-attach\s+-n\s+\d+)(?:\s+--?[\w-]+(?:\s+\S+)?)*\s+--\s+", re.I)
+_SHELL_C_RE = re.compile(r"^\s*(?:bash|sh)\s+-c\s+(['\"])(.*)\1\s*$", re.S)
+
+
+def strip_guest_wrappers(text: str) -> str:
+    """The commands as they run INSIDE the guest. Live, the model wrote
+    `pct exec 120 -- caddy validate …` for the agent/container template's
+    VERIFY_INSIDE; the template wrapped it again and the container answered
+    `pct: command not found`, so the §17.1302 read saw nothing. The same model
+    habit puts `pct exec N --` in front of REMOTE_COMMANDS lines."""
+    out = []
+    for ln in str(text or "").split("\n"):
+        prev = None
+        while prev != ln:
+            prev = ln
+            ln = _GUEST_WRAPPER_RE.sub("", ln, count=1)
+            m = _SHELL_C_RE.match(ln)
+            if m:
+                ln = m.group(2)
+        out.append(ln)
+    return "\n".join(out)
+
+
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
                            environment: Optional[dict] = None, retry_note: str = "") -> dict:
     """Ask the model for the free parameters only, one short draw each
@@ -600,6 +625,6 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
             draws=2, label=f"template {template.name} {node.get('node_key')} {p.name}",
         )
         text = (getattr(resp, "text", "") or "").strip()
-        fenced = model_fence(text)
+        fenced = strip_guest_wrappers(model_fence(text))                     # §17.1311
         out[p.name] = fenced.split("\n", 1)[0].strip() if p.name == "VERIFY_INSIDE" else fenced
     return out
