@@ -328,6 +328,33 @@ def _subject_kind(node: dict, truth) -> Optional[str]:
     return None
 
 
+_INSIDE_RE = re.compile(r"\b(?:inside|in|into|on)\s+(?:the\s+)?(?:vm|container|ct|lxc|guest)\b|\bin\s+LXC\s+\d+|\binside\b", re.I)
+
+
+def intent_of(node: dict) -> Optional[str]:
+    """§17.1293 — the template a step's TEXT alone points at, with no measured
+    guest yet: the hands-on classifier asks this, because a step the engine owns
+    a shape for is hands-on by construction. Live, ADD119 ("reset VM 106 and
+    capture its serial console during boot") carried no fenced command, so
+    `step_commands` found nothing, the step ran as an LLM task, the model wrote
+    "No open write channel … run the following as root@pve" three times and the
+    node failed -- while `WATCH_GUEST_BOOT.applies` would have said yes."""
+    if not subject_gid(node):
+        return None
+    text = _text(node)
+    if _INSTALL_OS_RE.search(text):
+        return INSTALL_OS_CLOUDINIT.name
+    if _BOOT_WATCH_RE.search(text):
+        return WATCH_GUEST_BOOT.name
+    if _CONSOLE_RE.search(text):
+        return READ_GUEST_CONSOLE.name
+    if _HOST_SIDE_RE.search(text):
+        return None
+    if _INSIDE_RE.search(text):
+        return "guest_work"            # reach_vm_ssh_and_run or run_in_container, once the guest's kind is measured
+    return None
+
+
 def subject_gid(node: dict) -> Optional[str]:
     m = _SUBJECT_RE.search(_text(node))
     return m.group(1) if m else None

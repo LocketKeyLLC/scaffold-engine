@@ -208,3 +208,20 @@ def test_a_boot_watch_step_selects_its_template_and_passes_every_gate():
     body = frame["files"][0]["content"]
     assert "timeout 140 socat -u UNIX-CONNECT:/var/run/qemu-server/$GID.serial0 STDOUT | tee" in body
     assert 'qm reset "$GID"' in body and frame["commands"] == ["bash /tmp/watch_boot_106.sh"] and frame["inputs"] == []
+
+
+# ───── §17.1293 — a step the engine owns a template for is hands-on, fence or no fence
+
+def test_a_template_shaped_step_is_hands_on_without_a_fenced_command():
+    from app.modules.step_classify import step_is_hands_on
+    add119 = {"node_key": "ADD119", "title": "Reset VM 106 and capture its serial console during boot (why it has no address)",
+              "description": "From the host: capture the serial console for about 140 seconds while the VM is hard-reset, then print the tail.", "tool": "LLM"}
+    assert step_is_hands_on(add119, shell_backend=False, mcp_enabled=False) == (True, "template:watch_guest_boot")
+    # a step with a command in its text keeps the command's reason (the template intent is the fallback)
+    assert step_is_hands_on(ADD82, shell_backend=False, mcp_enabled=False)[0] is True
+    assert rt.intent_of(ADD117) == "install_os_cloudinit" and rt.intent_of(ADD118) == "read_guest_console"
+    assert rt.intent_of(ADD82) == "guest_work" and rt.intent_of(ADD100) == "guest_work"
+    assert rt.intent_of(ADD94) is None, "host-side work on a guest keeps today's classification"
+    assert rt.intent_of({"node_key": "X", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}) is None
+    host = step_is_hands_on({"node_key": "X", "title": "Write the project README", "description": "Prose only.", "tool": "LLM"}, shell_backend=False, mcp_enabled=False)
+    assert host == (False, "")

@@ -224,9 +224,17 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
         return False, ""
     # what the step DOES
     text = "\n".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    # §17.1293 — a step the engine owns a template for is hands-on by construction,
+    # fenced command or not: ADD119 ran as an LLM task and wrote instructions.
+    try:
+        from app.modules.runbook_templates import intent_of
+        _intent = intent_of(node or {})
+    except Exception:
+        _intent = None
+    _fallback = (True, f"template:{_intent}") if _intent else (False, "")   # the answer when no command says so
     cmds = step_commands(text)
     if not cmds:
-        return False, ""
+        return _fallback
     for cmd, sentence in cmds:
         if forbidden_for(sentence, cmd):
             continue                              # §17.1253 — quoted to be avoided
@@ -240,4 +248,4 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
     host = _HOST_RE.search(text)
     if host and any(_parses(c) for c, _ in cmds):
         return True, f"target:{host.group(0)}"
-    return False, ""
+    return _fallback
