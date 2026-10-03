@@ -36,6 +36,8 @@ _HOST_SIDE_RE = re.compile(
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
     r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b)", re.I)
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
+#: §17.1291 — a step about the guest's CONSOLE is host-side work on its serial socket, not an ssh
+_CONSOLE_RE = re.compile(r"\b(?:serial console|console|serial0|socat|qemu-server/\d+\.serial)\b", re.I)
 _FENCE_RE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
 
 
@@ -203,7 +205,8 @@ REACH_VM_SSH_AND_RUN = Template(
     name="reach_vm_ssh_and_run",
     title="Run commands inside VM {GID} over ssh",
     applies=lambda node, truth: _subject_kind(node, truth) == "vm" and not _INSTALL_OS_RE.search(_text(node))
-                                and not _HOST_SIDE_RE.search(_text(node)) and not getattr(truth, "agent", False),
+                                and not _HOST_SIDE_RE.search(_text(node)) and not _CONSOLE_RE.search(_text(node))
+                                and not getattr(truth, "agent", False),
     params=[
         Param("GID", "subject"),
         Param("GUEST_USER", "operator", "the account inside the guest that has sudo (the operator logs in with it)"),
@@ -267,7 +270,22 @@ pct exec "$GID" -- bash /root/.scaffold_step.sh
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+READ_GUEST_CONSOLE = Template(
+    name="read_guest_console",
+    title="Read VM {GID}'s serial console",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_CONSOLE_RE.search(_text(node))),
+    params=[Param("GID", "subject")],
+    files={},
+    # §17.1291 — one newline in (harmless at a login prompt or a boot log), six seconds of the screen out.
+    # Live: VM 106 booted Ubuntu from its new disk and had no address under DHCP or a static seed; the
+    # console is the only witness the host holds, and `serial0: socket` is how it is read.
+    run="printf '\\n' | timeout 8 socat -t 6 - UNIX-CONNECT:/var/run/qemu-server/{GID}.serial0",
+    verify=["qm config {GID} | grep -E '^serial0:'"],
+    risk="Sends one newline to VM {GID}'s serial console and prints what the guest shows for six seconds. Types nothing else.",
+)
+
+
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, READ_GUEST_CONSOLE, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
 
 
 def _text(node: dict) -> str:
