@@ -42,7 +42,12 @@ _HOST_SIDE_RE = re.compile(
     r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b)", re.I)
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 #: §17.1291 — a step about the guest's CONSOLE is host-side work on its serial socket, not an ssh
-_CONSOLE_RE = re.compile(r"\b(?:serial console|console|serial0|socat|qemu-server/\d+\.serial)\b", re.I)
+#: §17.1298 — the console is the TASK ("read VM 106's serial console", "peek at the console"), not a word in
+#: the step's history: ADD82's description says "done at the console" (stale, corrected) and was templated as a
+#: console read. The verb and the console within one span, or the socket itself.
+_CONSOLE_RE = re.compile(
+    r"\b(?:read|reading|capture|capturing|watch|watching|peek at|look at|show|print|dump)\b.{0,40}\b(?:serial )?console\b"
+    r"|\bconsole (?:output|log|screen)\b|\bserial0: socket\b|\bsocat\b|qemu-server/\d+\.serial", re.I)
 #: §17.1292 — "capture the boot", "boot log", "reset … console": the console WHILE the guest boots
 _BOOT_WATCH_RE = re.compile(r"\b(?:boot (?:log|console|messages)|capture .{0,40}boot|watch .{0,40}boot|reset .{0,60}console)\b", re.I)
 _FENCE_RE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
