@@ -699,6 +699,8 @@ async def test_the_steam_template_renders_without_a_model_and_parses_in_bash(mon
     assert "+app_update 2394010 validate +quit" in body and "/opt/palworld" in body and "{GAME}" not in body and "{INSTALL_DIR}" not in body
     assert "su - steam -c '/opt/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true'" in body, "bootstrap as the install's user, one quoted argument"
     assert "systemctl enable palworld.service" in body and "ExecStart=$START" in body
+    assert "chown -R steam:steam /opt/palworld" in body, "§17.1323 — the ssh attempt left a root-owned steamapps/ under the install dir"
+    assert body.index("install -d -o steam -g steam /opt/steamcmd /opt/palworld") < body.index("chown -R steam:steam /opt/palworld") < body.index("+app_update 2394010")
     assert subprocess.run(["bash", "-n"], input=body, capture_output=True, text=True).returncode == 0
     i = body.find("<<'REMOTE'"); j = body.find("\nREMOTE\n"); remote = body[i + len("<<'REMOTE'\n"):j]
     assert subprocess.run(["bash", "-n"], input=remote, capture_output=True, text=True).returncode == 0
