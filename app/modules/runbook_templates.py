@@ -605,8 +605,53 @@ def content_is_cut(raw_text: str) -> bool:
     Live, ADD100's 139-line server.js ended `const runRes = await axios.post(
     SCAFFOLD_ENGINE_URL` -- the template closed its own heredoc after it, every
     gate passed, and the file would have replaced a working backend with
-    half a program."""
-    return str(raw_text or "").count("```") % 2 == 1
+    half a program. §17.1314 — so is a heredoc the content opens and never
+    closes (the ran-live record: `tee server.js <<'EOF'` with no `EOF`; bash
+    warned "here-document at line 19 delimited by end-of-file" and wrote the
+    rest of the script into the file)."""
+    text = str(raw_text or "")
+    if text.count("```") % 2 == 1:
+        return True
+    from app.modules.supervised_runs import unterminated_heredoc
+    return unterminated_heredoc(model_fence(text)) is not None
+
+
+#: §17.1314 — a line in the model's commands that REPLACES a file: `tee PATH <<`, `tee PATH <`,
+#: `cat > PATH`, `cp SRC PATH`, `mv SRC PATH`, `install … PATH`. Appends (`tee -a`, `>>`) keep the old content.
+_OVERWRITE_RE = re.compile(
+    r"^\s*(?:sudo\s+)?(?:tee\s+(?!-a\b)(?P<tee>/[^\s<>|;&]+)\s*(?:<<|<)"
+    r"|cat\s*>\s*(?P<cat>/[^\s<>|;&]+)"
+    r"|(?:cp|mv)\s+(?:-\S+\s+)*\S+\s+(?P<cpmv>/[^\s<>|;&]+)\s*$"
+    r"|install\s+(?:-\S+\s+\S+\s+|-\S+\s+)*\S+\s+(?P<inst>/[^\s<>|;&]+)\s*$)")
+
+
+def keep_a_copy_before_overwrites(remote_commands: str) -> str:
+    """Before every line that replaces a file, a line that keeps the old one.
+
+    Live, ADD100's draw wrote `tee /opt/control-panel-backend/server.js <<'EOF'`
+    over the ONLY copy of a working backend (1,669 bytes from September, in no
+    record anywhere) with a file cut mid-line by the draw's token cap. The old
+    program survives only in the memory of the process that loaded it; its next
+    restart loads the broken file. A ledger needs the pre-image (§17.1047) --
+    so does a disk. `cp -a PATH PATH.bak.<stamp>` costs nothing and is the
+    engine's shape, not the model's to remember."""
+    out: list[str] = []
+    in_heredoc: Optional[str] = None
+    for ln in str(remote_commands or "").split("\n"):
+        if in_heredoc is not None:
+            out.append(ln)
+            if ln.strip() == in_heredoc:
+                in_heredoc = None
+            continue
+        m = _OVERWRITE_RE.match(ln)
+        if m and not ln.lstrip().startswith("#"):
+            path = next(v for v in (m.group("tee"), m.group("cat"), m.group("cpmv"), m.group("inst")) if v)
+            out.append(f'[ -e "{path}" ] && cp -a "{path}" "{path}.bak.$(date +%Y%m%d%H%M%S)"')
+        out.append(ln)
+        hd = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", ln)
+        if hd and not ln.lstrip().startswith("#"):
+            in_heredoc = hd.group(1)
+    return "\n".join(out)
 
 
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
@@ -653,5 +698,8 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                              f"({len(text)} chars): the step's content is too large for one draw -- split the step, or write the "
                              f"file in parts")
         fenced = strip_guest_wrappers(model_fence(text))                     # §17.1311
-        out[p.name] = fenced.split("\n", 1)[0].strip() if p.name == "VERIFY_INSIDE" else fenced
+        if p.name == "VERIFY_INSIDE":
+            out[p.name] = fenced.split("\n", 1)[0].strip()
+        else:
+            out[p.name] = keep_a_copy_before_overwrites(fenced)             # §17.1314
     return out
