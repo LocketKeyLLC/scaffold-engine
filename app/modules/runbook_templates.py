@@ -37,7 +37,9 @@ _INSTALL_OS_RE = re.compile(
     r"ubuntu server \d\d\.\d\d|server \d\d\.\d\d)", re.I)
 #: host-side work ON a guest — the drafter's normal path handles these (a `qm set`, a resize, a start)
 _HOST_SIDE_RE = re.compile(
-    r"\b(?:resize|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
+    # §17.1304 — `resize` alone matched "resize2fs" in a step done INSIDE the guest (ADD84) and
+    # pushed it off the agent template; host-side is resizing the DISK (`qm resize`, "resize VM 106's disk").
+    r"\b(?:(?:qm|pct) resize|resize (?:the )?(?:vm \d+'?s? )?(?:disk|volume)|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
     r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b)", re.I)
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
@@ -287,7 +289,9 @@ RUN_IN_VM_VIA_AGENT = Template(
     ],
     files={"/tmp/in_vm_{GID}_agent.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside VM {GID} through its QEMU guest agent: no ssh, no account, no key, no address.\nset -uo pipefail\nGID={GID}\nqm status "$GID" | grep -q running || qm start "$GID"\nfor i in $(seq 1 12); do qm agent "$GID" ping >/dev/null 2>&1 && break; sleep 5; done\nqm agent "$GID" ping >/dev/null 2>&1 || { echo "FAILED: the guest agent in VM $GID did not answer within 60 s"; exit 1; }\ncat > /tmp/in_vm_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n# --timeout 110 + the 60 s agent wait stays inside the runner\'s 180 s budget for one command.\nqm guest exec "$GID" --timeout 110 --pass-stdin 1 -- bash -s < /tmp/in_vm_{GID}_remote.sh > /tmp/in_vm_{GID}_agent.out \\\n  || { cat /tmp/in_vm_{GID}_agent.out; echo "FAILED: qm guest exec $GID did not run the script"; exit 1; }\n# the agent answers JSON {exitcode, out-data, err-data}: print the guest\'s output, exit with the guest\'s code\npython3 - /tmp/in_vm_{GID}_agent.out <<\'PYJ\'\nimport json, sys\nd = json.loads(open(sys.argv[1]).read() or "{}")\nsys.stdout.write(d.get("out-data") or "")\nsys.stderr.write(d.get("err-data") or "")\nsys.exit(int(d.get("exitcode", 1)))\nPYJ\n'},
     run="bash /tmp/in_vm_{GID}_agent.sh",
-    verify=['qm guest exec {GID} -- bash -c "{VERIFY_INSIDE}"', "qm agent {GID} ping"],
+    # §17.1304 — the inside check ALONE: `qm agent ping` prints nothing, and a check that cannot speak to the
+    # goal is an `unknown` that keeps §17.1302 from recording an already-met step.
+    verify=['qm guest exec {GID} -- bash -c "{VERIFY_INSIDE}"'],
     risk="Runs this step's commands as root inside VM {GID} through its guest agent.",
 )
 

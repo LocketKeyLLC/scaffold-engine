@@ -4235,7 +4235,7 @@ async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]
         done = await _sw.run_block(spec, [p["command"] for p in with_ref], env=env or {})
         chunks = []
         for p, rec in zip(with_ref, done, strict=False):     # run_block stops at the first failure
-            out = str(rec.get("output") or "")
+            out = _lr.unwrap_guest_exec(p["command"], str(rec.get("output") or ""))   # §17.1304
             if rec.get("refused") or rec.get("unreachable"):
                 ran.append({"id": p["id"], "command": p["command"], "ok": False, "ran": False,
                             "why": out[:200] or "did not run"})
@@ -4342,7 +4342,8 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         return None
     kinds = [str(v.get("verdict") or "") for v in verdicts]
     if not all(k == "confirmed" for k in kinds):
-        logger.info("supervised_run_not_yet_met title=%r verdicts=%s", title[:60], kinds)
+        logger.info("supervised_run_not_yet_met title=%r verdicts=%s reasons=%s", title[:60], kinds,
+                    [f"{v.get('id')}: {str(v.get('reason') or '')[:90]}" for v in verdicts if v.get("verdict") != "confirmed"])
         return None
     return {"report": _probe_report(pasted, ran), "verdicts": verdicts, "checks": len(verify_cmds)}
 

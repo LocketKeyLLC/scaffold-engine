@@ -19,6 +19,10 @@ cost made visible. This module is the ONE crossing, and it is fenced:
 """
 from __future__ import annotations
 
+import re
+
+import json
+
 import logging
 from typing import Any
 
@@ -101,7 +105,7 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
         else:
             try:
                 res = await call_tool(spec, "run_readonly", {"command": cmd, "timeout_s": 20})
-                out = _plain_output(res)
+                out = unwrap_guest_exec(cmd, _plain_output(res))
                 why = not_evidence(out, bool(res.is_error))
             except Exception as exc:
                 out, why = f"(runner error: {exc})", "the call to the runner did not come back"
@@ -124,6 +128,33 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
             except Exception:
                 pass
     return "".join(chunks), executed
+
+
+_GUEST_EXEC_RE = re.compile(r"(?<![\w./-])qm\s+guest\s+exec\s+\d+\b")
+
+
+def unwrap_guest_exec(command: str, out: str) -> str:
+    """§17.1304 — `qm guest exec` answers JSON (`{"exitcode", "exited", "out-data",
+    "err-data"}`); the judge, the operator and the already-met read want the
+    GUEST's text. Live, the §17.1302 judge read `{"exitcode" : 0, … "out-data" :
+    "NAME SIZE…"}` for an `lsblk` and said unknown. Anything that is not that
+    envelope comes back untouched; a non-zero guest exit code is kept visible."""
+    if not _GUEST_EXEC_RE.search(command or ""):
+        return out
+    try:
+        d = json.loads(out or "")
+    except (ValueError, TypeError):
+        return out
+    if not isinstance(d, dict) or ("out-data" not in d and "exitcode" not in d):
+        return out
+    text = str(d.get("out-data") or "")
+    err = str(d.get("err-data") or "")
+    if err:
+        text = (text.rstrip("\n") + "\n" + err) if text else err
+    code = d.get("exitcode")
+    if code not in (None, 0):
+        text = text.rstrip("\n") + f"\n(guest exit code {code})"
+    return text
 
 
 def _plain_output(res) -> str:
