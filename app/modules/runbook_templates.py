@@ -648,7 +648,7 @@ def keep_a_copy_before_overwrites(remote_commands: str) -> str:
     return "\n".join(out)
 
 
-_STEAMCMD_RE = re.compile(r"(?P<path>(?:\S*/)?steamcmd(?:\.sh)?)\s+(?=.*\+app_update)")
+_STEAMCMD_RE = re.compile(r"(?P<q>['\"]?)(?P<path>(?:[^\s'\"]*/)?steamcmd(?:\.sh)?)(?P=q)\s+(?=.*\+app_update)")   # §17.1321 — the path, never its quotes
 
 
 _APT_RE = re.compile(r"(?<![\w-])(?:apt-get|apt|aptitude|dpkg)(?![\w-])")
@@ -685,12 +685,46 @@ def bootstrap_steamcmd_first(remote_commands: str) -> str:
         if m:
             # §17.1320 — as the SAME user as the install: SteamCMD bootstraps per home directory, so a
             # root bootstrap does nothing for `sudo -u palworld steamcmd.sh …`.
-            su = re.match(r"\s*(sudo\s+-u\s+\S+\s+|su\s+-\s+\S+\s+-c\s+|runuser\s+-u\s+\S+\s+--\s+)", ln)
+            su = re.match(r"\s*(sudo\s+-u\s+\S+\s+|su\s+(?:-\s+|-l\s+)?\S+\s+-c\s+|runuser\s+-u\s+\S+\s+--\s+)", ln)
             prefix = su.group(1).strip() + " " if su else ""
-            out.append(f"{prefix}{m.group('path')} +quit >/dev/null 2>&1 || true   # bootstrap: a fresh SteamCMD updates itself and exits")
+            boot = f"{m.group('path')} +quit >/dev/null 2>&1 || true"
+            # §17.1321 — live, the install line was `su - palworld -c '/opt/…/steamcmd.sh +…'`: the path
+            # capture swallowed the opening quote and the bootstrap line never closed it -- the whole
+            # remote script failed to parse. A `-c` prefix gets the bootstrap as ONE quoted argument.
+            if su and " -c " in prefix:
+                out.append(f"{prefix}'{boot}'   # bootstrap: a fresh SteamCMD updates itself and exits")
+            else:
+                out.append(f"{prefix}{boot}   # bootstrap: a fresh SteamCMD updates itself and exits")
             done = True
         out.append(ln)
     return "\n".join(out)
+
+
+_ABS_PATH_RE = re.compile(r"(?<![\w.])(/(?:[\w.@+-]+/)*[\w.@+-]+)")
+
+
+def check_looks_where_the_work_went(remote_commands: str, verify_inside: str) -> str:
+    """§17.1321 — the reason the one-line check does NOT fit the commands, or ``""``.
+    Live, the install went to `/opt/palworld/server` (`+force_install_dir`) and the
+    check read `ls -la /opt/palworld/PalServer.sh`: a correct install would have been
+    judged a failure. A check that names an absolute path must name a path the
+    commands write to, or a parent of one."""
+    paths = _ABS_PATH_RE.findall(str(verify_inside or ""))
+    if not paths:
+        return ""
+    body = str(remote_commands or "")
+    body_paths = set(_ABS_PATH_RE.findall(body))
+    for v in paths:
+        if v in ("/", "/dev/null"):
+            continue
+        parent = v.rsplit("/", 1)[0] or "/"
+        if any(b == v or b.startswith(v.rstrip("/") + "/") or v.startswith(b.rstrip("/") + "/") for b in body_paths):
+            continue
+        if parent in body_paths:
+            continue
+        return (f"the check looks at `{v}`, which the commands never write to or under -- they work in "
+                f"{', '.join(sorted(b for b in body_paths if b.count('/') >= 2)[:6]) or 'other paths'}; check there")
+    return ""
 
 
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
@@ -753,7 +787,19 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                              f"file in parts")
         fenced = strip_guest_wrappers(model_fence(text))                     # §17.1311
         if p.name == "VERIFY_INSIDE":
-            out[p.name] = fenced.split("\n", 1)[0].strip()
+            check = fenced.split("\n", 1)[0].strip()
+            # §17.1321 — a check that looks where the work did not go is redrawn once, told where it went.
+            why = check_looks_where_the_work_went(out.get("REMOTE_COMMANDS", ""), check)
+            if why:
+                logger.warning("template_check_redrawn template=%s node=%s why=%s", template.name, node.get("node_key"), why[:160])
+                resp2 = await generate_until_nonempty(
+                    model_router.generate, prompt + f"\n\nYOUR PREVIOUS CHECK WAS REFUSED: {why}. The commands are:\n{out.get('REMOTE_COMMANDS', '')[:3000]}",
+                    {"role": "model_general", "think": False}, system=FREE_PARAM_SYSTEM_VERIFY, temperature=0.1,
+                    max_tokens=base_cap, draws=2, label=f"template {template.name} {node.get('node_key')} {p.name} redraw")
+                check2 = strip_guest_wrappers(model_fence((getattr(resp2, "text", "") or "").strip())).split("\n", 1)[0].strip()
+                if check2 and not check_looks_where_the_work_went(out.get("REMOTE_COMMANDS", ""), check2):
+                    check = check2
+            out[p.name] = check
         else:
             out[p.name] = repair_apt_state_first(bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced)))   # §17.1314, §17.1317, §17.1320
     return out

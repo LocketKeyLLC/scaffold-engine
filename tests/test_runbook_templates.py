@@ -617,3 +617,49 @@ async def test_the_draw_applies_backup_bootstrap_and_repair_in_that_order(monkey
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, node, _truth("vm", agent=True), ENV, vals))
     frame = _frame(rb, node)
     assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+
+
+# ───── §17.1321 — the bootstrap keeps its quotes; the check looks where the work went
+
+def test_the_bootstrap_under_su_dash_c_is_one_quoted_argument():
+    import json as _json, subprocess
+    fr = _json.loads((pathlib.Path(__file__).parent / "fixtures" / "t23_frame_agent_su_2026_10_03.json").read_text(encoding="utf-8"))
+    bad = next(l for l in fr["files"][0]["content"].split("\n") if "+quit" in l)
+    assert bad.count("'") % 2 == 1, "the live line had an unterminated quote"
+    remote = "su - palworld -c '/opt/palworld/steamcmd/steamcmd.sh +force_install_dir /opt/palworld/server +login anonymous +app_update 2394010 validate +quit'"
+    out = rt.bootstrap_steamcmd_first(remote).split("\n")
+    assert out[0] == "su - palworld -c '/opt/palworld/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true'   # bootstrap: a fresh SteamCMD updates itself and exits", out[0]
+    assert subprocess.run(["bash", "-n"], input="\n".join(out), capture_output=True, text=True).returncode == 0, "the script parses"
+    assert rt.bootstrap_steamcmd_first('sudo -u palworld "/opt/steamcmd/steamcmd.sh" +login anonymous +app_update 2394010 +quit').split("\n")[0].startswith("sudo -u palworld /opt/steamcmd/steamcmd.sh +quit")
+
+
+def test_a_check_that_looks_where_the_work_did_not_go_is_named():
+    remote = "mkdir -p /opt/palworld/steamcmd\nsu - palworld -c '/opt/palworld/steamcmd/steamcmd.sh +force_install_dir /opt/palworld/server +app_update 2394010 +quit'\ntee /etc/systemd/system/palworld.service <<'EOF'\nx\nEOF"
+    why = rt.check_looks_where_the_work_went(remote, "ls -la /opt/palworld/PalServer.sh")
+    assert why and "/opt/palworld/PalServer.sh" in why and "/opt/palworld/server" in why
+    assert rt.check_looks_where_the_work_went(remote, "ls -la /opt/palworld/server/PalServer.sh") == ""
+    assert rt.check_looks_where_the_work_went(remote, "systemctl is-enabled palworld.service") == "", "no path named: nothing to compare"
+    assert rt.check_looks_where_the_work_went(remote, "test -f /etc/systemd/system/palworld.service && echo ok") == ""
+    assert rt.check_looks_where_the_work_went("apt-get install -y caddy", "caddy validate --config /etc/caddy/Caddyfile") , "a config the commands never touch"
+
+
+@pytest.mark.asyncio
+async def test_the_check_is_redrawn_once_when_it_looks_elsewhere(monkeypatch):
+    import app.utils.llm_retry as lr
+    draws = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        draws.append(kw.get("label"))
+        if "redraw" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\nls -la /opt/palworld/server/PalServer.sh\n```"})()
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\nls -la /opt/palworld/PalServer.sh\n```"})()
+        return type("R", (), {"text": "```bash\nsu - palworld -c '/opt/palworld/steamcmd/steamcmd.sh +force_install_dir /opt/palworld/server +login anonymous +app_update 2394010 validate +quit'\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    node = {"node_key": "T23", "title": "Install PalWorld server", "description": ""}
+    vals = await rt.fill_free_params(rt.RUN_IN_VM_VIA_AGENT, node, "brief")
+    assert vals["VERIFY_INSIDE"] == "ls -la /opt/palworld/server/PalServer.sh"
+    assert sum(1 for d in draws if d and d.endswith("redraw")) == 1
+    rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, node, _truth("vm", agent=True), ENV, vals))
+    frame = _frame(rb, node)
+    assert frame["refused"] == [] and frame["verify"] == ['qm guest exec 106 -- bash -c "ls -la /opt/palworld/server/PalServer.sh"']
