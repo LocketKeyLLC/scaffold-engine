@@ -357,9 +357,16 @@ def _guarded(cmd: str, tool: str, verb: str, gid: str) -> bool:
     the fix, and a check that passes skips it.
     """
     text_value = str(cmd or "")
+    action = re.compile(rf"\b{re.escape(tool)}\s+{re.escape(verb)}\s+{re.escape(gid)}\b")
+    # §17.1294 — in a FILE, `if qm status N | grep -q running; then … else qm start N; fi` is the same
+    # guard in the shell's other spelling: a status read of the SAME guest earlier in the script
+    # counts. Live, the engine's own watch_guest_boot template was refused for its `else qm start`.
+    if "\n" in text_value:
+        m = action.search(text_value)
+        if m and re.search(rf"\b{re.escape(tool)}\s+status\s+{re.escape(gid)}\b", text_value[:m.start()]):
+            return True
     if "||" not in text_value:
         return False
-    action = re.compile(rf"\b{re.escape(tool)}\s+{re.escape(verb)}\s+{re.escape(gid)}\b")
     parts = text_value.split("||")
     for i, part in enumerate(parts):
         if i == 0 or not action.search(part):

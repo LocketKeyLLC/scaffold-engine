@@ -225,3 +225,11 @@ def test_a_template_shaped_step_is_hands_on_without_a_fenced_command():
     assert rt.intent_of({"node_key": "X", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}) is None
     host = step_is_hands_on({"node_key": "X", "title": "Write the project README", "description": "Prose only.", "tool": "LLM"}, shell_backend=False, mcp_enabled=False)
     assert host == (False, "")
+
+
+def test_an_empty_boot_capture_fails_the_step():
+    """§17.1294 — the model's redraft was marked done with an empty log."""
+    body = sr.file_writes(rt.render(rt.WATCH_GUEST_BOOT, rt.values_for(rt.WATCH_GUEST_BOOT, ADD119, _truth("vm"), ENV)))[0]["content"]
+    assert 'if [ "${BYTES:-0}" -lt 20 ]' in body and "FAILED: nothing arrived on VM $GID's serial console" in body
+    frame = _frame(rt.render(rt.WATCH_GUEST_BOOT, rt.values_for(rt.WATCH_GUEST_BOOT, ADD119, _truth("vm"), ENV)), ADD119)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
