@@ -310,11 +310,12 @@ def test_the_agent_template_reaches_the_guest_without_ssh_account_key_or_address
     code = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("#"))
     assert "ssh" not in code and "@" not in code and "MASS_PASSWORD" not in rb, "no ssh, no account, no key, no password"
     assert "<" not in code.replace("<<'REMOTE'", "").replace("<<'PYJ'", "").replace(" < /tmp/", " "), "no operator placeholder"
-    assert "qm guest exec \"$GID\" --timeout 110 --pass-stdin 1 -- bash -s" in body, "the script travels on stdin; no quoting of the model's lines"
-    assert "seq 1 12" in body and "sleep 5" in body, "60 s agent wait + 110 s exec stays inside the runner's 180 s"
-    assert 'sys.exit(int(d.get("exitcode", 1)))' in body, "the guest's exit code is the command's exit code"
+    assert 'qm guest exec "$GID" --timeout 60 --pass-stdin 1 -- bash -c "cat > /root/.scaffold_step.sh"' in body, "the script travels on stdin; no quoting of the model's lines (§17.1317)"
+    assert "seq 1 12" in body and "sleep 5" in body, "60 s agent wait stays inside the runner's 180 s"
+    assert 'systemd-run --unit $UNIT --collect' in body and 'UNIT="scaffold-ADD84"' in body, "§17.1317 — the work runs detached as a transient unit named after the step"
+    assert "deadline=$(( SECONDS + 165 ))" in body and "STILL RUNNING" in body and 'exit "${code:-1}"' in body, "each wait fits the budget; the unit's exit code is the step's"
     frame = _frame(rb, ADD84)
-    assert frame["commands"] == ["bash /tmp/in_vm_106_agent.sh"]
+    assert frame["commands"] == ["bash /tmp/in_vm_106_agent.sh start"] + ["bash /tmp/in_vm_106_agent.sh wait"] * 7 + ["bash /tmp/in_vm_106_agent.sh last"], frame["commands"]
     assert frame["verify"] == ['qm guest exec 106 -- bash -c "df -h /"'], "the verify runs INSIDE the guest, alone, so §17.1302 can read it (§17.1304)"
     assert sr.verify_commands(rb) == frame["verify"], "both checks are read-only through the wrapper"
 
@@ -470,3 +471,31 @@ async def test_the_draw_keeps_copies_and_a_cut_heredoc_counts_as_cut(monkeypatch
     # the ran-live record: the fence closed but the inner heredoc never did
     assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst runRes = await axios.post(URL\n```") is True
     assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst a = 1;\nEOF\n```") is False
+
+
+# ───── §17.1317 — long in-guest work runs detached; SteamCMD bootstraps first
+
+def test_both_guest_templates_run_detached_and_wait_in_phases():
+    for tpl, node, truth, gid in ((rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), "106"), (rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), "111")):
+        vals = rt.values_for(tpl, node, truth, ENV, {"REMOTE_COMMANDS": "apt-get install -y curl", "VERIFY_INSIDE": "which curl"})
+        assert vals["STEP"] == node["node_key"]
+        rb = rt.render(tpl, vals)
+        body = next(f["content"] for f in sr.file_writes(rb))
+        assert f'UNIT="scaffold-{node["node_key"]}"' in body and "systemd-run --unit $UNIT --collect" in body
+        assert "systemctl reset-failed $UNIT" in body, "a rerun does not trip over the last run's failed unit"
+        assert body.rstrip().endswith("esac"), "the whole script survives the parser"
+        cmds = sr.runbook_commands(rb)
+        assert len(cmds) == 9 and cmds[0].endswith(" start") and cmds[-1].endswith(" last") and all(c.endswith(" wait") for c in cmds[1:-1]), cmds
+        frame = _frame(rb, node)
+        assert frame["refused"] == [], (tpl.name, [r["why"][:120] for r in frame["refused"]])
+    ct_body = next(f["content"] for f in sr.file_writes(rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), ENV, {"REMOTE_COMMANDS": "true", "VERIFY_INSIDE": "true"}))))
+    assert 'pct push "$GID" /tmp/in_ct_111_remote.sh /root/.scaffold_step.sh' in ct_body
+
+
+def test_steamcmd_bootstraps_once_before_the_first_install():
+    remote = "mkdir -p /opt/steamcmd && cd /opt/steamcmd && curl -sqL URL | tar zxvf -\n/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit\n/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit\nchown -R aedefruscio:aedefruscio /opt/palworld"
+    out = rt.bootstrap_steamcmd_first(remote).split("\n")
+    assert out[1].startswith("/opt/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true"), out
+    assert sum(1 for l in out if "+quit >/dev/null" in l) == 1, "once"
+    assert out[2].startswith("/opt/steamcmd/steamcmd.sh +force_install_dir")
+    assert rt.bootstrap_steamcmd_first("apt-get update") == "apt-get update"

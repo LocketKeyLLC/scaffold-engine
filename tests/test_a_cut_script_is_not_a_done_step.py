@@ -53,7 +53,7 @@ def test_model_fence_never_lets_a_fence_marker_into_the_content():
     assert "```" not in rt.model_fence("```\n$ echo a\n```bash\necho b\n```")
     rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, NODE, None, {}, {"REMOTE_COMMANDS": rt.model_fence("```bash\napt-get update\n```"), "VERIFY_INSIDE": "true"}))
     files = sr.file_writes(rb)
-    assert files and files[0]["content"].rstrip().endswith("pct exec \"$GID\" -- bash /root/.scaffold_step.sh"), "the whole script survives the parser"
+    assert files and files[0]["content"].rstrip().endswith("esac"), "the whole script survives the parser (§17.1317: it ends with the phase switch)"
     assert sr.unterminated_heredoc(files[0]["content"]) is None
 
 

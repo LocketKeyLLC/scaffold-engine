@@ -475,7 +475,8 @@ def test_the_live_t23_frame_takes_the_agent_template_once_the_subject_is_known()
     vals = rt.values_for(rt.RUN_IN_VM_VIA_AGENT, T23, truth, {}, {"REMOTE_COMMANDS": "apt-get install -y lib32gcc-s1", "VERIFY_INSIDE": "ls /opt/palworld/PalServer.sh"})
     assert vals["GID"] == "106"
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, vals)
-    assert "qm guest exec" in rb and "ssh" not in rb.split("## Write these files")[1].split("## Run this")[0].replace("# Run this step's commands inside VM 106 through its QEMU guest agent: no ssh, no account, no key, no address.", "")
+    code = "\n".join(l for l in rb.split("## Write these files")[1].split("## Run this")[0].split("\n") if not l.lstrip().startswith("#"))
+    assert "qm guest exec" in code and "ssh" not in code, "the agent template reaches the VM without ssh (comments aside)"
     needs = mt.step_needs(T23, ["bash /tmp/in_vm_106_agent.sh"], [{"path": "/tmp/in_vm_106_agent.sh", "content": 'GID=106\nqm guest exec "$GID" --timeout 110 --pass-stdin 1 -- bash -s < /tmp/r.sh\n'}], gid="106")
     assert {"exists", "running", "has_os", "agent"} <= needs
     from app.modules import execution_agent as ea
