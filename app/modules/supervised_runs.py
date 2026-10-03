@@ -1450,8 +1450,9 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     # `qm guest exec N`, an ssh), IS the host's own operation on one (`qm set
     # N`, `pct start N`), or runs a written file that does.
     def _reaches(cmd: str) -> bool:
-        texts = [cmd] + [str((f or {}).get("content") or "") for f in files or []
-                         if (f or {}).get("path") and str(f["path"]) in cmd]
+        from app.modules.runbook_preconditions import _resolve_ids   # §17.1290 — `GID=106` … `pct exec "$GID"` reaches 106
+        texts = [_resolve_ids(cmd)] + [_resolve_ids(str((f or {}).get("content") or "")) for f in files or []
+                                       if (f or {}).get("path") and str(f["path"]) in cmd]
         return any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) for t in texts)
     unreached = [c for c in writes if not _reaches(c)]
     if not unreached:
@@ -2473,7 +2474,7 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
 
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "", spec=None,
-                        environment: dict | None = None) -> str:
+                        environment: dict | None = None, truth=None) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them.
 
@@ -2484,6 +2485,22 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app import model_router
     from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK, build_base_prompt
     b = brief if isinstance(brief, dict) else {"description": str(brief or "")}
+    # §17.1290 — a shape the engine OWNS is rendered, not drafted: the model
+    # fills the one free parameter (the commands inside the guest), the engine
+    # supplies everything the gates would otherwise have to chase. Only on the
+    # first draft: a template that is refused (it must not be -- every template
+    # passes every gate in CI) hands the redraft to the model path below.
+    if truth is not None and not retry_note and for_channel:
+        try:
+            from app.modules import runbook_templates as rt
+            tpl = rt.select_template(node, truth)
+            if tpl is not None:
+                model_vals = await rt.fill_free_params(tpl, node, str(b if isinstance(b, str) else json.dumps(b, default=str)))
+                rendered = rt.render(tpl, rt.values_for(tpl, node, truth, environment, model_vals))
+                logger.warning("runbook_from_template node=%s template=%s chars=%d", node.get("node_key"), tpl.name, len(rendered))
+                return rendered
+        except Exception as exc:
+            logger.warning("runbook_template_failed node=%s err=%r", node.get("node_key"), exc)
     prompt = build_base_prompt(node, b, environment)
     # §17.1222 — a value the operator already gave once must never be asked for
     # again. The store, the `$NAME` reference and the out-of-band delivery all
@@ -3667,6 +3684,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
     _repairs = list(_repairs) + _vdrops + _lookup_repairs  # §17.1288d/o — a dropped check, a repaired lookup: corrections too
+    from app.modules.runbook_templates import template_of
+    _tpl = template_of(runbook)
+    if _tpl:                                               # §17.1290 — said on the frame: the shape is the engine's
+        _repairs = _repairs + [{"why": f"drafted from the engine's template `{_tpl}`: the script's shape is the engine's "
+                                       f"own, pre-gated; the model wrote only the commands that run inside the guest"}]
     # §17.1271 — and judge the written files the same way the commands are judged.
     refused = refused + file_writes_will_not_work(shape_files) + _secret_files
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.

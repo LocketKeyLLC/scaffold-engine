@@ -1,0 +1,358 @@
+"""§17.1290 — templates the drafter fills (design Phase 2a).
+
+The second structural defect of 2026-10-02: the drafter re-invented the script
+on every reask, and ~28 refusal markers chased the ways prose can get a known
+shape wrong. The shapes recur — reach a VM over ssh, wait for a guest to
+appear, run commands inside a container, install an OS unattended — so the
+engine owns them here as deterministic, parameterized, PRE-GATED templates.
+The model chooses nothing about the shape; it fills the one free parameter a
+template has (the commands to run inside the guest), and the engine renders the
+runbook in the exact form `frame_run` already parses. Every template passes
+every gate — `tests/test_runbook_templates.py` renders each with dummy values
+through `frame_run` and asserts ``refused == []`` — so a gate that refuses a
+template is a template bug, fixed in one place.
+
+The §17.1288 lessons are baked into the scripts: the guarded start, the
+sweep before `ip neigh`, `|| true` on every lookup a wait expects to be empty,
+`SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id`, sudo on stdin, the account
+as a placeholder named after the guest, no fixed-address wait, the password
+by name through the environment.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+logger = logging.getLogger("scaffold")
+
+TEMPLATE_MARK = "<!-- runbook-template:"
+_TEMPLATE_MARK_RE = re.compile(r"<!-- runbook-template: ([a-z_]+) -->")
+_INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|operating system|os\b|server \d\d\.\d\d)", re.I)
+#: host-side work ON a guest — the drafter's normal path handles these (a `qm set`, a resize, a start)
+_HOST_SIDE_RE = re.compile(
+    r"\b(?:resize|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
+    r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
+    r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b)", re.I)
+_SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
+_FENCE_RE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
+
+
+@dataclass
+class Param:
+    name: str
+    source: str            # "subject" | "truth" | "operator" | "model" | "default"
+    hint: str = ""
+    default: str = ""
+
+
+@dataclass
+class Template:
+    name: str
+    title: str
+    applies: Callable[[dict, Optional[object]], bool]
+    params: list[Param]
+    files: dict[str, str]              # path -> body, with {NAME} placeholders
+    run: str                           # the one command under ## Run this
+    verify: list[str] = field(default_factory=list)
+    risk: str = ""
+
+
+# ───── the shared wait: sweep the bridge's /24, read the neighbour table for the MAC, up to 12 × 10 s
+WAIT_FOR_ADDRESS = r'''
+wait_for_address() {
+    # $1 = MAC (any case). Prints the address, or nothing after 12 tries.
+    local mac net ip i
+    mac="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+    net="$(ip -4 route get 1 | sed -n 's/.* src \([0-9.]*\)\.[0-9]*.*/\1/p' || true)"
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        if command -v nmap >/dev/null 2>&1; then
+            nmap -sn "$net.0/24" >/dev/null 2>&1 || true
+        else
+            for h in $(seq 1 254); do ping -c 1 -W 1 "$net.$h" >/dev/null 2>&1 & done; wait
+        fi
+        ip="$(ip neigh show | grep -i "$mac" | awk '{print $1}' | head -n 1 || true)"
+        if [ -n "$ip" ]; then printf '%s\n' "$ip"; return 0; fi
+        sleep 10
+    done
+    return 1
+}
+'''.strip("\n")
+
+
+INSTALL_OS_CLOUDINIT = Template(
+    name="install_os_cloudinit",
+    title="Install Ubuntu unattended on VM {GID} (cloud image + cloud-init)",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_INSTALL_OS_RE.search(_text(node))),
+    params=[
+        Param("GID", "subject"),
+        Param("GUEST_USER", "operator", "the account to create inside the guest (the operator logs in with it; sudo)"),
+        Param("IMAGE_URL", "default", default="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"),
+        Param("IMAGE_FILE", "default", default="/var/lib/vz/template/jammy-server-cloudimg-amd64.img"),
+        Param("DISK_SIZE", "default", default="100G"),
+        Param("NAMESERVER", "default", default="192.168.1.1"),
+        Param("PUBKEY", "default", default="/root/.ssh/id_rsa.pub"),
+        Param("EXPECT", "default", default="Ubuntu 22.04"),
+    ],
+    files={"/tmp/install_os_{GID}.sh": r'''#!/usr/bin/env bash
+# Unattended Ubuntu install on VM {GID}: cloud image + the Proxmox cloud-init drive. No console at any point.
+set -uo pipefail
+GID={GID}
+IMAGE_URL="{IMAGE_URL}"
+IMAGE_FILE="{IMAGE_FILE}"
+DISK_SIZE="{DISK_SIZE}"
+USER_NAME="${GUEST_USER}"
+PUBKEY="{PUBKEY}"
+
+''' + WAIT_FOR_ADDRESS + r'''
+
+# 1. the image, once
+if [ ! -s "$IMAGE_FILE" ]; then
+    curl -fL --retry 3 -o "$IMAGE_FILE" "$IMAGE_URL" || { echo "FAILED: could not download $IMAGE_URL"; exit 1; }
+fi
+# 2. the VM must be stopped to swap its disk
+qm status "$GID" | grep -q running && qm stop "$GID"
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
+# 3. import the image as a new disk; it lands as unusedN
+OLD_DISK="$(qm config "$GID" | sed -n 's/^scsi0: \([^,]*\),.*/\1/p' | head -n 1 || true)"
+qm importdisk "$GID" "$IMAGE_FILE" local-lvm >/dev/null || { echo "FAILED: qm importdisk"; exit 1; }
+NEW_DISK="$(qm config "$GID" | sed -n 's/^unused[0-9]*: \(local-lvm:vm-'"$GID"'-disk-[0-9]*\)$/\1/p' | tail -n 1 || true)"
+if [ -z "$NEW_DISK" ]; then echo "FAILED: the imported disk did not appear as unusedN in qm config $GID"; exit 1; fi
+echo "imported $NEW_DISK (old boot disk: ${OLD_DISK:-none})"
+# 4. make it the boot disk, grow it; the old never-written disk is freed
+qm set "$GID" --scsihw virtio-scsi-pci --scsi0 "$NEW_DISK" --boot order=scsi0 >/dev/null || { echo "FAILED: qm set scsi0"; exit 1; }
+qm resize "$GID" scsi0 "$DISK_SIZE" >/dev/null || { echo "FAILED: qm resize"; exit 1; }
+if [ -n "$OLD_DISK" ] && [ "$OLD_DISK" != "$NEW_DISK" ]; then
+    OLD_SLOT="$(qm config "$GID" | grep -F ": $OLD_DISK" | grep -oE '^unused[0-9]+' | head -n 1 || true)"
+    [ -n "$OLD_SLOT" ] && qm set "$GID" --delete "$OLD_SLOT" >/dev/null
+    pvesm free "$OLD_DISK" >/dev/null 2>&1 || true
+fi
+# 5. the cloud-init drive and its seed: account, password by NAME, this host's key, DHCP
+qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD" \
+    --sshkeys "$PUBKEY" --ipconfig0 ip=dhcp --nameserver {NAMESERVER} --agent 1 --serial0 socket --vga serial0 >/dev/null \
+    || { echo "FAILED: qm set cloud-init"; exit 1; }
+# 6. boot and wait for it to answer over ssh (cloud-init needs a minute on first boot)
+qm start "$GID" || { echo "FAILED: qm start"; exit 1; }
+MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
+IP="$(wait_for_address "$MAC" || true)"
+if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
+echo "VM $GID is at $IP"
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" 'lsb_release -ds' 2>/dev/null || true)"
+    if [ -n "$OUT" ]; then echo "guest answers: $OUT"; break; fi
+    sleep 10
+done
+case "$OUT" in *"{EXPECT}"*) echo "OK: $OUT on VM $GID at $IP";; *) echo "FAILED: ssh to $USER_NAME@$IP did not answer with {EXPECT}"; exit 1;; esac
+'''},
+    run='MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/install_os_{GID}.sh',
+    verify=["qm config {GID} | grep -E '^(scsi0|ide2|boot):'", "qm status {GID}"],
+    risk="Stops VM {GID}, replaces its (never-written) boot disk with the imported cloud image, frees the old volume.",
+)
+
+
+REACH_VM_SSH_AND_RUN = Template(
+    name="reach_vm_ssh_and_run",
+    title="Run commands inside VM {GID} over ssh",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and not _INSTALL_OS_RE.search(_text(node))
+                                and not _HOST_SIDE_RE.search(_text(node)) and not getattr(truth, "agent", False),
+    params=[
+        Param("GID", "subject"),
+        Param("GUEST_USER", "operator", "the account inside the guest that has sudo (the operator logs in with it)"),
+        Param("REMOTE_COMMANDS", "model", "the commands to run inside the guest, as root, one per line"),
+        Param("NEEDS_KEY", "truth", default="yes"),
+    ],
+    files={"/tmp/in_vm_{GID}.sh": r'''#!/usr/bin/env bash
+# Reach VM {GID} over ssh and run this step's commands inside it as root.
+set -uo pipefail
+GID={GID}
+USER_NAME="${GUEST_USER}"
+
+''' + WAIT_FOR_ADDRESS + r'''
+
+qm status "$GID" | grep -q running || qm start "$GID"
+MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
+IP="$(wait_for_address "$MAC" || true)"
+if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
+echo "VM $GID is at $IP"
+if [ "{NEEDS_KEY}" = "yes" ]; then
+    command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
+    SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
+        || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password?)"; exit 1; }
+fi
+cat > /tmp/in_vm_{GID}_remote.sh <<'REMOTE'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+{REMOTE_COMMANDS}
+REMOTE
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" "sudo -S -p '' bash -s" <<< "$MASS_PASSWORD
+$(cat /tmp/in_vm_{GID}_remote.sh)"
+'''},
+    run='MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh',
+    verify=["qm status {GID}"],
+    risk="Runs this step's commands as root inside VM {GID}; copies this host's key into the guest first.",
+)
+
+
+RUN_IN_CONTAINER = Template(
+    name="run_in_container",
+    title="Run commands inside container {GID}",
+    applies=lambda node, truth: _subject_kind(node, truth) == "ct" and not _HOST_SIDE_RE.search(_text(node)),
+    params=[Param("GID", "subject"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line")],
+    files={"/tmp/in_ct_{GID}.sh": r'''#!/usr/bin/env bash
+# Run this step's commands inside container {GID} as root.
+set -uo pipefail
+GID={GID}
+pct status "$GID" | grep -q running || pct start "$GID"
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done
+cat > /tmp/in_ct_{GID}_remote.sh <<'REMOTE'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+{REMOTE_COMMANDS}
+REMOTE
+pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }
+pct exec "$GID" -- bash /root/.scaffold_step.sh
+'''},
+    run="bash /tmp/in_ct_{GID}.sh",
+    verify=["pct status {GID}"],
+    risk="Runs this step's commands as root inside container {GID}.",
+)
+
+
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+
+
+def _text(node: dict) -> str:
+    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+
+
+def _subject_kind(node: dict, truth) -> Optional[str]:
+    if truth is not None and getattr(truth, "kind", None):
+        return getattr(truth, "kind")
+    return None
+
+
+def subject_gid(node: dict) -> Optional[str]:
+    m = _SUBJECT_RE.search(_text(node))
+    return m.group(1) if m else None
+
+
+def select_template(node: dict, truth) -> Optional[Template]:
+    """The first template whose ``applies`` holds for this step and this
+    measured guest; None means today's model-written path."""
+    if not subject_gid(node):
+        return None
+    for t in TEMPLATES:
+        try:
+            if t.applies(node, truth):
+                return t
+        except Exception:
+            continue
+    return None
+
+
+def guest_user_name(node: dict, gid: str, env: Optional[dict]) -> str:
+    """`PALWORLD_USER` for the palworld-server guest (§17.1288h's word)."""
+    from app.modules.supervised_runs import _guest_word
+    return f"{_guest_word(_text(node), gid, env)}_USER"
+
+
+def values_for(template: Template, node: dict, truth, env: Optional[dict], model_values: Optional[dict] = None) -> dict:
+    gid = subject_gid(node) or ""
+    vals: dict[str, str] = {"GID": gid, "GUEST_USER_NAME": guest_user_name(node, gid, env)}
+    for p in template.params:
+        if p.source == "subject":
+            vals[p.name] = gid
+        elif p.source == "default":
+            vals[p.name] = p.default
+        elif p.source == "truth":
+            if p.name == "NEEDS_KEY":
+                vals[p.name] = "no" if getattr(truth, "key_known_by", None) else "yes"
+            else:
+                vals[p.name] = p.default
+        elif p.source == "model":
+            vals[p.name] = str((model_values or {}).get(p.name) or "").strip()
+        elif p.source == "operator":
+            vals[p.name] = ""          # stays a placeholder: the operator fills it on the frame
+    return vals
+
+
+def render(template: Template, values: dict) -> str:
+    """The runbook, in the exact shape `frame_run` parses: a marker line, the
+    inputs, the risk, the files, the run command, the verify checks. Operator
+    params are left as ``<NAME>`` placeholders; ``{GUEST_USER}`` inside a
+    script is the ENVIRONMENT variable the run command sets from that placeholder."""
+    v = dict(values)
+    user_ph = f"<{v.get('GUEST_USER_NAME', 'GUEST_USER')}>"
+
+    def fill(s: str) -> str:
+        out = s
+        for k, val in v.items():
+            if k == "GUEST_USER":
+                continue
+            out = out.replace("{" + k + "}", str(val))
+        return out
+
+    inputs = []
+    for p in template.params:
+        if p.source == "operator":
+            inputs.append(f"- `{user_ph}` — {p.hint}")
+    lines = [f"{TEMPLATE_MARK} {template.name} -->", "", f"## {fill(template.title)}", ""]
+    if inputs:
+        lines += ["## Inputs needed", "", *inputs, ""]
+    if template.risk:
+        lines += ["## Risk", "", fill(template.risk), ""]
+    lines += ["## Write these files", ""]
+    for path, body in template.files.items():
+        lines += [f"### {fill(path)}", "```bash", fill(body).rstrip("\n"), "```", ""]
+    lines += ["## Run this", "", "```bash", fill(template.run), "```", "", "## Verify", ""]
+    lines += [f"- `{fill(c)}`" for c in template.verify]
+    return "\n".join(lines) + "\n"
+
+
+def template_of(runbook: str) -> Optional[str]:
+    m = _TEMPLATE_MARK_RE.search(runbook or "")
+    return m.group(1) if m else None
+
+
+def model_fence(text: str) -> str:
+    """The commands the model wrote for the one free parameter: the first
+    fenced block, stripped of prompts and comments."""
+    m = _FENCE_RE.search(text or "")
+    body = m.group(1) if m else (text or "")
+    out = []
+    for ln in body.split("\n"):
+        ln = re.sub(r"^\s*\$\s+", "", ln.rstrip())
+        if ln.strip() and not ln.strip().startswith("#"):
+            out.append(ln)
+    return "\n".join(out)
+
+
+FREE_PARAM_SYSTEM = (
+    "You fill ONE parameter of a fixed, already-approved script: the commands that run INSIDE a guest "
+    "machine, as root, non-interactively. Output exactly one ```bash fence containing those commands and "
+    "nothing else: no sudo prefix (they already run as root), no prompts (apt-get with -y, "
+    "DEBIAN_FRONTEND is set), no placeholders, no comments, no explanations outside the fence. "
+    "Package installs and service enables are the usual content; do not start, stop, resize or "
+    "reconfigure the VM or container itself -- that is the host's business and the script's."
+)
+
+
+async def fill_free_params(template: Template, node: dict, brief_text: str) -> dict:
+    """Ask the model for the free parameters only (today: REMOTE_COMMANDS)."""
+    from app.config import settings
+    from app.modules import model_router
+    from app.utils.llm_retry import generate_until_nonempty
+    free = [p for p in template.params if p.source == "model"]
+    if not free:
+        return {}
+    prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n"
+              f"Write the {free[0].hint} for this step.")
+    resp = await generate_until_nonempty(
+        model_router.generate, prompt, {"role": "model_general", "think": False},
+        system=FREE_PARAM_SYSTEM, temperature=0.1,
+        max_tokens=min(1500, int(getattr(settings, "node_generation_max_tokens", 1500) or 1500)),
+        draws=2, label=f"template {template.name} {node.get('node_key')}",
+    )
+    text = (getattr(resp, "text", "") or "").strip()
+    return {free[0].name: model_fence(text)}

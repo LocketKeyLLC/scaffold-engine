@@ -2543,7 +2543,6 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         from app.modules.runbook_inputs import job_environment
         async with async_session() as db:
             _env = await job_environment(db, job_id)
-        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env)
         # §17.1213 — ask the host whether this block can work at all, before
         # offering it. ADD21 ran `pct exec 111` against a stopped container and
         # ADD82 ran `pct exec 106` against a VM; one `pct list` + `qm list`
@@ -2578,6 +2577,8 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 _truth = await machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)
         except Exception as exc:
             logger.warning("machine_truth_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+        # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
+        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth)
 
         async def _pre_for(rb: str) -> list[dict]:
             try:
