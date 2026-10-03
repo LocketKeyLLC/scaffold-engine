@@ -1,0 +1,21 @@
+```
+
+10. Connect Radarr and Sonarr applications and trigger sync:
+
+```bash
+python3 /tmp/connect_apps.py
+```
+
+## Verify
+
+- The API key Prowlarr is using: `pct exec 102 -- cat /var/lib/prowlarr/config.xml`
+- How many indexers Prowlarr now has (paste the key from the previous check): `curl -s -H "X-Api-Key: <PROWLARR_API_KEY>" http://<PROWLARR_IP>:9696/api/v1/indexer`
+- The applications Prowlarr has registered (paste the key from the first check): `curl -s -H "X-Api-Key: <PROWLARR_API_KEY>" http://<PROWLARR_IP>:9696/api/v1/applications`
+- Radarr shows indexers (paste the Radarr key from its config): `curl -s -H "X-Api-Key: <RADARR_API_KEY>" http://<RADARR_IP>:7878/api/v3/indexer`
+- Sonarr shows indexers (paste the Sonarr key from its config): `curl -s -H "X-Api-Key: <SONARR_API_KEY>" http://<SONARR_IP>:8989/api/v3/indexer`
+
+## Rollback
+
+If a batch fails with a `BAD REQUEST` message, the script prints the response body and stops. Read the body to see which property Prowlarr rejected, fix the script, and re-run only that batch — earlier batches are already done and re-running them is harmless (duplicates are counted as "already present").
+
+If the application connection fails, re-run `python3 /tmp/connect_apps.py` — it treats "already exists" as success.
