@@ -297,6 +297,62 @@ RUN_IN_VM_VIA_AGENT = Template(
 )
 
 
+#: §17.1322 — a Steam dedicated server (Palworld, Valheim, …) is one shape: SteamCMD as a dedicated
+#: user, bootstrap, `app_update <id>`, a unit on the start script the download leaves. Live, the agent
+#: draw flipped between this and Ubuntu's `steamcmd` package (licence prompt, no game) four times in a
+#: row once its own failed attempt was in view. The engine owns the shape; the model fills nothing unless
+#: the app id is in nothing the engine holds.
+_STEAM_RE = re.compile(r"\b(?:steamcmd|steam\s+(?:dedicated\s+)?server|dedicated\s+server|app_update|palworld|valheim|satisfactory|"
+                       r"rust\s+server|ark\s+(?:server|survival)|cs2\s+server|project\s+zomboid|v\s*rising|enshrouded|7\s*days\s+to\s+die)\b", re.I)
+_APP_ID_RE = re.compile(r"(?:app_update|app\s*id|appid)\D{0,12}(\d{4,8})", re.I)
+_KNOWN_APPS = {"palworld": "2394010", "valheim": "896660", "satisfactory": "1690800", "rust": "258550", "enshrouded": "2278520",
+               "ark": "376030", "zomboid": "380870", "v rising": "1829350", "7 days": "294420", "cs2": "730"}
+_GAME_RE = re.compile(r"\b(palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b", re.I)
+_STEAM_TITLE_RE = re.compile(
+    r"(?i)(?:\b(?:install|set\s*up|deploy)\b.*\b(?:steamcmd|dedicated\s+server|app_update)\b"
+    r"|\b(?:install|set\s*up|deploy)\b.*\b(?:palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b.*\bserver\b"
+    r"|\b(?:palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b.*\bserver\b.*\binstall)")
+
+
+def derive_param(name: str, node: dict) -> str:
+    """§17.1322 — APP_ID / GAME from the step's text, its last attempt's record and its research."""
+    texts = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "output_text", "last_verification_reason", "research"))
+    if name == "GAME":
+        m = _GAME_RE.search(_text(node))
+        return re.sub(r"\s+", "", m.group(1).lower()) if m else ""
+    if name == "APP_ID":
+        m = _APP_ID_RE.search(texts)
+        if m:
+            return m.group(1)
+        g = _GAME_RE.search(_text(node))
+        return _KNOWN_APPS.get(re.sub(r"\s+", " ", g.group(1).lower()), "") if g else ""
+    return ""
+
+
+STEAM_REMOTE = '# §17.1320 -- repair what a failed attempt left in dpkg before any apt work\ndpkg --configure -a >/dev/null 2>&1 || true\nfor _p in $(dpkg -l 2>/dev/null | awk \'/^(i[^i ]|[^i ]i|rF|rH|rU)/ {print $2}\'); do dpkg --purge --force-remove-reinstreq "$_p" >/dev/null 2>&1 || true; done\ndpkg --add-architecture i386\napt-get update\napt-get install -y lib32gcc-s1 lib32stdc++6 curl tar\nid -u steam >/dev/null 2>&1 || useradd -m -s /bin/bash steam\ninstall -d -o steam -g steam /opt/steamcmd {INSTALL_DIR}\nif [ ! -x /opt/steamcmd/steamcmd.sh ]; then\n  curl -sSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar -xz -C /opt/steamcmd\n  chown -R steam:steam /opt/steamcmd\nfi\nsu - steam -c \'/opt/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true\'   # bootstrap: a fresh SteamCMD updates itself and exits\nsu - steam -c \'/opt/steamcmd/steamcmd.sh +force_install_dir {INSTALL_DIR} +login anonymous +app_update {APP_ID} validate +quit\'\nSTART="$(ls {INSTALL_DIR}/*.sh 2>/dev/null | head -n 1)"\n[ -n "$START" ] || { echo "FAILED: app {APP_ID} installed nothing runnable under {INSTALL_DIR}"; exit 1; }\nchmod +x "$START"\n[ -e /etc/systemd/system/{GAME}.service ] && cp -a /etc/systemd/system/{GAME}.service "/etc/systemd/system/{GAME}.service.bak.$(date +%Y%m%d%H%M%S)"\ncat > /etc/systemd/system/{GAME}.service <<EOF\n[Unit]\nDescription={GAME} dedicated server (Steam app {APP_ID})\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=simple\nUser=steam\nGroup=steam\nWorkingDirectory={INSTALL_DIR}\nExecStart=$START\nRestart=on-failure\nRestartSec=10\nLimitNOFILE=65535\n[Install]\nWantedBy=multi-user.target\nEOF\nsystemctl daemon-reload\nsystemctl enable {GAME}.service\necho "installed app {APP_ID} under {INSTALL_DIR}; start script $START; unit {GAME}.service enabled (not started)"'
+
+INSTALL_STEAM_SERVER = Template(
+    name="install_steam_server",
+    title="Install the {GAME} dedicated server (Steam app {APP_ID}) inside VM {GID}",
+    # the TITLE names the install of a game/dedicated server; a description that merely mentions the
+    # guest "palworld-server" (ADD82: install the guest agent in it) does not make a step a game install
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(getattr(truth, "agent", False))
+                                and bool(_STEAM_TITLE_RE.search(str((node or {}).get("title") or "")))
+                                and not _INSTALL_OS_RE.search(_text(node)),
+    params=[
+        Param("GID", "subject"),
+        Param("STEP", "node_key"),
+        Param("GAME", "derived", default="steamapp"),
+        Param("INSTALL_DIR", "default", default="/opt/{GAME}"),
+        Param("APP_ID", "derived", "the Steam app id of the DEDICATED SERVER build (not the game client); for Palworld it is 2394010"),
+    ],
+    files={"/tmp/in_vm_{GID}_agent.sh": RUN_IN_VM_VIA_AGENT.files["/tmp/in_vm_{GID}_agent.sh"].replace("{REMOTE_COMMANDS}", STEAM_REMOTE)},
+    run=RUN_IN_VM_VIA_AGENT.run,
+    verify=['qm guest exec {GID} -- bash -c "ls -la {INSTALL_DIR}/*.sh"'],
+    risk="Installs SteamCMD and the dedicated server as user steam inside VM {GID}; writes and enables {GAME}.service (not started).",
+)
+
+
 RUN_IN_CONTAINER = Template(
     name="run_in_container",
     title="Run commands inside container {GID}",
@@ -363,7 +419,7 @@ tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
 
 
 def _text(node: dict) -> str:
@@ -440,6 +496,10 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
             vals[p.name] = p.default
         elif p.source == "node_key":
             vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
+        elif p.source == "derived":
+            # §17.1322 — read off what the engine already holds (the step's text, its last attempt's
+            # record, the research); the model is asked only when nothing holds it (fill_free_params).
+            vals[p.name] = derive_param(p.name, node) or str((model_values or {}).get(p.name) or "").strip() or p.default
         elif p.source == "truth":
             if p.name == "NEEDS_KEY":
                 vals[p.name] = "no" if getattr(truth, "key_known_by", None) else "yes"
@@ -459,6 +519,14 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
                 if pinned:
                     gw = next((p2.default for p2 in template.params if p2.name == "GATEWAY"), "192.168.1.1")
                     vals[p.name] = f"ip={pinned}/24,gw={gw}"
+    # §17.1322 — a default may name another value (INSTALL_DIR=/opt/{GAME}); resolve it here too, so
+    # callers that read values (not just the rendered runbook) see the real path.
+    for _ in range(2):
+        for k, val in list(vals.items()):
+            for k2, v2 in vals.items():
+                if k2 != k and isinstance(val, str) and "{" + k2 + "}" in val:
+                    val = val.replace("{" + k2 + "}", str(v2))
+            vals[k] = val
     return vals
 
 
@@ -472,10 +540,11 @@ def render(template: Template, values: dict) -> str:
 
     def fill(s: str) -> str:
         out = s
-        for k, val in v.items():
-            if k == "GUEST_USER":
-                continue
-            out = out.replace("{" + k + "}", str(val))
+        for _ in range(2):                          # §17.1322 — a default may name another value (INSTALL_DIR=/opt/{GAME})
+            for k, val in v.items():
+                if k == "GUEST_USER":
+                    continue
+                out = out.replace("{" + k + "}", str(val))
         return out
 
     inputs = []
@@ -732,7 +801,8 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     """Ask the model for the free parameters only, one short draw each
     (§17.1303: REMOTE_COMMANDS, and for the agent template the ONE read-only
     check inside the guest that shows the goal met)."""
-    free = [p for p in template.params if p.source == "model"]
+    free = [p for p in template.params if p.source == "model"
+            or (p.source == "derived" and not p.default and not derive_param(p.name, node))]   # §17.1322 — ask only for what nothing holds and nothing defaults
     if not free:
         return {}                                   # §17.1290b — no draw, no import, for a template with no free parameter
     from app import model_router                    # §17.1290b — live: importing it from app.modules was an ImportError
@@ -786,6 +856,10 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                              f"({len(text)} chars): the step's content is too large for one draw -- split the step, or write the "
                              f"file in parts")
         fenced = strip_guest_wrappers(model_fence(text))                     # §17.1311
+        if p.source == "derived":
+            m = re.search(r"\d{4,8}", fenced) if p.name == "APP_ID" else re.search(r"[A-Za-z0-9_-]+", fenced)
+            out[p.name] = m.group(0) if m else ""
+            continue
         if p.name == "VERIFY_INSIDE":
             check = fenced.split("\n", 1)[0].strip()
             # §17.1321 — a check that looks where the work did not go is redrawn once, told where it went.
