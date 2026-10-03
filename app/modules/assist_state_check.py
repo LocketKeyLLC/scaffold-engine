@@ -913,6 +913,34 @@ def render_probe_message(probes: list[dict], *, checked: int, unchecked: int,
 # Judge — attribute output by marker, model verdicts, deterministic gates.
 # ---------------------------------------------------------------------------
 
+#: §17.1310 — answers that settle a check against the claim with no model: an HTTP
+#: error page or refusal for a curl, `inactive`/`failed` for `systemctl is-active`,
+#: a missing file or command for a test/which/ls/cat.
+_NEG_HTTP_RE = re.compile(r"Cannot (?:GET|POST) /|<title>Error</title>|Connection refused|Could not resolve host|"
+                          r"HTTP/[12](?:\.[01])? (?:404|500|502|503)\b|\b(?:404 Not Found|502 Bad Gateway|503 Service Unavailable)\b", re.I)
+_NEG_FS_RE = re.compile(r"No such file or directory|command not found|not installed|cannot access", re.I)
+
+
+def negative_evidence(command: str, output: str) -> str:
+    """The reason a check's output CONTRADICTS its claim with no model, or ``""``."""
+    import shlex
+    cmd, out = str(command or ""), str(output or "")
+    head = cmd
+    if "--" in cmd:
+        try:
+            inner = container_exec_remainder(shlex.split(cmd))
+            head = inner or cmd
+        except ValueError:
+            pass
+    if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_HTTP_RE.search(out):
+        return f"the check answered an error, not the service: {_NEG_HTTP_RE.search(out).group(0)!r}"
+    if "is-active" in head and re.fullmatch(r"\s*(?:inactive|failed|unknown|deactivating)\s*", out):
+        return f"systemctl is-active says {out.strip()!r}"
+    if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and _NEG_FS_RE.search(out):
+        return f"the path or command is not there: {_NEG_FS_RE.search(out).group(0)!r}"
+    return ""
+
+
 def attribute_sections(pasted: str) -> dict[str, str]:
     """``{claim id: output text}`` split on the ``== id ==`` markers the
     script printed. Text before the first marker is ignored."""
@@ -1001,8 +1029,14 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
     to_judge: dict[str, str] = {}
     for cid, txt in with_output.items():
         exp = " ".join((probed[cid].get("expect") or "").split()).lower()
+        neg = negative_evidence(probed[cid].get("command") or "", txt)
         if len(exp) >= 6 and exp in " ".join(txt.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
+        elif neg:
+            # §17.1310 — a health check that answered "Cannot GET /api/health" is not
+            # ambiguous; live the model judge called it unknown and a step that did
+            # nothing stood as done.
+            verdicts[cid].update({"verdict": "contradicted", "reason": neg})
         else:
             verdicts[cid]["reason"] = "the judge returned no verdict for this check"
             to_judge[cid] = txt

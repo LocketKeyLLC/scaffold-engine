@@ -117,6 +117,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "'s address: the engine measured",             # §17.1303 measured address beats a written one
                    "is a placeholder, not a value",                # §17.1306
                    "appears nowhere the engine holds",             # §17.1307
+                   "ends inside a heredoc",                        # §17.1310
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
                    "is a container on this host, not a VM",        # §17.1213
@@ -1879,6 +1880,22 @@ def stopped_on_a_dead_party(output: str) -> Optional[str]:
             f"rest of the list; stop and print the body only when the service NAMES a field.")
 
 
+_HEREDOC_EOF_RE = re.compile(r"here-document at line \d+ delimited by end-of-file \(wanted [`'\"]?(\w+)", re.I)
+
+
+def script_was_cut(executed: list[dict]) -> str:
+    """§17.1310 — the reason, or ``""``: a command whose output carries bash's
+    unterminated-heredoc warning did not run what came after the opener, whatever
+    its exit code says."""
+    for e in executed or []:
+        m = _HEREDOC_EOF_RE.search(str(e.get("output") or ""))
+        if m:
+            return (f"`{str(e.get('command') or '')[:80]}` was cut: bash reported a here-document (`{m.group(1)}`) "
+                    f"delimited by end-of-file, so everything after the opener ran as text and nothing it was "
+                    f"meant to do happened; the exit code 0 is the warning's, not the work's.")
+    return ""
+
+
 def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[str]:
     """§17.1258 — a block that repeated a failing call instead of stopping at it.
 
@@ -2678,6 +2695,32 @@ def file_writes(text_out: str) -> list[dict]:
     return out
 
 
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?(?=\s|$|\))", re.M)
+
+
+def unterminated_heredoc(body: str) -> Optional[str]:
+    """§17.1310 — the delimiter of a heredoc this script opens and never closes,
+    or None. A file that ends inside a heredoc was CUT (live: a fence marker in
+    the model's content closed the runbook's file block early); bash only warns
+    about it and runs the rest as heredoc text, so nothing after the opener
+    happens and the exit code is 0."""
+    lines = (body or "").split("\n")
+    i = 0
+    while i < len(lines):
+        m = _HEREDOC_OPEN_RE.search(lines[i])
+        if m and not lines[i].lstrip().startswith("#"):
+            tag = m.group(1)
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != tag:
+                j += 1
+            if j >= len(lines):
+                return tag
+            i = j + 1
+            continue
+        i += 1
+    return None
+
+
 def file_writes_will_not_work(files: list[dict]) -> list[dict]:
     """§17.1271 — refuse a written file the machine would reject or the
     interpreter could not run, before the operator is asked to approve it.
@@ -2695,6 +2738,14 @@ def file_writes_will_not_work(files: list[dict]) -> list[dict]:
             out.append({"command": what, "why": (
                 f"{path!r} is not an absolute path, and the runner refuses a relative one because "
                 f"what it resolves to depends on where the runner happens to be running.")})
+        tag = unterminated_heredoc(body)
+        if tag:
+            out.append({"command": what, "why": (
+                f"the file {path} ends inside a heredoc (`<<'{tag}'` is opened and never closed), so it was cut: "
+                f"bash would warn `here-document delimited by end-of-file`, treat everything after the opener as "
+                f"text, exit 0 and run NOTHING -- a step recorded done for a script that did not happen. "
+                f"Close the heredoc, and keep fence markers (```) out of file content: a fence inside a file "
+                f"block ends the block.")})
             continue
         if ".." in path.split("/"):
             out.append({"command": what, "why": f"{path!r} contains '..', which the runner refuses."})
@@ -4157,6 +4208,14 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         logger.warning("supervised_run_repeated_failure job=%s node=%s", job_id, node_key)
     else:
         repeated_reason = ""
+    # §17.1310 — bash exits 0 after "here-document at line N delimited by end-of-file":
+    # the script was cut, everything after the opener ran as TEXT. Live, ADD100's
+    # 345-byte script did exactly that and was recorded done.
+    _cut = script_was_cut(executed)
+    if _cut and ok:
+        ok = False
+        repeated_reason = _cut
+        logger.warning("supervised_run_script_cut job=%s node=%s", job_id, node_key)
     if confirmed_after_drop:
         output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
                    f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
