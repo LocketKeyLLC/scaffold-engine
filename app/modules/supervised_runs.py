@@ -2496,15 +2496,24 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # supplies everything the gates would otherwise have to chase. Only on the
     # first draft: a template that is refused (it must not be -- every template
     # passes every gate in CI) hands the redraft to the model path below.
-    if truth is not None and not retry_note and for_channel:
+    # §17.1308 — and on a REDRAFT too: the shape is the engine's and pre-gated, so a
+    # refusal of a template frame is about the model's CONTENT (an invented e-mail,
+    # a placeholder). Handing the redraft to the model path threw the shape away:
+    # live, ADD88's second draft lost the guarded start and was refused for THAT,
+    # the third re-invented the e-mail, and the frame parked on a refusal. The
+    # refusal goes to the free-parameter draw instead, the way a compiler error
+    # feeds the next attempt.
+    if truth is not None and for_channel:
         try:
             from app.modules import runbook_templates as rt
             tpl = rt.select_template(node, truth)
             if tpl is not None:
                 model_vals = await rt.fill_free_params(tpl, node, str(b if isinstance(b, str) else json.dumps(b, default=str)),
-                                                       upstream=upstream, environment=environment)   # §17.1306
+                                                       upstream=upstream, environment=environment,   # §17.1306
+                                                       retry_note=retry_note)                        # §17.1308
                 rendered = rt.render(tpl, rt.values_for(tpl, node, truth, environment, model_vals))
-                logger.warning("runbook_from_template node=%s template=%s chars=%d", node.get("node_key"), tpl.name, len(rendered))
+                logger.warning("runbook_from_template node=%s template=%s chars=%d redraft=%s", node.get("node_key"), tpl.name,
+                               len(rendered), bool(retry_note))
                 return rendered
         except Exception as exc:
             logger.warning("runbook_template_failed node=%s err=%r", node.get("node_key"), exc)

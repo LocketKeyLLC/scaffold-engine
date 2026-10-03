@@ -564,7 +564,7 @@ FREE_PARAM_SYSTEM = (
 
 
 async def fill_free_params(template: Template, node: dict, brief_text: str, upstream: str = "",
-                           environment: Optional[dict] = None) -> dict:
+                           environment: Optional[dict] = None, retry_note: str = "") -> dict:
     """Ask the model for the free parameters only, one short draw each
     (§17.1303: REMOTE_COMMANDS, and for the agent template the ONE read-only
     check inside the guest that shows the goal met)."""
@@ -579,9 +579,12 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     # 17-line content … five handle_path blocks" came back as a stub with
     # `admin@example.com` and `:80 { respond … }`. Same reader, same evidence.
     context = plan_context(upstream, environment)
+    # §17.1308 — the previous attempt's refusal, quoted back: fix exactly that, keep the rest.
+    note = (f"THE PREVIOUS ATTEMPT WAS REFUSED BY THE ENGINE'S GATE -- fix exactly this and keep everything else:\n"
+            f"{str(retry_note).strip()[:2500]}\n\n") if str(retry_note or "").strip() else ""
     out: dict[str, str] = {}
     for p in free:
-        prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n{context}"
+        prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n{context}{note}"
                   f"Write the {p.hint} for this step.")
         resp = await generate_until_nonempty(
             model_router.generate, prompt, {"role": "model_general", "think": False},

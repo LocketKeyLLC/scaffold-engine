@@ -177,6 +177,9 @@ def _resolve_ids(text_value: str) -> str:
     return out
 
 
+resolve_ids = _resolve_ids      # §17.1308 — machine_truth.step_needs reads the same block
+
+
 def _first_line_with(texts: list[str], pattern: "re.Pattern[str]") -> str:
     for t in texts:
         for ln in str(t).split("\n"):
