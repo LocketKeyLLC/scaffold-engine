@@ -114,6 +114,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    # each "fixed" the shape note and lost what the other had.
                    "is stopped (`",                                # §17.1288f / §17.1213
                    "fails before it starts",                       # §17.1213 needs-running / §17.1301
+                   "'s address: the engine measured",             # §17.1303 measured address beats a written one
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
                    "is a container on this host, not a VM",        # §17.1213
@@ -4326,7 +4327,12 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     pasted, ran = await run_verify(spec, verify_cmds, env)
     answered = [r for r in ran or [] if r.get("ran")]
     if not _has_evidence(pasted, ran) or len(answered) != len(verify_cmds):
-        return None                                   # a check that did not answer is not evidence
+        # a check that did not answer is not evidence -- say which, so a verify the
+        # read-only channel refuses (an ssh) is visible as the reason nothing was read
+        logger.info("supervised_run_already_met_unreadable node=%s unanswered=%s",
+                    (node or {}).get("node_key"),
+                    [f"{r.get('id')}: {str(r.get('why') or 'no marker')[:60]}" for r in ran or [] if not r.get("ran")] or "all")
+        return None
     title = str((node or {}).get("title") or (frame or {}).get("node_key") or "")
     desc = " ".join(str((node or {}).get("description") or "").split())[:400]
     claim = f"{title} — {desc}" if desc else title

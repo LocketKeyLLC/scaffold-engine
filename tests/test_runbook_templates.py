@@ -20,6 +20,9 @@ ADD100 = {"node_key": "ADD100", "title": "Rebuild the control panel to do what w
           "description": "Rework the control-panel backend and frontend in LXC 111 so it does the things chosen."}
 ADD94 = {"node_key": "ADD94", "title": "Re-attach VM 106's detached disk and grow it to 100G", "description": "qm set / qm resize on the host."}
 REMOTE = "apt-get update\napt-get install -y qemu-guest-agent\nsystemctl enable --now qemu-guest-agent"
+ADD84 = {"node_key": "ADD84", "title": "Grow the VM 106 filesystem to fill the disk",
+         "description": "Inside the palworld-server guest, grow the partition and filesystem so the OS sees the full ~100GB. "
+                        "Done when `df -h` inside the guest reports the root filesystem at ~100GB."}
 
 
 def _truth(kind, agent=False, key=None):
@@ -37,6 +40,7 @@ def test_every_template_passes_every_gate():
         (rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm"), {"REMOTE_COMMANDS": REMOTE}),
         (rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm", key="ADD26 · Install the SSH public key"), {"REMOTE_COMMANDS": REMOTE}),
         (rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), {"REMOTE_COMMANDS": "apt-get update\napt-get install -y nodejs"}),
+        (rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), {"REMOTE_COMMANDS": "growpart /dev/sda 1\nresize2fs /dev/sda1", "VERIFY_INSIDE": "df -h /"}),
     ]
     for tpl, node, truth, model_vals in cases:
         rb = rt.render(tpl, rt.values_for(tpl, node, truth, ENV, model_vals))
@@ -45,8 +49,8 @@ def test_every_template_passes_every_gate():
         assert frame["refused"] == [], (tpl.name, [r["why"][:120] for r in frame["refused"]])
         assert frame["commands"] and frame["files"] and "run" in {o["id"] for o in frame["options"]}
         assert any("drafted from the engine's template" in w for w in frame["engine_fixed"]), tpl.name
-        if tpl is rt.RUN_IN_CONTAINER:
-            assert frame["inputs"] == []
+        if tpl in (rt.RUN_IN_CONTAINER, rt.RUN_IN_VM_VIA_AGENT):
+            assert frame["inputs"] == [], (tpl.name, frame["inputs"])
         else:
             assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"], tpl.name
             assert frame["inputs"][0]["suggestions"] == [], "the host shell's root is not offered for the guest"
@@ -80,7 +84,10 @@ def test_the_reach_template_copies_the_key_only_when_none_is_known():
 def test_selection_follows_the_step_and_the_measured_guest():
     assert rt.select_template(ADD117, _truth("vm")) is rt.INSTALL_OS_CLOUDINIT
     assert rt.select_template(ADD82, _truth("vm")) is rt.REACH_VM_SSH_AND_RUN
-    assert rt.select_template(ADD82, _truth("vm", agent=True)) is None, "with the agent up, today's path (qm guest exec) is fine"
+    assert rt.select_template(ADD82, _truth("vm", agent=True)) is rt.RUN_IN_VM_VIA_AGENT, "§17.1303 — with the agent up, the agent template owns the shape"
+    assert rt.select_template(ADD84, _truth("vm", agent=True)) is rt.RUN_IN_VM_VIA_AGENT
+    assert rt.select_template(ADD84, _truth("vm")) is rt.REACH_VM_SSH_AND_RUN, "no agent: ssh"
+    assert rt.select_template(ADD94, _truth("vm", agent=True)) is None, "host-side work stays host-side even with an agent"
     assert rt.select_template(ADD100, _truth("ct")) is rt.RUN_IN_CONTAINER
     assert rt.select_template(ADD94, _truth("vm")) is None, "host-side work on a guest is not a guest template"
     assert rt.select_template({"node_key": "X", "title": "Install the NVIDIA driver on the Proxmox host", "description": ""}, None) is None
@@ -291,3 +298,37 @@ def test_an_unattended_install_step_counts_as_the_key_step():
     from app.modules.runbook_preconditions import key_known_for
     plan = [{"node_key": "ADD117", "title": "Install Ubuntu 22.04 on VM 106 unattended (cloud image + cloud-init)", "status": "done"}]
     assert key_known_for("106", "palworld-server", plan) and key_known_for("106", "palworld-server", plan).startswith("ADD117")
+
+
+# ───── §17.1303 — a VM with a working agent is reached through the agent
+
+def test_the_agent_template_reaches_the_guest_without_ssh_account_key_or_address():
+    rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), ENV,
+                                                          {"REMOTE_COMMANDS": "growpart /dev/sda 1\nresize2fs /dev/sda1", "VERIFY_INSIDE": "df -h /"}))
+    body = next(f["content"] for f in sr.file_writes(rb))
+    code = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("#"))
+    assert "ssh" not in code and "@" not in code and "MASS_PASSWORD" not in rb, "no ssh, no account, no key, no password"
+    assert "<" not in code.replace("<<'REMOTE'", "").replace("<<'PYJ'", "").replace(" < /tmp/", " "), "no operator placeholder"
+    assert "qm guest exec \"$GID\" --timeout 110 --pass-stdin 1 -- bash -s" in body, "the script travels on stdin; no quoting of the model's lines"
+    assert "seq 1 12" in body and "sleep 5" in body, "60 s agent wait + 110 s exec stays inside the runner's 180 s"
+    assert 'sys.exit(int(d.get("exitcode", 1)))' in body, "the guest's exit code is the command's exit code"
+    frame = _frame(rb, ADD84)
+    assert frame["commands"] == ["bash /tmp/in_vm_106_agent.sh"]
+    assert frame["verify"][0] == 'qm guest exec 106 -- bash -c "df -h /"', "the verify runs INSIDE the guest, so §17.1302 can read it"
+    assert sr.verify_commands(rb) == frame["verify"], "both checks are read-only through the wrapper"
+
+
+@pytest.mark.asyncio
+async def test_the_model_fills_each_free_parameter_once_and_the_check_is_one_line(monkeypatch):
+    import app.utils.llm_retry as lr
+    drawn = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        drawn.append((system, prompt))
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\ndf -h /\nlsblk\n```"})()
+        return type("R", (), {"text": "```bash\n$ growpart /dev/sda 1\nresize2fs /dev/sda1\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    vals = await rt.fill_free_params(rt.RUN_IN_VM_VIA_AGENT, ADD84, "brief")
+    assert vals == {"REMOTE_COMMANDS": "growpart /dev/sda 1\nresize2fs /dev/sda1", "VERIFY_INSIDE": "df -h /"}
+    assert len(drawn) == 2 and drawn[1][0] is rt.FREE_PARAM_SYSTEM_VERIFY and "READ-ONLY" in drawn[1][0]

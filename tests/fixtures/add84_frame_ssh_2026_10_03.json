@@ -1,0 +1,24 @@
+{
+ "node_key": "ADD84",
+ "title": "Grow the VM 106 filesystem to fill the disk",
+ "commands": [
+  "ssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"sudo growpart /dev/sda 1\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"sudo resize2fs /dev/sda1\""
+ ],
+ "verify": [
+  "ssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"df -h /\""
+ ],
+ "runbook": "## Inputs needed\n\n- `<PALWORLD_USER>` \u2014 the account inside VM 106 that has sudo (the operator logs in with it)\n\n## Run this\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"sudo growpart /dev/sda 1\"\n```\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"sudo resize2fs /dev/sda1\"\n```\n\n## Verify\n\n- Root filesystem reports ~100GB: `ssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.127 \"df -h /\"`",
+ "hands_on_reason": "observed:df -h",
+ "inputs": [
+  {
+   "hint": "the account inside VM 106 that has sudo (the operator logs in with it)",
+   "name": "PALWORLD_USER",
+   "value": "",
+   "secret": false,
+   "suggestions": []
+  }
+ ],
+ "refused": [],
+ "files": []
+}

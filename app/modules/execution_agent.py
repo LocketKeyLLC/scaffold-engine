@@ -2584,7 +2584,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             try:
                 _f = supervised_runs.file_writes(rb) if (policy or {}).get("can_write_files") else []
                 return await unmet(supervised_runs.runbook_commands(rb), spec, plan=_plan_rows,
-                                   files=_f, node=run_node, inventory=_inv)
+                                   files=_f, node=run_node, inventory=_inv, truth=_truth)
             except Exception as exc:
                 logger.warning("preconditions_failed job=%s node=%s err=%r",
                                job_id, run_node.get("node_key"), exc)

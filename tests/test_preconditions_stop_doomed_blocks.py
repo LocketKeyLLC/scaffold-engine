@@ -12,6 +12,8 @@ machine had surprised it.
 """
 from __future__ import annotations
 
+import json
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pathlib as pathlib_mod
@@ -392,3 +394,37 @@ async def test_an_if_guard_in_a_script_counts_like_the_or_guard_on_a_line():
     assert all("ALREADY" not in o["why"] for o in out), [o["why"][:100] for o in out]
     assert pc._guarded('GID=106\nif qm status "$GID" | grep -q running; then qm reset "$GID"; else qm start "$GID"; fi\n'.replace('"$GID"', '106'), "qm", "start", "106")
     assert not pc._guarded("qm start 106", "qm", "start", "106")
+
+
+# ───── §17.1303 — a measured address beats a written one
+
+def _truth106(address="192.168.1.106", agent=True):
+    from app.modules.machine_truth import GuestTruth
+    return GuestTruth(gid="106", kind="vm", status="running", mac="bc:24:11:e8:9f:7a", address=address, agent=agent)
+
+
+ADD84_SSH = json.loads((pathlib_mod.Path(__file__).parent / "fixtures" / "add84_frame_ssh_2026_10_03.json").read_text(encoding="utf-8"))
+ADD84_NODE = {"node_key": "ADD84", "title": "Grow the VM 106 filesystem to fill the disk",
+              "description": "Inside the palworld-server guest, grow the partition and filesystem. Done when `df -h` reports ~100GB."}
+
+
+@pytest.mark.asyncio
+async def test_the_live_ssh_draft_reaches_another_guests_address_and_is_refused():
+    with patch("app.modules.mcp_client.call_tool", new=_host()):
+        out = await pc.unmet(ADD84_SSH["commands"], _spec(), node=ADD84_NODE, truth=_truth106())
+    hits = [r for r in out if "'s address: the engine measured" in r["why"]]
+    assert len(hits) == 1, out
+    assert "192.168.1.127" in hits[0]["command"] and "`192.168.1.106`" in hits[0]["why"] and "qm guest exec 106" in hits[0]["why"]
+    from app.modules.supervised_runs import shape_retry_note
+    assert "192.168.1.106" in shape_retry_note({"refused": hits, "commands": ADD84_SSH["commands"]}), "registered: the chain redrafts with the measured address"
+
+
+@pytest.mark.asyncio
+async def test_the_measured_address_itself_and_an_address_the_step_names_are_fine():
+    with patch("app.modules.mcp_client.call_tool", new=_host()):
+        ok = await pc.unmet(['ssh -o BatchMode=yes <PALWORLD_USER>@192.168.1.106 "df -h /"'], _spec(), node=ADD84_NODE, truth=_truth106())
+        named = await pc.unmet(["ssh root@192.168.1.127 uptime"], _spec(),
+                               node={"node_key": "ADD49", "title": "Make aiserver (VM 110) reachable", "description": "aiserver at 192.168.1.127, VM 110"},
+                               truth=_truth106())
+        blind = await pc.unmet(ADD84_SSH["commands"], _spec(), node=ADD84_NODE, truth=_truth106(address=None))
+    assert not any("'s address" in r["why"] for r in ok + named + blind)
