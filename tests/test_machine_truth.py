@@ -231,3 +231,55 @@ def test_the_live_template_frame_reopens_the_recorded_start_end_to_end():
     needs = mt.step_needs(node, fr["commands"], fr["files"])
     assert "running" in needs
     assert [r["reopen"] for r in mt.contradictions(node, t, needs, plan)] == ["ADD110"]
+
+
+@pytest.mark.asyncio
+async def test_a_reopened_start_becomes_a_dependency_of_the_step_that_needs_it(monkeypatch):
+    """§17.1309 — live, ADD110 was reopened and the pause still parked ADD88 (first
+    in execution order). The step that needs the guest running waits for the
+    step that starts it; the pause restarts so the start is asked about first."""
+    from app.modules import node_editor
+    calls = []
+
+    class _S:
+        async def __aenter__(self): return object()
+        async def __aexit__(self, *a): return False
+    import app.database as _db
+    monkeypatch.setattr(_db, "async_session", lambda: _S())
+
+    async def fake_reset(job_id, key, *, db, cascade, edited_by):
+        calls.append(("reset", key, cascade)); return {"status": "ok"}
+
+    async def fake_edit(job_id, key, fields, *, db, cascade, edited_by):
+        calls.append(("edit", key, fields, cascade)); return {"status": "ok", "downstream_kept": []}
+    monkeypatch.setattr(node_editor, "reset_node", fake_reset)
+    monkeypatch.setattr(node_editor, "edit_node", fake_edit)
+
+    import app.modules.assist_environment as _ae
+
+    async def no_facts(*a, **k):
+        return None
+    monkeypatch.setattr(_ae, "set_environment", no_facts)
+    plan = [{"node_key": "ADD110", "title": "Start container 120 (caddy-proxy)", "status": "done"},
+            {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "status": "pending"}]
+    node = {"node_key": "ADD88", "title": plan[1]["title"], "description": "", "depends_on": ["ADD87"]}
+    t = mt.truth_from_texts("120", inventory={"cts": {"120": "stopped"}, "vms": {}, "names": {}, "disks": {}}, plan=plan)
+    did = await mt.reconcile_from_truth("job", node, t, {"exists", "running"}, plan)
+    assert ("reset", "ADD110", False) in calls
+    assert ("edit", "ADD88", {"depends_on": ["ADD87", "ADD110"]}, False) in calls, calls
+    assert any(d.startswith("reopened ADD110") for d in did) and "ADD88 now waits for ADD110" in did
+    assert node["depends_on"] == ["ADD87", "ADD110"]
+
+
+def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it():
+    """§17.1309 — §17.1308's template re-render was inert: only the FIRST draft
+    passed `truth=_truth`, every redraft went to the model path (sibling call
+    sites drift). And a reopen must not park the step that now waits."""
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    calls = body.count("supervised_runs.draft_runbook(")
+    assert calls >= 8 and body.count("truth=_truth") >= calls, f"{calls} drafts, {body.count('truth=_truth')} carry the truth"
+    assert "decision_pause_restart_after_reopen" in body and body.count("_pause_for_decision(job_id, _depth + 1)") == 2
+    assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')

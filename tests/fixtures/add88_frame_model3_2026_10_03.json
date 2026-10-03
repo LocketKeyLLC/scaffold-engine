@@ -1,0 +1,32 @@
+{
+ "node_key": "ADD88",
+ "title": "Install Caddy and write the Caddyfile inside LXC 120",
+ "commands": [
+  "pct start 120",
+  "pct exec 120 -- apt-get update",
+  "pct exec 120 -- apt-get install -y caddy",
+  "pct exec 120 -- mkdir -p /etc/caddy",
+  "pct exec 120 -- tee /etc/caddy/Caddyfile <<'EOF'\n{\n\temail <ACME_EMAIL>\n\tadmin off\n}\n\naedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.101:8096\n}\n\nprowlarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.102:9696\n}\n\nradarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.103:7878\n}\n\nsonarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.104:8989\n}\n\npalworld.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.106:8211\n}\n\ncontrol.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.111:3001\n}\nEOF",
+  "pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile",
+  "pct exec 120 -- systemctl enable --now caddy"
+ ],
+ "verify": [
+  "pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile",
+  "pct exec 120 -- systemctl is-active caddy",
+  "pct exec 120 -- cat /etc/caddy/Caddyfile"
+ ],
+ "runbook": "## Prerequisites\n\n- Container 120 (caddy-proxy) exists on this host\n- `<ACME_EMAIL>` \u2014 an email address for Let's Encrypt certificate notifications (operator-supplied)\n\n## Run this\n\n```bash\npct start 120\n```\n\n```bash\npct exec 120 -- apt-get update\n```\n\n```bash\npct exec 120 -- apt-get install -y caddy\n```\n\n```bash\npct exec 120 -- mkdir -p /etc/caddy\n```\n\n```bash\npct exec 120 -- tee /etc/caddy/Caddyfile <<'EOF'\n{\n\temail <ACME_EMAIL>\n\tadmin off\n}\n\naedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.101:8096\n}\n\nprowlarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.102:9696\n}\n\nradarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.103:7878\n}\n\nsonarr.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.104:8989\n}\n\npalworld.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.106:8211\n}\n\ncontrol.aedefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.111:3001\n}\nEOF\n```\n\n```bash\npct exec 120 -- caddy validate --config /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- systemctl enable --now caddy\n```\n\n## Verify\n\n- `pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile` prints `Valid configuration`\n- `pct exec 120 -- systemctl is-active caddy` prints `active`\n- `pct exec 120 -- cat /etc/caddy/Caddyfile` shows the 17-line configuration with all six site blocks\n\n## Rollback\n\nIf any step fails, stop and report the error output. To remove Caddy if needed:\n\n```bash\npct exec 120 -- systemctl stop caddy\n```\n\n```bash\npct exec 120 -- apt-get remove -y caddy\n```\n\n```bash\npct exec 120 -- rm -f /etc/caddy/Caddyfile\n```",
+ "hands_on_reason": "writes:tee -a",
+ "inputs": [
+  {
+   "hint": "",
+   "name": "ACME_EMAIL",
+   "value": "",
+   "secret": false,
+   "suggestions": []
+  }
+ ],
+ "refused": [],
+ "files": [],
+ "engine_fixed": []
+}
