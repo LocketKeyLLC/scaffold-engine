@@ -79,7 +79,7 @@ async def test_the_draw_retries_at_three_times_the_cap_then_raises(monkeypatch):
         return type("R", (), {"text": "```bash\ntee /x <<'EOF'\nwhole\nEOF\n```"})()
     monkeypatch.setattr(lr, "generate_until_nonempty", ok_second)
     vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, NODE, "brief")
-    assert vals["REMOTE_COMMANDS"] == "tee /x <<'EOF'\nwhole\nEOF" and whole[:2] == [1500, 4500]
+    assert vals["REMOTE_COMMANDS"].endswith("tee /x <<'EOF'\nwhole\nEOF") and whole[:2] == [1500, 4500]   # §17.1314 prepends the backup line
 
 
 @pytest.mark.asyncio
