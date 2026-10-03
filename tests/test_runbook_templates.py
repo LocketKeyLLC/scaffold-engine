@@ -56,7 +56,7 @@ def test_the_install_template_carries_the_days_lessons():
     rb = rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), ENV))
     body = sr.file_writes(rb)[0]["content"]
     assert 'qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD"' in body
-    assert "--sshkeys \"$PUBKEY\" --ipconfig0 ip=dhcp" in body and "qm importdisk" in body
+    assert "--sshkeys \"$PUBKEY\" --ipconfig0 \"ip=dhcp\"" in body and "qm importdisk" in body
     assert 'DISK_SIZE="100G"' in body and 'qm resize "$GID" scsi0 "$DISK_SIZE"' in body
     assert body.index("nmap -sn") < body.index("ip neigh show"), "the sweep comes before the read"
     assert "| head -n 1 || true)" in body, "every lookup a wait expects to be empty ends in || true"
@@ -161,3 +161,16 @@ def test_a_capture_is_a_read_but_a_capture_file_is_not():
     assert read_only_command("tcpdump -nn -i tap106i0 -c 5")
     assert not read_only_command("tcpdump -nn -i tap106i0 -w /tmp/cap.pcap")
     assert not read_only_command("tcpdump -i tap106i0 -C 10 -w x")
+
+
+def test_the_waits_fit_the_commands_budget_and_a_pinned_address_becomes_static():
+    body = sr.file_writes(rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), ENV)))[0]["content"]
+    assert 'deadline=$(( SECONDS + ${2:-130} ))' in body and 'while [ "$SECONDS" -lt "$deadline" ]' in body, \
+        "live: 12 sweeps + 12 × 10 s overran the 180 s budget and the boot phase timed out"
+    assert 'wait_for_address "$MAC" 40' in body and 'while [ "$SECONDS" -lt 150 ]' in body
+    assert '--ipconfig0 "ip=dhcp"' in body
+    pinned = {**ENV, "substitutions": {"PALWORLD_IP": "192.168.1.106"}}
+    body2 = sr.file_writes(rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), pinned)))[0]["content"]
+    assert '--ipconfig0 "ip=192.168.1.106/24,gw=192.168.1.1"' in body2 and "ipconfig0: ip=192.168.1.106/24,gw=192.168.1.1" in body2
+    frame = _frame(rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), pinned)), ADD117)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
