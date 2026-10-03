@@ -467,7 +467,11 @@ async def test_the_draw_keeps_copies_and_a_cut_heredoc_counts_as_cut(monkeypatch
     assert vals["VERIFY_INSIDE"] == "curl -s http://localhost:3001/api/capabilities", "the one-line check is never prefixed"
     rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, node, mt.GuestTruth(gid="111", kind="ct", status="running"), ENV, vals))
     frame = _frame(rb, node)
-    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+    # §17.1327 — `systemctl restart control-panel` names a unit this block does not write; with the
+    # guest's units measured (CT 111 really has it) the frame is clean, without them it is asked about.
+    assert [r["why"][:46] for r in frame["refused"]] == ["`control-panel` is not a unit anything the engi"[:46]], [r["why"][:90] for r in frame["refused"]]
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    assert sr.frame_run(node, rb, spec, POLICY, env=ENV, units=["control-panel", "cron"])["refused"] == []
     # the ran-live record: the fence closed but the inner heredoc never did
     assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst runRes = await axios.post(URL\n```") is True
     assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst a = 1;\nEOF\n```") is False

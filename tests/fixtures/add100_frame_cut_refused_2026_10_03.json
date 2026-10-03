@@ -1,0 +1,33 @@
+{
+ "node_key": "ADD100",
+ "title": "Rebuild the control panel to do what was chosen in ADD99",
+ "commands": [
+  "echo \"content cut\""
+ ],
+ "verify": [],
+ "runbook": "<!-- runbook-cut -->\n## Why this cannot run yet\n\nthe model's REMOTE_COMMANDS for ADD100 was cut mid-line at 4500 tokens (12614 chars): the step's content is too large for one draw -- split the step, or write the file in parts\n\n## Run this\n\n```bash\necho \"content cut\"\n```\n",
+ "hands_on_reason": "observed:lspci -nn | grep -Ei \"vga|3d controller|display\"",
+ "inputs": [],
+ "refused": [
+  {
+   "why": "content cut: the model's REMOTE_COMMANDS for ADD100 was cut mid-line at 4500 tokens (12614 chars): the step's content is too large for one draw -- split the step, or write the file in parts",
+   "command": "echo \"content cut\""
+  }
+ ],
+ "files": [],
+ "engine_fixed": [],
+ "options": [
+  {
+   "id": "myself",
+   "fit": "keep the runbook as this step's output and carry it out by hand",
+   "label": "I'll do it myself",
+   "tradeoff": "the step counts as a plan, not as executed"
+  },
+  {
+   "id": "skip",
+   "fit": "not needed on this machine",
+   "label": "Skip this step",
+   "tradeoff": "steps that depend on it may not make sense"
+  }
+ ]
+}
