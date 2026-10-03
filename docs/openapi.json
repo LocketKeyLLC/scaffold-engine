@@ -3542,6 +3542,11 @@
             ],
             "title": "Assigned Model"
           },
+          "cascade": {
+            "default": false,
+            "title": "Cascade",
+            "type": "boolean"
+          },
           "depends_on": {
             "anyOf": [
               {
