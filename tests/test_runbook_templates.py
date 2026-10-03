@@ -663,3 +663,66 @@ async def test_the_check_is_redrawn_once_when_it_looks_elsewhere(monkeypatch):
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, node, _truth("vm", agent=True), ENV, vals))
     frame = _frame(rb, node)
     assert frame["refused"] == [] and frame["verify"] == ['qm guest exec 106 -- bash -c "ls -la /opt/palworld/server/PalServer.sh"']
+
+
+# ───── §17.1322 — the engine owns the Steam dedicated-server install
+
+T23_NODE = {"node_key": "T23", "title": "Install PalWorld server", "description": "",
+            "output_text": "## Executed on pve-runner\n$ ssh … steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit\nFailed installing AppID 2394010 (Missing configuration)\n"}
+
+
+def test_the_steam_template_selects_for_the_palworld_install_and_derives_its_values():
+    truth = _truth("vm", agent=True)
+    assert rt.select_template(T23_NODE, truth) is rt.INSTALL_STEAM_SERVER
+    assert rt.select_template(ADD84, truth) is rt.RUN_IN_VM_VIA_AGENT, "a non-Steam step keeps the general agent template"
+    assert rt.select_template(ADD82, truth) is rt.RUN_IN_VM_VIA_AGENT
+    assert rt.derive_param("APP_ID", T23_NODE) == "2394010" and rt.derive_param("GAME", T23_NODE) == "palworld"
+    bare = {"node_key": "X", "title": "Install PalWorld server", "description": ""}
+    assert rt.derive_param("APP_ID", bare) == "2394010", "a known game names its own server app id"
+    assert rt.derive_param("APP_ID", {"node_key": "X", "title": "Install the dedicated server for Foo", "description": ""}) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_steam_template_renders_without_a_model_and_parses_in_bash(monkeypatch):
+    import subprocess
+    import app.utils.llm_retry as lr
+
+    async def never(*a, **k):
+        raise AssertionError("nothing to draw: every value is held")
+    monkeypatch.setattr(lr, "generate_until_nonempty", never)
+    vals = await rt.fill_free_params(rt.INSTALL_STEAM_SERVER, T23_NODE, "brief")
+    assert vals == {}
+    vals = rt.values_for(rt.INSTALL_STEAM_SERVER, T23_NODE, _truth("vm", agent=True), ENV, vals)
+    assert vals["APP_ID"] == "2394010" and vals["GAME"] == "palworld" and vals["GID"] == "106"
+    rb = rt.render(rt.INSTALL_STEAM_SERVER, vals)
+    body = next(f["content"] for f in sr.file_writes(rb))
+    assert "+app_update 2394010 validate +quit" in body and "/opt/palworld" in body and "{GAME}" not in body and "{INSTALL_DIR}" not in body
+    assert "su - steam -c '/opt/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true'" in body, "bootstrap as the install's user, one quoted argument"
+    assert "systemctl enable palworld.service" in body and "ExecStart=$START" in body
+    assert subprocess.run(["bash", "-n"], input=body, capture_output=True, text=True).returncode == 0
+    i = body.find("<<'REMOTE'"); j = body.find("\nREMOTE\n"); remote = body[i + len("<<'REMOTE'\n"):j]
+    assert subprocess.run(["bash", "-n"], input=remote, capture_output=True, text=True).returncode == 0
+    frame = _frame(rb, T23_NODE)
+    assert frame["refused"] == [], [r["why"][:120] for r in frame["refused"]]
+    assert frame["inputs"] == [] and len(frame["commands"]) == 9
+    assert frame["verify"] == ['qm guest exec 106 -- bash -c "ls -la /opt/palworld/*.sh"']
+    from app.modules.runbook_preconditions import unmet
+    inv = {"cts": {}, "vms": {"106": "stopped"}, "names": {"106": "palworld-server"}, "disks": {}, "isos": []}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    assert await unmet(sr.runbook_commands(rb), spec, plan=[], files=sr.file_writes(rb), node=T23_NODE, inventory=inv,
+                       truth=mt.GuestTruth(gid="106", kind="vm", status="stopped", agent=True)) == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_app_id_is_the_one_thing_the_model_is_asked(monkeypatch):
+    import app.utils.llm_retry as lr
+    asked = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        asked.append(kw.get("label")); return type("R", (), {"text": "```\n896660\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    node = {"node_key": "X", "title": "Install the dedicated server for Foo via SteamCMD", "description": ""}
+    vals = await rt.fill_free_params(rt.INSTALL_STEAM_SERVER, node, "brief")
+    assert vals == {"APP_ID": "896660"} and len(asked) == 1
+    full = rt.values_for(rt.INSTALL_STEAM_SERVER, node, _truth("vm", agent=True), ENV, vals)
+    assert full["APP_ID"] == "896660" and full["GAME"] == "steamapp" and full["INSTALL_DIR"] == "/opt/steamapp"

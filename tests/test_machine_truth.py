@@ -471,9 +471,9 @@ def test_the_live_t23_frame_takes_the_agent_template_once_the_subject_is_known()
     truth = mt.truth_from_texts("106", inventory=INV_NAMES, agent_ping=(True, ""), plan=[])
     assert truth.agent is True
     assert rt.subject_gid(T23) is None and rt.subject_gid(T23, truth) == "106"
-    assert rt.select_template(T23, truth) is rt.RUN_IN_VM_VIA_AGENT
+    assert rt.select_template(T23, truth) is rt.INSTALL_STEAM_SERVER, "§17.1322 — a game-server install is the engine's own shape"
     vals = rt.values_for(rt.RUN_IN_VM_VIA_AGENT, T23, truth, {}, {"REMOTE_COMMANDS": "apt-get install -y lib32gcc-s1", "VERIFY_INSIDE": "ls /opt/palworld/PalServer.sh"})
-    assert vals["GID"] == "106"
+    assert vals["GID"] == "106", "the gid comes from the truth for any template"
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, vals)
     code = "\n".join(l for l in rb.split("## Write these files")[1].split("## Run this")[0].split("\n") if not l.lstrip().startswith("#"))
     assert "qm guest exec" in code and "ssh" not in code, "the agent template reaches the VM without ssh (comments aside)"
