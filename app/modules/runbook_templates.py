@@ -62,11 +62,12 @@ class Template:
 # ───── the shared wait: sweep the bridge's /24, read the neighbour table for the MAC, up to 12 × 10 s
 WAIT_FOR_ADDRESS = r'''
 wait_for_address() {
-    # $1 = MAC (any case). Prints the address, or nothing after 12 tries.
-    local mac net ip i
+    # $1 = MAC (any case), $2 = seconds to wait (default 130: a supervised command has 180). Prints the address, or nothing.
+    local mac net ip deadline
     mac="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+    deadline=$(( SECONDS + ${2:-130} ))
     net="$(ip -4 route get 1 | sed -n 's/.* src \([0-9.]*\)\.[0-9]*.*/\1/p' || true)"
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    while [ "$SECONDS" -lt "$deadline" ]; do
         if command -v nmap >/dev/null 2>&1; then
             nmap -sn "$net.0/24" >/dev/null 2>&1 || true
         else
@@ -74,7 +75,7 @@ wait_for_address() {
         fi
         ip="$(ip neigh show | grep -i "$mac" | awk '{print $1}' | head -n 1 || true)"
         if [ -n "$ip" ]; then printf '%s\n' "$ip"; return 0; fi
-        sleep 10
+        sleep 8
     done
     return 1
 }
@@ -92,6 +93,8 @@ INSTALL_OS_CLOUDINIT = Template(
         Param("IMAGE_FILE", "default", default="/var/lib/vz/template/jammy-server-cloudimg-amd64.img"),
         Param("DISK_SIZE", "default", default="100G"),
         Param("NAMESERVER", "default", default="192.168.1.1"),
+        Param("IPCONFIG", "pin", default="ip=dhcp"),   # §17.1290d — a pinned <GUEST>_IP becomes ip=<addr>/24,gw=<GATEWAY>
+        Param("GATEWAY", "default", default="192.168.1.1"),
         Param("PUBKEY", "default", default="/root/.ssh/id_rsa.pub"),
         Param("EXPECT", "default", default="Ubuntu 22.04"),
     ],
@@ -126,12 +129,20 @@ phase_prepare() {
 }
 
 phase_swap() {
+    # §17.1290d -- idempotency FIRST: a rerun must never stop a guest whose swap is already done (live, it did,
+    # mid-first-boot). The cloud-init drive is the last thing this phase writes, so its presence means all of it.
+    if qm config "$GID" | grep -q '^ide2: local-lvm:vm-'"$GID"'-cloudinit'; then
+        if qm config "$GID" | grep -qxF 'ipconfig0: {IPCONFIG}'; then
+            echo "cloud-init drive already present: the swap was done on an earlier run"; return 0
+        fi
+        # the address plan changed (dhcp -> a pinned static, say): reseed and let the boot phase start it afresh
+        qm set "$GID" --ipconfig0 "{IPCONFIG}" >/dev/null || { echo "FAILED: qm set ipconfig0"; return 1; }
+        qm status "$GID" | grep -q running && qm stop "$GID"
+        echo "cloud-init reseeded with ipconfig0 {IPCONFIG}; the boot phase starts VM $GID again"; return 0
+    fi
     # the VM must be stopped to swap its disk
     qm status "$GID" | grep -q running && qm stop "$GID"
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
-    if qm config "$GID" | grep -q '^ide2: local-lvm:vm-'"$GID"'-cloudinit'; then
-        echo "cloud-init drive already present: the swap was done on an earlier run"; return 0
-    fi
     OLD_DISK="$(qm config "$GID" | sed -n 's/^scsi0: \([^,]*\),.*/\1/p' | head -n 1 || true)"
     qm importdisk "$GID" "$IMAGE_FILE" local-lvm >/dev/null || { echo "FAILED: qm importdisk"; return 1; }
     NEW_DISK="$(qm config "$GID" | sed -n 's/^unused[0-9]*: \(local-lvm:vm-'"$GID"'-disk-[0-9]*\)$/\1/p' | tail -n 1 || true)"
@@ -146,7 +157,7 @@ phase_swap() {
     fi
     # the cloud-init drive and its seed: account, password by NAME, this host's key, DHCP
     qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD" \
-        --sshkeys "$PUBKEY" --ipconfig0 ip=dhcp --nameserver {NAMESERVER} --agent 1 --serial0 socket --vga serial0 >/dev/null \
+        --sshkeys "$PUBKEY" --ipconfig0 "{IPCONFIG}" --nameserver {NAMESERVER} --agent 1 --serial0 socket --vga serial0 >/dev/null \
         || { echo "FAILED: qm set cloud-init"; return 1; }
     echo "disk swapped and cloud-init seeded on VM $GID"
 }
@@ -161,10 +172,10 @@ phase_boot() {
 
 phase_check() {
     MAC="$(vm_mac)"
-    IP="$(wait_for_address "$MAC" || true)"
+    IP="$(wait_for_address "$MAC" 40 || true)"
     if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) is not on the network"; return 1; fi
     OUT=""
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    while [ "$SECONDS" -lt 150 ]; do
         OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" 'lsb_release -ds' 2>/dev/null || true)"
         if [ -n "$OUT" ]; then break; fi
         sleep 10
@@ -311,6 +322,16 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
             vals[p.name] = str((model_values or {}).get(p.name) or "").strip()
         elif p.source == "operator":
             vals[p.name] = ""          # stays a placeholder: the operator fills it on the frame
+        elif p.source == "pin":
+            vals[p.name] = p.default
+            if p.name == "IPCONFIG":
+                subs = (env or {}).get("substitutions") or {}
+                word = vals["GUEST_USER_NAME"].rsplit("_USER", 1)[0]
+                pinned = next((str(v) for k, v in (subs.items() if isinstance(subs, dict) else [])
+                               if str(k).upper() in (f"{word}_IP", f"VM{gid}_IP")), "")
+                if pinned:
+                    gw = next((p2.default for p2 in template.params if p2.name == "GATEWAY"), "192.168.1.1")
+                    vals[p.name] = f"ip={pinned}/24,gw={gw}"
     return vals
 
 

@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "20"
+HELPER_VERSION = "21"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -293,6 +293,9 @@ _READ_ONLY_HEADS = frozenset({
     # draft that obeyed it. nmap's output flags (`-o*`) and scripts are
     # denied below.
     "arp-scan", "fping", "nmap",
+    # §17.1290d — a packet CAPTURE is a read: the engine could not see why a guest it
+    # had just installed got no DHCP lease. Writing a capture file (-w/-C/-G/-z) is denied below.
+    "tcpdump",
     "dig", "nslookup", "host", "whois", "getconf", "ethtool", "iw", "iwconfig",
     # package and module queries (binaries that cannot install)
     "dpkg-query", "apt-cache", "rpm", "modinfo", "ldconfig", "ldd",
@@ -389,6 +392,7 @@ _READ_HEAD_DENY_FLAGS = {
     "jq":    {"-i", "--in-place"},
     # §17.1288l — nmap's ping sweep is a read; a report to disk or an NSE script is not
     "nmap":  {"-oN", "-oX", "-oG", "-oA", "-oS", "--script", "-sC", "-A"},
+    "tcpdump": {"-w", "-C", "-G", "-z", "-W", "-F"},   # §17.1290d — a capture to disk or a filter file is not a read
 }
 
 # awk reads in every idiom the corpus uses (`… | awk 'NR==2{print $1}'`) and
