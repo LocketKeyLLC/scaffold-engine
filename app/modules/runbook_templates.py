@@ -126,12 +126,14 @@ phase_prepare() {
 }
 
 phase_swap() {
-    # the VM must be stopped to swap its disk
-    qm status "$GID" | grep -q running && qm stop "$GID"
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
+    # §17.1290d -- idempotency FIRST: a rerun must never stop a guest whose swap is already done (live, it did,
+    # mid-first-boot). The cloud-init drive is the last thing this phase writes, so its presence means all of it.
     if qm config "$GID" | grep -q '^ide2: local-lvm:vm-'"$GID"'-cloudinit'; then
         echo "cloud-init drive already present: the swap was done on an earlier run"; return 0
     fi
+    # the VM must be stopped to swap its disk
+    qm status "$GID" | grep -q running && qm stop "$GID"
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
     OLD_DISK="$(qm config "$GID" | sed -n 's/^scsi0: \([^,]*\),.*/\1/p' | head -n 1 || true)"
     qm importdisk "$GID" "$IMAGE_FILE" local-lvm >/dev/null || { echo "FAILED: qm importdisk"; return 1; }
     NEW_DISK="$(qm config "$GID" | sed -n 's/^unused[0-9]*: \(local-lvm:vm-'"$GID"'-disk-[0-9]*\)$/\1/p' | tail -n 1 || true)"

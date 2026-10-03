@@ -142,3 +142,22 @@ async def test_the_install_template_is_not_refused_for_the_disk_it_exists_to_fil
         out = await pc.unmet(cmds, spec, plan=plan, files=files, node=ADD117)
     assert all("has never been written" not in o["why"] for o in out), [o["why"][:100] for o in out]
     assert out == [], [o["why"][:100] for o in out]
+
+
+# ───── §17.1290d — a rerun never stops a guest whose swap is done; a capture is a read
+
+def test_the_swap_phase_checks_before_it_stops():
+    body = rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), ENV))
+    script = sr.file_writes(body)[0]["content"]
+    i = script.index("phase_swap() {")
+    swap = script[i:script.index("phase_boot() {")]
+    assert swap.index("cloud-init drive already present") < swap.index('qm stop "$GID"'), \
+        "live: the rerun stopped VM 106 mid-first-boot because the stop came before the check"
+
+
+def test_a_capture_is_a_read_but_a_capture_file_is_not():
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command("timeout 12 tcpdump -nn -i tap106i0 -c 12 port 67 or port 68")
+    assert read_only_command("tcpdump -nn -i tap106i0 -c 5")
+    assert not read_only_command("tcpdump -nn -i tap106i0 -w /tmp/cap.pcap")
+    assert not read_only_command("tcpdump -i tap106i0 -C 10 -w x")
