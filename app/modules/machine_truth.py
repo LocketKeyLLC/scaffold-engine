@@ -117,6 +117,72 @@ async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
         return None, ""
 
 
+#: `ESTAB 0 0 192.168.1.156:8790 192.168.1.43:35764`, and the v4-mapped form
+#: `[::ffff:192.168.1.156]:8006 [::ffff:192.168.1.43]:42048`
+_SS_LINE_RE = re.compile(r"^\s*ESTAB\s+\S+\s+\S+\s+(\S+)\s+(\S+)", re.M)
+
+
+def _ss_host_port(field: str) -> tuple[str, str]:
+    """`host, port` out of one `ss` address field, v4-mapped form unwrapped."""
+    f = str(field or "").strip()
+    host, _, port = f.rpartition(":")
+    host = host.strip("[]")
+    if host.lower().startswith("::ffff:"):
+        host = host[7:]
+    return host, port
+
+
+def peers_of_port(ss_output: str, port: str) -> list[str]:
+    """Every distinct address connected TO local `port`, loopback aside.
+
+    The engine's own address on the operator's network, as the machine it drives
+    sees it: the engine holds the only connections to the runner's port.
+    """
+    seen: list[str] = []
+    for local, peer in _SS_LINE_RE.findall(str(ss_output or "")):
+        lhost, lport = _ss_host_port(local)
+        if lport != str(port):
+            continue
+        phost, _ = _ss_host_port(peer)
+        if not phost or phost.startswith("127.") or phost in ("::1", lhost) or phost in seen:
+            continue
+        seen.append(phost)
+    return seen
+
+
+def port_of(endpoint: str) -> str:
+    """The port an MCP endpoint speaks on (`http://192.168.1.156:8790/mcp/` → 8790)."""
+    m = re.search(r"://[^/]*?:(\d{2,5})\b", str(endpoint or ""))
+    return m.group(1) if m else ""
+
+
+async def engine_address(spec) -> Optional[str]:
+    """§17.1333 — THIS engine's address on the operator's network, measured.
+
+    The engine cannot see it from inside its own container (its interfaces are
+    the docker bridge, `172.18.x`), so it asks the machine it drives where it
+    sees the engine coming from: `ss -tn` on that host, the peer of its own
+    runner port. Live, 2026-10-03, `pve-runner` on 192.168.1.156 answered
+    `192.168.1.156:8790 <- 192.168.1.43`, which is this host on `wlp3s0`.
+
+    None when the read fails or more than one peer holds that port — a value
+    this engine is not sure of is not a value it states (§17.1289).
+    """
+    if spec is None:
+        return None
+    port = port_of(getattr(spec, "endpoint", "") or "")
+    if not port:
+        return None
+    ok, out = await _probe(spec, "ss -tn")
+    if not ok:
+        return None
+    peers = peers_of_port(out, port)
+    if len(peers) != 1:
+        logger.info("engine_address_undecided port=%s peers=%s", port, peers)
+        return None
+    return peers[0]
+
+
 def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = "", neigh: str = "",
                      fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
                      plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,

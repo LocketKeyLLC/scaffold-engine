@@ -3894,7 +3894,8 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
-              units: Optional[list[str]] = None, inventory: Optional[dict] = None) -> dict:
+              units: Optional[list[str]] = None, inventory: Optional[dict] = None,
+              engine_address: Optional[str] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -3925,6 +3926,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # filled rather than dropped.
     from app.modules import machine_values as _mv
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
+    # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
+    # safe in a written file too, so files are filled here.
+    cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
+    _mv_notes = list(_mv_notes) + _ea_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
     if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):
@@ -3941,7 +3946,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
         inputs = suggest_inputs(inputs, env, text=step_text(node))   # §17.1275 — and what the step says
-    _mv_asked = _mv.still_asked(inputs, inventory)      # §17.1332 — the other end of the fix
+    _mv_asked = (_mv.still_asked(inputs, inventory)          # §17.1332 — the other end of the fix
+                 + _mv.engine_still_asked(inputs, engine_address))   # §17.1333
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
     # place); the real commands are gated again at resolve, once the operator
     # has supplied the values.
