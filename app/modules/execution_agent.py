@@ -2875,6 +2875,25 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _upd.rowcount:
                     await machine_truth.after_step_done(job_id, run_node)       # §17.1315
                     return await _pause_for_decision(job_id, _depth + 1)
+        # §17.1330 — the step does not FIT in one block (§17.1312 cut its content). Refusing is
+        # right and stopping there is not: the engine splits it into steps it can carry, chains
+        # them, makes this one wait for the last, and asks about the first. Once per step.
+        if _depth < 6:
+            try:
+                from app.modules import step_decomposition as _sd
+                _why = _sd.too_large(frame)
+                if _why:
+                    _machine = (f"{'VM' if (_truth and _truth.kind == 'vm') else 'container'} {_truth.gid}"
+                                if _truth is not None and _truth.gid else "")
+                    _split = await _sd.split_step(job_id, run_node, _plan_rows, _brief, _env,
+                                                  upstream=up_block, reason=_why, machine=_machine)
+                    if _split:
+                        frame["engine_fixed"] = list(frame.get("engine_fixed") or []) + _split
+                        logger.warning("step_split_restart job=%s node=%s did=%s", job_id,
+                                       run_node.get("node_key"), _split)
+                        return await _pause_for_decision(job_id, _depth + 1)
+            except Exception as exc:
+                logger.warning("step_split_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

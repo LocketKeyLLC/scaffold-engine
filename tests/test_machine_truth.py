@@ -281,7 +281,10 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     body = src[i:src.index("\nasync def ", i + 10)]
     calls = body.count("supervised_runs.draft_runbook(")
     assert calls >= 8 and body.count("truth=_truth") >= calls, f"{calls} drafts, {body.count('truth=_truth')} carry the truth"
-    assert "decision_pause_restart_after_reopen" in body and body.count("_pause_for_decision(job_id, _depth + 1)") == 2
+    assert "decision_pause_restart_after_reopen" in body
+    # §17.1330 — three restarts now: a step already met, a reopen/insert this step waits for, a split
+    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 3
+    assert "step_split_restart" in body
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')
 
 
