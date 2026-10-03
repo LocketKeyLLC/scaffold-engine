@@ -224,7 +224,7 @@ REACH_VM_SSH_AND_RUN = Template(
     name="reach_vm_ssh_and_run",
     title="Run commands inside VM {GID} over ssh",
     applies=lambda node, truth: _subject_kind(node, truth) == "vm" and not _INSTALL_OS_RE.search(_text(node))
-                                and not _HOST_SIDE_RE.search(_text(node)) and not _CONSOLE_RE.search(_text(node))
+                                and not host_side_only(node) and not _CONSOLE_RE.search(_text(node))
                                 and not getattr(truth, "agent", False),
     params=[
         Param("GID", "subject"),
@@ -279,7 +279,7 @@ RUN_IN_VM_VIA_AGENT = Template(
     name="run_in_vm_via_agent",
     title="Run commands inside VM {GID} through its guest agent",
     applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(getattr(truth, "agent", False))
-                                and not _INSTALL_OS_RE.search(_text(node)) and not _HOST_SIDE_RE.search(_text(node))
+                                and not _INSTALL_OS_RE.search(_text(node)) and not host_side_only(node)
                                 and not _CONSOLE_RE.search(_text(node)) and not _BOOT_WATCH_RE.search(_text(node)),
     params=[
         Param("GID", "subject"),
@@ -356,7 +356,7 @@ INSTALL_STEAM_SERVER = Template(
 RUN_IN_CONTAINER = Template(
     name="run_in_container",
     title="Run commands inside container {GID}",
-    applies=lambda node, truth: _subject_kind(node, truth) == "ct" and not _HOST_SIDE_RE.search(_text(node)),
+    applies=lambda node, truth: _subject_kind(node, truth) == "ct" and not host_side_only(node),
     params=[Param("GID", "subject"), Param("STEP", "node_key"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line"),
             # §17.1307 — parity with run_in_vm_via_agent: a check INSIDE the guest is what §17.1302 can read
             Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the container whose output shows this step's "
@@ -426,6 +426,28 @@ def _text(node: dict) -> str:
     return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
 
 
+#: §17.1329 — in-guest work: a service/unit/package INSIDE the guest, or a port it binds.
+_IN_GUEST_SIGNAL_RE = re.compile(
+    r"\b(?:inside|within)\s+(?:the\s+)?(?:vm|container|ct|lxc|guest)\b|\binside\b"
+    r"|\b(?:systemctl|systemd|service|unit|daemon|apt|apt-get|dpkg|pip|npm|steamcmd|app_update)\b"
+    r"|\b(?:enabled|active|listening)\b|\b(?:UDP|TCP)\s*\d{2,5}\b|\bport\s*\d{2,5}\b", re.I)
+
+
+def host_side_only(node: dict) -> bool:
+    """§17.1329 — is this step host-side work ONLY?
+
+    The host-side rule reads the text for the host's own verbs (start, resize,
+    attach, passthrough…) so a `qm set` step does not get a guest template. But
+    every guest template starts its guest first, guarded — so a step that says BOTH
+    ("Start VM 106 and bring the PalWorld service up on UDP 8211") is fully served
+    by the guest template, and routing it host-side sent it to the model path,
+    which invented a unit name and never started the service (§17.1325). Host-side
+    wins only when nothing in the text points inside the guest.
+    """
+    text = _text(node)
+    return bool(_HOST_SIDE_RE.search(text)) and not _IN_GUEST_SIGNAL_RE.search(text)
+
+
 def _subject_kind(node: dict, truth) -> Optional[str]:
     if truth is not None and getattr(truth, "kind", None):
         return getattr(truth, "kind")
@@ -452,7 +474,7 @@ def intent_of(node: dict) -> Optional[str]:
         return WATCH_GUEST_BOOT.name
     if _CONSOLE_RE.search(text):
         return READ_GUEST_CONSOLE.name
-    if _HOST_SIDE_RE.search(text):
+    if host_side_only(node):
         return None
     if _INSIDE_RE.search(text):
         return "guest_work"            # reach_vm_ssh_and_run or run_in_container, once the guest's kind is measured

@@ -429,6 +429,43 @@ def in_guest_work_voided_by_reinstall(plan: list[dict], gid: str, name: str = ""
     return out
 
 
+def skips_a_reinstall_left_uncovered(plan: list[dict], gid: str, name: str = "") -> list[dict]:
+    """§17.1329 — the SKIPPED steps a reinstall leaves with nobody doing their work.
+
+    Live: VM 106 was reinstalled, §17.1315 reopened T23 "Install PalWorld server"
+    and T24 "Configure PalWorld service" — and ADD47, ADD54, ADD66, ADD85, every
+    step that STARTED the server and checked UDP 8211, stood `skipped` since
+    September as duplicates of work that reinstall had just voided. After T24
+    nothing in the plan would have brought the service up; the operator's primary
+    goal was one unnoticed gap away. A skip is a judgement that someone else does
+    this work, so when that someone is reopened the skip is stale.
+
+    Reported, never reopened: four skipped duplicates of one goal must not become
+    four steps. The engine names them in a fact and on the frame; which one runs
+    again is a judgement about duplicates, not about the machine.
+    """
+    voided = in_guest_work_voided_by_reinstall(plan, gid, name)
+    if not voided:
+        return []
+    install_at = voided[0]["install_at"]
+    out = []
+    for n in plan or []:
+        if (n.get("status") or "") != "skipped":
+            continue
+        at = n.get("completed_at")
+        if at is not None and install_at is not None and not (at < install_at):
+            continue                       # skipped AFTER the reinstall: a current judgement, left alone
+        title = str(n.get("title") or "")
+        if not _mentions_guest(title, gid, name) or _INSTALL_OS_RE.search(title):
+            continue
+        if not _IN_GUEST_WORK_RE.search(title):
+            continue
+        if _HOST_WORK_RE.search(title) and not re.search(r"\b(?:service|unit|daemon|listening|enabled|active)\b", title, re.I):
+            continue
+        out.append({"node_key": str(n.get("node_key")), "title": title})
+    return out
+
+
 async def after_step_done(job_id: str, node: Optional[dict]) -> list[str]:
     """§17.1315 — called when a step is recorded done. When that step installed a
     guest's OS, every earlier done step that worked INSIDE the guest is reopened
@@ -479,15 +516,27 @@ async def reopen_voided_work(job_id: str, plan: list[dict], gid: str, name: str 
                 logger.warning("machine_truth_reopened_voided job=%s node=%s by=%s", job_id, v["node_key"], v["install"])
         except Exception as exc:
             logger.warning("machine_truth_reopen_voided_failed job=%s node=%s err=%r", job_id, v["node_key"], exc)
+    stale = skips_a_reinstall_left_uncovered(plan, gid, name)
+    if stale:
+        done.append("skips a reinstall left uncovered: " + ", ".join(f"{sk['node_key']} '{sk['title'][:40]}'" for sk in stale[:6]))
+        logger.warning("machine_truth_stale_skips job=%s guest=%s keys=%s", job_id, gid, [sk["node_key"] for sk in stale])
     if done:
         try:
             async with async_session() as db:
                 row = (await db.execute(text("SELECT id, metadata FROM assist_sessions WHERE job_id = :j ORDER BY created_at DESC LIMIT 1"),
                                         {"j": job_id})).mappings().first()
                 if row:
-                    fact = (f"{FACT_PREFIX}: {voided[0]['install']} reinstalled the OS of guest {gid} at {str(voided[0]['install_at'])[:16]}; "
-                            f"the in-guest work recorded done before it ({', '.join(v['node_key'] for v in voided)}) is reopened -- a fresh OS holds none of it")
-                    await set_environment(session_id=str(row["id"]), facts=[fact], db=db)
+                    facts = []
+                    if voided:
+                        facts.append(f"{FACT_PREFIX}: {voided[0]['install']} reinstalled the OS of guest {gid} at {str(voided[0]['install_at'])[:16]}; "
+                                     f"the in-guest work recorded done before it ({', '.join(v['node_key'] for v in voided)}) is reopened -- a fresh OS holds none of it")
+                    if stale:
+                        facts.append(f"{FACT_PREFIX}: these steps were SKIPPED as duplicates of in-guest work the reinstall of guest {gid} "
+                                     f"voided, so nobody is doing their work now: "
+                                     + ", ".join(sk["node_key"] + " '" + sk["title"][:50] + "'" for sk in stale[:6])
+                                     + ". One of them has to run again (they are duplicates of each other, so not all of them)")
+                    if facts:
+                        await set_environment(session_id=str(row["id"]), facts=facts, db=db)
         except Exception as exc:
             logger.warning("machine_truth_voided_fact_failed job=%s err=%r", job_id, exc)
     return done
