@@ -3894,7 +3894,7 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
-              units: Optional[list[str]] = None) -> dict:
+              units: Optional[list[str]] = None, inventory: Optional[dict] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -3919,6 +3919,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # is the operator's decision; a check the engine cannot fill is the
     # engine's to remove, said on the frame (`engine_fixed`). When NO check
     # would be left, the refusal stands and the redraft must supply one.
+    # §17.1332 — a value a MACHINE holds is read on the machine, not asked of the
+    # operator. This runs BEFORE the drop-gate below: a check that only needed a
+    # key off the disk is now a check the engine can fill, so it is kept and
+    # filled rather than dropped.
+    from app.modules import machine_values as _mv
+    cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
     if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):
@@ -3935,6 +3941,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
         inputs = suggest_inputs(inputs, env, text=step_text(node))   # §17.1275 — and what the step says
+    _mv_asked = _mv.still_asked(inputs, inventory)      # §17.1332 — the other end of the fix
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
     # place); the real commands are gated again at resolve, once the operator
     # has supplied the values.
@@ -3952,7 +3959,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                    if _dummies else files)
     _secret_files = secrets_in_files(files, inputs)
     runnable, refused = gate_block(shape, policy.get("allow") or [])
-    refused = list(refused) + list(preconditions or [])      # §17.1213
+    refused = list(refused) + list(preconditions or []) + _mv_asked   # §17.1213, §17.1332
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
@@ -3971,7 +3978,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
-    _repairs = list(_repairs) + _vdrops + _lookup_repairs  # §17.1288d/o — a dropped check, a repaired lookup: corrections too
+    _repairs = list(_repairs) + _vdrops + _lookup_repairs + _mv_notes  # §17.1288d/o, §17.1332 — a dropped check, a repaired lookup: corrections too
     from app.modules.runbook_templates import template_of
     _tpl = template_of(runbook)
     if _tpl:                                               # §17.1290 — said on the frame: the shape is the engine's
