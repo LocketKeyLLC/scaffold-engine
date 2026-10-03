@@ -1,0 +1,9 @@
+VMID       Status     Lock         Name                
+101        running                 jellyfin            
+102        running                 prowlarr            
+103        running                 radarr              
+104        running                 sonarr              
+105        running                 download-client     
+111        stopped                 control-panel       
+120        stopped                 caddy-proxy         
+130        running                 pihole              

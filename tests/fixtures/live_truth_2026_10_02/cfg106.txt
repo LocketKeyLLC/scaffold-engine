@@ -1,0 +1,12 @@
+agent: 1
+boot: order=scsi0
+cores: 4
+ide2: none,media=cdrom
+memory: 8192
+meta: creation-qemu=11.0.0,ctime=1788478127
+name: palworld-server
+net0: virtio=BC:24:11:E8:9F:7A,bridge=vmbr0
+scsi0: local-lvm:vm-106-disk-0,size=100G
+scsihw: virtio-scsi-pci
+smbios1: uuid=d4f2327d-c95b-4db7-83db-8db2e47e93fb
+vmgenid: cfc697d3-0b6a-411a-97f6-5fa9e9c4caa8

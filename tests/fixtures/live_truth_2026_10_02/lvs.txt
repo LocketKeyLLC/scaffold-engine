@@ -1,0 +1,13 @@
+  data          429.14g 2.78  
+  root           96.00g       
+  swap            8.00g       
+  vm-100-disk-0  40.00g       
+  vm-101-disk-0   8.00g 20.01 
+  vm-102-disk-0   8.00g 18.04 
+  vm-103-disk-0   8.00g 17.22 
+  vm-104-disk-0   8.00g 17.67 
+  vm-105-disk-0   8.00g 13.33 
+  vm-106-disk-0 100.00g 0.00  
+  vm-111-disk-0   8.00g       
+  vm-120-disk-0   4.00g       
+  vm-130-disk-0   8.00g 13.66 
