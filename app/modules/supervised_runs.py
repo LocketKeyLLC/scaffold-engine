@@ -113,6 +113,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    # about the stopped VM and draft 4 nothing about the key, so
                    # each "fixed" the shape note and lost what the other had.
                    "is stopped (`",                                # §17.1288f / §17.1213
+                   "fails before it starts",                       # §17.1213 needs-running / §17.1301
                    "nothing has put this host's key on guest",     # §17.1288g
                    "is a VM on this host, not a container",        # §17.1213
                    "is a container on this host, not a VM",        # §17.1213
