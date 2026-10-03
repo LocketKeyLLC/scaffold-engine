@@ -52,6 +52,9 @@ def parse_net0(config: str) -> tuple[Optional[str], Optional[str]]:
     return (mac.group(1).lower() if mac else None), (br.group(1) if br else None)
 _AGENT_CFG_RE = re.compile(r"^agent:\s*(\d)", re.M)
 _INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|os|operating system|server \d\d\.\d\d)\b", re.I)
+#: §17.1313 — commands that reach the internet by NAME from inside the guest
+_NET_FETCH_RE = re.compile(r"(?<![\w-])(?:apt-get|apt|aptitude|dnf|yum|zypper|apk|pip3?|npm|pnpm|yarn|gem|cargo|go\s+install|curl|wget|git\s+clone|snap|add-apt-repository|pveam\s+download)(?![\w-])")
+
 _START_RE = re.compile(r"\bstart\b.*\b(?:VM|container|CT)\b", re.I)
 _SSH_KEY_RE = re.compile(r"ssh.*\bkey\b|public\s*key|authorized_keys|ssh-copy-id", re.I)
 FACT_PREFIX = "ENGINE MEASURED"
@@ -71,6 +74,8 @@ class GuestTruth:
     address: Optional[str] = None         # the neigh entry for the MAC
     agent: Optional[bool] = None          # qm agent N ping answered
     key_known_by: Optional[str] = None    # the finished plan step that installed this host's key
+    resolves: Optional[bool] = None       # §17.1313 — `getent hosts deb.debian.org` inside the guest answered
+    dns_hint: str = ""                    # §17.1313 — a sibling guest's `nameserver:` line, for the fix step
     reads: dict[str, str] = field(default_factory=dict)   # evidence, by read
 
     def to_dict(self) -> dict:
@@ -109,7 +114,8 @@ async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
 
 def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = "", neigh: str = "",
                      fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
-                     plan: Optional[list[dict]] = None) -> GuestTruth:
+                     plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,
+                     sibling_config: str = "") -> GuestTruth:
     """The pure half: build the truth from texts the reads returned. Tested on
     the live fixtures; ``read_guest_truth`` only fetches the texts."""
     from app.modules.runbook_preconditions import key_known_for
@@ -152,6 +158,18 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
             # live: "QEMU guest agent is not running" (106), "No QEMU guest agent configured" (110)
             t.agent = bool(ok) and not any(w in low for w in ("not running", "not configured", "no qemu", "error", "timeout"))
             t.reads["qm agent ping"] = (out or ("answered" if t.agent else "no answer"))[:200]
+    # §17.1313 — does the guest resolve names? Live, CT 120's /etc/resolv.conf was the
+    # host's Tailscale stub (100.100.100.100); `apt-get update` inside it hung for the
+    # runner's full 180 s, twice, and the step failed twice. One read settles it.
+    if dns is not None:
+        ok, out = dns
+        if ok is not None:
+            t.resolves = bool(ok) and bool((out or "").strip()) and "not running" not in (out or "").lower()
+            t.reads["getent hosts"] = ((out or "").strip() or "(printed nothing)")[:200]
+    if sibling_config:
+        m = re.search(r"^nameserver:\s*(.+)$", sibling_config, re.M)
+        if m:
+            t.dns_hint = " ".join(m.group(1).split())
     t.key_known_by = key_known_for(gid, t.name, plan)
     return t
 
@@ -172,8 +190,22 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
             fdb = fdb_out if _ok else ""
         if kind == "vm" and ((inventory or {}).get("vms") or {}).get(gid) == "running":
             agent_ping = await _probe(spec, f"qm agent {gid} ping")
+    dns: Optional[tuple[Optional[bool], str]] = None
+    sibling_config = ""
+    cts = (inventory or {}).get("cts") or {}
+    if spec is not None and kind == "ct" and cts.get(gid) == "running":
+        dns = await _probe(spec, f"pct exec {gid} -- timeout 5 getent hosts deb.debian.org")
+        if dns[0] is not None and not (dns[1] or "").strip():
+            other = next((c for c, st in cts.items() if st == "running" and c != gid), None)
+            if other:
+                _ok, sibling_config = await _probe(spec, f"pct config {other}")
+    elif spec is not None and kind == "vm" and agent_ping is not None and agent_ping[0]:
+        from app.modules.assist_local_runner import unwrap_guest_exec
+        cmd = f"qm guest exec {gid} -- timeout 5 getent hosts deb.debian.org"
+        ok, out = await _probe(spec, cmd)
+        dns = (ok, unwrap_guest_exec(cmd, out)) if ok is not None else None
     t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
-                         agent_ping=agent_ping, plan=plan)
+                         agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "")
     logger.warning("machine_truth guest=%s %s", gid, {k: v for k, v in t.to_dict().items() if k not in ("reads", "disks")})
     return t
 
@@ -207,6 +239,8 @@ def step_needs(node: Optional[dict], commands: list[str], files: Optional[list[d
         needs.add("reachable")
     if re.search(rf"\bqm\s+guest\s+exec\s+{gid}\b", joined):
         needs.add("agent")
+    if (uses_ssh or guest_exec or re.search(rf"\bpct\s+push\s+{gid}\b", joined)) and _NET_FETCH_RE.search(joined):
+        needs.add("network")             # §17.1313 — apt/curl/pip/npm… inside the guest need a resolver
     return needs
 
 
@@ -274,6 +308,33 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
                            f"{done.get('node_key')} started it once; it is stopped again — reopened so the start runs first "
                            f"and this step's checks can be read inside the running guest"),
             })
+    # §17.1313 — the block fetches by name inside a guest that resolves nothing. The
+    # remedy is host-side and the engine has it (a sibling's nameserver): propose
+    # the step, make this one wait for it, and refuse the block meanwhile.
+    if truth.resolves is False and "network" in needs:
+        tool = "qm" if truth.kind == "vm" else "pct"
+        kind = "VM" if truth.kind == "vm" else "container"
+        hint = truth.dns_hint or "<DNS_SERVER>"
+        nums = [int(m.group(1)) for n in plan for m in [re.match(r"ADD(\d+)$", str(n.get("node_key") or ""))] if m]
+        new_key = f"ADD{(max(nums) + 1) if nums else 1}"
+        cur = str((node or {}).get("node_key") or "")
+        out.append({
+            "kind": "no_dns",
+            "evidence": f"`{tool} exec {gid} -- getent hosts deb.debian.org` printed nothing",
+            "fact": f"{FACT_PREFIX}: {kind} {gid} cannot resolve names (getent hosts deb.debian.org printed nothing)"
+                    + (f"; sibling guests use nameserver {hint}" if truth.dns_hint else ""),
+            "reopen": None, "covered_by": None, "blocks": True,
+            "insert": {"node_key": new_key, "title": f"Give {kind} {gid} a working nameserver",
+                       "description": (f"Measured: inside {kind} {gid}, `getent hosts deb.debian.org` prints nothing -- it cannot resolve "
+                                       f"names, so apt, curl and every download inside it hang until the runner's timeout. "
+                                       + (f"Other containers on this host use `nameserver: {hint}` (read from `pct config`). " if truth.dns_hint
+                                          else "No sibling guest shows a nameserver to borrow; the operator supplies <DNS_SERVER>. ")
+                                       + f"Set it on the host: `{tool} set {gid} --nameserver \"{hint}\"`, then `{tool} reboot {gid}` so the "
+                                       f"guest picks it up. Done when `{tool} exec {gid} -- getent hosts deb.debian.org` prints an address."),
+                       "depends_on": [], "tool": "LLM"},
+            "waits": cur,
+            "remedy": f"{kind} {gid} cannot resolve names; {new_key} (inserted) sets `--nameserver {hint}` and this step waits for it",
+        })
     # Reachability: a VM that transmits nothing on its bridge is not up, whatever `qm list` says.
     if truth.kind == "vm" and truth.status == "running" and truth.transmits is False and truth.has_os is not False \
             and {"reachable", "agent"} & needs:
@@ -428,6 +489,28 @@ async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTr
         except Exception as exc:
             logger.warning("machine_truth_fact_failed job=%s err=%r", job_id, exc)
     for r in rows:
+        ins = r.get("insert")
+        if ins:
+            try:
+                async with async_session() as db:
+                    res = await node_editor.insert_node(job_id, ins, db=db, edited_by=f"engine:measured — {r['evidence'][:120]}")
+                if res.get("status") == "ok":
+                    done.append(f"inserted {ins['node_key']}: {str(ins.get('title'))[:70]}")
+                    logger.warning("machine_truth_inserted job=%s node=%s evidence=%r", job_id, ins["node_key"], r["evidence"][:120])
+                    cur = str(r.get("waits") or "")
+                    deps = [str(d) for d in ((node or {}).get("depends_on") or [])]
+                    if cur and ins["node_key"] not in deps:
+                        async with async_session() as db:
+                            res2 = await node_editor.edit_node(job_id, cur, {"depends_on": deps + [ins["node_key"]]}, db=db, cascade=False,
+                                                              edited_by=f"engine:measured — {cur} needs a resolver {ins['node_key']} provides")
+                        if not isinstance(res2, dict) or res2.get("status", "ok") == "ok":
+                            if node is not None:
+                                node["depends_on"] = deps + [ins["node_key"]]
+                            done.append(f"{cur} now waits for {ins['node_key']}")
+                else:
+                    logger.warning("machine_truth_insert_refused job=%s node=%s res=%r", job_id, ins["node_key"], res)
+            except Exception as exc:
+                logger.warning("machine_truth_insert_failed job=%s node=%s err=%r", job_id, ins.get("node_key"), exc)
         key = r.get("reopen")
         if not key:
             continue

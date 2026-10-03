@@ -434,3 +434,39 @@ async def test_the_draw_strips_the_wrapper_before_the_template_wraps_it(monkeypa
     frame = _frame(rb, node)
     assert frame["verify"] == ['pct exec 120 -- bash -c "caddy validate --config /etc/caddy/Caddyfile"'], frame["verify"]
     assert frame["refused"] == []
+
+
+# ───── §17.1314 — a write over an existing file keeps a copy
+
+def test_every_overwrite_in_the_models_commands_is_preceded_by_a_backup():
+    remote = "apt-get install -y nodejs\ntee /opt/cp/package.json <<'EOF'\n{ \"a\": 1 }\nEOF\ntee /opt/cp/server.js <<'EOF'\nconst x = 1;\nEOF\ntee -a /etc/caddy/Caddyfile <<'EOF'\nx\nEOF\ncat > /etc/x.conf <<'EOF'\ny\nEOF\ncp /tmp/a /etc/b\nsystemctl restart cp"
+    out = rt.keep_a_copy_before_overwrites(remote).split("\n")
+    backups = [l for l in out if '.bak.$(date' in l]
+    assert backups == ['[ -e "/opt/cp/package.json" ] && cp -a "/opt/cp/package.json" "/opt/cp/package.json.bak.$(date +%Y%m%d%H%M%S)"',
+                       '[ -e "/opt/cp/server.js" ] && cp -a "/opt/cp/server.js" "/opt/cp/server.js.bak.$(date +%Y%m%d%H%M%S)"',
+                       '[ -e "/etc/x.conf" ] && cp -a "/etc/x.conf" "/etc/x.conf.bak.$(date +%Y%m%d%H%M%S)"',
+                       '[ -e "/etc/b" ] && cp -a "/etc/b" "/etc/b.bak.$(date +%Y%m%d%H%M%S)"'], backups
+    assert out.index(backups[1]) + 1 == out.index("tee /opt/cp/server.js <<'EOF'"), "the copy is taken immediately before the write"
+    assert "const x = 1;" in out and not any(".bak." in l for l in out if l.startswith("const")), "heredoc bodies are never touched"
+    assert rt.keep_a_copy_before_overwrites("apt-get update\nsystemctl restart x") == "apt-get update\nsystemctl restart x"
+
+
+@pytest.mark.asyncio
+async def test_the_draw_keeps_copies_and_a_cut_heredoc_counts_as_cut(monkeypatch):
+    import app.utils.llm_retry as lr
+    node = {"node_key": "ADD100", "title": "Rebuild the control panel in LXC 111", "description": ""}
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\ncurl -s http://localhost:3001/api/capabilities\n```"})()
+        return type("R", (), {"text": "```bash\ntee /opt/control-panel-backend/server.js <<'EOF'\nconst a = 1;\nEOF\nsystemctl restart control-panel\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, node, "brief")
+    assert vals["REMOTE_COMMANDS"].split("\n")[0] == '[ -e "/opt/control-panel-backend/server.js" ] && cp -a "/opt/control-panel-backend/server.js" "/opt/control-panel-backend/server.js.bak.$(date +%Y%m%d%H%M%S)"'
+    assert vals["VERIFY_INSIDE"] == "curl -s http://localhost:3001/api/capabilities", "the one-line check is never prefixed"
+    rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, node, mt.GuestTruth(gid="111", kind="ct", status="running"), ENV, vals))
+    frame = _frame(rb, node)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+    # the ran-live record: the fence closed but the inner heredoc never did
+    assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst runRes = await axios.post(URL\n```") is True
+    assert rt.content_is_cut("```bash\ntee /opt/x/server.js <<'EOF'\nconst a = 1;\nEOF\n```") is False

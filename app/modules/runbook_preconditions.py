@@ -256,6 +256,18 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 f"machine. Reach {kind} {tgid} at `{addr}` -- or, since its guest agent "
                 f"{'answers' if getattr(truth, 'agent', False) else 'may answer'}, through `qm guest exec {tgid}` "
                 f"with no address at all.")})
+    # §17.1313 — the block fetches by name inside a guest the truth measured as unable
+    # to resolve: refuse it, with the inserted fix step named when the truth has one.
+    if getattr(truth, "resolves", None) is False and tgid and tgid in subjects:
+        from app.modules.machine_truth import _NET_FETCH_RE
+        hit = _first_line_with(texts, _NET_FETCH_RE)
+        if hit:
+            kind = "container" if getattr(truth, "kind", "") == "ct" else "VM"
+            out.append({"command": hit[:200], "why": (
+                f"{kind} {tgid} cannot resolve names: `getent hosts deb.debian.org` inside it printed nothing (read just now), "
+                f"so this download hangs until the runner's 180 s timeout -- it did, twice. The resolver is set on the "
+                f"host (`{'qm' if kind == 'VM' else 'pct'} set {tgid} --nameserver "
+                f"\"{getattr(truth, 'dns_hint', '') or '<DNS_SERVER>'}\"` + a reboot); the engine inserts that step and this one waits for it.")})
     if (not guests and not subjects) or not inv:
         return out
     cts, vms = inv["cts"], inv["vms"]

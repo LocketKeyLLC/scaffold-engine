@@ -354,3 +354,96 @@ async def test_after_an_os_install_is_recorded_done_the_voided_steps_are_reopene
     esrc = pathlib.Path(__import__("app.modules.execution_agent", fromlist=["x"]).__file__).read_text(encoding="utf-8")
     assert "machine_truth.after_step_done(job_id, run_node)" in esrc, "the already-met done write calls it"
     assert "SELECT node_key, title, status, completed_at FROM dag_nodes" in esrc, "plan rows carry completed_at"
+
+
+
+# ───── §17.1313 — the engine measures DNS and proposes the fix
+
+CFG111_LIVE = "arch: amd64\nhostname: control-panel\nmemory: 2048\nnameserver: 192.168.1.30 1.1.1.1\nnet0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:82:37:C3,type=veth\nostype: debian\n"
+ADD88_NODE = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": "", "depends_on": ["ADD87"]}
+PLAN_120 = [{"node_key": "ADD87", "title": "Start LXC 111", "status": "skipped"}, {"node_key": "ADD110", "title": "Start container 120 (caddy-proxy)", "status": "done"},
+            {"node_key": "ADD119", "title": "Reset VM 106 and capture its console", "status": "done"}, {"node_key": "ADD88", "title": ADD88_NODE["title"], "status": "pending"}]
+CT_SCRIPT = [{"path": "/tmp/in_ct_120.sh", "content": "GID=120\npct status \"$GID\" | grep -q running || pct start \"$GID\"\ncat > /tmp/r.sh <<'REMOTE'\napt-get update\napt-get install -y caddy\nREMOTE\npct push \"$GID\" /tmp/r.sh /root/r.sh\npct exec \"$GID\" -- bash /root/r.sh\n"}]
+
+
+def test_the_live_caddy_container_resolves_nothing_and_the_fix_is_borrowed_from_a_sibling():
+    inv = {"cts": {"111": "running", "120": "running"}, "vms": {}, "names": {}, "disks": {}}
+    t = mt.truth_from_texts("120", inventory=inv, dns=(True, ""), sibling_config=CFG111_LIVE, plan=PLAN_120)
+    assert t.resolves is False and t.dns_hint == "192.168.1.30 1.1.1.1" and t.reads["getent hosts"] == "(printed nothing)"
+    ok = mt.truth_from_texts("111", inventory=inv, dns=(True, "151.101.2.132 deb.debian.org"), plan=PLAN_120)
+    assert ok.resolves is True
+    assert mt.truth_from_texts("120", inventory=inv, plan=PLAN_120).resolves is None, "unread is unknown, not false"
+
+
+def test_a_block_that_downloads_inside_a_guest_that_cannot_resolve_is_blocked_and_a_fix_step_is_proposed():
+    inv = {"cts": {"111": "running", "120": "running"}, "vms": {}, "names": {}, "disks": {}}
+    t = mt.truth_from_texts("120", inventory=inv, dns=(True, ""), sibling_config=CFG111_LIVE, plan=PLAN_120)
+    needs = mt.step_needs(ADD88_NODE, ["bash /tmp/in_ct_120.sh"], CT_SCRIPT)
+    assert "network" in needs
+    rows = [r for r in mt.contradictions(ADD88_NODE, t, needs, PLAN_120) if r["kind"] == "no_dns"]
+    assert len(rows) == 1 and rows[0]["blocks"] is True
+    ins = rows[0]["insert"]
+    assert ins["node_key"] == "ADD120" and ins["title"] == "Give container 120 a working nameserver" and ins["depends_on"] == []
+    assert 'pct set 120 --nameserver "192.168.1.30 1.1.1.1"' in ins["description"] and "pct reboot 120" in ins["description"]
+    assert rows[0]["waits"] == "ADD88" and "cannot resolve names" in rows[0]["fact"]
+    assert not [r for r in mt.contradictions(ADD88_NODE, t, {"exists", "running"}, PLAN_120) if r["kind"] == "no_dns"], "a block that fetches nothing is not blocked"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_inserts_the_fix_step_and_the_waiting_step_depends_on_it(monkeypatch):
+    from app.modules import node_editor
+    import app.database as _db
+    import app.modules.assist_environment as _ae
+    calls = []
+
+    class _S:
+        async def __aenter__(self): return object()
+        async def __aexit__(self, *a): return False
+    monkeypatch.setattr(_db, "async_session", lambda: _S())
+
+    async def fake_insert(job_id, spec, *, db, edited_by):
+        calls.append(("insert", spec["node_key"], spec["title"])); return {"status": "ok", "node_key": spec["node_key"]}
+
+    async def fake_edit(job_id, key, fields, *, db, cascade, edited_by):
+        calls.append(("edit", key, fields, cascade)); return {"status": "ok"}
+
+    async def no_facts(*a, **k):
+        return None
+    monkeypatch.setattr(node_editor, "insert_node", fake_insert)
+    monkeypatch.setattr(node_editor, "edit_node", fake_edit)
+    monkeypatch.setattr(_ae, "set_environment", no_facts)
+    inv = {"cts": {"111": "running", "120": "running"}, "vms": {}, "names": {}, "disks": {}}
+    t = mt.truth_from_texts("120", inventory=inv, dns=(True, ""), sibling_config=CFG111_LIVE, plan=PLAN_120)
+    node = dict(ADD88_NODE)
+    did = await mt.reconcile_from_truth("job", node, t, {"exists", "running", "network"}, PLAN_120)
+    assert ("insert", "ADD120", "Give container 120 a working nameserver") in calls
+    assert ("edit", "ADD88", {"depends_on": ["ADD87", "ADD120"]}, False) in calls
+    assert any(d.startswith("inserted ADD120") for d in did) and "ADD88 now waits for ADD120" in did
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8"); i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert 'if any(" now waits for " in d for d in _did) and _depth < 6' in body, "a reopen or an insert restarts the pause"
+
+
+@pytest.mark.asyncio
+async def test_the_dns_probe_runs_only_for_a_running_guest_and_borrows_a_sibling(monkeypatch):
+    asked = []
+
+    async def fake_probe(spec, command):
+        asked.append(command)
+        if command.startswith("pct config 120"):
+            return True, "net0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:AC:C9:06,type=veth\n"
+        if command.startswith("pct config 111"):
+            return True, CFG111_LIVE
+        if "getent" in command:
+            return True, ""
+        return True, ""
+    monkeypatch.setattr(mt, "_probe", fake_probe)
+    inv = {"cts": {"111": "running", "120": "running"}, "vms": {}, "names": {}, "disks": {}}
+    t = await mt.read_guest_truth(object(), "120", inv, PLAN_120)
+    assert "pct exec 120 -- timeout 5 getent hosts deb.debian.org" in asked and "pct config 111" in asked
+    assert t.resolves is False and t.dns_hint == "192.168.1.30 1.1.1.1"
+    asked.clear()
+    inv2 = {"cts": {"120": "stopped"}, "vms": {}, "names": {}, "disks": {}}
+    t2 = await mt.read_guest_truth(object(), "120", inv2, PLAN_120)
+    assert not any("getent" in a for a in asked) and t2.resolves is None, "a stopped guest cannot be asked"
