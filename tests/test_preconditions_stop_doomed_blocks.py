@@ -347,3 +347,19 @@ def test_the_empty_disk_fact_is_recorded_for_the_plan():
     assert "machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)" in body
     assert "machine_truth.reconcile_from_truth(job_id, run_node, _truth, _needs, _plan_rows)" in body
     assert "has never been written" in sr._SHAPE_REFUSALS, "the redraft is told, and the chain counts it"
+
+
+@pytest.mark.asyncio
+async def test_an_if_guard_in_a_script_counts_like_the_or_guard_on_a_line():
+    """§17.1294 — the engine's own watch_guest_boot template was refused for its
+    `else qm start "$GID"` on a running VM: the guard was an if/else, not `||`."""
+    from app.modules import runbook_templates as rt, supervised_runs as sr
+    node = {"node_key": "ADD119", "title": "Reset VM 106 and capture its serial console during boot", "description": "boot log"}
+    import app.modules.machine_truth as mt
+    rb = rt.render(rt.WATCH_GUEST_BOOT, rt.values_for(rt.WATCH_GUEST_BOOT, node, mt.GuestTruth(gid="106", kind="vm", status="running"), {}))
+    cmds, files = sr.runbook_commands(rb), sr.file_writes(rb)
+    with patch("app.modules.mcp_client.call_tool", new=_host()):          # 106 running in QM_LIST
+        out = await pc.unmet(cmds, _spec(), plan=[], files=files, node=node)
+    assert all("ALREADY" not in o["why"] for o in out), [o["why"][:100] for o in out]
+    assert pc._guarded('GID=106\nif qm status "$GID" | grep -q running; then qm reset "$GID"; else qm start "$GID"; fi\n'.replace('"$GID"', '106'), "qm", "start", "106")
+    assert not pc._guarded("qm start 106", "qm", "start", "106")

@@ -306,7 +306,15 @@ CAP=$!
 sleep 2
 if qm status "$GID" | grep -q running; then qm reset "$GID"; else qm start "$GID"; fi
 wait "$CAP" || true
-echo "=== VM $GID console, first {SECONDS_TO_WATCH}s after reset ($(wc -c < "$LOG") bytes) ==="
+BYTES="$(wc -c < "$LOG" | tr -d ' ')"
+echo "=== VM $GID console, first {SECONDS_TO_WATCH}s after reset ($BYTES bytes) ==="
+if [ "${BYTES:-0}" -lt 20 ]; then
+    # §17.1294 -- an empty capture is a finding, not a success: the model's redraft of this step was marked done
+    # with an empty log. Either nothing listens on the socket, the guest's console is not on serial0, or socat
+    # could not connect; the config line says which to look at next.
+    echo "FAILED: nothing arrived on VM $GID's serial console in {SECONDS_TO_WATCH}s (socket /var/run/qemu-server/$GID.serial0; $(qm config "$GID" | grep -E '^(serial0|vga):' | tr '\n' ' '))"
+    exit 1
+fi
 tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
 """},
     run="bash /tmp/watch_boot_{GID}.sh",
