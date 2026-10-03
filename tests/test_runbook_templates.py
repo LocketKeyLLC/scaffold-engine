@@ -275,3 +275,19 @@ def test_a_step_whose_history_mentions_the_console_is_not_a_console_read():
     assert rt.select_template(add82_live, _truth("vm")) is rt.REACH_VM_SSH_AND_RUN
     assert rt.intent_of(ADD118) == "read_guest_console" and rt.select_template(ADD118, _truth("vm")) is rt.READ_GUEST_CONSOLE
     assert rt.intent_of(ADD119) == "watch_guest_boot"
+
+
+# ───── §17.1299 — probe key auth before copying a key; an unattended install counts as a key step
+
+def test_the_reach_template_probes_key_auth_before_any_copy():
+    body = sr.file_writes(rt.render(rt.REACH_VM_SSH_AND_RUN, rt.values_for(rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm"), ENV, {"REMOTE_COMMANDS": REMOTE})))[0]["content"]
+    assert body.index('"$USER_NAME@$IP" true >/dev/null') < body.index("sshpass -e ssh-copy-id"), "the probe comes first"
+    assert 'elif [ "yes" = "yes" ]' in body
+    frame = _frame(rt.render(rt.REACH_VM_SSH_AND_RUN, rt.values_for(rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm"), ENV, {"REMOTE_COMMANDS": REMOTE})), ADD82)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+
+
+def test_an_unattended_install_step_counts_as_the_key_step():
+    from app.modules.runbook_preconditions import key_known_for
+    plan = [{"node_key": "ADD117", "title": "Install Ubuntu 22.04 on VM 106 unattended (cloud image + cloud-init)", "status": "done"}]
+    assert key_known_for("106", "palworld-server", plan) and key_known_for("106", "palworld-server", plan).startswith("ADD117")
