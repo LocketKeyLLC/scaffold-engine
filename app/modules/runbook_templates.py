@@ -73,11 +73,16 @@ wait_for_address() {
     net="$(ip -4 route get 1 | sed -n 's/.* src \([0-9.]*\)\.[0-9]*.*/\1/p' || true)"
     while [ "$SECONDS" -lt "$deadline" ]; do
         if command -v nmap >/dev/null 2>&1; then
-            nmap -sn "$net.0/24" >/dev/null 2>&1 || true
+            # §17.1295 -- nmap's ARP scan uses its OWN raw sockets: it never populates the kernel's
+            # neighbour table, so `ip neigh` after it stayed empty while the guest answered (live, VM 106
+            # at 192.168.1.106 for an hour). Read nmap's own report for the MAC instead.
+            ip="$(nmap -sn "$net.0/24" 2>/dev/null | tr -d '\r' | awk -v m="$mac" '
+                /^Nmap scan report for/ { ip=$NF; gsub(/[()]/, "", ip) }
+                tolower($0) ~ "mac address: " m { print ip; exit }' || true)"
         else
             for h in $(seq 1 254); do ping -c 1 -W 1 "$net.$h" >/dev/null 2>&1 & done; wait
+            ip="$(ip neigh show | grep -i "$mac" | awk '{print $1}' | head -n 1 || true)"
         fi
-        ip="$(ip neigh show | grep -i "$mac" | awk '{print $1}' | head -n 1 || true)"
         if [ -n "$ip" ]; then printf '%s\n' "$ip"; return 0; fi
         sleep 8
     done

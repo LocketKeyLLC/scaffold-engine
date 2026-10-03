@@ -58,7 +58,9 @@ def test_the_install_template_carries_the_days_lessons():
     assert 'qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD"' in body
     assert "--sshkeys \"$PUBKEY\" --ipconfig0 \"ip=dhcp\"" in body and "qm importdisk" in body
     assert 'DISK_SIZE="100G"' in body and 'qm resize "$GID" scsi0 "$DISK_SIZE"' in body
-    assert body.index("nmap -sn") < body.index("ip neigh show"), "the sweep comes before the read"
+    assert body.index("nmap -sn") < body.index("ip neigh show"), "the kernel-table read (the no-nmap path) comes after a sweep"
+    # §17.1295 — with nmap, the address is read from nmap's OWN report, never from `ip neigh`
+    assert "/^Nmap scan report for/ { ip=$NF" in body and 'tolower($0) ~ "mac address: " m { print ip; exit }' in body
     assert "| head -n 1 || true)" in body, "every lookup a wait expects to be empty ends in || true"
     assert "set -uo pipefail" in body and "set -e" not in body
     assert sr.runbook_commands(rb) == [f'MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<PALWORLD_USER>" bash /tmp/install_os_106.sh {ph}'
@@ -233,3 +235,19 @@ def test_an_empty_boot_capture_fails_the_step():
     assert 'if [ "${BYTES:-0}" -lt 20 ]' in body and "FAILED: nothing arrived on VM $GID's serial console" in body
     frame = _frame(rt.render(rt.WATCH_GUEST_BOOT, rt.values_for(rt.WATCH_GUEST_BOOT, ADD119, _truth("vm"), ENV)), ADD119)
     assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+
+
+def test_the_wait_parses_nmaps_report_the_way_the_live_host_prints_it():
+    """§17.1295 — the awk in wait_for_address, run on nmap's real output for VM 106."""
+    import subprocess
+    report = ("Starting Nmap 7.95 ( https://nmap.org ) at 2026-10-02 18:55 HDT\n"
+              "Nmap scan report for pve.lan (192.168.1.156)\nHost is up.\n"
+              "Nmap scan report for 192.168.1.106\nHost is up (0.00025s latency).\nMAC Address: BC:24:11:E8:9F:7A (Proxmox Server Solutions GmbH)\n"
+              "Nmap scan report for AdamsTV.lan (192.168.1.211)\nHost is up (0.12s latency).\nMAC Address: 0C:62:A6:77:7E:11 (Hui Zhou Gaoshengda Technology)\n"
+              "Nmap done: 256 IP addresses (21 hosts up) scanned in 3.44 seconds\n")
+    awk = r"""/^Nmap scan report for/ { ip=$NF; gsub(/[()]/, "", ip) }
+                tolower($0) ~ "mac address: " m { print ip; exit }"""
+    out = subprocess.run(["awk", "-v", "m=bc:24:11:e8:9f:7a", awk], input=report, capture_output=True, text=True).stdout.strip()
+    assert out == "192.168.1.106", out
+    out2 = subprocess.run(["awk", "-v", "m=0c:62:a6:77:7e:11", awk], input=report, capture_output=True, text=True).stdout.strip()
+    assert out2 == "192.168.1.211", "a named host's ip is the parenthesised one"
