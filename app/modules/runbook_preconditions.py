@@ -133,7 +133,8 @@ async def read_inventory(spec) -> Optional[dict]:
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 #: a bare `ssh` (not `ssh-copy-id`, not a path)
 _SSH_RE = re.compile(r"(?<![\w./-])ssh(?![\w-])")
-_KEY_STEP_RE = re.compile(r"ssh.*\bkey\b|public\s*key|authorized_keys|ssh-copy-id", re.I)
+#: §17.1299 — an unattended install with cloud-init seeds this host's key too (`--sshkeys`)
+_KEY_STEP_RE = re.compile(r"ssh.*\bkey\b|public\s*key|authorized_keys|ssh-copy-id|cloud-init|cloud image|unattended", re.I)
 
 
 def _norm(s: str) -> str:

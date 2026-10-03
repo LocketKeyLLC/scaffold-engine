@@ -243,10 +243,16 @@ MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' |
 IP="$(wait_for_address "$MAC" || true)"
 if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
 echo "VM $GID is at $IP"
-if [ "{NEEDS_KEY}" = "yes" ]; then
+# §17.1299 -- probe key auth FIRST: a cloud-init install already seeded this host's key (--sshkeys) and a cloud
+# image refuses password auth, so a blind ssh-copy-id would fail on a guest that is perfectly reachable.
+if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" true >/dev/null 2>&1; then
+    echo "key auth works for $USER_NAME@$IP"
+elif [ "{NEEDS_KEY}" = "yes" ]; then
     command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
     SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
-        || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password?)"; exit 1; }
+        || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password, or password auth is off in the guest)"; exit 1; }
+else
+    echo "FAILED: key auth to $USER_NAME@$IP was refused and no password path is allowed here"; exit 1
 fi
 cat > /tmp/in_vm_{GID}_remote.sh <<'REMOTE'
 set -e
