@@ -39,6 +39,53 @@ MIN_CHILDREN, MAX_CHILDREN = 2, 8
 
 #: the refusals that mean "this does not fit in one block", not "this block is wrong".
 _TOO_LARGE_RE = re.compile(r"content cut|too large for one draw", re.I)
+#: §17.1331 — a step that BUILDS, and the separate things it asks to be built. A cut draw was the
+#: symptom; a draft can also come back small and do a fraction of the work (live, ADD100's third
+#: draft was 498 characters that wrote only package.json and would have claimed the whole step).
+#: The signal is in the STEP: it asks for more than one deliverable in one block.
+_BUILD_RE = re.compile(r"\b(?:re)?(?:build|write|create|implement|develop|rework|add)\b|\bset ?up\b", re.I)
+_DELIVERABLES = {
+    "a backend": r"\bback[- ]?end\b",
+    "a frontend": r"\bfront[- ]?end\b",
+    "a user interface": r"\b(?:UI|user interface|web interface)\b",
+    "an API": r"\bAPI\b|\bendpoints?\b",
+    "a service unit": r"\bsystemd service\b|\bservice unit\b",
+    "a page": r"\bpage\b|\bdashboard\b",
+}
+
+
+#: §17.1331b — what joins two deliverables that are both to be built.
+_COORDINATED_RE = re.compile(r"[\s,]*(?:and|&|\+|/|,|as well as|plus|then)?[\s,]*(?:the\s+|a\s+|an\s+|its\s+|new\s+)*", re.I)
+
+
+def deliverables_in(node: Optional[dict]) -> list[str]:
+    """The separate things a BUILD step asks to be built, by the step's own words.
+
+    Measured over the live plan's 150 steps: fires on ADD100 alone ("Rebuild the
+    control panel…": a backend, a frontend, a page) and on nothing else. "Stop the
+    control-panel backend node process" names two but builds neither, so the build
+    verb is required; T33 "Build control panel backend" and T34 "Build control panel
+    frontend" name ONE each and are correctly sized — they failed for another reason
+    (§17.1208, recorded done with 553 and 154 bytes), which splitting would not fix.
+    """
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not _BUILD_RE.search(text):
+        return []
+    spans: list[tuple[int, int, str]] = []
+    for name, rx in _DELIVERABLES.items():
+        for m in re.finditer(rx, text, re.I):
+            spans.append((m.start(), m.end(), name))
+    spans.sort()
+    # §17.1331b — the deliverables must be COORDINATED, two things to build: "the backend and the
+    # frontend". "A service unit FOR the backend" (ADD114) names two and builds one, so a pair
+    # joined by "for"/"of"/"in" is one deliverable qualified by another, and does not count.
+    named: set[str] = set()
+    for (_, e1, n1), (s2, _, n2) in zip(spans, spans[1:], strict=False):
+        if n1 == n2 or s2 - e1 > 40:
+            continue
+        if _COORDINATED_RE.fullmatch(text[e1:s2]):
+            named.update({n1, n2})
+    return sorted(named)
 
 SPLIT_TOOL = Tool(
     name="record_step_split",
@@ -77,12 +124,16 @@ SPLIT_SYSTEM = (
 )
 
 
-def too_large(frame: Optional[dict]) -> str:
-    """§17.1330 — the reason this step cannot be carried as one block, or ``""``."""
+def too_large(frame: Optional[dict], node: Optional[dict] = None) -> str:
+    """§17.1330/§17.1331 — the reason this step cannot be carried as one block, or ``""``."""
     for r in (frame or {}).get("refused") or []:
         why = str(r.get("why") or "")
         if _TOO_LARGE_RE.search(why):
             return " ".join(why.split())[:300]
+    parts = deliverables_in(node)
+    if len(parts) >= 2:
+        return (f"the step asks for {len(parts)} separate deliverables in one block ({', '.join(parts)}); "
+                f"the engine carries one block of commands per step")
     return ""
 
 
