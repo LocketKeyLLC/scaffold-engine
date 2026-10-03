@@ -210,15 +210,24 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
     return t
 
 
-def subject_guest(node: Optional[dict]) -> Optional[str]:
+def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Optional[str]:
+    """The guest a step is about: by id ("VM 106", "LXC 120") or, §17.1316, by NAME
+    against the inventory ("Install PalWorld server" → 106 palworld-server). Live,
+    T23 had no id in its text, so no truth was read, no template applied, and the
+    draft went over ssh with sudo into a VM whose agent answers."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
     m = _SUBJECT_RE.search(text)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    names = (inventory or {}).get("names") or {}
+    hits = [gid for gid, name in names.items() if name and _mentions_guest(text, gid, str(name))]
+    return hits[0] if len(hits) == 1 else None
 
 
-def step_needs(node: Optional[dict], commands: list[str], files: Optional[list[dict]] = None) -> set[str]:
+def step_needs(node: Optional[dict], commands: list[str], files: Optional[list[dict]] = None,
+               gid: Optional[str] = None) -> set[str]:
     """What the step requires of its subject guest, from the block's shape."""
-    gid = subject_guest(node)
+    gid = gid or subject_guest(node)
     if not gid:
         return set()
     # §17.1308 — the engine's own templates write `GID=120` then `pct exec "$GID"`;

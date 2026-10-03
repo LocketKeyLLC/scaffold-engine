@@ -89,6 +89,16 @@ def parse_qm_list(text_out: str) -> dict[str, str]:
     return {m.group(1): m.group(3).lower() for m in _QM_ROW.finditer(text_out or "")}
 
 
+def parse_pct_names(text_out: str) -> dict[str, str]:
+    """``{ctid: name}`` from `pct list` (VMID Status [Lock] Name): the name is the last column."""
+    out: dict[str, str] = {}
+    for ln in (text_out or "").split("\n"):
+        parts = ln.split()
+        if len(parts) >= 3 and re.fullmatch(r"\d{3,5}", parts[0]) and not parts[-1].lower().startswith("name"):
+            out[parts[0]] = parts[-1]
+    return out
+
+
 def parse_qm_names(text_out: str) -> dict[str, str]:
     """``{vmid: name}`` from the same listing (§17.1288f — a plan step names a
     VM by its name as often as by its id: "the AI VM", `ai-vm`)."""
@@ -124,7 +134,7 @@ async def read_inventory(spec) -> Optional[dict]:
     if not cts and not vms:
         logger.warning("preconditions_unreadable — nothing refused")
         return None
-    inv = {"cts": cts, "vms": vms, "names": parse_qm_names(qm_out)}
+    inv = {"cts": cts, "vms": vms, "names": {**parse_pct_names(pct_out), **parse_qm_names(qm_out)}}   # §17.1316 — containers have names too
     # §17.1288p — and what is ON the guests' disks, cheaply: a thin volume at
     # Data% 0.00 has never been written, so the guest it belongs to has no OS.
     lvs_out = await _read(spec, "lvs --noheadings -o lv_name,lv_size,data_percent pve")
@@ -210,6 +220,11 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     guests = guests_in(texts)
     subject = str((node or {}).get("title") or "") + "\n" + str((node or {}).get("description") or "")
     subjects = list(dict.fromkeys(_SUBJECT_RE.findall(subject))) if node else []
+    # §17.1316 — "Install PalWorld server" names VM 106 by its name; the pause measured it,
+    # so the truth's guest is the step's subject for every rule below.
+    _tg = str(getattr(truth, "gid", "") or "")
+    if _tg and _tg not in subjects:
+        subjects.append(_tg)
     uses_ssh = any(_SSH_RE.search(t) for t in texts)
     out: list[dict] = []
     inv = inventory if inventory is not None else (await read_inventory(spec) if spec is not None else None)

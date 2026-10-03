@@ -2572,7 +2572,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         _truth = None
         try:
             from app.modules import machine_truth
-            _gid = machine_truth.subject_guest(run_node)
+            _gid = machine_truth.subject_guest(run_node, _inv)      # §17.1316 — by id, or by name against the inventory
             if _gid:
                 _truth = await machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)
         except Exception as exc:
@@ -2597,7 +2597,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # step already covers it. What was done is said on the frame.
         if _truth is not None:
             try:
-                _needs = machine_truth.step_needs(run_node, frame.get("commands") or [], frame.get("files") or [])
+                _needs = machine_truth.step_needs(run_node, frame.get("commands") or [], frame.get("files") or [], gid=_gid)
                 _did = await machine_truth.reconcile_from_truth(job_id, run_node, _truth, _needs, _plan_rows)
                 if _did:
                     frame["engine_fixed"] = list(frame.get("engine_fixed") or []) + [f"measured {_truth.kind or 'guest'} {_truth.gid}: {d}" for d in _did]

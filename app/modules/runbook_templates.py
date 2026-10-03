@@ -415,15 +415,17 @@ def intent_of(node: dict) -> Optional[str]:
     return None
 
 
-def subject_gid(node: dict) -> Optional[str]:
+def subject_gid(node: dict, truth=None) -> Optional[str]:
     m = _SUBJECT_RE.search(_text(node))
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    return str(getattr(truth, "gid", "") or "") or None       # §17.1316 — the pause measured the guest the text names by name
 
 
 def select_template(node: dict, truth) -> Optional[Template]:
     """The first template whose ``applies`` holds for this step and this
     measured guest; None means today's model-written path."""
-    if not subject_gid(node):
+    if not subject_gid(node, truth):
         return None
     for t in TEMPLATES:
         try:
@@ -441,7 +443,7 @@ def guest_user_name(node: dict, gid: str, env: Optional[dict]) -> str:
 
 
 def values_for(template: Template, node: dict, truth, env: Optional[dict], model_values: Optional[dict] = None) -> dict:
-    gid = subject_gid(node) or ""
+    gid = subject_gid(node, truth) or ""
     vals: dict[str, str] = {"GID": gid, "GUEST_USER_NAME": guest_user_name(node, gid, env)}
     for p in template.params:
         if p.source == "subject":

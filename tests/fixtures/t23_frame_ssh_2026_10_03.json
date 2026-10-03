@@ -1,0 +1,48 @@
+{
+ "node_key": "T23",
+ "title": "Install PalWorld server",
+ "commands": [
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'dpkg --add-architecture i386 && apt-get update && apt-get install -y lib32gcc-s1 lib32stdc++6 curl wget file tar bzip2 gzip unzip python3'\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'mkdir -p /opt/steamcmd && cd /opt/steamcmd && curl -sqL \\\"https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz\\\" | tar zxvf -'\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c '/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit'\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'chown -R <PALWORLD_USER>:<PALWORLD_USER> /opt/palworld'\""
+ ],
+ "verify": [
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -la /opt/steamcmd/steamcmd.sh\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -la /opt/palworld/PalServer.sh\"",
+  "ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -ld /opt/palworld\""
+ ],
+ "runbook": "## Inputs needed\n\n- `<PALWORLD_IP>` \u2014 the IP address the palworld-server VM (106) will receive from DHCP on vmbr0. The engine can read this off the host once the VM is up.\n- `<PALWORLD_USER>` \u2014 the non-root user account inside the VM that will run the server. Suggested default: `palworld` (rename if you like).\n\n## Prerequisites\n\n- VM 106 exists and is configured per T22 (confirmed in upstream output).\n- The VM has a working network connection on vmbr0.\n- The VM has an OS installed and reachable over SSH. If the VM has no OS yet, install one first (Ubuntu Server 22.04 LTS recommended for SteamCMD compatibility).\n\n## Risk\n\n- None of these steps are destructive to the host. All work happens inside VM 106.\n- The SteamCMD install downloads several hundred MB from Valve's servers; ensure the VM has internet access.\n\n## Run this\n\n1. Install SteamCMD dependencies and create the service user:\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'dpkg --add-architecture i386 && apt-get update && apt-get install -y lib32gcc-s1 lib32stdc++6 curl wget file tar bzip2 gzip unzip python3'\"\n```\n\n2. Create the SteamCMD directory and download SteamCMD:\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'mkdir -p /opt/steamcmd && cd /opt/steamcmd && curl -sqL \\\"https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz\\\" | tar zxvf -'\"\n```\n\n3. Run SteamCMD to install the PalWorld dedicated server:\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c '/opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit'\"\n```\n\n4. Set ownership of the PalWorld directory to the service user:\n\n```bash\nssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'chown -R <PALWORLD_USER>:<PALWORLD_USER> /opt/palworld'\"\n```\n\n## Verify\n\n- Confirm SteamCMD is installed and executable: `ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -la /opt/steamcmd/steamcmd.sh\"`\n- Confirm the PalWorld server binary exists: `ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -la /opt/palworld/PalServer.sh\"`\n- Confirm the server files are owned by the service user: `ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ls -ld /opt/palworld\"`\n\n## Rollback\n\n- If SteamCMD fails to download, check the VM's internet connectivity: `ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"ping -c 3 8.8.8.8\"`\n- If the PalWorld install fails, remove the partial install and retry: `ssh -o BatchMode=yes <PALWORLD_USER>@<PALWORLD_IP> \"sudo -S -p '' bash -c 'rm -rf /opt/palworld && /opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit'\"`\n- If the VM is unreachable, verify it is running on the host: `qm status 106`",
+ "hands_on_reason": "tool:shell",
+ "inputs": [
+  {
+   "hint": "the non-root user account inside the VM that will run the server. Suggested default: `palworld` (rename if you like).",
+   "name": "PALWORLD_USER",
+   "value": "aedefruscio",
+   "secret": false,
+   "suggestions": [
+    {
+     "value": "aedefruscio",
+     "source": "pinned as PALWORLD_USER",
+     "confidence": "pinned"
+    }
+   ]
+  },
+  {
+   "hint": "the IP address the palworld-server VM (106) will receive from DHCP on vmbr0. The engine can read this off the host once the VM is up.",
+   "name": "PALWORLD_IP",
+   "value": "192.168.1.106",
+   "secret": false,
+   "suggestions": [
+    {
+     "value": "192.168.1.106",
+     "source": "pinned as PALWORLD_IP",
+     "confidence": "pinned"
+    }
+   ]
+  }
+ ],
+ "refused": [],
+ "files": [],
+ "engine_fixed": []
+}
