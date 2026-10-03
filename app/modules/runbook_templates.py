@@ -54,7 +54,7 @@ class Template:
     applies: Callable[[dict, Optional[object]], bool]
     params: list[Param]
     files: dict[str, str]              # path -> body, with {NAME} placeholders
-    run: str                           # the one command under ## Run this
+    run: str | list[str]               # the command(s) under ## Run this -- each gets the runner's 180 s budget
     verify: list[str] = field(default_factory=list)
     risk: str = ""
 
@@ -95,8 +95,9 @@ INSTALL_OS_CLOUDINIT = Template(
         Param("PUBKEY", "default", default="/root/.ssh/id_rsa.pub"),
         Param("EXPECT", "default", default="Ubuntu 22.04"),
     ],
-    files={"/tmp/install_os_{GID}.sh": r'''#!/usr/bin/env bash
+    files={"/tmp/install_os_{GID}.sh": r"""#!/usr/bin/env bash
 # Unattended Ubuntu install on VM {GID}: cloud image + the Proxmox cloud-init drive. No console at any point.
+# §17.1290c -- in PHASES, one command each, because a supervised command has 180 seconds: prepare | swap | boot | check.
 set -uo pipefail
 GID={GID}
 IMAGE_URL="{IMAGE_URL}"
@@ -104,48 +105,84 @@ IMAGE_FILE="{IMAGE_FILE}"
 DISK_SIZE="{DISK_SIZE}"
 USER_NAME="${GUEST_USER}"
 PUBKEY="{PUBKEY}"
+PHASE="${1:-all}"
 
-''' + WAIT_FOR_ADDRESS + r'''
+""" + WAIT_FOR_ADDRESS + r"""
 
-# 1. the image, once
-if [ ! -s "$IMAGE_FILE" ]; then
-    curl -fL --retry 3 -o "$IMAGE_FILE" "$IMAGE_URL" || { echo "FAILED: could not download $IMAGE_URL"; exit 1; }
-fi
-# 2. the VM must be stopped to swap its disk
-qm status "$GID" | grep -q running && qm stop "$GID"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
-# 3. import the image as a new disk; it lands as unusedN
-OLD_DISK="$(qm config "$GID" | sed -n 's/^scsi0: \([^,]*\),.*/\1/p' | head -n 1 || true)"
-qm importdisk "$GID" "$IMAGE_FILE" local-lvm >/dev/null || { echo "FAILED: qm importdisk"; exit 1; }
-NEW_DISK="$(qm config "$GID" | sed -n 's/^unused[0-9]*: \(local-lvm:vm-'"$GID"'-disk-[0-9]*\)$/\1/p' | tail -n 1 || true)"
-if [ -z "$NEW_DISK" ]; then echo "FAILED: the imported disk did not appear as unusedN in qm config $GID"; exit 1; fi
-echo "imported $NEW_DISK (old boot disk: ${OLD_DISK:-none})"
-# 4. make it the boot disk, grow it; the old never-written disk is freed
-qm set "$GID" --scsihw virtio-scsi-pci --scsi0 "$NEW_DISK" --boot order=scsi0 >/dev/null || { echo "FAILED: qm set scsi0"; exit 1; }
-qm resize "$GID" scsi0 "$DISK_SIZE" >/dev/null || { echo "FAILED: qm resize"; exit 1; }
-if [ -n "$OLD_DISK" ] && [ "$OLD_DISK" != "$NEW_DISK" ]; then
-    OLD_SLOT="$(qm config "$GID" | grep -F ": $OLD_DISK" | grep -oE '^unused[0-9]+' | head -n 1 || true)"
-    [ -n "$OLD_SLOT" ] && qm set "$GID" --delete "$OLD_SLOT" >/dev/null
-    pvesm free "$OLD_DISK" >/dev/null 2>&1 || true
-fi
-# 5. the cloud-init drive and its seed: account, password by NAME, this host's key, DHCP
-qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD" \
-    --sshkeys "$PUBKEY" --ipconfig0 ip=dhcp --nameserver {NAMESERVER} --agent 1 --serial0 socket --vga serial0 >/dev/null \
-    || { echo "FAILED: qm set cloud-init"; exit 1; }
-# 6. boot and wait for it to answer over ssh (cloud-init needs a minute on first boot)
-qm start "$GID" || { echo "FAILED: qm start"; exit 1; }
-MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
-IP="$(wait_for_address "$MAC" || true)"
-if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
-echo "VM $GID is at $IP"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" 'lsb_release -ds' 2>/dev/null || true)"
-    if [ -n "$OUT" ]; then echo "guest answers: $OUT"; break; fi
-    sleep 10
-done
-case "$OUT" in *"{EXPECT}"*) echo "OK: $OUT on VM $GID at $IP";; *) echo "FAILED: ssh to $USER_NAME@$IP did not answer with {EXPECT}"; exit 1;; esac
-'''},
-    run='MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/install_os_{GID}.sh',
+vm_mac() { qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true; }
+
+phase_prepare() {
+    # the image, once; resumable, bounded to the command's budget -- an incomplete download is kept and finished on the next run
+    if [ -s "$IMAGE_FILE" ] && [ "$(stat -c %s "$IMAGE_FILE")" -gt 300000000 ] && qemu-img info "$IMAGE_FILE" >/dev/null 2>&1; then
+        echo "image present: $IMAGE_FILE"; return 0
+    fi
+    curl -fL -C - --retry 2 --max-time 165 -o "$IMAGE_FILE" "$IMAGE_URL"
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! qemu-img info "$IMAGE_FILE" >/dev/null 2>&1; then
+        echo "download incomplete (curl exit $rc; $(stat -c %s "$IMAGE_FILE" 2>/dev/null || echo 0) bytes kept): run this step again to resume"
+        return 1
+    fi
+    echo "image downloaded: $IMAGE_FILE"
+}
+
+phase_swap() {
+    # the VM must be stopped to swap its disk
+    qm status "$GID" | grep -q running && qm stop "$GID"
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do qm status "$GID" | grep -q stopped && break; sleep 5; done
+    if qm config "$GID" | grep -q '^ide2: local-lvm:vm-'"$GID"'-cloudinit'; then
+        echo "cloud-init drive already present: the swap was done on an earlier run"; return 0
+    fi
+    OLD_DISK="$(qm config "$GID" | sed -n 's/^scsi0: \([^,]*\),.*/\1/p' | head -n 1 || true)"
+    qm importdisk "$GID" "$IMAGE_FILE" local-lvm >/dev/null || { echo "FAILED: qm importdisk"; return 1; }
+    NEW_DISK="$(qm config "$GID" | sed -n 's/^unused[0-9]*: \(local-lvm:vm-'"$GID"'-disk-[0-9]*\)$/\1/p' | tail -n 1 || true)"
+    if [ -z "$NEW_DISK" ]; then echo "FAILED: the imported disk did not appear as unusedN in qm config $GID"; return 1; fi
+    echo "imported $NEW_DISK (old boot disk: ${OLD_DISK:-none})"
+    qm set "$GID" --scsihw virtio-scsi-pci --scsi0 "$NEW_DISK" --boot order=scsi0 >/dev/null || { echo "FAILED: qm set scsi0"; return 1; }
+    qm resize "$GID" scsi0 "$DISK_SIZE" >/dev/null || { echo "FAILED: qm resize"; return 1; }
+    if [ -n "$OLD_DISK" ] && [ "$OLD_DISK" != "$NEW_DISK" ]; then
+        OLD_SLOT="$(qm config "$GID" | grep -F ": $OLD_DISK" | grep -oE '^unused[0-9]+' | head -n 1 || true)"
+        [ -n "$OLD_SLOT" ] && qm set "$GID" --delete "$OLD_SLOT" >/dev/null
+        pvesm free "$OLD_DISK" >/dev/null 2>&1 || true
+    fi
+    # the cloud-init drive and its seed: account, password by NAME, this host's key, DHCP
+    qm set "$GID" --ide2 local-lvm:cloudinit --ciuser "$USER_NAME" --cipassword "$MASS_PASSWORD" \
+        --sshkeys "$PUBKEY" --ipconfig0 ip=dhcp --nameserver {NAMESERVER} --agent 1 --serial0 socket --vga serial0 >/dev/null \
+        || { echo "FAILED: qm set cloud-init"; return 1; }
+    echo "disk swapped and cloud-init seeded on VM $GID"
+}
+
+phase_boot() {
+    qm status "$GID" | grep -q running || qm start "$GID" || { echo "FAILED: qm start"; return 1; }
+    MAC="$(vm_mac)"
+    IP="$(wait_for_address "$MAC" || true)"
+    if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; return 1; fi
+    echo "VM $GID is at $IP"
+}
+
+phase_check() {
+    MAC="$(vm_mac)"
+    IP="$(wait_for_address "$MAC" || true)"
+    if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) is not on the network"; return 1; fi
+    OUT=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" 'lsb_release -ds' 2>/dev/null || true)"
+        if [ -n "$OUT" ]; then break; fi
+        sleep 10
+    done
+    case "$OUT" in *"{EXPECT}"*) echo "OK: $OUT on VM $GID at $IP";; *) echo "FAILED: ssh to $USER_NAME@$IP did not answer with {EXPECT} (got: ${OUT:-nothing})"; return 1;; esac
+}
+
+case "$PHASE" in
+    prepare) phase_prepare;;
+    swap)    phase_swap;;
+    boot)    phase_boot;;
+    check)   phase_check;;
+    all)     phase_prepare && phase_swap && phase_boot && phase_check;;
+    *)       echo "unknown phase: $PHASE"; exit 2;;
+esac
+"""},
+    run=[f'MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{{GUEST_USER_NAME}}>" bash /tmp/install_os_{{GID}}.sh {ph}'
+         for ph in ("prepare", "swap", "boot", "check")],
     verify=["qm config {GID} | grep -E '^(scsi0|ide2|boot):'", "qm status {GID}"],
     risk="Stops VM {GID}, replaces its (never-written) boot disk with the imported cloud image, frees the old volume.",
 )
@@ -305,7 +342,8 @@ def render(template: Template, values: dict) -> str:
     lines += ["## Write these files", ""]
     for path, body in template.files.items():
         lines += [f"### {fill(path)}", "```bash", fill(body).rstrip("\n"), "```", ""]
-    lines += ["## Run this", "", "```bash", fill(template.run), "```", "", "## Verify", ""]
+    runs = template.run if isinstance(template.run, list) else [template.run]
+    lines += ["## Run this", "", "```bash", *[fill(r) for r in runs], "```", "", "## Verify", ""]
     lines += [f"- `{fill(c)}`" for c in template.verify]
     return "\n".join(lines) + "\n"
 
