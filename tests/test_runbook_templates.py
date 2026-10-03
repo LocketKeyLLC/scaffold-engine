@@ -97,3 +97,45 @@ def test_the_drafter_renders_a_template_first_and_the_pause_measures_before_draf
     j = esrc.index("async def _pause_for_decision(")
     ebody = esrc[j:esrc.index("\nasync def ", j + 10)]
     assert ebody.index("machine_truth.read_guest_truth(") < ebody.index("spec=spec, environment=_env, truth=_truth)")
+
+
+# ───── §17.1290b — the first live pass: the import, and the OS-install step is not blocked by the empty disk
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_a_template_without_a_free_parameter_asks_the_model_nothing():
+    assert await rt.fill_free_params(rt.INSTALL_OS_CLOUDINIT, ADD117, "brief") == {}
+
+
+def test_the_free_parameter_draw_imports_the_router_from_where_it_lives():
+    src = pathlib.Path(rt.__file__).read_text(encoding="utf-8")
+    assert "from app import model_router" in src and "from app.modules import model_router" not in src
+    i = src.index("async def fill_free_params(")
+    body = src[i:]
+    assert body.index("return {}") < body.index("from app import model_router"), "no import before the early return"
+
+
+@pytest.mark.asyncio
+async def test_the_install_template_is_not_refused_for_the_disk_it_exists_to_fill():
+    """§17.1288p blocks a step that reaches into a VM with a never-written disk;
+    the OS-install step is the one exception, and its script sshes in AFTER."""
+    from unittest.mock import MagicMock, patch
+    from app.modules import runbook_preconditions as pc
+    rb = rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), ENV))
+    cmds, files = sr.runbook_commands(rb), sr.file_writes(rb)
+    lvs = (pathlib.Path(__file__).parent / "fixtures" / "pve_lvs_2026_10_02.txt").read_text(encoding="utf-8")
+    qm = "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID\n       106 palworld-server      running    8192               0.00 1\n"
+
+    async def fake(spec, tool, args):
+        r = MagicMock(); r.structured = None; r.is_error = False
+        c = args["command"]; r.text = {"qm list": qm, "pct list": ""}.get(c, "")
+        if c.startswith("lvs"): r.text = lvs
+        return r
+    spec = MagicMock(); spec.name = "pve-runner"
+    plan = [{"node_key": "ADD5", "title": "Install Ubuntu Server 22.04 on VM 106", "status": "done"}]
+    with patch("app.modules.mcp_client.call_tool", new=fake):
+        out = await pc.unmet(cmds, spec, plan=plan, files=files, node=ADD117)
+    assert all("has never been written" not in o["why"] for o in out), [o["why"][:100] for o in out]
+    assert out == [], [o["why"][:100] for o in out]

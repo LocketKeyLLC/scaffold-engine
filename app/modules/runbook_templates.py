@@ -340,12 +340,12 @@ FREE_PARAM_SYSTEM = (
 
 async def fill_free_params(template: Template, node: dict, brief_text: str) -> dict:
     """Ask the model for the free parameters only (today: REMOTE_COMMANDS)."""
-    from app.config import settings
-    from app.modules import model_router
-    from app.utils.llm_retry import generate_until_nonempty
     free = [p for p in template.params if p.source == "model"]
     if not free:
-        return {}
+        return {}                                   # §17.1290b — no draw, no import, for a template with no free parameter
+    from app import model_router                    # §17.1290b — live: importing it from app.modules was an ImportError
+    from app.config import settings
+    from app.utils.llm_retry import generate_until_nonempty
     prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n"
               f"Write the {free[0].hint} for this step.")
     resp = await generate_until_nonempty(

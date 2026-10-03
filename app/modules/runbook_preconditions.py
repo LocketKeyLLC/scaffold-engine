@@ -208,9 +208,10 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # none copied in this block. Judged from the plan (the engine's own record
     # of what it finished), so it needs no host read.
     if uses_ssh and subjects:
-        copies = any("ssh-copy-id" in t for t in texts)
+        # §17.1290b — cloud-init's `--sshkeys` installs this host's key as surely as ssh-copy-id does
+        copies = any("ssh-copy-id" in t or "--sshkeys" in t for t in texts)
         bare = [ln for t in texts for ln in str(t).split("\n")
-                if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln]
+                if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln and not ln.lstrip().startswith("#")]
         if bare and not copies:
             names = (inv or {}).get("names") or {}
             for gid in subjects:
@@ -257,7 +258,14 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # removed that disk (`pvesm free`) and created an empty one. The engine
     # had the read all along.
     disks = inv.get("disks") or {}
+    # §17.1290b — the step that INSTALLS the OS is the one step the empty disk
+    # does not block: live, ADD117 (cloud image + cloud-init) was refused for
+    # the very condition it exists to end, because its script sshes in after.
+    installs_os = bool(re.search(r"\binstall\b.*\b(?:ubuntu|debian|operating system|os\b|server \d\d\.\d\d)", subject, re.I)) \
+        or any(re.search(r"\bqm\s+importdisk\b|\bqm\s+disk\s+import\b|local-lvm:cloudinit|--cicustom\b", t) for t in texts)
     for gid in subjects:
+        if installs_os:
+            break
         if gid not in vms or not (uses_ssh or any(re.search(rf"\bqm\s+guest\s+exec\s+{gid}\b", t) for t in texts)):
             continue
         mine = [d for d in disks.get(gid, []) if "cloudinit" not in d["name"]]
