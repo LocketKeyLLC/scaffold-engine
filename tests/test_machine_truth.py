@@ -159,3 +159,37 @@ def test_the_live_host_vm_110_is_up_keyed_and_without_an_agent():
     assert t.agent is False, "'No QEMU guest agent configured' is not an answer"
     assert t.key_known_by and t.key_known_by.startswith("ADD26")
     assert mt.contradictions(node, t, {"exists", "running", "has_os", "reachable"}, PLAN) == []
+
+
+def test_the_live_host_ct_111_has_a_mac_a_bridge_and_no_presence():
+    """§17.1301 — `pct config` writes the MAC fourth (`hwaddr=`), not first; the
+    live measurement of CT 111 at 06:56 UTC was `mac None, bridge None`."""
+    node = {"node_key": "ADD68", "title": "Set static IP on control-panel container 111", "description": ""}
+    t = mt.truth_from_texts("111", inventory=_live_inventory(), qm_config=_live("cfg111"), neigh=_live("neigh"), fdb=_live("fdb"), plan=PLAN)
+    assert (t.kind, t.status, t.name) == ("ct", "stopped", "control-panel")
+    assert t.mac == "bc:24:11:66:89:94" and t.bridge == "vmbr0"
+    assert t.transmits is False and t.address is None and t.agent is None
+    assert "pct config" in t.reads and "qm config" not in t.reads
+    assert mt.contradictions(node, t, {"exists"}, PLAN) == []
+
+
+def test_parse_net0_reads_both_tools_lines():
+    assert mt.parse_net0("net0: virtio=BC:24:11:E8:9F:7A,bridge=vmbr0\n") == ("bc:24:11:e8:9f:7a", "vmbr0")
+    assert mt.parse_net0("net0: name=eth0,bridge=vmbr0,firewall=1,hwaddr=BC:24:11:66:89:94,type=veth\n") == ("bc:24:11:66:89:94", "vmbr0")
+    assert mt.parse_net0("memory: 2048\n") == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_read_guest_truth_asks_pct_config_for_a_container(monkeypatch):
+    asked = []
+
+    async def fake_probe(spec, command):
+        asked.append(command)
+        if command.startswith("pct config"):
+            return True, _live("cfg111")
+        return True, {"ip neigh show": _live("neigh"), "bridge fdb show": _live("fdb")}.get(command, "")
+    monkeypatch.setattr(mt, "_probe", fake_probe)
+    t = await mt.read_guest_truth(object(), "111", _live_inventory(), PLAN)
+    assert asked[0] == "pct config 111" and "ip neigh show" in asked and "bridge fdb show" in asked
+    assert not any(a.startswith("qm ") for a in asked), "a container is never asked with qm"
+    assert t.mac == "bc:24:11:66:89:94" and t.transmits is False

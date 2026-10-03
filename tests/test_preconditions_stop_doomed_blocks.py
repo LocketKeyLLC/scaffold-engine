@@ -71,6 +71,35 @@ async def test_add21_a_stopped_container_is_refused_and_the_fix_is_named():
 
 
 @pytest.mark.asyncio
+async def test_a_reboot_of_a_stopped_guest_is_refused_with_start_as_the_remedy():
+    """§17.1300 — live, ADD68 wrote `pct set 111 --net0 …` then `pct reboot 111`
+    on a STOPPED container. `reboot` was not a verb that needed the guest
+    running, so the doomed command passed. (The test PR #678 shipped without
+    is this one — added with §17.1301.)"""
+    with patch("app.modules.mcp_client.call_tool", new=_host()):
+        out = await pc.unmet(["pct set 111 --net0 name=eth0,bridge=vmbr0,ip=192.168.1.25/24,gw=192.168.1.1",
+                              "pct reboot 111", "pct status 111"], _spec())
+    assert [r["command"] for r in out] == ["pct reboot 111"], out
+    why = out[0]["why"]
+    assert "container 111 is stopped" in why and "cannot reboot" in why, why
+    assert "`pct start 111`" in why, "the remedy is a start, which also applies the new config"
+
+
+@pytest.mark.asyncio
+async def test_the_needs_running_refusal_feeds_the_redraft():
+    """§17.1301 — the same frame, parked: `shape_retry_note` is what decides
+    whether the chain redrafts or hands the operator a greyed-out button. The
+    needs-running refusal text was not in the registry, so live the engine
+    refused its own block and then parked on it (06:56 UTC, no redraft event)."""
+    from app.modules.supervised_runs import shape_retry_note
+    with patch("app.modules.mcp_client.call_tool", new=_host()):
+        out = await pc.unmet(["pct reboot 111"], _spec())
+    note = shape_retry_note({"refused": out, "commands": ["pct reboot 111"]})
+    assert note, "a machine-raised refusal the drafter can fix must redraft, not park"
+    assert "pct start 111" in note, note
+
+
+@pytest.mark.asyncio
 async def test_add82_the_wrong_tool_for_that_guest_is_refused():
     with patch("app.modules.mcp_client.call_tool", new=_host()):
         out = await pc.unmet(["pct exec 106 -- apt-get update"], _spec())

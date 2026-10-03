@@ -31,7 +31,24 @@ logger = logging.getLogger("scaffold")
 
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 _SSH_RE = re.compile(r"(?<![\w./-])ssh(?![\w-])")
-_NET0_RE = re.compile(r"^net0:\s*(?:\w+)=([0-9A-Fa-f:]{17})(?:,.*?bridge=(\w+))?", re.M)
+_NET0_LINE_RE = re.compile(r"^net0:\s*(.+)$", re.M)
+_MAC_RE = re.compile(r"\b(?:virtio|e1000e?|vmxnet3|rtl8139|hwaddr|macaddr)=([0-9A-Fa-f:]{17})")
+_BRIDGE_RE = re.compile(r"\bbridge=(\w+)")
+_HOSTNAME_RE = re.compile(r"^hostname:\s*(\S+)", re.M)
+
+
+def parse_net0(config: str) -> tuple[Optional[str], Optional[str]]:
+    """``(mac, bridge)`` from a ``qm config`` OR ``pct config`` net0 line. §17.1301 —
+    a VM writes the MAC first (`net0: virtio=BC:…,bridge=vmbr0`); a container
+    writes it fourth (`net0: name=eth0,bridge=vmbr0,firewall=1,hwaddr=BC:…`), and
+    the regex that wanted it first measured every container as MAC-less."""
+    m = _NET0_LINE_RE.search(config or "")
+    if not m:
+        return None, None
+    line = m.group(1)
+    mac = _MAC_RE.search(line)
+    br = _BRIDGE_RE.search(line)
+    return (mac.group(1).lower() if mac else None), (br.group(1) if br else None)
 _AGENT_CFG_RE = re.compile(r"^agent:\s*(\d)", re.M)
 _INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|os|operating system|server \d\d\.\d\d)\b", re.I)
 _START_RE = re.compile(r"\bstart\b.*\b(?:VM|container|CT)\b", re.I)
@@ -103,10 +120,11 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
         elif any(p is not None and float(p) > 0.0 for p in pcts):
             t.has_os = True
     if qm_config:
-        m = _NET0_RE.search(qm_config)
-        if m:
-            t.mac, t.bridge = m.group(1).lower(), (m.group(2) or None)
-        t.reads["qm config"] = qm_config[:600]
+        t.mac, t.bridge = parse_net0(qm_config)
+        if t.kind == "ct" and not t.name:
+            hm = _HOSTNAME_RE.search(qm_config)
+            t.name = hm.group(1) if hm else ""
+        t.reads[("pct" if t.kind == "ct" else "qm") + " config"] = qm_config[:600]
     if t.mac and neigh:
         hit = next((ln for ln in neigh.split("\n") if t.mac in ln.lower()), "")
         t.address = hit.split()[0] if hit else None
@@ -133,14 +151,15 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
     qm_config = neigh = fdb = ""
     agent_ping: Optional[tuple[Optional[bool], str]] = None
     kind = "ct" if gid in ((inventory or {}).get("cts") or {}) else ("vm" if gid in ((inventory or {}).get("vms") or {}) else None)
-    if spec is not None and kind == "vm":
-        _ok, qm_config = await _probe(spec, f"qm config {gid}")
-        m = _NET0_RE.search(qm_config or "")
-        if m:
+    # §17.1301 — a container has a config too (`pct config`): live, CT 111 was
+    # measured with no MAC, no bridge and no presence because only VMs were read.
+    if spec is not None and kind in ("vm", "ct"):
+        _ok, qm_config = await _probe(spec, f"{'qm' if kind == 'vm' else 'pct'} config {gid}")
+        if parse_net0(qm_config or "")[0]:
             _ok, neigh = await _probe(spec, "ip neigh show")
             _ok, fdb_out = await _probe(spec, "bridge fdb show")
             fdb = fdb_out if _ok else ""
-        if ((inventory or {}).get("vms") or {}).get(gid) == "running":
+        if kind == "vm" and ((inventory or {}).get("vms") or {}).get(gid) == "running":
             agent_ping = await _probe(spec, f"qm agent {gid} ping")
     t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
                          agent_ping=agent_ping, plan=plan)
