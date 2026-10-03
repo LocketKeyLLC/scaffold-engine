@@ -474,3 +474,17 @@ async def test_a_download_inside_a_guest_that_cannot_resolve_is_refused_with_the
     from app.modules.supervised_runs import shape_retry_note
     assert shape_retry_note({"refused": hits, "commands": ["bash /tmp/in_ct_120.sh"]}), "registered"
     assert not any("cannot resolve names" in r["why"] for r in fine + none), "a resolving guest, or a block that downloads nothing, is fine"
+
+
+# ───── §17.1316 — the measured guest is the subject even when the text names it by name
+
+@pytest.mark.asyncio
+async def test_the_truths_guest_counts_as_the_subject_for_the_address_rule():
+    import json as _json
+    fr = _json.loads((pathlib_mod.Path(__file__).parent / "fixtures" / "t23_frame_ssh_2026_10_03.json").read_text(encoding="utf-8"))
+    node = {"node_key": "T23", "title": "Install PalWorld server", "description": ""}
+    cmds = [c.replace("<PALWORLD_IP>", "192.168.1.127").replace("<PALWORLD_USER>", "aedefruscio") for c in fr["commands"]]
+    with patch("app.modules.mcp_client.call_tool", new=_host()):
+        out = await pc.unmet(cmds, _spec(), node=node, truth=_truth106())
+    hits = [r for r in out if "'s address: the engine measured" in r["why"]]
+    assert len(hits) == 1 and "`192.168.1.106`" in hits[0]["why"], [r["why"][:90] for r in out]

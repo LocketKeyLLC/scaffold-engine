@@ -447,3 +447,37 @@ async def test_the_dns_probe_runs_only_for_a_running_guest_and_borrows_a_sibling
     inv2 = {"cts": {"120": "stopped"}, "vms": {}, "names": {}, "disks": {}}
     t2 = await mt.read_guest_truth(object(), "120", inv2, PLAN_120)
     assert not any("getent" in a for a in asked) and t2.resolves is None, "a stopped guest cannot be asked"
+
+
+# ───── §17.1316 — a guest named by name is still the subject
+
+T23 = {"node_key": "T23", "title": "Install PalWorld server", "description": ""}
+INV_NAMES = {"cts": {"111": "running", "120": "running"}, "vms": {"106": "running", "110": "running"},
+             "names": {"106": "palworld-server", "110": "ai-vm", "111": "control-panel", "120": "caddy-proxy"}, "disks": {}}
+
+
+def test_the_subject_is_found_by_name_when_the_text_has_no_id():
+    assert mt.subject_guest(T23) is None, "the text alone names no id"
+    assert mt.subject_guest(T23, INV_NAMES) == "106"
+    assert mt.subject_guest({"node_key": "X", "title": "Install Caddy inside the caddy-proxy container", "description": ""}, INV_NAMES) == "120"
+    assert mt.subject_guest({"node_key": "X", "title": "Set vmbr0 bridge-ports to enp5s0f3", "description": ""}, INV_NAMES) is None
+    assert mt.subject_guest({"node_key": "X", "title": "Reset VM 106 and capture its console", "description": ""}, INV_NAMES) == "106", "an id still wins"
+    from app.modules.runbook_preconditions import parse_pct_names
+    assert parse_pct_names("VMID       Status     Lock         Name\n111        running                 control-panel\n120        stopped                 caddy-proxy\n") == {"111": "control-panel", "120": "caddy-proxy"}
+
+
+def test_the_live_t23_frame_takes_the_agent_template_once_the_subject_is_known():
+    from app.modules import runbook_templates as rt
+    truth = mt.truth_from_texts("106", inventory=INV_NAMES, agent_ping=(True, ""), plan=[])
+    assert truth.agent is True
+    assert rt.subject_gid(T23) is None and rt.subject_gid(T23, truth) == "106"
+    assert rt.select_template(T23, truth) is rt.RUN_IN_VM_VIA_AGENT
+    vals = rt.values_for(rt.RUN_IN_VM_VIA_AGENT, T23, truth, {}, {"REMOTE_COMMANDS": "apt-get install -y lib32gcc-s1", "VERIFY_INSIDE": "ls /opt/palworld/PalServer.sh"})
+    assert vals["GID"] == "106"
+    rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, vals)
+    assert "qm guest exec" in rb and "ssh" not in rb.split("## Write these files")[1].split("## Run this")[0].replace("# Run this step's commands inside VM 106 through its QEMU guest agent: no ssh, no account, no key, no address.", "")
+    needs = mt.step_needs(T23, ["bash /tmp/in_vm_106_agent.sh"], [{"path": "/tmp/in_vm_106_agent.sh", "content": 'GID=106\nqm guest exec "$GID" --timeout 110 --pass-stdin 1 -- bash -s < /tmp/r.sh\n'}], gid="106")
+    assert {"exists", "running", "has_os", "agent"} <= needs
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    assert "machine_truth.subject_guest(run_node, _inv)" in src and "gid=_gid)" in src
