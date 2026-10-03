@@ -428,3 +428,30 @@ async def test_the_measured_address_itself_and_an_address_the_step_names_are_fin
                                truth=_truth106())
         blind = await pc.unmet(ADD84_SSH["commands"], _spec(), node=ADD84_NODE, truth=_truth106(address=None))
     assert not any("'s address" in r["why"] for r in ok + named + blind)
+
+
+# ───── §17.1305 — a start in the block counts
+
+ADD88_FRAME = json.loads((pathlib_mod.Path(__file__).parent / "fixtures" / "add88_frame_2026_10_03.json").read_text(encoding="utf-8"))
+ADD88_NODE = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": "Inside container 120 (caddy-proxy)."}
+PCT_LIST_120 = PCT_LIST + "\n120        stopped                 caddy-proxy"
+
+
+@pytest.mark.asyncio
+async def test_the_live_add88_draft_starts_the_container_first_and_is_not_refused():
+    assert ADD88_FRAME["commands"][0] == "pct start 120" and ADD88_FRAME["commands"][1].startswith("pct exec 120")
+    with patch("app.modules.mcp_client.call_tool", new=_host(pct=PCT_LIST_120)):
+        out = await pc.unmet(ADD88_FRAME["commands"], _spec(), node=ADD88_NODE)
+    assert out == [], [o["why"][:100] for o in out]
+
+
+@pytest.mark.asyncio
+async def test_an_exec_without_a_start_is_still_refused_and_the_order_matters():
+    with patch("app.modules.mcp_client.call_tool", new=_host(pct=PCT_LIST_120)):
+        bare = await pc.unmet(["pct exec 120 -- apt-get update"], _spec(), node=ADD88_NODE)
+        after = await pc.unmet(["pct exec 120 -- apt-get update", "pct start 120"], _spec(), node=ADD88_NODE)
+        in_file = await pc.unmet(["bash /tmp/in_ct_120.sh"], _spec(), node=ADD88_NODE,
+                                 files=[{"path": "/tmp/in_ct_120.sh", "content": 'GID=120\npct status "$GID" | grep -q running || pct start "$GID"\npct push "$GID" /tmp/x /root/x\npct exec "$GID" -- bash /root/x\n'}])
+    assert len(bare) == 1 and "fails before it starts" in bare[0]["why"]
+    assert len(after) == 1, "a start AFTER the exec does not help the exec"
+    assert in_file == [], "the engine's own template shape: guarded start in the script, then push + exec"
