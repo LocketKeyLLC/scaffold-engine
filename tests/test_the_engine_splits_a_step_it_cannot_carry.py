@@ -41,6 +41,59 @@ def test_the_live_cut_refusal_is_what_too_large_reads():
     assert sd.too_large({"refused": []}) == "" and sd.too_large(None) == ""
 
 
+# ───── §17.1331 — the cut was the symptom; the signal is in the step
+
+#: real steps from the live plan (150 of them; the detector fires on ADD100 alone)
+LIVE_STEPS = [
+    ("ADD100", "Rebuild the control panel to do what was chosen in ADD99",
+     "Rework the control-panel backend and frontend in LXC 111 so it does the things chosen in ADD99.", True),
+    ("ADD10", "Stop the control-panel backend node process on port 3001",
+     "Stop the backend and the systemd service on port 3001.", False),
+    ("T33", "Build control panel backend", "Build the control panel backend.", False),
+    ("T34", "Build control panel frontend", "Build the control panel frontend.", False),
+    ("T23", "Install PalWorld server", "Install the dedicated server with SteamCMD.", False),
+    ("ADD88", "Install Caddy and write the Caddyfile inside LXC 120", "Install Caddy and create /etc/caddy/Caddyfile.", False),
+    # §17.1331b — "a service unit FOR the backend" names two and builds one: coordination is required
+    ("ADD114", "Make the control-panel backend come back on its own after a reboot",
+     "Write a systemd service unit for the backend so it starts at boot.", False),
+    ("ADD52", "Start the control-panel backend in LXC 111 on port 3001", "Start it and confirm the listener.", False),
+]
+
+
+def test_coordination_is_what_makes_two_deliverables_two_steps():
+    """Measured over the live plan's 150 steps: one hit, ADD100."""
+    def parts(text):
+        return sd.deliverables_in({"node_key": "X", "title": text, "description": ""})
+    assert parts("Rebuild the control-panel backend and frontend") == ["a backend", "a frontend"]
+    assert parts("Rebuild the panel: a backend, a frontend and the dashboard page") == ["a backend", "a frontend", "a page"]
+    assert parts("Write a systemd service unit for the backend") == [], "one thing, qualified by another"
+    assert parts("Write the API endpoints in the backend") == [], "the endpoints ARE the backend's"
+    assert parts("Stop the control-panel backend and the systemd service") == [], "no build verb"
+    assert parts("Install Caddy and write the Caddyfile") == []
+
+
+def test_the_detector_fires_on_the_project_and_on_nothing_else_in_the_live_plan():
+    for key, title, descr, expected in LIVE_STEPS:
+        node = {"node_key": key, "title": title, "description": descr}
+        parts = sd.deliverables_in(node)
+        assert (len(parts) >= 2) is expected, (key, parts)
+        assert bool(sd.too_large({"refused": []}, node)) is expected, key
+    add100 = {"node_key": "ADD100", "title": LIVE_STEPS[0][1], "description": LIVE_STEPS[0][2]}
+    why = sd.too_large({"refused": []}, add100)
+    assert "2 separate deliverables" in why and "a backend" in why and "a frontend" in why
+    assert "one block of commands per step" in why
+
+
+def test_a_small_draft_that_does_a_fraction_still_reads_as_a_project():
+    """Live, after §17.1312's retry the third ADD100 draft came back 498 characters
+    writing only package.json — small, runnable, and a fraction of the step. The
+    step's own words are what settle it, not the size of the draft."""
+    add100 = {"node_key": "ADD100", "title": LIVE_STEPS[0][1], "description": LIVE_STEPS[0][2]}
+    tiny = {"refused": [], "commands": ["bash /tmp/in_ct_111.sh"],
+            "files": [{"path": "/tmp/in_ct_111.sh", "content": "tee /opt/control-panel-backend/package.json <<'EOF'\n{}\nEOF\n"}]}
+    assert sd.too_large(tiny, add100)
+
+
 def test_the_children_are_chained_stamped_and_carry_their_check():
     kids = sd.children_from(STEPS, parent_key="ADD100", parent_deps=["ADD99", "ADD110"], keys=["ADD121", "ADD122", "ADD123", "ADD124"], machine="container 111")
     assert [k["node_key"] for k in kids] == ["ADD121", "ADD122", "ADD123", "ADD124"]
@@ -174,7 +227,7 @@ def test_the_pause_splits_before_it_parks_and_only_once_per_descent():
     src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert body.count("_sd.split_step(") == 1 and body.count("_sd.too_large(frame)") == 1
+    assert body.count("_sd.split_step(") == 1 and body.count("_sd.too_large(frame, run_node)") == 1
     assert body.index("_sd.split_step(") < body.index('logger.warning("supervised_run_parked'), "split before parking"
-    assert body.index("supervised_runs.already_met(") < body.index("_sd.too_large(frame)"), "a step already done is not split"
+    assert body.index("supervised_runs.already_met(") < body.index("_sd.too_large(frame"), "a step already done is not split"
     assert "_pause_for_decision(job_id, _depth + 1)" in body and "if _depth < 6:" in body

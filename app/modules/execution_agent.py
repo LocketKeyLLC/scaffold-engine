@@ -2881,7 +2881,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if _depth < 6:
             try:
                 from app.modules import step_decomposition as _sd
-                _why = _sd.too_large(frame)
+                _why = _sd.too_large(frame, run_node)
                 if _why:
                     _machine = (f"{'VM' if (_truth and _truth.kind == 'vm') else 'container'} {_truth.gid}"
                                 if _truth is not None and _truth.gid else "")
