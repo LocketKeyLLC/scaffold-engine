@@ -499,3 +499,38 @@ def test_steamcmd_bootstraps_once_before_the_first_install():
     assert sum(1 for l in out if "+quit >/dev/null" in l) == 1, "once"
     assert out[2].startswith("/opt/steamcmd/steamcmd.sh +force_install_dir")
     assert rt.bootstrap_steamcmd_first("apt-get update") == "apt-get update"
+
+
+# ───── §17.1319 — the agent phase script reads the text inside the agent's JSON
+
+def test_the_agent_scripts_reads_unwrap_the_agents_json_in_bash(tmp_path):
+    """The first live detached run (T23, 16:20 UTC) compared `systemctl is-active`
+    against `{"exitcode":0,"out-data":"active\\n"}` and `exit`ed on a JSON blob.
+    Run the script's own `ginfo` under a stubbed `qm` and read what it prints."""
+    import subprocess
+    rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), ENV,
+                                                         {"REMOTE_COMMANDS": "true", "VERIFY_INSIDE": "true"}))
+    body = next(f["content"] for f in sr.file_writes(rb))
+    i = body.index("ginfo() {"); j = body.index("\n", body.index("sys.stdout.write", i)) + 1
+    ginfo = body[i:j]
+    stub = tmp_path / "qm"; stub.write_text("#!/usr/bin/env bash\nprintf \'{\\n \"exitcode\" : 0,\\n \"exited\" : 1,\\n \"out-data\" : \"inactive\\\\n\"\\n}\\n\'\n"); stub.chmod(0o755)
+    out = subprocess.run(["bash", "-c", f'GID=106\n{ginfo}\nginfo "systemctl is-active scaffold-ADD84"'],
+                         capture_output=True, text=True, env={"PATH": f"{tmp_path}:{__import__('os').environ.get('PATH', '/usr/bin:/bin')}", "GID": "106"})
+    assert out.returncode == 0 and out.stdout == "inactive\n", (out.stdout, out.stderr)
+    stub.write_text("#!/usr/bin/env bash\necho not-json\n"); stub.chmod(0o755)
+    out2 = subprocess.run(["bash", "-c", f'GID=106\n{ginfo}\nginfo "x"'], capture_output=True, text=True, env={"PATH": f"{tmp_path}:{__import__('os').environ.get('PATH', '/usr/bin:/bin')}"})
+    assert out2.stdout == "", "a non-JSON answer reads as nothing, not as a blob"
+    # the container variant reads plain text and needs no unwrapping
+    ct = next(f["content"] for f in sr.file_writes(rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), ENV, {"REMOTE_COMMANDS": "true", "VERIFY_INSIDE": "true"}))))
+    assert 'ginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }' in ct
+
+
+def test_identical_refusals_across_the_phases_are_said_once():
+    """§17.1319 — ADD100's nine phase commands each earned the same 'reads secrets from
+    its environment' refusal: eleven lines on the frame for two findings."""
+    node = {"node_key": "ADD100", "title": "Rebuild the control panel in LXC 111", "description": ""}
+    vals = rt.values_for(rt.RUN_IN_CONTAINER, node, _truth("ct"), ENV, {"REMOTE_COMMANDS": "export KEY=$RADARR_API_KEY\ncurl -H \"X-Api-Key: $RADARR_API_KEY\" http://192.168.1.22:7878/api/v3/system/status", "VERIFY_INSIDE": "true"})
+    frame = _frame(rt.render(rt.RUN_IN_CONTAINER, vals), node)
+    whys = [r["why"] for r in frame["refused"]]
+    assert whys, "a script that reads a stored value the command never mentions is refused"
+    assert len(whys) == len(set(whys)), f"{len(whys)} refusals, {len(set(whys))} distinct: say each once"

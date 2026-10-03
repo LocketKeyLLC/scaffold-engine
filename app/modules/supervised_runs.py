@@ -3916,6 +3916,18 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + asks_for_a_secret_the_store_holds(
         [str(i.get("name") or "") for i in inputs if i.get("secret")], policy, node)   # the ones still ASKED
     refused = refused + waits_on_a_fixed_address(cmds, node, files)
+    # §17.1319 — a template's run is a LIST of phases; a refusal earned by the file they
+    # all run repeats once per phase (live: nine identical lines for one finding). The
+    # first command keeps it; the same words are not said again.
+    _seen_why: set[str] = set()
+    _dedup: list[dict] = []
+    for _r in refused:
+        _w = str((_r or {}).get("why") or "")
+        if _w in _seen_why:
+            continue
+        _seen_why.add(_w)
+        _dedup.append(_r)
+    refused = _dedup
     # §17.1288k — a file written and never run is a draft with nothing to run,
     # said as a refusal so the redraft is told and the chain goes on.
     if files and not cmds:
