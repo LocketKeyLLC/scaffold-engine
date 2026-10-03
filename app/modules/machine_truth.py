@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -308,10 +309,14 @@ def in_guest_work_voided_by_reinstall(plan: list[dict], gid: str, name: str = ""
                 and _mentions_guest(str(n.get("title") or ""), gid, name) and _ts(n) is not None]
     if not installs:
         return []
-    last = max(installs, key=_ts)
+    last = max(installs, key=lambda n: _ts(n) or datetime.min.replace(tzinfo=timezone.utc))
+    last_at = _ts(last)
+    if last_at is None:
+        return []
     out = []
     for n in plan or []:
-        if n is last or (n.get("status") or "") != "done" or _ts(n) is None or not (_ts(n) < _ts(last)):
+        at = _ts(n)
+        if n is last or (n.get("status") or "") != "done" or at is None or not (at < last_at):
             continue
         title = str(n.get("title") or "")
         if not _mentions_guest(title, gid, name):
