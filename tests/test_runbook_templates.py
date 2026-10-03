@@ -174,3 +174,20 @@ def test_the_waits_fit_the_commands_budget_and_a_pinned_address_becomes_static()
     assert '--ipconfig0 "ip=192.168.1.106/24,gw=192.168.1.1"' in body2 and "ipconfig0: ip=192.168.1.106/24,gw=192.168.1.1" in body2
     frame = _frame(rt.render(rt.INSTALL_OS_CLOUDINIT, rt.values_for(rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), pinned)), ADD117)
     assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+
+
+# ───── §17.1291 — reading a guest's console is a template of its own, not an ssh
+
+ADD118 = {"node_key": "ADD118", "title": "Read VM 106's serial console: why it has no network address",
+          "description": "The guest's console is the only place that says why. Read it from the host: the VM has serial0: socket."}
+
+
+def test_a_console_step_selects_the_console_template_and_passes_every_gate():
+    assert rt.select_template(ADD118, _truth("vm")) is rt.READ_GUEST_CONSOLE, "live: the reach template was chosen and would have sshed into a VM with no address"
+    assert rt.select_template(ADD82, _truth("vm")) is rt.REACH_VM_SSH_AND_RUN
+    rb = rt.render(rt.READ_GUEST_CONSOLE, rt.values_for(rt.READ_GUEST_CONSOLE, ADD118, _truth("vm"), ENV))
+    frame = _frame(rb, ADD118)
+    assert frame["refused"] == [], [r["why"][:120] for r in frame["refused"]]
+    assert frame["commands"] == ["printf '\\n' | timeout 8 socat -t 6 - UNIX-CONNECT:/var/run/qemu-server/106.serial0"]
+    assert frame["inputs"] == [] and frame["files"] == [] and "run" in {o["id"] for o in frame["options"]}
+    assert frame["verify"] == ["qm config 106 | grep -E '^serial0:'"]

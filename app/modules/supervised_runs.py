@@ -1453,7 +1453,9 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         from app.modules.runbook_preconditions import _resolve_ids   # §17.1290 — `GID=106` … `pct exec "$GID"` reaches 106
         texts = [_resolve_ids(cmd)] + [_resolve_ids(str((f or {}).get("content") or "")) for f in files or []
                                        if (f or {}).get("path") and str(f["path"]) in cmd]
-        return any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) for t in texts)
+        # §17.1291 — the guest's serial socket (`/var/run/qemu-server/106.serial0`) reaches the guest too
+        return any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) or re.search(r"qemu-server/\d{3,5}\.serial", t)
+                   for t in texts)
     unreached = [c for c in writes if not _reaches(c)]
     if not unreached:
         return []
