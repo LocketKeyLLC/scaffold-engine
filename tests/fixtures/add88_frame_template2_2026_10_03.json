@@ -1,0 +1,25 @@
+{
+ "node_key": "ADD88",
+ "title": "Install Caddy and write the Caddyfile inside LXC 120",
+ "commands": [
+  "bash /tmp/in_ct_120.sh"
+ ],
+ "verify": [
+  "pct status 120"
+ ],
+ "runbook": "<!-- runbook-template: run_in_container -->\n\n## Run commands inside container 120\n\n## Risk\n\nRuns this step's commands as root inside container 120.\n\n## Write these files\n\n### /tmp/in_ct_120.sh\n```bash\n#!/usr/bin/env bash\n# Run this step's commands inside container 120 as root.\nset -uo pipefail\nGID=120\npct status \"$GID\" | grep -q running || pct start \"$GID\"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status \"$GID\" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_120_remote.sh <<'REMOTE'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl\ncurl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg\ncurl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list\napt-get update\napt-get install -y caddy\nmkdir -p /etc/caddy\ntee /etc/caddy/Caddyfile <<'EOF'\n{\n\temail aedefruscio@defrusciohomelab.duckdns.org\n}\ndefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.20:8096\n}\nprowlarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.21:9696\n}\nradarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.22:7878\n}\nsonarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.23:8989\n}\ncontrol.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.25:3001\n}\nEOF\ncaddy validate --config /etc/caddy/Caddyfile\nREMOTE\npct push \"$GID\" /tmp/in_ct_120_remote.sh /root/.scaffold_step.sh >/dev/null || { echo \"FAILED: pct push into $GID\"; exit 1; }\npct exec \"$GID\" -- bash /root/.scaffold_step.sh\n```\n\n## Run this\n\n```bash\nbash /tmp/in_ct_120.sh\n```\n\n## Verify\n\n- `pct status 120`\n",
+ "hands_on_reason": "writes:tee -a",
+ "inputs": [],
+ "refused": [],
+ "files": [
+  {
+   "path": "/tmp/in_ct_120.sh",
+   "bytes": 1437,
+   "lines": 40,
+   "content": "#!/usr/bin/env bash\n# Run this step's commands inside container 120 as root.\nset -uo pipefail\nGID=120\npct status \"$GID\" | grep -q running || pct start \"$GID\"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status \"$GID\" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_120_remote.sh <<'REMOTE'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl\ncurl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg\ncurl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list\napt-get update\napt-get install -y caddy\nmkdir -p /etc/caddy\ntee /etc/caddy/Caddyfile <<'EOF'\n{\n\temail aedefruscio@defrusciohomelab.duckdns.org\n}\ndefrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.20:8096\n}\nprowlarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.21:9696\n}\nradarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.22:7878\n}\nsonarr.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.23:8989\n}\ncontrol.defrusciohomelab.duckdns.org {\n\treverse_proxy 192.168.1.25:3001\n}\nEOF\ncaddy validate --config /etc/caddy/Caddyfile\nREMOTE\npct push \"$GID\" /tmp/in_ct_120_remote.sh /root/.scaffold_step.sh >/dev/null || { echo \"FAILED: pct push into $GID\"; exit 1; }\npct exec \"$GID\" -- bash /root/.scaffold_step.sh\n"
+  }
+ ],
+ "engine_fixed": [
+  "drafted from the engine's template `run_in_container`: the script's shape is the engine's own, pre-gated; the model wrote only the commands that run inside the guest"
+ ]
+}

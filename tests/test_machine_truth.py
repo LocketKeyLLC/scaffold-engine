@@ -96,7 +96,13 @@ def test_a_start_only_step_needs_no_os_and_a_stopped_vm_names_the_step_that_star
     t = mt.truth_from_texts("106", inventory=inv, qm_config=QM_CONFIG_106, plan=PLAN)
     assert mt.contradictions(ADD82, t, {"exists"}, PLAN) and all(not r["blocks"] for r in mt.contradictions(ADD82, t, {"exists"}, PLAN)) or True
     rows = mt.contradictions(ADD82, t, {"exists", "running"}, PLAN)
-    assert any(r["kind"] == "record_contradicted:start" and "ADD9" in r["remedy"] for r in rows)
+    row = next(r for r in rows if r["kind"] == "record_contradicted:start")
+    assert "ADD9" in row["remedy"] and row["reopen"] == "ADD9" and row["fact"] and "reopened" in row["fact"], \
+        "§17.1307 — the done start step is reopened so the start runs first and the next step's checks can be read inside"
+    assert row["blocks"] is False
+    start_step = {"node_key": "ADD9", "title": "Start VM 106 (palworld-server)", "description": ""}
+    row2 = next(r for r in mt.contradictions(start_step, t, {"exists", "running"}, PLAN) if r["kind"] == "record_contradicted:start")
+    assert row2["reopen"] is None and row2["fact"] is None, "a start step does not reopen itself"
 
 
 def test_a_running_vm_that_transmits_nothing_is_not_up():
@@ -193,3 +199,15 @@ async def test_read_guest_truth_asks_pct_config_for_a_container(monkeypatch):
     assert asked[0] == "pct config 111" and "ip neigh show" in asked and "bridge fdb show" in asked
     assert not any(a.startswith("qm ") for a in asked), "a container is never asked with qm"
     assert t.mac == "bc:24:11:66:89:94" and t.transmits is False
+
+
+def test_the_live_stopped_caddy_container_reopens_its_recorded_start():
+    """2026-10-03 10:38 UTC: CT 120 stopped, ADD110 "Start container 120 (caddy-proxy)" done
+    on a runner error, ADD88 about to install Caddy over a validated Caddyfile it could not see."""
+    plan = [{"node_key": "ADD110", "title": "Start container 120 (caddy-proxy)", "status": "done"},
+            {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "status": "pending"}]
+    node = plan[1]
+    t = mt.truth_from_texts("120", inventory={"cts": {"120": "stopped"}, "vms": {}, "names": {}, "disks": {}}, plan=plan)
+    rows = mt.contradictions(node, t, {"exists", "running"}, plan)
+    assert [r["reopen"] for r in rows] == ["ADD110"]
+    assert "container 120 is stopped" in rows[0]["fact"] and "ADD110" in rows[0]["fact"]

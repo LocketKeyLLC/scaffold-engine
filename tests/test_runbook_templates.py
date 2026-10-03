@@ -39,7 +39,7 @@ def test_every_template_passes_every_gate():
         (rt.INSTALL_OS_CLOUDINIT, ADD117, _truth("vm"), {}),
         (rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm"), {"REMOTE_COMMANDS": REMOTE}),
         (rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm", key="ADD26 · Install the SSH public key"), {"REMOTE_COMMANDS": REMOTE}),
-        (rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), {"REMOTE_COMMANDS": "apt-get update\napt-get install -y nodejs"}),
+        (rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), {"REMOTE_COMMANDS": "apt-get update\napt-get install -y nodejs", "VERIFY_INSIDE": "systemctl is-active control-panel"}),
         (rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), {"REMOTE_COMMANDS": "growpart /dev/sda 1\nresize2fs /dev/sda1", "VERIFY_INSIDE": "df -h /"}),
     ]
     for tpl, node, truth, model_vals in cases:
@@ -361,10 +361,23 @@ async def test_every_template_passes_the_preconditions_with_its_guest_stopped():
         (rt.INSTALL_OS_CLOUDINIT, ADD117, mt.GuestTruth(gid="106", kind="vm", status="stopped"), {}),
         (rt.REACH_VM_SSH_AND_RUN, ADD82, mt.GuestTruth(gid="106", kind="vm", status="stopped", key_known_by="ADD117 · Install Ubuntu 22.04 on VM 106 unattended"), {"REMOTE_COMMANDS": REMOTE}),
         (rt.RUN_IN_VM_VIA_AGENT, ADD84, mt.GuestTruth(gid="106", kind="vm", status="stopped", agent=True), {"REMOTE_COMMANDS": "growpart /dev/sda 1", "VERIFY_INSIDE": "df -h /"}),
-        (rt.RUN_IN_CONTAINER, ADD100, mt.GuestTruth(gid="111", kind="ct", status="stopped"), {"REMOTE_COMMANDS": "apt-get update"}),
+        (rt.RUN_IN_CONTAINER, ADD100, mt.GuestTruth(gid="111", kind="ct", status="stopped"), {"REMOTE_COMMANDS": "apt-get update", "VERIFY_INSIDE": "dpkg -l nodejs"}),
     ]
     for tpl, node, truth, model_vals in cases:
         rb = rt.render(tpl, rt.values_for(tpl, node, truth, ENV, model_vals))
         spec = type("S", (), {"name": "pve-runner", "headers": {}})()
         out = await unmet(sr.runbook_commands(rb), spec, plan=[], files=sr.file_writes(rb), node=node, inventory=inv, truth=truth)
         assert out == [], (tpl.name, [o["why"][:140] for o in out])
+
+
+def test_the_container_template_verifies_inside_like_the_agent_template():
+    """§17.1307 — `pct status 120` cannot say whether Caddy is installed; live the
+    judge said so (`unknown`) and the step would have reinstalled over a validated
+    Caddyfile. The check runs inside, alone -- the shape run_in_vm_via_agent has."""
+    rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, ADD100, _truth("ct"), ENV,
+                                                      {"REMOTE_COMMANDS": "apt-get install -y caddy", "VERIFY_INSIDE": "caddy validate --config /etc/caddy/Caddyfile"}))
+    frame = _frame(rb, ADD100)
+    assert frame["verify"] == ['pct exec 111 -- bash -c "caddy validate --config /etc/caddy/Caddyfile"'], frame["verify"]
+    assert sr.verify_commands(rb) == frame["verify"], "read-only through the wrapper"
+    assert frame["refused"] == [] and frame["inputs"] == []
+    assert [p.name for p in rt.RUN_IN_CONTAINER.params if p.source == "model"] == ["REMOTE_COMMANDS", "VERIFY_INSIDE"]
