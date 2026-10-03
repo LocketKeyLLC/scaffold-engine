@@ -264,3 +264,14 @@ def test_a_step_that_mentions_installing_the_agent_on_ubuntu_is_not_an_os_instal
     assert rt.intent_of({"node_key": "X", "title": "Install Ubuntu Server 22.04 on VM 106", "description": ""}) == "install_os_cloudinit"
     assert rt.intent_of({"node_key": "X", "title": "Reinstall the operating system on VM 106", "description": ""}) == "install_os_cloudinit"
     assert rt.intent_of(ADD82) == "guest_work"
+
+
+# ───── §17.1298 — the console intent is the task, not the word
+
+def test_a_step_whose_history_mentions_the_console_is_not_a_console_read():
+    desc = pathlib.Path(__file__).parent.joinpath("fixtures", "add82_description.txt").read_text(encoding="utf-8")
+    add82_live = {**ADD82, "description": desc + "\n\nENGINE CORRECTION (2026-10-02): the lines above that say \"done at the console\" are SUPERSEDED … Nothing here is done at a console by hand."}
+    assert rt.intent_of(add82_live) == "guest_work", "live: ADD82 was templated as read_guest_console"
+    assert rt.select_template(add82_live, _truth("vm")) is rt.REACH_VM_SSH_AND_RUN
+    assert rt.intent_of(ADD118) == "read_guest_console" and rt.select_template(ADD118, _truth("vm")) is rt.READ_GUEST_CONSOLE
+    assert rt.intent_of(ADD119) == "watch_guest_boot"
