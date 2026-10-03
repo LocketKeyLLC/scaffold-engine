@@ -61,7 +61,10 @@ def test_the_install_template_carries_the_days_lessons():
     assert body.index("nmap -sn") < body.index("ip neigh show"), "the sweep comes before the read"
     assert "| head -n 1 || true)" in body, "every lookup a wait expects to be empty ends in || true"
     assert "set -uo pipefail" in body and "set -e" not in body
-    assert sr.runbook_commands(rb) == ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<PALWORLD_USER>" bash /tmp/install_os_106.sh']
+    assert sr.runbook_commands(rb) == [f'MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<PALWORLD_USER>" bash /tmp/install_os_106.sh {ph}'
+                                       for ph in ("prepare", "swap", "boot", "check")], "§17.1290c — four phases, 180 s each"
+    assert "curl -fL -C - --retry 2 --max-time 165" in body, "the download is resumable and bounded to the budget"
+    assert "cloud-init drive already present" in body, "a re-run after a partial first run does not swap twice"
     assert sr.verify_commands(rb) == ["qm config 106 | grep -E '^(scsi0|ide2|boot):'", "qm status 106"]
 
 
