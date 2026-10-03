@@ -2559,14 +2559,37 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.utils.savepoint import savepoint
             async with async_session() as db:
                 async with savepoint(db):            # §17.1132 — optional read, swallowed on failure
+                    # §17.1334 — `description` and the ORDER are part of this read, not
+                    # an extra: `step_decomposition.already_split` (the guard that stops a
+                    # step being split twice) looks for the `[Engine split of X — n of N]`
+                    # stamp in a row's description, and these rows had none, so the guard
+                    # could never fire. A consumer's field is this query's business.
                     _plan = (await db.execute(
-                        text("SELECT node_key, title, status, completed_at FROM dag_nodes WHERE job_id = :j"),
+                        text("SELECT node_key, title, description, status, completed_at, execution_order "
+                             "FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"),
                         {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)
         except Exception as exc:
             logger.warning("preconditions_failed job=%s node=%s err=%r",
                            job_id, run_node.get("node_key"), exc)
+        # §17.1334 — a split's own numbering, and any sibling that states how many
+        # capability steps there are, are reconciled against the plan BEFORE this
+        # step is drafted: the draft reads the step's text, so a stale count is how
+        # a capability the operator asked for goes missing with nothing refused.
+        _split_fixed: list[str] = []
+        try:
+            from app.modules import step_decomposition as _sd0
+            _parent_key = _sd0.parent_of(run_node)
+            if _parent_key and _plan_rows:
+                _split_fixed = await _sd0.reconcile_split(job_id, _plan_rows, _parent_key)
+                if _split_fixed:
+                    logger.warning("split_reconciled job=%s node=%s parent=%s did=%s",
+                                   job_id, run_node.get("node_key"), _parent_key, _split_fixed)
+                    if any(str(run_node.get("node_key")) in d for d in _split_fixed) and _depth < 6:
+                        return await _pause_for_decision(job_id, _depth + 1)   # this step's own text changed
+        except Exception as exc:
+            logger.warning("split_reconcile_skipped job=%s err=%r", job_id, exc)
         # §17.1289 — and the guest the step is ABOUT is measured once, here,
         # before any draft: what the plan, the step text and the facts say is
         # reconciled against it below, not rediscovered one gate at a time.
@@ -2600,6 +2623,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # about the machine goes to the ledger; a finished step whose effect
         # the machine does not show is reopened (no cascade) unless a pending
         # step already covers it. What was done is said on the frame.
+        if _split_fixed:                 # §17.1334 — said on the frame, like every other correction
+            frame["engine_fixed"] = list(frame.get("engine_fixed") or []) + \
+                [f"the split of {_parent_key}: {d}" for d in _split_fixed]
         if _truth is not None:
             try:
                 _needs = machine_truth.step_needs(run_node, frame.get("commands") or [], frame.get("files") or [], gid=_gid)
