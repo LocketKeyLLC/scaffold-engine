@@ -430,7 +430,7 @@ async def test_the_draw_strips_the_wrapper_before_the_template_wraps_it(monkeypa
     monkeypatch.setattr(lr, "generate_until_nonempty", fake)
     node = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": ""}
     vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, node, "brief")
-    assert vals == {"REMOTE_COMMANDS": "apt-get update\napt-get install -y caddy", "VERIFY_INSIDE": "caddy validate --config /etc/caddy/Caddyfile"}
+    assert vals["REMOTE_COMMANDS"].endswith("apt-get update\napt-get install -y caddy") and vals["VERIFY_INSIDE"] == "caddy validate --config /etc/caddy/Caddyfile"   # §17.1320 prepends the apt repair
     rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, node, mt.GuestTruth(gid="120", kind="ct", status="running"), ENV, vals))
     frame = _frame(rb, node)
     assert frame["verify"] == ['pct exec 120 -- bash -c "caddy validate --config /etc/caddy/Caddyfile"'], frame["verify"]
@@ -575,4 +575,45 @@ async def test_a_failed_research_or_feedback_leaves_the_draw_as_it_was(monkeypat
         raise RuntimeError("search down")
     monkeypatch.setattr(sr, "research_for_step", boom)
     vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, ADD100, "brief", environment={"profile": "x"})
-    assert vals["REMOTE_COMMANDS"] == "apt-get install -y curl"
+    assert vals["REMOTE_COMMANDS"].endswith("apt-get install -y curl")   # §17.1320 prepends the apt repair
+
+
+# ───── §17.1320 — the engine repairs the apt state it left; the bootstrap runs as the install's user
+
+def test_the_bootstrap_runs_as_the_same_user_as_the_install():
+    remote = "mkdir -p /opt/steamcmd\nsudo -u palworld /opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit"
+    out = rt.bootstrap_steamcmd_first(remote).split("\n")
+    assert out[1].startswith("sudo -u palworld /opt/steamcmd/steamcmd.sh +quit >/dev/null 2>&1 || true"), out[1]
+    plain = rt.bootstrap_steamcmd_first("/opt/steamcmd/steamcmd.sh +login anonymous +app_update 2394010 +quit").split("\n")
+    assert plain[0].startswith("/opt/steamcmd/steamcmd.sh +quit")
+
+
+def test_apt_work_gets_the_repair_prelude_once_and_other_work_does_not():
+    out = rt.repair_apt_state_first("apt-get update\napt-get install -y lib32gcc-s1")
+    lines = out.split("\n")
+    assert lines[1] == "dpkg --configure -a >/dev/null 2>&1 || true" and "dpkg --purge --force-remove-reinstreq" in lines[2] and lines[3] == "apt-get update"
+    assert rt.repair_apt_state_first(out) == out, "once"
+    assert rt.repair_apt_state_first("systemctl restart caddy") == "systemctl restart caddy"
+    import json as _json
+    fr = _json.loads((pathlib.Path(__file__).parent / "fixtures" / "t23_frame_agent_steamcmd_2026_10_03.json").read_text(encoding="utf-8"))
+    assert "dpkg --configure -a" not in fr["files"][0]["content"], "the live frame (before this fix) had no repair and would have aborted on steamcmd:i386"
+
+
+@pytest.mark.asyncio
+async def test_the_draw_applies_backup_bootstrap_and_repair_in_that_order(monkeypatch):
+    import app.utils.llm_retry as lr
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\nls -la /opt/palworld/PalServer.sh\n```"})()
+        return type("R", (), {"text": "```bash\napt-get install -y lib32gcc-s1\nsudo -u palworld /opt/steamcmd/steamcmd.sh +force_install_dir /opt/palworld +login anonymous +app_update 2394010 validate +quit\ntee /etc/systemd/system/palworld.service <<'EOF'\n[Unit]\nEOF\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    node = {"node_key": "T23", "title": "Install PalWorld server", "description": ""}
+    vals = await rt.fill_free_params(rt.RUN_IN_VM_VIA_AGENT, node, "brief")
+    lines = vals["REMOTE_COMMANDS"].split("\n")
+    assert lines[1].startswith("dpkg --configure -a"), "repair first"
+    assert any(l.startswith("sudo -u palworld /opt/steamcmd/steamcmd.sh +quit") for l in lines), "bootstrap as the install's user"
+    assert any(l.startswith('[ -e "/etc/systemd/system/palworld.service" ] && cp -a') for l in lines), "backup before the overwrite"
+    rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, node, _truth("vm", agent=True), ENV, vals))
+    frame = _frame(rb, node)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
