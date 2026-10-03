@@ -146,6 +146,94 @@ def read_on_the_machine(commands: list[str], verify: list[str],
     return out_cmds, out_verify, notes
 
 
+# ── §17.1333: what the ENGINE knows about itself ──────────────────────────────
+#: `<SCAFFOLD_ENGINE_URL>`, `<ENGINE_IP>`, `<SCAFFOLD_ENGINE_HOST>` — the engine's
+#: own address on the operator's network. Never a name holding a credential.
+_ENGINE_RE = re.compile(
+    r"^(?:SCAFFOLD(?:_ENGINE)?|ENGINE)_(?:IP|HOST|ADDR|ADDRESS|URL|BASE_URL|ENDPOINT)$"
+    r"|^SCAFFOLD_ENGINE$")
+#: a URL-shaped name gets the whole surface, a host-shaped one the bare address
+_URLISH_RE = re.compile(r"(?:URL|ENDPOINT)$")
+
+
+def engine_port() -> str:
+    """The port this engine serves on, from its OWN configuration."""
+    try:
+        from app.config import settings
+        m = re.search(r":(\d{2,5})\b", str(settings.web_loopback_url or ""))
+        if m:
+            return m.group(1)
+    except Exception:            # settings unreadable: the engine's default
+        pass
+    return "8000"
+
+
+def engine_value(name: str, address: str, port: str = "") -> Optional[str]:
+    """What `<name>` is worth given the engine's measured address, or None."""
+    if not address or not _ENGINE_RE.match(str(name or "").strip().upper()):
+        return None
+    from app.modules.runbook_inputs import secret_name   # §17.1275 — one definition
+    if secret_name(name):        # a key or a token is never an address
+        return None
+    if _URLISH_RE.search(name.upper()):
+        return f"http://{address}:{port or engine_port()}"
+    return address
+
+
+def read_from_the_engine(commands: list[str], verify: list[str],
+                         files: Optional[list[dict]], address: Optional[str],
+                         port: str = "") -> tuple[list[str], list[str], Optional[list[dict]], list[dict]]:
+    """§17.1333 — fill every placeholder that names the engine's own address.
+
+    Live, ADD124 ("implement the scaffold-engine capability") said the engine's
+    address was an "operator-supplied value". It is not: the engine measured it
+    (`machine_truth.engine_address`). A literal address is safe in a written
+    FILE too, unlike §17.1332's shell read, so files are filled here.
+    """
+    if not address:
+        return list(commands or []), list(verify or []), files, []
+    texts = list(commands or []) + list(verify or []) + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    found: dict[str, str] = {}
+    for t in texts:
+        for name in re.findall(r"<([A-Z][A-Z0-9_]{2,40})>", str(t)):
+            v = engine_value(name, address, port)
+            if v:
+                found[name] = v
+    if not found:
+        return list(commands or []), list(verify or []), files, []
+    out_cmds, out_verify = list(commands or []), list(verify or [])
+    out_files = [dict(f) for f in files or []] if files is not None else files
+    notes: list[dict] = []
+    for name, value in sorted(found.items()):
+        ph = f"<{name}>"
+        out_cmds = [c.replace(ph, value) for c in out_cmds]
+        out_verify = [v.replace(ph, value) for v in out_verify]
+        for f in out_files or []:
+            body = str(f.get("content") or "")
+            if ph in body:
+                f["content"] = body.replace(ph, value)
+        notes.append({"why": (
+            f"filled {name} with {value}: that is this engine's own address, measured -- the machine the "
+            f"engine drives reports it as the peer on the runner's port (`ss -tn`). Live (§17.1333), the "
+            f"step called it an operator-supplied value.")})
+    return out_cmds, out_verify, out_files, notes
+
+
+def engine_still_asked(inputs: Optional[list[dict]], address: Optional[str]) -> list[dict]:
+    """The other end: an input naming the engine's own address while the engine
+    has measured it."""
+    out: list[dict] = []
+    for i in inputs or []:
+        name = str((i or {}).get("name") or "")
+        v = engine_value(name, address or "")
+        if v:
+            out.append({"command": f"the value <{name}>", "why": (
+                f"<{name}> is not a question for the operator: this engine's own address is {v}, measured "
+                f"from the machine it drives (`ss -tn`, the peer on the runner's port). Use it.")})
+    return out
+
+
 def still_asked(inputs: Optional[list[dict]], inventory: Optional[dict] = None) -> list[dict]:
     """The inputs the frame would still ASK for although a machine holds them —
     the other end of the structural fix (§17.1085). One refusal per value, with
