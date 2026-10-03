@@ -118,6 +118,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is a placeholder, not a value",                # §17.1306
                    "appears nowhere the engine holds",             # §17.1307
                    "appears in nothing the engine holds",          # §17.1312
+                   "is not a unit anything the engine holds names",  # §17.1327
                    "cannot resolve names",                         # §17.1313
                    "content cut",                                  # §17.1312 (the template draw was cut twice)
                    "ends inside a heredoc",                        # §17.1310
@@ -3270,6 +3271,94 @@ _IPV4_LITERAL_RE = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])")
 _UNSOURCED_SKIP = {"0.0.0.0", "127.0.0.1", "255.255.255.0", "255.255.0.0", "255.0.0.0", "8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9"}
 
 
+#: §17.1327 — `systemctl <verb> <unit>`: the unit a block acts on.
+_SYSTEMCTL_RE = re.compile(
+    r"(?<![\w-])systemctl\s+(?:--\S+\s+|-\w\s+)*"
+    r"(?:start|stop|restart|reload|reload-or-restart|try-restart|enable|disable|reenable|mask|unmask|"
+    r"is-active|is-enabled|is-failed|status|cat|edit)\b[^\n|;&]*?\s"
+    r"(?P<unit>[A-Za-z0-9@:._-]{2,64}?)(?P<suffix>\.(?:service|socket|timer|target))?(?=\s|$|'|\"|&)")
+#: units a Linux host has without any step creating them.
+_STOCK_UNITS = frozenset({
+    "ssh", "sshd", "cron", "crond", "networking", "systemd-networkd", "systemd-resolved", "systemd-timesyncd",
+    "systemd-journald", "dbus", "rsyslog", "ufw", "firewalld", "fail2ban", "postfix", "chrony", "chronyd",
+    "qemu-guest-agent", "docker", "containerd", "snapd", "unattended-upgrades", "apparmor", "multipathd",
+    "getty", "serial-getty", "systemd-udevd", "polkit", "irqbalance", "atd", "apt-daily", "man-db", "nginx",
+    "apache2", "caddy", "pveproxy", "pvedaemon", "pvestatd", "pve-cluster", "pve-firewall",
+})
+#: a flag, a path, a variable or a number mistaken for a unit name.
+_NOT_A_UNIT = re.compile(r"^(?:-|/|\$|<|\d+$|--)")
+_UNIT_FILE_RE = "/(?:etc|lib|usr/lib|run)/systemd/system/[^\\s\"']*{u}\\.(?:service|socket|timer|target)"
+
+
+def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
+                           node: Optional[dict], upstream: str = "", units: Optional[list[str]] = None) -> list[dict]:
+    """§17.1327 — a systemd unit a block starts, enables or reads must be one that
+    something the engine holds names AS A UNIT: this block writes its unit file,
+    or a fact, pin, step text or earlier output mentions `<name>.service` (or a
+    systemctl on it, or its unit-file path).
+
+    Live, ADD66's model draft ran `systemctl is-enabled palworld-server` and
+    `is-active palworld-server` — the VM's HOSTNAME. No such unit exists; the
+    real one, `palworld.service`, sat in T23's and T24's own records, and the
+    step would have reported a failure that was not about the work. The guest's
+    name in the system map is not evidence that a unit of that name exists, so
+    the question is asked about the name as a unit, and the nearest unit the
+    engine does hold is named in the remedy.
+    """
+    bodies = [str((f or {}).get("content") or "") for f in files or []]
+    paths = [str((f or {}).get("path") or "") for f in files or []]
+    block = "\n".join([str(c) for c in commands or []] + bodies + paths)
+    held = (json.dumps(env or {}, default=str) + " " + str(upstream or "") + " "
+            + " ".join(str((node or {}).get(k) or "") for k in
+                       ("title", "description", "prompt_template", "output_text", "last_verification_reason")))
+
+    def names_as_unit(text: str, unit: str) -> bool:
+        u = re.escape(unit)
+        return bool(re.search(rf"\b{u}\.(?:service|socket|timer|target)\b", text)
+                    or re.search(_UNIT_FILE_RE.format(u=u), text)
+                    or re.search(rf"(?<![\w-])systemctl\s[^\n]*?\b{u}\b", text))
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    # §17.1327b — line by line, and never a COMMENT: the engine's own phase script explains
+    # itself with "`systemctl is-active` against the JSON blob", and the first version of this
+    # gate refused the engine's own template for a unit called `against`.
+    for line in block.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in _SYSTEMCTL_RE.finditer(line):
+            unit = (m.group("unit") or "").strip().strip("'\"")
+            base = unit[:-len(m.group("suffix"))] if m.group("suffix") else unit
+            if not base or base in seen or _NOT_A_UNIT.match(base):
+                continue
+            if base.lower() in _STOCK_UNITS or base.split("@", 1)[0].lower() in _STOCK_UNITS:
+                continue
+            seen.add(base)
+            # the block writing the unit FILE is a source; `.service` in its own systemctl is not
+            if re.search(_UNIT_FILE_RE.format(u=re.escape(base)), block):
+                continue
+            if base in (units or []):
+                continue                  # §17.1327 — the machine HAS it; that settles it
+            if names_as_unit(held, base):
+                continue
+            import difflib
+            candidates = sorted(({mm.group(1) for mm in re.finditer(r"\b([A-Za-z0-9@._-]{2,40})\.service\b", held)}
+                                 | {u for u in (units or []) if "@" not in u}) - _STOCK_UNITS)
+            near = difflib.get_close_matches(base, candidates, n=1, cutoff=0.55)
+            where = line.strip()
+            held_by = "the guest has" if units else "the engine holds"
+            hint = (f" The unit {held_by} is `{near[0]}.service` — use that." if near else
+                    (f" Units {held_by}: {', '.join(c + '.service' for c in candidates[:4])}." if candidates else
+                     " Nothing names a unit for this step: write its unit file in this block first."))
+            out.append({"command": where[:200], "why": (
+                f"`{unit}` is not a unit anything the engine holds names: " +
+                ("the guest's own `systemctl list-unit-files` does not have it" if units else
+                 f"no fact, pin, step text or earlier output mentions `{base}.service`") +
+                ", and this block writes no unit file for it — so `systemctl` acts on a unit that does "
+                "not exist and reports a failure that is not about the work." + hint)})
+    return out
+
+
 def unsourced_addresses_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
                                  node: Optional[dict], upstream: str = "") -> list[dict]:
     """§17.1312 — an IPv4 literal written into a file or a command must appear in
@@ -3804,7 +3893,8 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 
 
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
-              preconditions: Optional[list[dict]] = None, upstream: str = "") -> dict:
+              preconditions: Optional[list[dict]] = None, upstream: str = "",
+              units: Optional[list[str]] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -3910,6 +4000,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + placeholder_values_in_files(cmds, files, env)
     refused = refused + invented_email_in_files(cmds, files, env, node)       # §17.1307
     refused = refused + unsourced_addresses_in_files(cmds, files, env, node, upstream)   # §17.1312
+    refused = refused + unsourced_service_name(cmds, files, env, node, upstream, units)  # §17.1327
     # §17.1288m — the held password is referenced, not asked for again; a
     # wait pings the guest, not the router. (A secret as an ARGUMENT by name,
     # `--key $TOKEN`, is the §17.1191/1193 contract and is not refused.)

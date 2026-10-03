@@ -55,6 +55,10 @@ _INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|os|operating syste
 #: §17.1313 — commands that reach the internet by NAME from inside the guest
 _NET_FETCH_RE = re.compile(r"(?<![\w-])(?:apt-get|apt|aptitude|dnf|yum|zypper|apk|pip3?|npm|pnpm|yarn|gem|cargo|go\s+install|curl|wget|git\s+clone|snap|add-apt-repository|pveam\s+download)(?![\w-])")
 
+#: §17.1327 — a unit as `systemctl list-unit-files` prints it, and its suffix.
+_UNIT_NAME_RE = re.compile(r"[A-Za-z0-9@:._-]+\.(?:service|socket|timer|target)")
+_UNIT_SUFFIX_RE = re.compile(r"\.(?:service|socket|timer|target)$")
+
 _START_RE = re.compile(r"\bstart\b.*\b(?:VM|container|CT)\b", re.I)
 _SSH_KEY_RE = re.compile(r"ssh.*\bkey\b|public\s*key|authorized_keys|ssh-copy-id", re.I)
 FACT_PREFIX = "ENGINE MEASURED"
@@ -75,6 +79,7 @@ class GuestTruth:
     agent: Optional[bool] = None          # qm agent N ping answered
     key_known_by: Optional[str] = None    # the finished plan step that installed this host's key
     resolves: Optional[bool] = None       # §17.1313 — `getent hosts deb.debian.org` inside the guest answered
+    units: Optional[list[str]] = None     # §17.1327 — the service units the guest HAS (`systemctl list-unit-files`)
     dns_hint: str = ""                    # §17.1313 — a sibling guest's `nameserver:` line, for the fix step
     reads: dict[str, str] = field(default_factory=dict)   # evidence, by read
 
@@ -115,7 +120,7 @@ async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
 def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = "", neigh: str = "",
                      fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
                      plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,
-                     sibling_config: str = "") -> GuestTruth:
+                     sibling_config: str = "", units_text: str = "") -> GuestTruth:
     """The pure half: build the truth from texts the reads returned. Tested on
     the live fixtures; ``read_guest_truth`` only fetches the texts."""
     from app.modules.runbook_preconditions import key_known_for
@@ -170,6 +175,19 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
         m = re.search(r"^nameserver:\s*(.+)$", sibling_config, re.M)
         if m:
             t.dns_hint = " ".join(m.group(1).split())
+    # §17.1327 — the units the guest HAS, so a block that acts on one is judged against the
+    # machine and not against whatever happens to be in view. Live, a model draft ran
+    # `systemctl is-enabled palworld-server` (the VM's hostname) while the machine held
+    # `palworld.service`; and a legitimate `systemctl restart control-panel` would have been
+    # refused for a unit CT 111 really has, because no step in view mentioned it.
+    if units_text:
+        names = []
+        for ln in units_text.split("\n"):
+            w = ln.split()
+            if w and _UNIT_NAME_RE.fullmatch(w[0]):
+                names.append(_UNIT_SUFFIX_RE.sub("", w[0]))
+        t.units = names[:400]
+        t.reads["systemctl list-unit-files"] = f"{len(t.units)} units"
     t.key_known_by = key_known_for(gid, t.name, plan)
     return t
 
@@ -204,9 +222,22 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
         cmd = f"qm guest exec {gid} -- timeout 5 getent hosts deb.debian.org"
         ok, out = await _probe(spec, cmd)
         dns = (ok, unwrap_guest_exec(cmd, out)) if ok is not None else None
+    units_text = ""
+    if spec is not None:
+        _list = "systemctl list-unit-files --type=service --no-legend"
+        if kind == "ct" and ((inventory or {}).get("cts") or {}).get(gid) == "running":
+            _ok, units_text = await _probe(spec, f"pct exec {gid} -- {_list}")
+            units_text = units_text if _ok else ""
+        elif kind == "vm" and agent_ping is not None and agent_ping[0]:
+            from app.modules.assist_local_runner import unwrap_guest_exec
+            _cmd = f"qm guest exec {gid} -- {_list}"
+            _ok, _out = await _probe(spec, _cmd)
+            units_text = unwrap_guest_exec(_cmd, _out) if _ok else ""
     t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
-                         agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "")
-    logger.warning("machine_truth guest=%s %s", gid, {k: v for k, v in t.to_dict().items() if k not in ("reads", "disks")})
+                         agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "",
+                         units_text=units_text)
+    logger.warning("machine_truth guest=%s %s", gid, {k: (f"{len(v)} units" if k == "units" and v is not None else v)
+                                                      for k, v in t.to_dict().items() if k not in ("reads", "disks")})
     return t
 
 

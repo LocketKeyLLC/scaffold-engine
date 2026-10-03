@@ -1,0 +1,24 @@
+{
+ "node_key": "ADD66",
+ "title": "Start VM 106 and bring the PalWorld service up on UDP 8211",
+ "commands": [
+  "qm status 106 | grep -q running || qm start 106",
+  "qm agent 106 ping",
+  "qm agent 106 exec -- systemctl is-enabled palworld-server",
+  "qm agent 106 exec -- systemctl is-active palworld-server",
+  "qm agent 106 exec -- ss -ulnp | grep 8211"
+ ],
+ "verify": [
+  "qm status 106",
+  "qm agent 106 ping",
+  "qm agent 106 exec -- systemctl is-enabled palworld-server",
+  "qm agent 106 exec -- systemctl is-active palworld-server",
+  "qm agent 106 exec -- ss -ulnp | grep 8211"
+ ],
+ "runbook": "## Prerequisites\n\n- Proxmox VE host reachable as `root@pve` in a single shell\n- VM 106 exists and is stopped (per ADD53, it was stopped for disk resize)\n- QEMU guest agent installed inside VM 106 (per ADD65, `qm agent 106 ping` succeeded previously)\n\n## Run this\n\n```bash\nqm status 106 | grep -q running || qm start 106\n```\n\n```bash\nqm agent 106 ping\n```\n\n```bash\nqm agent 106 exec -- systemctl is-enabled palworld-server\n```\n\n```bash\nqm agent 106 exec -- systemctl is-active palworld-server\n```\n\n```bash\nqm agent 106 exec -- ss -ulnp | grep 8211\n```\n\n## Verify\n\n- `qm status 106` reports `status: running`\n- `qm agent 106 ping` returns without error\n- `qm agent 106 exec -- systemctl is-enabled palworld-server` returns `enabled`\n- `qm agent 106 exec -- systemctl is-active palworld-server` returns `active`\n- `qm agent 106 exec -- ss -ulnp | grep 8211` shows a listener on UDP 8211\n\n## Rollback\n\n- If `qm start 106` fails, run `qm config 106` to confirm the disk is attached (`scsi0: local-lvm:vm-106-disk-0,size=40G` per ADD53) and check `journalctl -u pvedaemon -n 50` for start errors.\n- If `qm agent 106 ping` fails with \"QEMU guest agent is not running\", the guest agent is not installed or not running inside the VM. Install it inside the guest: `qm guest exec 106 -- apt-get install -y qemu-guest-agent` then `qm guest exec 106 -- systemctl enable --now qemu-guest-agent`. If the guest has no network, use the Proxmox console (`qm terminal 106`) to install it manually.\n- If `systemctl is-enabled palworld-server` returns `disabled` or `masked`, enable it: `qm agent 106 exec -- systemctl enable palworld-server`.\n- If `systemctl is-active palworld-server` returns `inactive` or `failed`, start it: `qm agent 106 exec -- systemctl start palworld-server`, then check `qm agent 106 exec -- journalctl -u palworld-server -n 50` for the failure reason.\n- If no UDP 8211 listener appears, confirm the service is actually running and check its config for the correct port: `qm agent 106 exec -- journalctl -u palworld-server -n 50`.",
+ "hands_on_reason": "observed:qm status 106",
+ "inputs": [],
+ "refused": [],
+ "files": [],
+ "engine_fixed": []
+}
