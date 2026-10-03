@@ -4291,6 +4291,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                      f"the machine confirm the step's goal is met")})
         logger.warning("supervised_run_done job=%s node=%s commands=%d confirmed_after_drop=%s",
                        job_id, node_key, len(executed), confirmed_after_drop)
+        try:                                                     # §17.1315 — a finished OS install voids the in-guest work before it
+            from app.modules import machine_truth as _mt
+            await _mt.after_step_done(job_id, {"node_key": node_key, "title": str(waiting.get("title") or "")})
+        except Exception as exc:
+            logger.warning("after_step_done_failed job=%s node=%s err=%r", job_id, node_key, exc)
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out,
                 "confirmed_after_drop": confirmed_after_drop}
     last = executed[-1] if executed else None

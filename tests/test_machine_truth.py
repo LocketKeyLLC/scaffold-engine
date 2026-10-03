@@ -285,6 +285,78 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')
 
 
+# ───── §17.1315 — a reinstalled OS reopens the in-guest work before it
+
+from datetime import datetime, timezone as _tz
+
+def _at(s):
+    return datetime.fromisoformat(s).replace(tzinfo=_tz.utc)
+
+PLAN_106 = [
+    {"node_key": "T22", "title": "Create PalWorld VM", "status": "done", "completed_at": _at("2026-08-31T22:56:51")},
+    {"node_key": "T23", "title": "Install PalWorld server", "status": "done", "completed_at": _at("2026-09-04T22:02:57")},
+    {"node_key": "T24", "title": "Configure PalWorld service", "status": "done", "completed_at": _at("2026-09-04T22:05:55")},
+    {"node_key": "ADD5", "title": "Install Ubuntu Server 22.04 on VM 106", "status": "done", "completed_at": _at("2026-09-04T20:00:00")},
+    {"node_key": "ADD9", "title": "Start VM 106 (palworld-server)", "status": "done", "completed_at": _at("2026-09-05T10:00:00")},
+    {"node_key": "ADD22", "title": "Give VM 106 (palworld-server) a 40G local-lvm boot disk", "status": "done", "completed_at": _at("2026-09-10T10:00:00")},
+    {"node_key": "ADD47", "title": "Create, enable and start the palworld.service unit in VM 106", "status": "skipped", "completed_at": _at("2026-09-12T10:00:00")},
+    {"node_key": "ADD117", "title": "Install Ubuntu 22.04 on VM 106 unattended (cloud image + cloud-init)", "status": "done", "completed_at": _at("2026-10-03T05:23:28")},
+    {"node_key": "ADD82", "title": "Install and enable QEMU Guest Agent in VM 106", "status": "done", "completed_at": _at("2026-10-03T06:12:06")},
+    {"node_key": "ADD84", "title": "Grow the VM 106 filesystem to fill the disk", "status": "done", "completed_at": _at("2026-10-03T09:35:26")},
+]
+
+
+def test_the_live_plan_the_palworld_install_and_service_are_voided_by_the_reinstall():
+    voided = mt.in_guest_work_voided_by_reinstall(PLAN_106, "106", "palworld-server")
+    assert [v["node_key"] for v in voided] == ["T23", "T24"], voided
+    assert all(v["install"] == "ADD117" for v in voided)
+    # host-side work on the guest survives (the VM, its start, its disk), the older OS install is superseded not reopened,
+    # work done AFTER the reinstall stands, skipped steps are not reopened
+    assert mt.in_guest_work_voided_by_reinstall([n for n in PLAN_106 if n["node_key"] != "ADD117"], "106", "palworld-server") == [], "no reinstall: nothing voided"
+    assert mt.in_guest_work_voided_by_reinstall(PLAN_106, "110", "ai-vm") == []
+
+
+@pytest.mark.asyncio
+async def test_after_an_os_install_is_recorded_done_the_voided_steps_are_reopened_with_a_fact(monkeypatch):
+    from app.modules import node_editor
+    import app.database as _db
+    import app.modules.assist_environment as _ae
+    calls = []
+
+    class _R:
+        def __init__(self, rows): self._rows = rows
+        def mappings(self): return self
+        def all(self): return self._rows
+        def first(self): return self._rows[0] if self._rows else None
+
+    class _S:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def execute(self, q, params=None):
+            if "assist_sessions" in str(q): return _R([{"id": "sid-1", "metadata": {}}])
+            return _R(PLAN_106)
+    monkeypatch.setattr(_db, "async_session", lambda: _S())
+
+    async def fake_reset(job_id, key, *, db, cascade, edited_by):
+        calls.append(("reset", key, cascade, edited_by[:40])); return {"status": "ok"}
+
+    async def fake_facts(*, session_id, facts, db):
+        calls.append(("fact", session_id, facts[0][:90]))
+    monkeypatch.setattr(node_editor, "reset_node", fake_reset)
+    monkeypatch.setattr(_ae, "set_environment", fake_facts)
+    did = await mt.after_step_done("job", {"node_key": "ADD117", "title": PLAN_106[7]["title"]})
+    assert [c[:3] for c in calls if c[0] == "reset"] == [("reset", "T23", False), ("reset", "T24", False)], calls
+    assert any(c[0] == "fact" and "reinstalled the OS of guest 106" in c[2] for c in calls)
+    assert len(did) == 2 and did[0].startswith("reopened T23")
+    assert await mt.after_step_done("job", {"node_key": "ADD84", "title": "Grow the VM 106 filesystem"}) == [], "only an OS install voids anything"
+    src = pathlib.Path(__import__("app.modules.supervised_runs", fromlist=["x"]).__file__).read_text(encoding="utf-8")
+    assert "_mt.after_step_done(job_id, {" in src, "the run's done write calls it"
+    esrc = pathlib.Path(__import__("app.modules.execution_agent", fromlist=["x"]).__file__).read_text(encoding="utf-8")
+    assert "machine_truth.after_step_done(job_id, run_node)" in esrc, "the already-met done write calls it"
+    assert "SELECT node_key, title, status, completed_at FROM dag_nodes" in esrc, "plan rows carry completed_at"
+
+
+
 # ───── §17.1313 — the engine measures DNS and proposes the fix
 
 CFG111_LIVE = "arch: amd64\nhostname: control-panel\nmemory: 2048\nnameserver: 192.168.1.30 1.1.1.1\nnet0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:82:37:C3,type=veth\nostype: debian\n"

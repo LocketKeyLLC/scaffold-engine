@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -86,7 +87,17 @@ def _norm(s: str) -> str:
 
 
 def _mentions_guest(title: str, gid: str, name: str) -> bool:
-    return bool(re.search(rf"\b{re.escape(gid)}\b", title)) or (bool(_norm(name)) and _norm(name) in _norm(title))
+    if re.search(rf"\b{re.escape(gid)}\b", title):
+        return True
+    if _norm(name) and _norm(name) in _norm(title):
+        return True
+    # §17.1315 — "Configure PalWorld service" names guest `palworld-server` by its first word;
+    # a distinctive token (5+ chars, not a generic noun) counts.
+    head = re.split(r"[-_. ]", str(name or ""), 1)[0]
+    return len(head) >= 5 and head.lower() not in _GENERIC_NAME_WORDS and bool(re.search(rf"\b{re.escape(head)}\b", title, re.I))
+
+
+_GENERIC_NAME_WORDS = frozenset({"server", "service", "guest", "container", "ubuntu", "debian", "proxy", "panel", "control", "media", "download", "client"})
 
 
 async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
@@ -334,6 +345,112 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
             "remedy": "the guest has no network stack up yet (still booting, or no OS): wait on the MAC, do not assume",
         })
     return out
+
+
+#: §17.1315 — work done INSIDE a guest, which a fresh OS wipes: installs, services, configs, users, keys.
+_IN_GUEST_WORK_RE = re.compile(r"\b(?:install|configure|set ?up|enable|create|write|add|deploy|run)\b.*\b(?:server|service|unit|daemon|agent|key|user|account|package|docker|steam|game|config)\b|"
+                               r"\b(?:service|unit)\b", re.I)
+#: host-side work on the guest survives a reinstall: the VM itself, its disk, its start, its config on the host.
+_HOST_WORK_RE = re.compile(r"\b(?:create|start|stop|reboot|resize|expand|grow|attach|detach|re-attach|free|give|boot order|passthrough|hostpci|"
+                           r"disk|volume|cpu|cores|memory|ram|snapshot|backup|clone|destroy|delete|verify|check|measure|read|capture|console|"
+                           r"install (?:ubuntu|debian|the os|an os)|unattended)\b", re.I)
+
+
+def in_guest_work_voided_by_reinstall(plan: list[dict], gid: str, name: str = "") -> list[dict]:
+    """§17.1315 — the DONE steps that did work INSIDE guest ``gid`` before a DONE
+    OS install of the same guest finished. Live: VM 106 was reinstalled from a
+    cloud image at 05:23 (ADD117); T23 "Install PalWorld server" and T24
+    "Configure PalWorld service" (2026-09-04) stood `done` -- and the VM holds
+    no steam user, nothing in /opt, nothing on UDP 8211. The operator's primary
+    goal, silently absent behind two green records."""
+    def _ts(n):
+        v = n.get("completed_at")
+        return v if v is not None else None
+    installs = [n for n in plan or [] if (n.get("status") or "") == "done" and _INSTALL_OS_RE.search(str(n.get("title") or ""))
+                and _mentions_guest(str(n.get("title") or ""), gid, name) and _ts(n) is not None]
+    if not installs:
+        return []
+    last = max(installs, key=lambda n: _ts(n) or datetime.min.replace(tzinfo=timezone.utc))
+    last_at = _ts(last)
+    if last_at is None:
+        return []
+    out = []
+    for n in plan or []:
+        at = _ts(n)
+        if n is last or (n.get("status") or "") != "done" or at is None or not (at < last_at):
+            continue
+        title = str(n.get("title") or "")
+        if not _mentions_guest(title, gid, name):
+            continue
+        if _INSTALL_OS_RE.search(title) or _HOST_WORK_RE.search(title) or not _IN_GUEST_WORK_RE.search(title):
+            continue
+        out.append({"node_key": str(n.get("node_key")), "title": title, "completed_at": _ts(n), "install": str(last.get("node_key")),
+                    "install_title": str(last.get("title") or ""), "install_at": _ts(last)})
+    return out
+
+
+async def after_step_done(job_id: str, node: Optional[dict]) -> list[str]:
+    """§17.1315 — called when a step is recorded done. When that step installed a
+    guest's OS, every earlier done step that worked INSIDE the guest is reopened
+    (no cascade) with a measured fact. Returns what was done; fail-soft."""
+    title = str((node or {}).get("title") or "")
+    if not _INSTALL_OS_RE.search(title):
+        return []
+    gid = subject_guest(node)
+    if not gid:
+        return []
+    from sqlalchemy import text
+    from app.database import async_session
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(text("SELECT node_key, title, status, completed_at FROM dag_nodes WHERE job_id = :j"),
+                                     {"j": job_id})).mappings().all()
+            plan = [dict(r) for r in rows]
+    except Exception as exc:
+        logger.warning("after_step_done_plan_failed job=%s err=%r", job_id, exc)
+        return []
+    return await reopen_voided_work(job_id, plan, gid, guest_name_from_plan(plan, gid))
+
+
+def guest_name_from_plan(plan: list[dict], gid: str) -> str:
+    """§17.1315 — the guest's name as the plan writes it: "Start VM 106 (palworld-server)"."""
+    for n in plan or []:
+        m = re.search(rf"\b(?:VM|CT|LXC|container|guest)\s*#?\s*{re.escape(gid)}\s*\(([^)]{{2,40}})\)", str(n.get("title") or ""), re.I)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+async def reopen_voided_work(job_id: str, plan: list[dict], gid: str, name: str = "") -> list[str]:
+    from app.database import async_session
+    from app.modules import node_editor
+    from app.modules.assist_environment import set_environment
+    from sqlalchemy import text
+    voided = in_guest_work_voided_by_reinstall(plan, gid, name)
+    done: list[str] = []
+    for v in voided:
+        evidence = (f"{v['install']} '{v['install_title'][:60]}' reinstalled the OS at {str(v['install_at'])[:16]}; "
+                    f"{v['node_key']} '{v['title'][:60]}' was done inside it on {str(v['completed_at'])[:10]}, before that")
+        try:
+            async with async_session() as db:
+                res = await node_editor.reset_node(job_id, v["node_key"], db=db, cascade=False, edited_by=f"engine:measured — {evidence[:140]}")
+            if res.get("status") == "ok":
+                done.append(f"reopened {v['node_key']}: {v['title'][:70]} (voided by {v['install']})")
+                logger.warning("machine_truth_reopened_voided job=%s node=%s by=%s", job_id, v["node_key"], v["install"])
+        except Exception as exc:
+            logger.warning("machine_truth_reopen_voided_failed job=%s node=%s err=%r", job_id, v["node_key"], exc)
+    if done:
+        try:
+            async with async_session() as db:
+                row = (await db.execute(text("SELECT id, metadata FROM assist_sessions WHERE job_id = :j ORDER BY created_at DESC LIMIT 1"),
+                                        {"j": job_id})).mappings().first()
+                if row:
+                    fact = (f"{FACT_PREFIX}: {voided[0]['install']} reinstalled the OS of guest {gid} at {str(voided[0]['install_at'])[:16]}; "
+                            f"the in-guest work recorded done before it ({', '.join(v['node_key'] for v in voided)}) is reopened -- a fresh OS holds none of it")
+                    await set_environment(session_id=str(row["id"]), facts=[fact], db=db)
+        except Exception as exc:
+            logger.warning("machine_truth_voided_fact_failed job=%s err=%r", job_id, exc)
+    return done
 
 
 async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTruth, needs: set[str],

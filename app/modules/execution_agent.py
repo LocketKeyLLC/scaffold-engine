@@ -2559,7 +2559,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             async with async_session() as db:
                 async with savepoint(db):            # §17.1132 — optional read, swallowed on failure
                     _plan = (await db.execute(
-                        text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
+                        text("SELECT node_key, title, status, completed_at FROM dag_nodes WHERE job_id = :j"),
                         {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)
@@ -2873,6 +2873,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                        "result": "already_met", "checks": _met["checks"]}})})
                     await db.commit()
                 if _upd.rowcount:
+                    await machine_truth.after_step_done(job_id, run_node)       # §17.1315
                     return await _pause_for_decision(job_id, _depth + 1)
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
