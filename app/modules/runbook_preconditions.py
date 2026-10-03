@@ -44,6 +44,9 @@ _QM_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", re.M)
 #: Verbs that need the guest actually RUNNING, not merely defined.
 #: §17.1300 — `reboot` too: live, ADD68's block ran `pct reboot 111` on a STOPPED container (a stopped
 #: guest cannot reboot; `pct start` is the verb). `shutdown`/`stop` on a stopped guest are §17.1240's.
+#: §17.1303 — `ssh|scp|sftp|ssh-copy-id … [user@]<ipv4>`: the literal address a block reaches.
+_SSH_TARGET_RE = re.compile(r"(?<![\w./-])(?:ssh|ssh-copy-id|scp|sftp)(?![\w-])[^\n|;&]*?(?:\s|@)((?:[a-z_][a-z0-9_-]{0,31}|<[A-Z0-9_]+>)@)?((?:\d{1,3}\.){3}\d{1,3})\b")
+
 _NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull", "reboot"})
 
 #: §17.1240 — verbs whose job is ALREADY DONE, which is not the same as working.
@@ -184,7 +187,7 @@ def _first_line_with(texts: list[str], pattern: "re.Pattern[str]") -> str:
 
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
-                inventory: Optional[dict] = None) -> list[dict]:
+                inventory: Optional[dict] = None, truth=None) -> list[dict]:
     """``[{command, why}]`` for every command the host contradicts.
 
     `plan` is the job's nodes, so a refusal can name the step that would make
@@ -229,6 +232,27 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                     f"itself with `SSHPASS=\"$MASS_PASSWORD\" sshpass -e`. The password travels by name; "
                     f"nothing here can type one.")})
                 break
+    # §17.1303 — the block reaches the step's guest at an address the machine
+    # contradicts. Live, ADD84 (VM 106, measured at 192.168.1.106 by its MAC in
+    # `ip neigh`, pinned as PALWORLD_IP) drew `ssh <PALWORLD_USER>@192.168.1.127`
+    # -- VM 110's old address, borrowed from another step's text. A measured
+    # address beats a written one; a step that names the other machine itself
+    # is left alone (ADD49 legitimately reaches 192.168.1.127).
+    addr = str(getattr(truth, "address", "") or "")
+    tgid = str(getattr(truth, "gid", "") or "")
+    if addr and tgid and tgid in subjects:
+        hit = next(((t, m) for t in texts for m in _SSH_TARGET_RE.finditer(t)
+                    if m.group(2) != addr and m.group(2) not in subject), None)
+        if hit:
+            t, m = hit
+            kind = "container" if getattr(truth, "kind", "") == "ct" else "VM"
+            line = t[t.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+            out.append({"command": line[:200], "why": (
+                f"`{m.group(2)}` is not {kind} {tgid}'s address: the engine measured `{addr}` for its MAC "
+                f"`{getattr(truth, 'mac', '') or '?'}` (`ip neigh`, read just now), and the step names no other "
+                f"machine. Reach {kind} {tgid} at `{addr}` -- or, since its guest agent "
+                f"{'answers' if getattr(truth, 'agent', False) else 'may answer'}, through `qm guest exec {tgid}` "
+                f"with no address at all.")})
     if (not guests and not subjects) or not inv:
         return out
     cts, vms = inv["cts"], inv["vms"]
