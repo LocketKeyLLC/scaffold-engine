@@ -1,0 +1,5 @@
+# --- BEGIN PVE ---
+search tail3692cc.ts.net
+nameserver 100.100.100.100
+nameserver fd7a:115c:a1e0::53
+# --- END PVE ---
