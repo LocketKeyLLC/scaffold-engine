@@ -651,6 +651,28 @@ def keep_a_copy_before_overwrites(remote_commands: str) -> str:
 _STEAMCMD_RE = re.compile(r"(?P<path>(?:\S*/)?steamcmd(?:\.sh)?)\s+(?=.*\+app_update)")
 
 
+_APT_RE = re.compile(r"(?<![\w-])(?:apt-get|apt|aptitude|dpkg)(?![\w-])")
+APT_REPAIR_PRELUDE = [
+    "# §17.1320 -- repair what a failed attempt left in dpkg before any apt work (a half-installed package aborts every later install)",
+    "dpkg --configure -a >/dev/null 2>&1 || true",
+    "for _p in $(dpkg -l 2>/dev/null | awk '/^(i[^i ]|[^i ]i|rF|rH|rU)/ {print $2}'); do dpkg --purge --force-remove-reinstreq \"$_p\" >/dev/null 2>&1 || true; done",
+]
+
+
+def repair_apt_state_first(remote_commands: str) -> str:
+    """§17.1320 — when the model's commands touch apt/dpkg, the engine's own
+    prelude runs first: finish pending configuration, then purge what is still
+    half-installed/half-configured. Live, the operator-approved apt-steamcmd draft
+    left `steamcmd:i386` in state `in` (declined licence) and the next correct
+    draft's `apt-get install lib32gcc-s1 …` would have aborted on it with
+    `E: Sub-process /usr/bin/dpkg returned an error code (1)` -- the engine's own
+    mess, blocking the engine's own next step."""
+    text = str(remote_commands or "")
+    if not _APT_RE.search(text) or APT_REPAIR_PRELUDE[1] in text:
+        return text
+    return "\n".join(APT_REPAIR_PRELUDE) + "\n" + text
+
+
 def bootstrap_steamcmd_first(remote_commands: str) -> str:
     """§17.1317 — a fresh SteamCMD must run once (`+quit`) before an `app_update`
     works; live, T23's first `+app_update 2394010` ended `Failed installing AppID
@@ -661,7 +683,11 @@ def bootstrap_steamcmd_first(remote_commands: str) -> str:
     for ln in str(remote_commands or "").split("\n"):
         m = _STEAMCMD_RE.search(ln) if not done and not ln.lstrip().startswith("#") else None
         if m:
-            out.append(f"{m.group('path')} +quit >/dev/null 2>&1 || true   # bootstrap: a fresh SteamCMD updates itself and exits")
+            # §17.1320 — as the SAME user as the install: SteamCMD bootstraps per home directory, so a
+            # root bootstrap does nothing for `sudo -u palworld steamcmd.sh …`.
+            su = re.match(r"\s*(sudo\s+-u\s+\S+\s+|su\s+-\s+\S+\s+-c\s+|runuser\s+-u\s+\S+\s+--\s+)", ln)
+            prefix = su.group(1).strip() + " " if su else ""
+            out.append(f"{prefix}{m.group('path')} +quit >/dev/null 2>&1 || true   # bootstrap: a fresh SteamCMD updates itself and exits")
             done = True
         out.append(ln)
     return "\n".join(out)
@@ -729,5 +755,5 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
         if p.name == "VERIFY_INSIDE":
             out[p.name] = fenced.split("\n", 1)[0].strip()
         else:
-            out[p.name] = bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced))   # §17.1314, §17.1317
+            out[p.name] = repair_apt_state_first(bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced)))   # §17.1314, §17.1317, §17.1320
     return out
