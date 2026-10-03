@@ -341,8 +341,9 @@ def test_the_empty_disk_fact_is_recorded_for_the_plan():
     from app.modules import execution_agent as ea
     from app.modules import supervised_runs as sr
     src = pathlib_mod.Path(ea.__file__).read_text(encoding="utf-8")
-    assert "async def _record_engine_fact(" in src and "ENGINE MEASURED:" in src
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert '"has never been written" in str(_r.get("why")' in body and "_record_engine_fact(job_id" in body
+    # §17.1289 — the fact is one row of machine_truth.contradictions, recorded by reconcile_from_truth
+    assert "machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)" in body
+    assert "machine_truth.reconcile_from_truth(job_id, run_node, _truth, _needs, _plan_rows)" in body
     assert "has never been written" in sr._SHAPE_REFUSALS, "the redraft is told, and the chain counts it"

@@ -2480,23 +2480,6 @@ def _order_of(node: dict) -> float:
         return float("inf")
 
 
-async def _record_engine_fact(job_id: str, fact: str) -> bool:
-    """§17.1288p — append one fact the ENGINE measured to the job's newest
-    assist session (the ledger `job_environment` reads). False when the job
-    has no session; a fact is never invented from blindness."""
-    from app.modules.assist_environment import set_environment
-    async with async_session() as db:
-        row = (await db.execute(
-            text("SELECT id FROM assist_sessions WHERE job_id = :j ORDER BY updated_at DESC LIMIT 1"),
-            {"j": job_id})).mappings().first()
-        if not row:
-            return False
-        await set_environment(session_id=str(row["id"]), facts=[f"ENGINE MEASURED: {fact}"], db=db)
-        await db.commit()
-    logger.warning("engine_fact_recorded job=%s fact=%r", job_id, fact[:120])
-    return True
-
-
 async def _pause_for_decision(job_id: str) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
@@ -2584,6 +2567,17 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         except Exception as exc:
             logger.warning("preconditions_failed job=%s node=%s err=%r",
                            job_id, run_node.get("node_key"), exc)
+        # §17.1289 — and the guest the step is ABOUT is measured once, here,
+        # before any draft: what the plan, the step text and the facts say is
+        # reconciled against it below, not rediscovered one gate at a time.
+        _truth = None
+        try:
+            from app.modules import machine_truth
+            _gid = machine_truth.subject_guest(run_node)
+            if _gid:
+                _truth = await machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)
+        except Exception as exc:
+            logger.warning("machine_truth_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
 
         async def _pre_for(rb: str) -> list[dict]:
             try:
@@ -2596,17 +2590,19 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook))
-        # §17.1288p — a precondition that is a DURABLE fact about a machine
-        # (a guest's disk has never been written: no OS) goes into the facts
-        # ledger, so the plan reconciles from it (§17.1089) instead of every
-        # later step rediscovering it. Transient ones (stopped, no key) do not.
-        for _r in frame.get("refused") or []:
-            if "has never been written" in str(_r.get("why") or ""):
-                try:
-                    await _record_engine_fact(job_id, str(_r.get("why") or "")[:400])
-                except Exception as exc:
-                    logger.warning("engine_fact_record_failed job=%s err=%r", job_id, exc)
-                break
+        # §17.1289 — reconcile the record from the measurement: a durable fact
+        # about the machine goes to the ledger; a finished step whose effect
+        # the machine does not show is reopened (no cascade) unless a pending
+        # step already covers it. What was done is said on the frame.
+        if _truth is not None:
+            try:
+                _needs = machine_truth.step_needs(run_node, frame.get("commands") or [], frame.get("files") or [])
+                _did = await machine_truth.reconcile_from_truth(job_id, run_node, _truth, _needs, _plan_rows)
+                if _did:
+                    frame["engine_fixed"] = list(frame.get("engine_fixed") or []) + [f"measured {_truth.kind or 'guest'} {_truth.gid}: {d}" for d in _did]
+                    logger.warning("machine_truth_reconciled job=%s node=%s did=%s", job_id, run_node.get("node_key"), _did)
+            except Exception as exc:
+                logger.warning("machine_truth_reconcile_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
         # §17.1288n — the gate just contradicted the step's own text about how
         # its guest is reached ("no way in … done at the console"); the text is
         # the engine's earlier judgment, so the engine corrects it -- appended,
