@@ -1,0 +1,16 @@
+{
+ "node_key": "ADD84",
+ "title": "Grow the VM 106 filesystem to fill the disk",
+ "commands": [
+  "qm guest exec 106 -- bash -c \"sudo growpart /dev/sda 1\"",
+  "qm guest exec 106 -- bash -c \"sudo resize2fs /dev/sda1\""
+ ],
+ "verify": [
+  "qm guest exec 106 -- df -h /"
+ ],
+ "runbook": "## Inputs needed\n\n- `<PALWORLD_USER>` \u2014 the account inside VM 106 that has sudo (the operator logs in with it)\n\n## Run this\n\n```bash\nqm guest exec 106 -- bash -c \"sudo growpart /dev/sda 1\"\n```\n\n```bash\nqm guest exec 106 -- bash -c \"sudo resize2fs /dev/sda1\"\n```\n\n## Verify\n\n- Root filesystem reports ~100GB: `qm guest exec 106 -- df -h /`\n\n## Rollback\n\nIf growpart fails, the partition table is unchanged \u2014 no rollback needed. If resize2fs fails after growpart succeeded, the partition is larger but the filesystem is not; re-run the resize2fs command after checking `qm guest exec 106 -- sudo lsblk` to confirm the partition size.",
+ "hands_on_reason": "observed:df -h",
+ "inputs": [],
+ "refused": [],
+ "files": []
+}
