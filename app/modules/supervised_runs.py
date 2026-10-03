@@ -4160,7 +4160,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
 
 
-async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str) -> list[dict]:
+async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
+                           expects: Optional[dict[str, str]] = None) -> list[dict]:
     """§17.1233 — the state-check judge's verdicts for this step's own checks.
 
     One place builds the probes so the drop path (§17.1225) and the success path
@@ -4170,9 +4171,26 @@ async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str) -> l
         return []
     try:
         from app.modules.assist_state_check import judge_outputs
-        probes = [{"id": f"V{i}", "kind": "state", "claim": title, "command": c}
+        # §17.1302b — the judge attributes output by splitting the paste on
+        # `== <L>:<id> ==` markers (MARKER_RE: `S:ADD5`, `F:1`, `K:HOST`). The run
+        # path labels its checks `V1` and `run_probes` writes `== V1 ==`, which that
+        # regex does not match: every section came back missing, every verdict
+        # "unknown". So §17.1225's confirm-after-drop never confirmed and §17.1233's
+        # contradiction never contradicted — from the day they were written. The
+        # ids are translated here, in the ONE place both paths build their probes,
+        # and translated back so callers keep seeing `V1`.
+        ids = {f"V{i}": f"V:{i}" for i in range(1, len(verify_cmds) + 1)}
+        marked = re.sub(r"^(\s*==\s*)V(\d+)(\s*==\s*)$", r"\1V:\2\3", pasted or "", flags=re.M)
+        # §17.1302 — `expect` feeds the judge's deterministic pre-pass: a runbook that
+        # says "`cmd` shows `ostype: l26`" is confirmed with no model draw when it does.
+        probes = [{"id": ids[f"V{i}"], "kind": "state", "claim": title, "command": c,
+                   "expect": (expects or {}).get(c, "")}
                   for i, c in enumerate(verify_cmds, 1)]
-        return await judge_outputs(probes, pasted)
+        out = await judge_outputs(probes, marked)
+        back = {v: k for k, v in ids.items()}
+        for v in out:
+            v["id"] = back.get(str(v.get("id") or ""), v.get("id"))
+        return out
     except Exception as exc:
         logger.warning("verify_judge_failed err=%r", exc)
         return []
@@ -4266,6 +4284,76 @@ def _has_evidence(pasted: str, ran: list[dict]) -> bool:
         if re.search(rf"== {e['id']} ==", pasted or ""):
             return True
     return False
+
+
+# ── §17.1302 — a step whose own checks already pass is already done ──────────
+#: a `## Verify` bullet of the form "`cmd` shows `text`" — the text is what the
+#: output contains when the goal holds.
+_EXPECT_RE = re.compile(r"`([^`\n]{2,200})`\s+(?:shows|prints|reports|returns|contains|lists|includes)\s+`([^`\n]{1,200})`", re.I)
+
+
+def verify_expectations(runbook: str) -> dict[str, str]:
+    """``{command: expected text}`` from the ``## Verify`` bullets that spell out
+    what the check shows when the step's goal holds. Prose only — the fenced
+    checks carry no expectation."""
+    body = _FENCE_RE.sub(" ", _section(runbook or "", "Verify"))
+    return {m.group(1).strip(): m.group(2).strip() for m in _EXPECT_RE.finditer(body)}
+
+
+async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
+    """§17.1302 — read the step's OWN verify checks off the machine before the
+    block is parked. When every check confirms the step's goal, the step is
+    already done and nothing should run: return the evidence; else None.
+
+    Live, ADD84 "Grow the VM 106 filesystem to fill the disk" was framed as
+    `growpart /dev/sda 1` + `resize2fs` on a guest whose cloud-init had grown
+    the root partition to 99.9 G on first boot (`df -h /` → 97 G of a 100 G
+    disk). `growpart` exits 1 for NOCHANGE, so approving the block would have
+    failed a step whose goal the machine already showed met — and the checks
+    that show it were sitting in the frame's own `verify` list, on a runner
+    with an open read-only channel. §17.1225 built this exact read for the
+    case where a RESPONSE was lost; the case where the WORK was already done
+    is the same read, a step earlier.
+
+    Asymmetric like §17.1225: every check must be `confirmed` (the deterministic
+    pre-pass on the runbook's own "`cmd` shows `text`" bullets, then the judge
+    against the step's title AND its "done when" text). `unknown` or
+    `contradicted` anywhere → None, and the block is parked as before.
+    """
+    verify_cmds = [str(c) for c in (frame or {}).get("verify") or []]
+    if not verify_cmds or not (frame or {}).get("commands"):
+        return None
+    pasted, ran = await run_verify(spec, verify_cmds, env)
+    answered = [r for r in ran or [] if r.get("ran")]
+    if not _has_evidence(pasted, ran) or len(answered) != len(verify_cmds):
+        return None                                   # a check that did not answer is not evidence
+    title = str((node or {}).get("title") or (frame or {}).get("node_key") or "")
+    desc = " ".join(str((node or {}).get("description") or "").split())[:400]
+    claim = f"{title} — {desc}" if desc else title
+    verdicts = await _verify_verdicts(claim, verify_cmds, pasted,
+                                      expects=verify_expectations(str((frame or {}).get("runbook") or "")))
+    if not verdicts or len(verdicts) != len(verify_cmds):
+        return None
+    kinds = [str(v.get("verdict") or "") for v in verdicts]
+    if not all(k == "confirmed" for k in kinds):
+        logger.info("supervised_run_not_yet_met title=%r verdicts=%s", title[:60], kinds)
+        return None
+    return {"report": _probe_report(pasted, ran), "verdicts": verdicts, "checks": len(verify_cmds)}
+
+
+def already_met_record(node: dict, runner: str, met: dict) -> str:
+    """The node's output when §17.1302 found the goal already met: the reads,
+    verbatim, and why nothing ran."""
+    title = str((node or {}).get("title") or "")
+    lines = ["## Already met — nothing was run\n",
+             f"Before running anything, the engine read this step's own checks off {runner}:\n",
+             "```", str(met.get("report") or "").rstrip(), "```", "",
+             f"Every check confirms the goal (\"{title}\"), so the block was not run and the step is recorded as done. "
+             "Repeating a change the machine already shows is not a step forward.", ""]
+    for v in met.get("verdicts") or []:
+        why = str(v.get("reason") or "").strip()
+        lines.append(f"- `{v.get('id')}` {str(v.get('claim') or '')[:90]}" + (f" — {why[:160]}" if why else ""))
+    return "\n".join(lines).rstrip() + "\n"
 
 
 async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bool:

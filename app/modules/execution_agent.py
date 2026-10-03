@@ -2480,7 +2480,7 @@ def _order_of(node: dict) -> float:
         return float("inf")
 
 
-async def _pause_for_decision(job_id: str) -> dict | None:
+async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
     SSE payload; else None. Called by BOTH execute paths before a claim, so a
@@ -2835,6 +2835,40 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             except Exception as exc:
                 logger.warning("runbook_discovery_failed job=%s node=%s err=%r",
                                job_id, run_node.get("node_key"), exc)
+        # §17.1302 — is the step ALREADY done? Read its own verify checks off the
+        # machine first; when every one confirms the goal, record the step done
+        # with that evidence and ask about the NEXT step instead of this one.
+        # Bounded: a plan of already-met steps is walked, not recursed forever.
+        if _depth < 6:
+            try:
+                _met = await supervised_runs.already_met(spec, run_node, frame, _env)
+            except Exception as exc:
+                logger.warning("already_met_check_failed job=%s node=%s err=%r", job_id,
+                               run_node.get("node_key"), exc)
+                _met = None
+            if _met:
+                from datetime import datetime as _dt, timezone as _tz
+                _nk = run_node.get("node_key")
+                logger.warning("supervised_run_already_met job=%s node=%s checks=%d verdicts=%s", job_id, _nk,
+                               _met["checks"], [str(v.get("verdict")) for v in _met["verdicts"]])
+                _rec = supervised_runs.already_met_record(run_node, frame["runner"], _met)
+                async with async_session() as db:
+                    _upd = await db.execute(
+                        text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), "
+                             "started_at = COALESCE(started_at, NOW()), updated_at = NOW(), "
+                             "last_verification_reason = :why "
+                             "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+                        {"jid": job_id, "nk": _nk, "out": _rec,
+                         "why": f"already met: {_met['checks']} verify check(s) read off {frame['runner']} before the run confirm the goal"})
+                    if _upd.rowcount:
+                        await db.execute(
+                            text("UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{decisions}', "
+                                 "COALESCE(metadata->'decisions', '{}'::jsonb) || CAST(:patch AS jsonb)) WHERE id = :jid"),
+                            {"jid": job_id, "patch": json.dumps({_nk: {"by": "engine", "at": _dt.now(_tz.utc).isoformat(),
+                                                                       "result": "already_met", "checks": _met["checks"]}})})
+                    await db.commit()
+                if _upd.rowcount:
+                    return await _pause_for_decision(job_id, _depth + 1)
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

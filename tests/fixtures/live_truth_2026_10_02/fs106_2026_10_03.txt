@@ -1,0 +1,22 @@
+$ qm config 106 | grep -E "scsi0|ide2|ipconfig"
+boot: order=scsi0
+ide2: local-lvm:vm-106-cloudinit,media=cdrom
+ipconfig0: ip=192.168.1.106/24,gw=192.168.1.1
+scsi0: local-lvm:vm-106-disk-1,size=100G
+$ qm guest exec 106 -- lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+NAME      SIZE TYPE MOUNTPOINT
+loop0      74M loop /snap/core22/2955
+loop1   115.2M loop /snap/lxd/40911
+loop2    50.3M loop /snap/snapd/27738
+loop3    44.7M loop /snap/snapd/28254
+sda       100G disk 
+ââsda1   99.9G part /
+ââsda14     4M part 
+ââsda15   106M part /boot/efi
+sr0         4M rom
+$ qm guest exec 106 -- df -h /
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        97G  2.3G   95G   3% /
+$ qm guest exec 106 -- which growpart resize2fs
+/usr/bin/growpart
+/usr/sbin/resize2fs
