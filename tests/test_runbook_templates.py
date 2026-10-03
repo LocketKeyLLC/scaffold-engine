@@ -381,3 +381,23 @@ def test_the_container_template_verifies_inside_like_the_agent_template():
     assert sr.verify_commands(rb) == frame["verify"], "read-only through the wrapper"
     assert frame["refused"] == [] and frame["inputs"] == []
     assert [p.name for p in rt.RUN_IN_CONTAINER.params if p.source == "model"] == ["REMOTE_COMMANDS", "VERIFY_INSIDE"]
+
+
+# ───── §17.1308 — a refused template re-renders with the refusal in the draw
+
+@pytest.mark.asyncio
+async def test_a_redraft_keeps_the_template_and_hands_the_refusal_to_the_draw(monkeypatch):
+    import app.utils.llm_retry as lr
+    seen = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        seen.append(prompt)
+        return type("R", (), {"text": "```bash\napt-get install -y caddy\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    note = "- `/tmp/in_ct_120.sh: email aedefruscio@…` — appears nowhere the engine holds … Write `<ACME_EMAIL>`"
+    rb = await sr.draft_runbook(ADD100, {"description": "brief"}, "", retry_note=note, spec=None, environment=ENV, truth=_truth("ct"))
+    assert rt.template_of(rb) == rt.RUN_IN_CONTAINER.name, "the shape stays the engine's on a redraft"
+    assert seen and all("THE PREVIOUS ATTEMPT WAS REFUSED" in s and "<ACME_EMAIL>" in s for s in seen)
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def draft_runbook(")
+    assert "if truth is not None and for_channel:" in src[i:i + 3000] and "not retry_note and for_channel" not in src[i:i + 3000]

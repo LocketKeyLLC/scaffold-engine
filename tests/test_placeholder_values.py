@@ -76,7 +76,9 @@ async def test_the_draw_carries_the_context_into_the_prompt(monkeypatch):
     assert len(seen) == 2, "REMOTE_COMMANDS and VERIFY_INSIDE (§17.1307): one draw each"
     assert all("ADD56: the 406-byte Caddyfile" in s and "defrusciohomelab.duckdns.org" in s for s in seen), "every draw sees the plan"
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
-    assert "upstream=upstream, environment=environment)   # §17.1306" in src, "the drafter hands the draw what it hands the model path"
+    i = src.index("async def draft_runbook(")
+    assert "upstream=upstream, environment=environment," in src[i:i + 3000] and "retry_note=retry_note)" in src[i:i + 3000], \
+        "the drafter hands the draw what it hands the model path (§17.1306) and the refusal (§17.1308)"
 
 
 # ───── §17.1307 — an e-mail the engine holds nowhere was made up

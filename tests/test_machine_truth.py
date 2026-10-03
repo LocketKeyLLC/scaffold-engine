@@ -211,3 +211,23 @@ def test_the_live_stopped_caddy_container_reopens_its_recorded_start():
     rows = mt.contradictions(node, t, {"exists", "running"}, plan)
     assert [r["reopen"] for r in rows] == ["ADD110"]
     assert "container 120 is stopped" in rows[0]["fact"] and "ADD110" in rows[0]["fact"]
+
+
+def test_needs_resolve_the_scripts_own_guest_variable():
+    """§17.1308 — `GID=120` + `pct exec "$GID"` is a need for 120 to be running."""
+    node = {"node_key": "ADD88", "title": "Install Caddy and write the Caddyfile inside LXC 120", "description": ""}
+    script = {"path": "/tmp/in_ct_120.sh", "content": 'GID=120\npct status "$GID" | grep -q running || pct start "$GID"\npct push "$GID" /tmp/x /root/x\npct exec "$GID" -- bash /root/x\n'}
+    assert {"exists", "running", "has_os"} <= mt.step_needs(node, ["bash /tmp/in_ct_120.sh"], [script])
+    assert mt.step_needs(node, ["bash /tmp/in_ct_120.sh"], [{"path": "/tmp/x", "content": "GID=120\npct status \"$GID\"\n"}]) == {"exists"}
+
+
+def test_the_live_template_frame_reopens_the_recorded_start_end_to_end():
+    import json
+    fr = json.loads((FX / "add88_frame_template2_2026_10_03.json").read_text(encoding="utf-8"))
+    plan = [{"node_key": "ADD110", "title": "Start container 120 (caddy-proxy)", "status": "done"},
+            {"node_key": "ADD88", "title": fr["title"], "status": "pending"}]
+    node = {"node_key": "ADD88", "title": fr["title"], "description": "Install Caddy inside container 120 (caddy-proxy)."}
+    t = mt.truth_from_texts("120", inventory={"cts": {"120": "stopped"}, "vms": {}, "names": {}, "disks": {}}, plan=plan)
+    needs = mt.step_needs(node, fr["commands"], fr["files"])
+    assert "running" in needs
+    assert [r["reopen"] for r in mt.contradictions(node, t, needs, plan)] == ["ADD110"]

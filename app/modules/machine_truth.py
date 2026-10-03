@@ -178,7 +178,12 @@ def step_needs(node: Optional[dict], commands: list[str], files: Optional[list[d
     gid = subject_guest(node)
     if not gid:
         return set()
-    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    # §17.1308 — the engine's own templates write `GID=120` then `pct exec "$GID"`;
+    # read literally, no command named the guest, `needs` was {exists} alone and the
+    # stopped-guest row (and its reopen, §17.1307) never fired. Live: CT 120 stayed
+    # stopped and ADD110 stayed `done` through three pauses.
+    from app.modules.runbook_preconditions import resolve_ids
+    texts = [resolve_ids(str(c)) for c in commands or []] + [resolve_ids(str((f or {}).get("content") or "")) for f in files or []]
     joined = "\n".join(texts)
     needs = {"exists"}
     uses_ssh = bool(_SSH_RE.search(joined))
