@@ -321,6 +321,25 @@ async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTr
             if res.get("status") == "ok":
                 done.append(f"reopened {key}: {r['remedy'][:90]}")
                 logger.warning("machine_truth_reopened job=%s node=%s evidence=%r", job_id, key, r["evidence"][:120])
+                # §17.1309 — reopening alone changed nothing live: ADD110 went back to
+                # pending and the pause still parked ADD88, which comes first in
+                # execution order. The step that needs the guest running WAITS for
+                # the step that starts it: one dependency, no cascade, and the pause
+                # restarts so the start is asked about first.
+                cur = str((node or {}).get("node_key") or "")
+                deps = [str(d) for d in ((node or {}).get("depends_on") or [])]
+                if cur and cur != key and key not in deps:
+                    try:
+                        async with async_session() as db:
+                            res2 = await node_editor.edit_node(job_id, cur, {"depends_on": deps + [key]}, db=db, cascade=False,
+                                                              edited_by=f"engine:measured — {cur} needs the guest {key} starts")
+                        if not isinstance(res2, dict) or res2.get("status", "ok") == "ok":
+                            if node is not None:
+                                node["depends_on"] = deps + [key]
+                            done.append(f"{cur} now waits for {key}")
+                            logger.warning("machine_truth_dependency_added job=%s node=%s waits_for=%s", job_id, cur, key)
+                    except Exception as exc:
+                        logger.warning("machine_truth_dependency_failed job=%s node=%s waits_for=%s err=%r", job_id, cur, key, exc)
         except Exception as exc:
             logger.warning("machine_truth_reopen_failed job=%s node=%s err=%r", job_id, key, exc)
     return done

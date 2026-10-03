@@ -2602,6 +2602,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _did:
                     frame["engine_fixed"] = list(frame.get("engine_fixed") or []) + [f"measured {_truth.kind or 'guest'} {_truth.gid}: {d}" for d in _did]
                     logger.warning("machine_truth_reconciled job=%s node=%s did=%s", job_id, run_node.get("node_key"), _did)
+                    # §17.1309 — a reopened step this one now waits for is asked about FIRST:
+                    # this frame would park a step whose guest the reopened one starts.
+                    if any(d.startswith("reopened ") for d in _did) and any(" now waits for " in d for d in _did) and _depth < 6:
+                        logger.warning("decision_pause_restart_after_reopen job=%s node=%s did=%s", job_id, run_node.get("node_key"), _did)
+                        return await _pause_for_decision(job_id, _depth + 1)
             except Exception as exc:
                 logger.warning("machine_truth_reconcile_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
         # §17.1288n — the gate just contradicted the step's own text about how
@@ -2638,7 +2643,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if fix:
             logger.warning("supervised_run_redraft job=%s node=%s refusals=%s", job_id,
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
-            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env)
+            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env, truth=_truth)
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
                                                    preconditions=await _pre_for(retry))
@@ -2670,7 +2675,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                             logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s same=%s",
                                            job_id, run_node.get("node_key"), sorted(k1), sorted(k2), k2 == k1)
                             again = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix2,
-                                                                        spec=spec, environment=_env)
+                                                                        spec=spec, environment=_env, truth=_truth)
                             if again:
                                 third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
                                                                   preconditions=await _pre_for(again))
@@ -2699,7 +2704,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                            job_id, run_node.get("node_key"), sorted(k3))
                                             last = await supervised_runs.draft_runbook(run_node, _brief, up_block,
                                                                                        retry_note=fix3, spec=spec,
-                                                                                       environment=_env)
+                                                                                       environment=_env, truth=_truth)
                                             if last:
                                                 fourth = supervised_runs.frame_run(run_node, last, spec, policy, env=_env,
                                                                                    preconditions=await _pre_for(last))
@@ -2728,7 +2733,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _nc:
                     logger.warning("supervised_run_no_commands_redraft job=%s node=%s runbook_chars=%d",
                                    job_id, run_node.get("node_key"), len(runbook or ""))
-                    _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env)
+                    _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env, truth=_truth)
                     if _api:
                         _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
                                                           preconditions=await _pre_for(_api))
@@ -2758,7 +2763,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))
                 _vb = await supervised_runs.draft_runbook(run_node, _brief, up_block,
-                                                         retry_note=_nv, spec=spec, environment=_env)
+                                                         retry_note=_nv, spec=spec, environment=_env, truth=_truth)
                 if _vb:
                     _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
                                                    preconditions=await _pre_for(_vb))
@@ -2782,7 +2787,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
                 _wr = await supervised_runs.draft_runbook(run_node, _brief, up_block,
-                                                          retry_note=_ro, spec=spec, environment=_env)
+                                                          retry_note=_ro, spec=spec, environment=_env, truth=_truth)
                 if _wr:
                     _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
                                                      preconditions=await _pre_for(_wr))
@@ -2808,7 +2813,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
                 _again = await supervised_runs.draft_runbook(
-                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env)
+                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env, truth=_truth)
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
                                                        env=_env, preconditions=await _pre_for(_again))
