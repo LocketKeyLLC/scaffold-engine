@@ -2480,6 +2480,23 @@ def _order_of(node: dict) -> float:
         return float("inf")
 
 
+async def _record_engine_fact(job_id: str, fact: str) -> bool:
+    """§17.1288p — append one fact the ENGINE measured to the job's newest
+    assist session (the ledger `job_environment` reads). False when the job
+    has no session; a fact is never invented from blindness."""
+    from app.modules.assist_environment import set_environment
+    async with async_session() as db:
+        row = (await db.execute(
+            text("SELECT id FROM assist_sessions WHERE job_id = :j ORDER BY updated_at DESC LIMIT 1"),
+            {"j": job_id})).mappings().first()
+        if not row:
+            return False
+        await set_environment(session_id=str(row["id"]), facts=[f"ENGINE MEASURED: {fact}"], db=db)
+        await db.commit()
+    logger.warning("engine_fact_recorded job=%s fact=%r", job_id, fact[:120])
+    return True
+
+
 async def _pause_for_decision(job_id: str) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
@@ -2579,6 +2596,17 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook))
+        # §17.1288p — a precondition that is a DURABLE fact about a machine
+        # (a guest's disk has never been written: no OS) goes into the facts
+        # ledger, so the plan reconciles from it (§17.1089) instead of every
+        # later step rediscovering it. Transient ones (stopped, no key) do not.
+        for _r in frame.get("refused") or []:
+            if "has never been written" in str(_r.get("why") or ""):
+                try:
+                    await _record_engine_fact(job_id, str(_r.get("why") or "")[:400])
+                except Exception as exc:
+                    logger.warning("engine_fact_record_failed job=%s err=%r", job_id, exc)
+                break
         # §17.1288n — the gate just contradicted the step's own text about how
         # its guest is reached ("no way in … done at the console"); the text is
         # the engine's earlier judgment, so the engine corrects it -- appended,

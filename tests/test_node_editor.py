@@ -116,7 +116,7 @@ class TestEdit:
         with _patch_load(nodes):
             r = await node_editor.edit_node("j", "T1", {"tool": "CodeGen"}, db=_db())
         assert r["status"] == "ok"
-        assert r["reset"] == ["T1", "T2"]   # node + downstream invalidated
+        assert r["reset"] == ["T1"] and r["downstream_kept"] == ["T2"]   # §17.1288r — downstream kept unless cascade=True
 
     async def test_metadata_edit_does_not_reset(self):
         nodes = [_node("T1", status="done"), _node("T2", status="done", deps=["T1"])]
@@ -131,7 +131,7 @@ class TestEdit:
         with _patch_load(nodes):
             r = await node_editor.edit_node("j", "T1", {"prompt_template": "new prompt"}, db=_db())
         assert r["status"] == "ok"
-        assert r["reset"] == ["T1", "T2"]   # invalidating → resets node + downstream
+        assert r["reset"] == ["T1"] and r["downstream_kept"] == ["T2"]   # §17.1288r — invalidating resets the node; downstream opt-in
 
     async def test_optimized_prompt_no_longer_editable(self):
         """§17.614 (audit #11) — editing optimized_prompt alone is now a 400
@@ -320,3 +320,35 @@ def test_the_route_and_its_model_default_to_no_cascade():
     src = pathlib.Path(inspect.getfile(nodes_router)).read_text(encoding="utf-8")
     i = src.index("async def node_reset(")
     assert "cascade=bool(body.cascade) if body else False" in src[i:i + 1200]
+
+
+# ───── §17.1288r — an invalidating EDIT's cascade is opt-in too
+
+@pytest.mark.asyncio
+async def test_rewiring_a_failed_nodes_dependencies_touches_nothing_downstream_by_default():
+    """Live: making ADD82 and ADD65 depend on a new install step reset
+    twenty-one nodes behind them, sixteen of them `skipped` decisions."""
+    nodes = [
+        _node("T0", status="done"),
+        _node("T1", status="failed"), _node("T2", status="done", deps=["T1"]),
+        _node("T3", status="skipped", deps=["T2"]), _node("T4", status="pending", deps=["T3"]),
+    ]
+    with _patch_load(nodes):
+        r = await node_editor.edit_node("j", "T1", {"depends_on": ["T0"]}, db=_db())
+    assert r["status"] == "ok" and r["updated"] == ["depends_on"]
+    assert r["reset"] == ["T1"], "only the node edited"
+    assert r["downstream_kept"] == ["T2", "T3", "T4"]
+    with _patch_load(nodes):
+        r = await node_editor.edit_node("j", "T1", {"depends_on": ["T0"]}, db=_db(), cascade=True)
+    assert r["reset"] == ["T1", "T2", "T3", "T4"] and r["downstream_kept"] == []
+
+
+def test_the_edit_route_and_its_model_default_to_no_cascade():
+    import inspect, pathlib
+    from app import schemas
+    from app.routers import nodes as nodes_router
+    assert schemas.NodeEditInput().cascade is False
+    src = pathlib.Path(inspect.getfile(nodes_router)).read_text(encoding="utf-8")
+    i = src.index("async def node_edit(")
+    assert 'cascade = bool(data.pop("cascade", False))' in src[i:i + 1200]
+    assert "db=db, cascade=cascade" in src[i:i + 1200]

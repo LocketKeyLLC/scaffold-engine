@@ -103,9 +103,10 @@ async def node_edit(
     data = body.model_dump(exclude_unset=True)
     expected_version = data.pop("expected_version", None)
     edited_by = _attributed(principal, data.pop("edited_by", None))
+    cascade = bool(data.pop("cascade", False))               # §17.1288r
     return _dispatch(await node_editor.edit_node(
         job_id, node_key, data,
-        expected_version=expected_version, edited_by=edited_by, db=db,
+        expected_version=expected_version, edited_by=edited_by, db=db, cascade=cascade,
     ))
 
 

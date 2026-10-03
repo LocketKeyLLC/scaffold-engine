@@ -119,6 +119,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is ALREADY",                                   # §17.1240
                    "is already taken on this host",                # §17.1243
                    "there is no guest",                            # §17.1213
+                   "has never been written",                       # §17.1288p
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -1458,7 +1459,8 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     gid = ids[0]
     return [{"command": unreached[0], "why": (
         f"`{unreached[0][:70]}` runs in the runner's own shell on the Proxmox HOST, and the step is about "
-        f"VM/CT {gid} -- live, this would have installed qemu-guest-agent on the host instead of in VM 106 (a "
+        f"VM/CT {gid} -- it would change the HOST instead of guest {gid} (live, ADD82's agent install would have "
+        f"landed on the hypervisor) (a "
         f"`qm agent {gid} ping` beside it is a read and reaches nothing). Every command that CHANGES something must reach "
         f"the guest: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
         f"(needs the agent) or over ssh -- and a VM WITHOUT the agent is reached by finding its address from its MAC "

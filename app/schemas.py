@@ -785,6 +785,8 @@ class NodeEditInput(BaseModel):
     optimized_prompt: str | None = None
     tool: str | None = None
     depends_on: list[str] | None = None
+    #: §17.1288r — an invalidating edit resets the node; its downstream only when asked
+    cascade: bool = False
     assigned_model: str | None = None
     is_deliverable: bool | None = None
     expected_version: int | None = None

@@ -366,8 +366,14 @@ async def _bump_version(db: AsyncSession, job_id: str, node_key: str) -> None:
 async def edit_node(
     job_id: str, node_key: str, fields: dict, *,
     expected_version: int | None = None, edited_by: str | None = None,
-    db: AsyncSession,
+    db: AsyncSession, cascade: bool = False,
 ) -> dict:
+    """§17.1288r — an INVALIDATING edit (depends_on, prompt, …) of a node that
+    is not pending resets that node; the cascade over its transitive
+    downstream is OPT-IN, as §17.1284 made it for `reset_node`. Live: making
+    ADD82 and ADD65 depend on a new install step reset twenty-one nodes behind
+    them, un-doing sixteen `skipped` decisions settled weeks earlier (restored
+    from the pre-images). What was NOT touched is returned as ``downstream_kept``."""
     nodes = await _load_nodes(db, job_id)
     by_key = {n["node_key"]: n for n in nodes}
     node = by_key.get(node_key)
@@ -423,6 +429,7 @@ async def edit_node(
     # Output invalidation: an invalidating edit to an already-run node resets
     # it + transitive downstream (their inputs / this output are now stale).
     reset_keys: list[str] = []
+    downstream_kept: list[str] = []
     # §17.1211 — an edit that only REMOVES dependencies invalidates nothing.
     # The node ran; dropping a prerequisite it never actually needed does not
     # make what it produced stale. This reset fired on ANY `depends_on` change,
@@ -448,7 +455,9 @@ async def edit_node(
             for n in post_nodes:
                 if n["node_key"] == node_key:
                     n["depends_on"] = list(updates["depends_on"] or [])
-        downstream = _transitive_downstream(post_nodes, node_key)
+        all_downstream = _transitive_downstream(post_nodes, node_key)
+        downstream = all_downstream if cascade else set()          # §17.1288r — opt-in
+        downstream_kept = sorted(all_downstream - downstream)
         reset_keys = sorted({node_key} | downstream)
         await _reset_keys(db, job_id, reset_keys)
         await _reopen_job(db, job_id)
@@ -461,7 +470,7 @@ async def edit_node(
         job_id, node_key, list(updates), reset_keys,
     )
     return {"status": "ok", "node_key": node_key, "updated": list(updates),
-            "reset": reset_keys}
+            "reset": reset_keys, "downstream_kept": downstream_kept}
 
 
 async def insert_node(

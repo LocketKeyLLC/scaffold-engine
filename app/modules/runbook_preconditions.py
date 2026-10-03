@@ -90,6 +90,24 @@ def parse_qm_names(text_out: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in _QM_ROW.finditer(text_out or "")}
 
 
+#: `lvs -o lv_name,data_percent pve` → `vm-106-disk-0 0.00` (a thin LV; a thick one has no Data%)
+_LVS_ROW = re.compile(r"^\s*(vm-(\d{3,5})-(?:disk|cloudinit)-\d+)\s+\S+g?\s*(\d+\.\d{2})?(?=\s|$)", re.M)
+
+
+def parse_lvs(text_out: str) -> dict[str, list[dict]]:
+    """``{vmid: [{name, data_percent}]}`` — §17.1288p. `data_percent` is None
+    for a thick LV (nothing reported) and a float for a thin one; 0.0 means
+    the volume has never been written: no partition table, no OS."""
+    out: dict[str, list[dict]] = {}
+    for ln in (text_out or "").split("\n"):
+        m = _LVS_ROW.match(ln.rstrip())
+        if not m:
+            continue
+        pct = m.group(3)
+        out.setdefault(m.group(2), []).append({"name": m.group(1), "data_percent": float(pct) if pct else None})
+    return out
+
+
 async def read_inventory(spec) -> Optional[dict]:
     """§17.1288f — the two listings, read ONCE per pause and handed to every
     draft's `unmet`. ``None`` when the host cannot be read (then nothing is
@@ -101,7 +119,14 @@ async def read_inventory(spec) -> Optional[dict]:
     if not cts and not vms:
         logger.warning("preconditions_unreadable — nothing refused")
         return None
-    return {"cts": cts, "vms": vms, "names": parse_qm_names(qm_out)}
+    inv = {"cts": cts, "vms": vms, "names": parse_qm_names(qm_out)}
+    # §17.1288p — and what is ON the guests' disks, cheaply: a thin volume at
+    # Data% 0.00 has never been written, so the guest it belongs to has no OS.
+    lvs_out = await _read(spec, "lvs --noheadings -o lv_name,lv_size,data_percent pve")
+    inv["disks"] = parse_lvs(lvs_out)
+    isos = await _read(spec, "ls /var/lib/vz/template/iso")
+    inv["isos"] = [ln.strip() for ln in (isos or "").split("\n") if ln.strip().endswith(".iso")]
+    return inv
 
 
 #: §17.1288f — `VM 106`, `container 111`, `CT 120`: the guest a step is ABOUT.
@@ -224,6 +249,34 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             f"{tool} start {gid}`, then wait for it with a loop of reads, and only then find its address "
             f"(sweep the bridge's /24 and read `ip neigh` for its MAC, up to 12 × 5 s) and ssh."
             + (f" {fix} is the plan step that starts it, and it has not run yet." if fix else ""))})
+    # §17.1288p — the step reaches INTO a VM whose only disks have never been
+    # written: there is no OS to log into. Live, ADD82 ran twice against VM 106
+    # (`qm list` running, `bridge fdb` never saw its MAC, scsi0 read 222 KB in
+    # 30 min) before anyone read `lvs`: vm-106-disk-0 100G Data% 0.00, blkid
+    # empty. ADD5 "Install Ubuntu Server" was recorded done, and ADD53 later
+    # removed that disk (`pvesm free`) and created an empty one. The engine
+    # had the read all along.
+    disks = inv.get("disks") or {}
+    for gid in subjects:
+        if gid not in vms or not (uses_ssh or any(re.search(rf"\bqm\s+guest\s+exec\s+{gid}\b", t) for t in texts)):
+            continue
+        mine = [d for d in disks.get(gid, []) if "cloudinit" not in d["name"]]
+        if not mine or any(d["data_percent"] is None or d["data_percent"] > 0.0 for d in mine):
+            continue
+        names = ", ".join(d["name"] for d in mine)
+        installed = next((f"{n.get('node_key')} · {str(n.get('title'))[:50]}" for n in plan or []
+                          if (n.get("status") or "") == "done"
+                          and re.search(r"\binstall\b.*\b(?:ubuntu|debian|os|server)\b", str(n.get("title") or ""), re.I)
+                          and (gid in str(n.get("title") or "") or _norm((inv.get("names") or {}).get(gid, "")) in _norm(str(n.get("title") or "")))), "")
+        isos = ", ".join((inv.get("isos") or [])[:3]) or "none found in /var/lib/vz/template/iso"
+        out.append({"command": _first_line_with(texts, _SSH_RE) or f"ssh into {gid}", "why": (
+            f"VM {gid}'s disk {names} has never been written (`lvs` Data% 0.00; no partition table, no "
+            f"filesystem): there is no OS to log into, so an ssh or a guest agent cannot exist there yet. "
+            + (f"{installed} is recorded done, but a later step recreated the disk, so that install is gone. "
+               if installed else "")
+            + f"Ubuntu must be installed on VM {gid} before this step (ISOs on the host: {isos}) -- an OS "
+            f"install is a console step, or an autoinstall from the ISO; it is not this step.")})
+        break
     if not guests:
         if out:
             logger.warning("preconditions_unmet count=%d first=%r", len(out), out[0]["why"][:120])
