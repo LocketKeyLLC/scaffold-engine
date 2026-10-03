@@ -1,0 +1,44 @@
+{
+ "node_key": "ADD88",
+ "title": "Install Caddy and write the Caddyfile inside LXC 120",
+ "commands": [
+  "pct start 120",
+  "pct exec 120 -- apt-get update",
+  "pct exec 120 -- apt-get install -y caddy",
+  "pct exec 120 -- tee /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- tee -a /etc/caddy/Caddyfile",
+  "pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile",
+  "pct exec 120 -- systemctl enable --now caddy"
+ ],
+ "verify": [
+  "pct exec 120 -- caddy version",
+  "pct exec 120 -- wc -c /etc/caddy/Caddyfile",
+  "pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile",
+  "pct exec 120 -- systemctl is-active caddy"
+ ],
+ "runbook": "## Prerequisites\n\n- Container 120 (`caddy-proxy`) exists on this host\n- Caddy package is installed inside container 120\n\n## Run this\n\n```bash\npct start 120\n```\n\n```bash\npct exec 120 -- apt-get update\n```\n\n```bash\npct exec 120 -- apt-get install -y caddy\n```\n\n```bash\npct exec 120 -- tee /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- tee -a /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- caddy validate --config /etc/caddy/Caddyfile\n```\n\n```bash\npct exec 120 -- systemctl enable --now caddy\n```\n\n## Verify\n\n- Caddy is installed: `pct exec 120 -- caddy version`\n- Caddyfile exists with expected size: `pct exec 120 -- wc -c /etc/caddy/Caddyfile`\n- Config is valid: `pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile`\n- Caddy service is active: `pct exec 120 -- systemctl is-active caddy`\n\n## Rollback\n\n- If validation fails, inspect the file: `pct exec 120 -- cat /etc/caddy/Caddyfile`\n- To remove the bad config: `pct exec 120 -- rm /etc/caddy/Caddyfile`\n- To stop Caddy: `pct exec 120 -- systemctl stop caddy`",
+ "hands_on_reason": "writes:tee -a",
+ "inputs": [],
+ "refused": [
+  {
+   "why": "container 120 is stopped, so `pct exec` fails before it starts. Start it first (`pct start 120`).",
+   "command": "pct exec 120 -- apt-get update"
+  }
+ ],
+ "files": []
+}

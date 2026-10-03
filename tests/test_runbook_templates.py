@@ -345,3 +345,26 @@ def test_resize2fs_inside_the_guest_is_not_host_side_work():
     for host_side in ("Resize VM 106's disk to 100G", "qm resize 106 scsi0 +50G on the host", "Grow the VM 106 disk",
                       "Re-attach VM 106's detached disk and grow it to 100G"):
         assert rt._HOST_SIDE_RE.search(host_side), host_side
+
+
+# ───── §17.1305 — every template passes the MACHINE rules too, with its guest stopped
+
+@pytest.mark.asyncio
+async def test_every_template_passes_the_preconditions_with_its_guest_stopped():
+    """`frame_run` alone never ran `unmet`; live, run_in_container was refused for
+    the `pct push` its own script guards with a start. A template owns the start,
+    so a stopped guest must refuse nothing."""
+    from app.modules.runbook_preconditions import unmet
+    inv = {"cts": {"111": "stopped", "120": "stopped"}, "vms": {"106": "stopped"}, "names": {"106": "palworld-server"},
+           "disks": {}, "isos": ["ubuntu-22.04.3-live-server-amd64.iso"]}
+    cases = [
+        (rt.INSTALL_OS_CLOUDINIT, ADD117, mt.GuestTruth(gid="106", kind="vm", status="stopped"), {}),
+        (rt.REACH_VM_SSH_AND_RUN, ADD82, mt.GuestTruth(gid="106", kind="vm", status="stopped", key_known_by="ADD117 · Install Ubuntu 22.04 on VM 106 unattended"), {"REMOTE_COMMANDS": REMOTE}),
+        (rt.RUN_IN_VM_VIA_AGENT, ADD84, mt.GuestTruth(gid="106", kind="vm", status="stopped", agent=True), {"REMOTE_COMMANDS": "growpart /dev/sda 1", "VERIFY_INSIDE": "df -h /"}),
+        (rt.RUN_IN_CONTAINER, ADD100, mt.GuestTruth(gid="111", kind="ct", status="stopped"), {"REMOTE_COMMANDS": "apt-get update"}),
+    ]
+    for tpl, node, truth, model_vals in cases:
+        rb = rt.render(tpl, rt.values_for(tpl, node, truth, ENV, model_vals))
+        spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+        out = await unmet(sr.runbook_commands(rb), spec, plan=[], files=sr.file_writes(rb), node=node, inventory=inv, truth=truth)
+        assert out == [], (tpl.name, [o["why"][:140] for o in out])

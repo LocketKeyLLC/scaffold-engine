@@ -321,7 +321,15 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # `guests_in` preserves command order, so a create is always seen before the
     # start and the exec that follow it.
     made: set[str] = set()
+    # §17.1305 — a guest this very block STARTS before it reaches in is running by
+    # then. Live, ADD88's draft began `pct start 120` and its `pct exec 120` was
+    # refused as "stopped"; the engine's own run_in_container template (guarded
+    # start in the script, then push + exec) was refused the same way -- the
+    # rule read the listing and never the block. `guests_in` keeps command order.
+    started: set[str] = set()
     for tool, verb, gid in guests:
+        if verb == "start":
+            started.add(gid)
         cmd = next((c for c in commands if re.search(rf"\b{tool}\s+{verb}\s+{gid}\b", str(c))), f"{tool} {verb} {gid}")
         is_ct, is_vm = gid in cts, gid in vms
         if verb in _CREATES:
@@ -350,7 +358,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             out.append({"command": cmd, "why": f"there is no guest {gid} on this host — `pct list` and `qm list` do not have it."})
         elif verb in _NEEDS_RUNNING:
             status = cts.get(gid) if is_ct else vms.get(gid)
-            if status and status != "running":
+            if status and status != "running" and gid not in started:
                 fix = _step_that_starts(gid, plan)
                 kind = "container" if is_ct else "VM"
                 if verb == "reboot":
