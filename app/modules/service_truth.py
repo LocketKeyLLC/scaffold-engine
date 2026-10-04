@@ -410,6 +410,44 @@ _EDIT_RE = re.compile(r"\b(?:sed\s+-i|tee\s|cat\s*>|printf|echo)\b[^\n]*?(?P<pat
 _STOPS_RE = re.compile(r"\bsystemctl\s+stop\s+(?P<unit>[\w@.-]+)", re.I)
 
 
+#: §17.1358 — what precedes a `:port` in a URL or a host:port pair.
+_HOST_PORT_RE = re.compile(
+    r"(?:(?P<scheme>[a-z][a-z0-9+.-]*)://)?(?P<host>\[[0-9a-fA-F:]+\]|[A-Za-z0-9_.-]+):(?P<port>\d{2,5})\b")
+#: addresses that mean "this machine"
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]", "", "*"})
+#: §17.1358 — `"host": "…"` as a JSON field, with or without shell escaping
+_JSON_HOST_RE = re.compile(r'\\?"(?:host|hostname|server|address|url)\\?"\s*:\s*\\?"(?P<host>[^"\\]+)')
+
+
+def _reaches_another_host(seg: str, port: str) -> bool:
+    """Is this port reached at some OTHER machine's address?
+
+    §17.1358 — `127.0.0.1:8989` is a claim that the service is HERE; `192.168.1.24:8080`
+    or `<QBITTORRENT_IP>:8080` is a claim that it is somewhere else, which is what a
+    step wiring two services together must say. A bare port with no host at all
+    (`--port 8080`) is local.
+    """
+    for m in _HOST_PORT_RE.finditer(str(seg or "")):
+        if m.group("port") != str(port):
+            continue
+        host = (m.group("host") or "").strip().lower()
+        if host not in _LOCAL_HOSTS:
+            return True
+    # a placeholder the engine fills with another machine's address
+    if re.search(rf"<[A-Z][A-Z0-9_]*>:{re.escape(str(port))}\b", str(seg or "")):
+        return True
+    # §17.1358 — and the shape the *arr APIs actually use: the host and the port are
+    # separate JSON fields, escaped inside a shell-quoted body. Live, ADD132's draft
+    # sent `\"host\":\"<QBITTORRENT_IP>\",\"port\":8080` to Radarr, which is the
+    # download client's address, correctly stated.
+    if re.search(rf'\\?"port\\?"\s*:\s*"?{re.escape(str(port))}"?\b', str(seg or "")):
+        for m in _JSON_HOST_RE.finditer(str(seg or "")):
+            host = (m.group("host") or "").strip().lower()
+            if host and host not in _LOCAL_HOSTS:
+                return True
+    return False
+
+
 def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
                              services: list[ServiceTruth]) -> list[dict]:
     """§17.1346 — a command running in one guest using another guest's port or path.
@@ -444,6 +482,16 @@ def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
                     continue
                 if any((hit and hit in o.ports) or (path and path == o.data_dir) for o in mine):
                     continue                       # the same value exists here too
+                # §17.1358 — a port reached at ANOTHER HOST's address is not this
+                # mistake; it is how services talk. Live, ADD132's correct draft ran
+                # `pct exec 103 -- curl … <addr>:8080 …` to register the download
+                # client with Radarr, and this gate refused the one thing the step
+                # exists to do. The original defect was `127.0.0.1:8989` inside the
+                # wrong container, so the discriminator is the HOST in the value: a
+                # loopback or bare port is local and wrong, a real address or a name
+                # that is not this guest is remote and right.
+                if hit and _reaches_another_host(seg, hit):
+                    continue
                 out.append({"command": seg.strip()[:200], "why": (
                     f"this runs inside guest {here}, and {hit or path} belongs to {s.name} on guest "
                     f"{s.guest} (measured: " + s.says() + f"). Inside {here} there is nothing of {s.name}'s "

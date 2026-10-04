@@ -1,0 +1,10 @@
+{
+ "node_key": "ADD132",
+ "lines": [
+  "pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H \"X-Api-Key: '\"$RADARR_KEY\"'\" -H \"Content-Type: application/json\" -d \"{\\\"id\\\":1,\\\"name\\\":\\\"qBittorrent\\\",\\\"implementation\\\":\\\"QBittorrent\\\",\\\"enable\\\":true,\\\"host\\\":\\\"<QBITTORRENT_IP>\\\",\\\"port\\\":8080,\\\"movieCategory\\\":\\\"radarr\\\",\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"'\"$MASS_PASSWORD\"'\\\"}\" http://127.0.0.1:7878/api/v3/downloadclient/1'",
+  "pct exec 104 -- sh -c 'curl -s --fail-with-body -X PUT -H \"X-Api-Key: '\"$SONARR_KEY\"'\" -H \"Content-Type: application/json\" -d \"{\\\"id\\\":1,\\\"name\\\":\\\"qBittorrent\\\",\\\"implementation\\\":\\\"QBittorrent\\\",\\\"enable\\\":true,\\\"host\\\":\\\"<QBITTORRENT_IP>\\\",\\\"port\\\":8080,\\\"tvCategory\\\":\\\"tv-sonarr\\\",\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"'\"$MASS_PASSWORD\"'\\\"}\" http://127.0.0.1:8989/api/v3/downloadclient/1'"
+ ],
+ "verify": [
+  "pct exec 105 -- systemctl is-active qbittorrent-nox.service"
+ ]
+}
