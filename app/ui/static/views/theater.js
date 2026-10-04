@@ -32,6 +32,20 @@ export function streamDropDecision(status, attempt, maxAttempts) {
 }
 
 /** Frames to render from a replayed backlog after `seen` were already shown. */
+// §17.1337 — when the run parks or ends, nothing is running. `node_start` marks a
+// node running and only `node_done` / `node_failed` clear it, so a step the engine
+// previewed and then parked instead of claiming stayed on screen as "running" for
+// good. Live, 2026-10-04: the operator read "ADD122 is running" while the engine's
+// own status said that step was pending and the parked step was another one.
+export const CLEARS_RUNNING = new Set([
+  "awaiting_decision", "awaiting_assist", "pipeline_complete",
+  "execution_failed", "error", "budget_exhausted",
+]);
+
+export function clearsRunning(event) {
+  return CLEARS_RUNNING.has(String(event || ""));
+}
+
 export function framesAfter(frames, seen) {
   return Array.isArray(frames) ? frames.slice(Math.max(0, seen | 0)) : [];
 }
@@ -639,6 +653,14 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   function handleEvent(event, data) {
     data = data || {};
+    if (clearsRunning(event)) {
+      // §17.1337 — nothing runs while the job is parked or finished.
+      let cleared = false;
+      nodeState.forEach((n, key) => {
+        if (n && n.status === "running") { ensureNode(key, { status: "pending" }); cleared = true; }
+      });
+      if (cleared) renderNodes();
+    }
     switch (event) {
       case "queued":
         log("queued", `Queued (job ${shortId(data.job_id || jobId)})`);
