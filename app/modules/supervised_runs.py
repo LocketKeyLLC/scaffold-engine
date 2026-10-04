@@ -3393,8 +3393,13 @@ _NOT_A_UNIT = re.compile(r"^(?:-|/|\$|<|\d+$|--)")
 _UNIT_FILE_RE = "/(?:etc|lib|usr/lib|run)/systemd/system/[^\\s\"']*{u}\\.(?:service|socket|timer|target)"
 
 
+#: §17.1357 — the guest a line addresses: `pct exec 105 -- …`, `qm guest exec 106 -- …`.
+_IN_GUEST_LINE_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>\d{3,5})\b", re.I)
+
+
 def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
-                           node: Optional[dict], upstream: str = "", units: Optional[list[str]] = None) -> list[dict]:
+                           node: Optional[dict], upstream: str = "", units: Optional[list[str]] = None,
+                           units_by_guest: Optional[dict] = None) -> list[dict]:
     """§17.1327 — a systemd unit a block starts, enables or reads must be one that
     something the engine holds names AS A UNIT: this block writes its unit file,
     or a fact, pin, step text or earlier output mentions `<name>.service` (or a
@@ -3429,9 +3434,27 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
     for line in block.split("\n"):
         if line.lstrip().startswith("#"):
             continue
+        # §17.1357 — a unit is judged where it RUNS. `pct exec 105 -- systemctl …`
+        # is a question about guest 105's units, not the subject guest's: ADD132's
+        # correct `qbittorrent-nox.service` was refused because 103's list lacks it.
+        # A line naming no guest keeps the subject's list, so nothing else changes
+        # -- and `pct exec 103 -- systemctl restart qbittorrent-nox`, the right unit
+        # in the wrong container, is still refused, which a pooled list would not be.
+        _g = _IN_GUEST_LINE_RE.search(line)
+        line_units = ((units_by_guest or {}).get(_g.group("gid")) if _g else None)
+        if _g and line_units is None:
+            line_units = units                 # unmeasured guest: judge as before
+        if not _g:
+            line_units = units
         for m in _SYSTEMCTL_RE.finditer(line):
             unit = (m.group("unit") or "").strip().strip("'\"")
-            base = unit[:-len(m.group("suffix"))] if m.group("suffix") else unit
+            # §17.1357 — `unit` and `suffix` are SEPARATE groups, so `unit` never
+            # holds the `.service`, and subtracting its length chopped the name:
+            # `qbittorrent-nox.service` became `qbittor` (refused for a name
+            # nobody has — this is what stopped ADD132's correct draft) and
+            # `radarr.service` became `""`, which the next line skips, so the gate
+            # was blind to every `systemctl <name>.service` with a short name.
+            base = unit
             if not base or base in seen or _NOT_A_UNIT.match(base):
                 continue
             if base.lower() in _STOCK_UNITS or base.split("@", 1)[0].lower() in _STOCK_UNITS:
@@ -3440,22 +3463,22 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
             # the block writing the unit FILE is a source; `.service` in its own systemctl is not
             if re.search(_UNIT_FILE_RE.format(u=re.escape(base)), block):
                 continue
-            if base in (units or []):
+            if base in (line_units or []):
                 continue                  # §17.1327 — the machine HAS it; that settles it
             if names_as_unit(held, base):
                 continue
             import difflib
             candidates = sorted(({mm.group(1) for mm in re.finditer(r"\b([A-Za-z0-9@._-]{2,40})\.service\b", held)}
-                                 | {u for u in (units or []) if "@" not in u}) - _STOCK_UNITS)
+                                 | {u for u in (line_units or []) if "@" not in u}) - _STOCK_UNITS)
             near = difflib.get_close_matches(base, candidates, n=1, cutoff=0.55)
             where = line.strip()
-            held_by = "the guest has" if units else "the engine holds"
+            held_by = "the guest has" if line_units else "the engine holds"
             hint = (f" The unit {held_by} is `{near[0]}.service` — use that." if near else
                     (f" Units {held_by}: {', '.join(c + '.service' for c in candidates[:4])}." if candidates else
                      " Nothing names a unit for this step: write its unit file in this block first."))
             out.append({"command": where[:200], "why": (
                 f"`{unit}` is not a unit anything the engine holds names: " +
-                ("the guest's own `systemctl list-unit-files` does not have it" if units else
+                ("the guest's own `systemctl list-unit-files` does not have it" if line_units else
                  f"no fact, pin, step text or earlier output mentions `{base}.service`") +
                 ", and this block writes no unit file for it — so `systemctl` acts on a unit that does "
                 "not exist and reports a failure that is not about the work." + hint)})
@@ -4080,7 +4103,8 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
               units: Optional[list[str]] = None, inventory: Optional[dict] = None,
-              engine_address: Optional[str] = None, services: Optional[list] = None) -> dict:
+              engine_address: Optional[str] = None, services: Optional[list] = None,
+              units_by_guest: Optional[dict] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -4229,7 +4253,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + placeholder_values_in_files(cmds, files, env)
     refused = refused + invented_email_in_files(cmds, files, env, node)       # §17.1307
     refused = refused + unsourced_addresses_in_files(cmds, files, env, node, upstream)   # §17.1312
-    refused = refused + unsourced_service_name(cmds, files, env, node, upstream, units)  # §17.1327
+    # §17.1357 — judged against the units of the guest each line addresses
+    refused = refused + unsourced_service_name(cmds, files, env, node, upstream, units,
+                                              units_by_guest)  # §17.1327, §17.1357
     # §17.1288m — the held password is referenced, not asked for again; a
     # wait pings the guest, not the router. (A secret as an ARGUMENT by name,
     # `--key $TOKEN`, is the §17.1191/1193 contract and is not refused.)

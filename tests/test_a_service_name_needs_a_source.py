@@ -110,7 +110,11 @@ def test_every_frame_in_the_pause_carries_the_measured_units():
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
     assert body.count("supervised_runs.frame_run(") >= 8
-    assert body.count("units=(_truth.units if _truth is not None else None)") == body.count("supervised_runs.frame_run(")
+    # §17.1357 — the units are computed ONCE (the subject guest's list plus the
+    # units measured on the step's other guests, by guest) and every frame carries
+    # both. Eight copies of the expression is how sibling call sites drift.
+    assert body.count("units=_units, units_by_guest=_units_by_guest") == body.count("supervised_runs.frame_run(")
+    assert "units=(_truth.units if _truth is not None else None)" not in body
 
 
 def test_the_engines_own_templates_name_only_units_they_write():
