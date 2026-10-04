@@ -103,13 +103,16 @@ def test_the_model_fills_one_fence_and_nothing_else():
 def test_the_drafter_renders_a_template_first_and_the_pause_measures_before_drafting():
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("async def draft_runbook(")
-    assert "truth=None" in src[i:i + 400] and "rt.select_template(node, truth)" in src[i:] and "rt.render(tpl" in src[i:]
-    assert src.index("rt.select_template(node, truth)", i) < src.index("prompt = build_base_prompt(node, b, environment)", i)
+    # §17.1351 — the selector also receives the MEASURED services, so a step that
+    # touches several guests is drafted from no single-guest template.
+    assert "truth=None" in src[i:i + 400] and "rt.select_template(node, truth, services)" in src[i:] \
+        and "rt.render(tpl" in src[i:]
+    assert src.index("rt.select_template(node, truth, services)", i) < src.index("prompt = build_base_prompt(node, b, environment)", i)
     from app.modules import execution_agent as ea
     esrc = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     j = esrc.index("async def _pause_for_decision(")
     ebody = esrc[j:esrc.index("\nasync def ", j + 10)]
-    assert ebody.index("machine_truth.read_guest_truth(") < ebody.index("spec=spec, environment=_env, truth=_truth)")
+    assert ebody.index("machine_truth.read_guest_truth(") < ebody.index("spec=spec, environment=_env, truth=_truth, services=_services)")
 
 
 # ───── §17.1290b — the first live pass: the import, and the OS-install step is not blocked by the empty disk
