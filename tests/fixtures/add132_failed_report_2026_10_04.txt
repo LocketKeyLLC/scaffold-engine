@@ -1,0 +1,288 @@
+## Inputs needed
+
+None — all values are already stored or read from the machines.
+
+## Risk
+
+- qBittorrent's service must be stopped to edit its config safely (it rewrites the file on shutdown). The WebUI will be briefly unavailable.
+- The password hash is written to qBittorrent's config file. The hash is PBKDF2-HMAC-SHA512 with a random salt — it cannot be reversed, but the file should remain readable only by the qbittorrent-nox user.
+
+## Write these files
+
+### /tmp/set_qbit_auth.sh
+```bash
+#!/bin/bash
+set -e
+
+# 1. Hash the password on the host
+HASH=$(python3 - <<'EOF'
+import base64, hashlib, os
+salt = os.urandom(16)
+key = hashlib.pbkdf2_hmac('sha512', os.environ['MASS_PASSWORD'].encode(), salt, 100000, 64)
+print('@ByteArray(<REDACTED:salt:key>).decode() + ':' + base64.b64encode(key).decode() + ')')
+EOF
+)
+
+# 2. Stop qBittorrent, set username and hash under [Preferences], start it
+pct exec 105 -- systemctl stop qbittorrent-nox.service
+pct exec 105 -- sed -i '/^\[Preferences\]/a WebUI\\Username=admin\nWebUI\\Password_PBKDF2='"$HASH" /var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf
+pct exec 105 -- systemctl start qbittorrent-nox.service
+
+# 3. Prove the login from the host
+sleep 2
+LOGIN=$(curl -s -d "username=admin&password=$MASS_PASSWORD" http://192.168.1.24:8080/api/v2/auth/login)
+if [ "$LOGIN" != "Ok." ]; then
+    echo "LOGIN FAILED: $LOGIN"
+    exit 1
+fi
+echo "qBittorrent login: Ok."
+
+# 4. Tell Radarr and Sonarr the credentials through their APIs
+RADARR_KEY=$(pct exec 103 -- sh -c 'cat /var/lib/radarr/config.xml | sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1')
+SONARR_KEY=$(pct exec 104 -- sh -c 'cat /var/lib/sonarr/config.xml | sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1')
+
+# Radarr: update download client (id 1) with username/password
+pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: '"$RADARR_KEY"'" -H "Content-Type: application/json" -d "{\"id\":1,\"name\":\"qBittorrent\",\"implementation\":\"QBittorrent\",\"enable\":true,\"host\":\"192.168.1.24\",\"port\":8080,\"movieCategory\":\"radarr\",\"username\":\"admin\",\"password\":\"'"$MASS_PASSWORD"'\"}" http://127.0.0.1:7878/api/v3/downloadclient/1'
+
+# Sonarr: update download client (id 1) with username/password
+pct exec 104 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: '"$SONARR_KEY"'" -H "Content-Type: application/json" -d "{\"id\":1,\"name\":\"qBittorrent\",\"implementation\":\"QBittorrent\",\"enable\":true,\"host\":\"192.168.1.24\",\"port\":8080,\"tvCategory\":\"tv-sonarr\",\"username\":\"admin\",\"password\":\"'"$MASS_PASSWORD"'\"}" http://127.0.0.1:8989/api/v3/downloadclient/1'
+
+# 5. Test the connections
+echo "--- Radarr test ---"
+pct exec 103 -- sh -c 'curl -s --fail-with-body -X POST -H "X-Api-Key: '"$RADARR_KEY"'" -H "Content-Type: application/json" -d "{\"id\":1}" http://127.0.0.1:7878/api/v3/downloadclient/test'
+
+echo "--- Sonarr test ---"
+pct exec 104 -- sh -c 'curl -s --fail-with-body -X POST -H "X-Api-Key: '"$SONARR_KEY"'" -H "Content-Type: application/json" -d "{\"id\":1}" http://127.0.0.1:8989/api/v3/downloadclient/test'
+```
+
+## Run this
+
+```bash
+MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/set_qbit_auth.sh
+```
+
+## Verify
+
+- `curl -s -d "username=admin&password=$MASS_PASSWORD" http://192.168.1.24:8080/api/v2/auth/login` — output must be exactly `Ok.`
+- `pct exec 103 -- sh -c 'curl -s -H "X-Api-Key: $(cat /var/lib/radarr/config.xml | sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1)" http://127.0.0.1:7878/api/v3/downloadclient'` — output must show `"enable": true` and `"username": "admin"` for the qBittorrent entry
+- `pct exec 104 -- sh -c 'curl -s -H "X-Api-Key: $(cat /var/lib/sonarr/config.xml | sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1)" http://127.0.0.1:8989/api/v3/downloadclient'` — output must show `"enable": true` and `"username": "admin"` for the qBittorrent entry
+
+## Rollback
+
+If the login fails or the hash is rejected:
+
+```bash
+pct exec 105 -- systemctl stop qbittorrent-nox.service
+pct exec 105 -- sed -i '/^WebUI\\Username=admin$/d; /^WebUI\\Password_PBKDF2=/d' /var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf
+pct exec 105 -- systemctl start qbittorrent-nox.service
+```
+
+This removes the credentials and restores the previous no-auth state.
+
+## Executed on pve-runner (supervised, operator-approved)
+$ write /tmp/set_qbit_auth.sh (2618 bytes)
+wrote /tmp/set_qbit_auth.sh (2618 bytes, 42 lines)
+$ MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/set_qbit_auth.sh
+qBittorrent login: Ok.
+[
+  {
+    "propertyName": "ConfigContract",
+    "errorMessage": "\u0027Config Contract\u0027 must not be empty.",
+    "severity": "error",
+    "errorCode": "NotEmptyValidator",
+    "formattedMessageArguments": [],
+    "formattedMessagePlaceholderValues": {
+      "propertyName": "Config Contract",
+      "propertyValue": null
+    }
+  },
+  {
+    "propertyName": "Priority",
+    "errorMessage": "\u0027Priority\u0027 must be between 1 and 50. You entered 0.",
+    "attemptedValue": 0,
+    "severity": "error",
+    "errorCode": "InclusiveBetweenValidator",
+    "formattedMessageArguments": [],
+    "formattedMessagePlaceholderValues": {
+      "from": 1,
+      "to": 50,
+      "value": 0,
+      "propertyName": "Priority",
+      "propertyValue": 0
+    }
+  }
+]
+rc=22
+
+## What went wrong, and what to try
+
+## 👉 Do this next
+
+📍 On: the Proxmox host shell (root@pve)
+
+**Run this now:**
+
+**Paste 1 of 3** — wait for the prompt to come back before the next one. If the prompt turns into `>` instead of coming back, the paste was clipped — press Ctrl-C and tell me.
+
+```bash
+cat > /tmp/fix_qbit_auth.py <<'EOF'
+import json, os, re, subprocess, sys
+
+def run_pct(ct, cmd, input_data=None):
+    args = ['pct','exec',str(ct),'--','sh','-c',cmd]
+    r = subprocess.run(args, input=input_data, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"pct exec {ct} failed: {r.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return r.stdout
+
+def get_api_key(ct, path):
+    xml = run_pct(ct, f'cat {path}')
+    m = re.search(r'<ApiKey>(.*?)</ApiKey>', xml)
+    if not m:
+        print(f"No ApiKey found in {path} for CT {ct}", file=sys.stderr)
+        sys.exit(1)
+    return m.group(1)
+
+def get_clients(ct, port, key):
+    cmd = f"curl -s -H 'X-Api-Key: {key}' http://127.0.0.1:{port}/api/v3/downloadclient"
+    out = run_pct(ct, cmd)
+    return json.loads(out)
+
+def update_client(ct, port, key, client):
+    payload = json.dumps(client)
+    put_cmd = f"curl -s -X PUT -H 'X-Api-Key: {key}' -H 'Content-Type: application/json' -d @- http://127.0.0.1:{port}/api/v3/downloadclient/{client['id']}"
+    out = run_pct(ct, put_cmd, input_data=payload)
+    return out
+
+def test_client(ct, port, key, client):
+    payload = json.dumps(client)
+EOF
+```
+
+**Paste 2 of 3** — wait for the prompt to come back before the next one.
+
+```bash
+cat >> /tmp/fix_qbit_auth.py <<'EOF'
+    test_cmd = f"curl -s -X POST -H 'X-Api-Key: {key}' -H 'Content-Type: application/json' -d @- http://127.0.0.1:{port}/api/v3/downloadclient/test"
+    out = run_pct(ct, test_cmd, input_data=payload)
+    return out
+
+def main():
+    password = os.environ.get('MASS_PASSWORD')
+    if not password:
+        print("MASS_PASSWORD not set", file=sys.stderr)
+        sys.exit(1)
+    targets = [
+        (103, 7878, '/var/lib/radarr/config.xml', 'Radarr'),
+        (104, 8989, '/var/lib/sonarr/config.xml', 'Sonarr'),
+    ]
+    for ct, port, cfg_path, name in targets:
+        key = get_api_key(ct, cfg_path)
+        clients = get_clients(ct, port, key)
+        qbit = None
+        for c in clients:
+            if c.get('implementation') == 'QBittorrent' or c.get('name') == 'qBittorrent':
+                qbit = c
+                break
+        if not qbit:
+            print(f"{name}: no qBittorrent download client found", file=sys.stderr)
+            sys.exit(1)
+        for field in qbit.get('fields', []):
+            if field.get('name') == 'username':
+                field['value'] = 'admin'
+            elif field.get('name') == 'password':
+EOF
+```
+
+**Paste 3 of 3** — wait for the prompt to come back before the next one.
+
+```bash
+cat >> /tmp/fix_qbit_auth.py <<'EOF'
+                field['value'] = password
+        out = update_client(ct, port, key, qbit)
+        if 'error' in out.lower() or 'must not be empty' in out.lower():
+            print(f"{name} update failed: {out}", file=sys.stderr)
+            sys.exit(1)
+        print(f"{name} update: OK")
+        out = test_client(ct, port, key, qbit)
+        if 'error' in out.lower() or 'must not be empty' in out.lower():
+            print(f"{name} test failed: {out}", file=sys.stderr)
+            sys.exit(1)
+        print(f"{name} test: OK")
+    print("All done.")
+
+if __name__ == '__main__':
+    main()
+EOF
+```
+
+**Then confirm it arrived intact** — this must print `2876`. Any other number means a paste was clipped; tell me the number and we redo that piece.
+
+```bash
+wc -c /tmp/fix_qbit_auth.py
+```
+
+```bash
+MASS_PASSWORD="$MASS_PASSWORD" python3 /tmp/fix_qbit_auth.py
+```
+
+Then tell me what it shows.
+
+## Diagnosis
+
+The script tried to **create a brand-new download client** in Radarr and Sonarr, but it sent an incomplete payload. Radarr/Sonarr require `configContract` and `priority` (1–50) on every download client, and the script left them out — so the API rejected it with exactly those two validation errors.
+
+The qBittorrent client **already exists** in both apps (you measured it earlier). The correct move is to **update the existing client** with the username and password, not create a new one. Updating preserves all the required fields automatically.
+
+## Fix
+
+The command above writes a corrected Python script and runs it. It does this:
+
+1. Reads the API key from each container's `config.xml`.
+2. Fetches the existing download client list.
+3. Finds the qBittorrent client.
+4. Sets `username` to `admin` and `password` to the value of `MASS_PASSWORD` (which is already in your environment — it never appears on a command line or in a file).
+5. Sends the **full existing client object back** with `PUT`, so `configContract` and `priority` stay intact.
+6. Runs each app's `downloadclient/test` endpoint.
+
+You should see four lines of output:
+
+```
+Radarr update: OK
+Radarr test: OK
+Sonarr update: OK
+Sonarr test: OK
+All done.
+```
+
+If you see any line that says `failed`, stop and share that line.
+
+## Then
+
+Run this to confirm the qBittorrent login still works (it already printed `Ok.` earlier, but this re-checks it):
+
+```bash
+curl -s -d "username=admin&password=$MASS_PASSWORD" http://192.168.1.24:8080/api/v2/auth/login
+```
+
+You should see exactly:
+
+```
+Ok.
+```
+
+If all four lines from the script say `OK` and the login prints `Ok.`, the step is done — Radarr and Sonarr can now authenticate to qBittorrent.
+
+## If that fails
+
+If the script prints `Radarr update: failed` or `Sonarr update: failed`, run this to see the current download client structure:
+
+```bash
+pct exec 103 -- sh -c 'curl -s -H "X-Api-Key: $(cat /var/lib/radarr/config.xml | sed -n "s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p" | head -n 1)" http://127.0.0.1:7878/api/v3/downloadclient'
+```
+
+Paste the output back. It will show whether the qBittorrent client is missing, has a different `implementation` name, or is missing the `username`/`password` fields.
+
+---
+ℹ️ **Adjusted for your system:** split a 2988-character block into 3 pastes with a byte-count check, because a block this size arrives truncated in most terminals.
