@@ -45,13 +45,16 @@ READS_BACK = [
 # ------------------------------------------------- which calls change state
 
 
-def test_the_live_block_changes_three_apis():
-    assert sorted(api_ports_changed(TEXTS)) == ["7878", "8080", "8989"]
+def test_the_live_block_changes_the_two_arr_apis():
+    """8080 appears in the block too, but only as `…/api/v2/auth/login`, which
+    changes no configuration (§17.1362b)."""
+    assert sorted(api_ports_changed(TEXTS)) == ["7878", "8989"]
+    assert "8080/api/v2/auth/login" in "".join(TEXTS)
 
 
 def test_an_explicit_method_and_a_body_both_count():
     assert sorted(api_ports_changed(["curl -X PUT http://h:7878/api/v3/x"])) == ["7878"]
-    assert sorted(api_ports_changed(["curl -d 'a=b' http://h:8080/api/v2/auth/login"])) == ["8080"]
+    assert sorted(api_ports_changed(["curl -d 'a=b' http://h:8080/api/v2/app/setPreferences"])) == ["8080"]
     assert sorted(api_ports_changed(["curl --json '{}' http://h:9117/api/x"])) == ["9117"]
 
 
@@ -107,7 +110,7 @@ def test_the_files_are_read_too():
     assert FRAME["commands"] == ['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/set_qbit_auth.sh']
     assert api_ports_changed(FRAME["commands"]) == {}
     assert sorted(api_ports_changed([f["content"] for f in FRAME["files"]])) == \
-        ["7878", "8080", "8989"]
+        ["7878", "8989"]
     # so without the files there is nothing to judge, and with them there is
     assert changes_an_api_without_reading_it(FRAME["commands"], FRAME["verify"], None) == []
     assert changes_an_api_without_reading_it(FRAME["commands"], FRAME["verify"], FRAME["files"])
@@ -124,3 +127,58 @@ def test_the_framer_runs_it():
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr.frame_run)
     assert "changes_an_api_without_reading_it(cmds, verify, shape_files)" in src
+
+
+# ------------------------------- §17.1362b — a login changes no configuration
+
+
+def test_a_login_is_not_a_change():
+    r"""Live, the frame after §17.1362 shipped. The redraft read BOTH \*arrs back
+    (7878 and 8989) and was still refused — for port 8080, where the only call is
+
+        curl -s -d "username=admin&password=…" http://192.168.1.24:8080/api/v2/auth/login
+
+    followed by `if [ "$LOGIN_RESULT" != "Ok." ]; then exit 1`. That login changes
+    no configuration: qBittorrent's password was set by editing its config, and the
+    login is how the block PROVES it. Asking for a check that "reads back" a change
+    the API never made is asking for nothing.
+    """
+    login = ('curl -s -d "username=admin&password=$MASS_PASSWORD" '
+             'http://192.168.1.24:8080/api/v2/auth/login')
+    assert api_ports_changed([login]) == {}
+
+
+def test_every_authentication_verb_is_exempt():
+    for verb in ("login", "logout", "signin", "signout", "token", "session",
+                 "authenticate", "auth"):
+        assert api_ports_changed([f"curl -d x http://h:8080/api/v2/{verb}"]) == {}, verb
+
+
+def test_configuring_authentication_is_still_a_change():
+    """`/api/v3/authentication` sets up auth; only the VERB at the end is exempt."""
+    assert sorted(api_ports_changed(
+        ["curl -X POST -d '{}' http://127.0.0.1:7878/api/v3/authentication"])) == ["7878"]
+    assert sorted(api_ports_changed(
+        ["curl -X PUT -d '{}' http://127.0.0.1:7878/api/v3/config/host"])) == ["7878"]
+
+
+def test_the_corpus_only_post_endpoint_is_still_a_change():
+    """Measured: `/api/v3/rootfolder` (ADD131) is the one POST-shaped endpoint in
+    the whole recorded history, and it is a real configuration change."""
+    assert sorted(api_ports_changed(
+        ["curl -X POST -d '{}' http://127.0.0.1:7878/api/v3/rootfolder"])) == ["7878"]
+
+
+def test_a_url_with_no_path_still_counts():
+    assert sorted(api_ports_changed(["curl -X POST -d x http://h:9091"])) == ["9091"]
+
+
+def test_the_live_frame_after_the_amendment_passes():
+    r"""The frame that was refused for 8080 alone: with both \*arrs read back and
+    the login exempt, nothing is left to refuse."""
+    arrs_read_back = [
+        "pct exec 103 -- sh -c 'curl -s -H \"X-Api-Key: $K\" http://127.0.0.1:7878/api/v3/downloadclient'",
+        "pct exec 104 -- sh -c 'curl -s -H \"X-Api-Key: $K\" http://127.0.0.1:8989/api/v3/downloadclient'",
+    ]
+    assert changes_an_api_without_reading_it(
+        FRAME["commands"], arrs_read_back, FRAME["files"]) == []
