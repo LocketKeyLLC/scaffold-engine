@@ -316,10 +316,35 @@ _APP_ID_RE = re.compile(r"(?:app_update|app\s*id|appid)\D{0,12}(\d{4,8})", re.I)
 _KNOWN_APPS = {"palworld": "2394010", "valheim": "896660", "satisfactory": "1690800", "rust": "258550", "enshrouded": "2278520",
                "ark": "376030", "zomboid": "380870", "v rising": "1829350", "7 days": "294420", "cs2": "730"}
 _GAME_RE = re.compile(r"\b(palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b", re.I)
+#: §17.1339 — a GAME word that is not half of a guest's name. Live, "Install the
+#: control panel's public key on VM 106 (palworld-server)" matched
+#: `install … palworld … server`: the guest's own name supplied both halves, and the
+#: frame came back as a 4.6 GB SteamCMD install with Run suggested. A hyphenated
+#: `palworld-server` is a NAME; `the PalWorld dedicated server` is a game.
+_GAME_WORD = (r"(?:palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)"
+              r"(?!\s*-\s*server)")
+_SERVER_WORD = r"(?<!-)(?<!-\s)\bserver\b"
+#: §17.1339 — and the step's own OBJECT. A key, a certificate, a driver, a package
+#: or an agent is not a game server, however the guest is named.
+_NOT_A_GAME_OBJECT_RE = re.compile(
+    r"\b(?:ssh\s+key|public\s*key|keypair|key\s+pair|authorized_keys|certificate|cert\b|driver|"
+    r"guest\s+agent|qemu-guest-agent|nameserver|package|apt\b|firewall|nginx|caddy|reverse\s+proxy)\b", re.I)
 _STEAM_TITLE_RE = re.compile(
     r"(?i)(?:\b(?:install|set\s*up|deploy)\b.*\b(?:steamcmd|dedicated\s+server|app_update)\b"
-    r"|\b(?:install|set\s*up|deploy)\b.*\b(?:palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b.*\bserver\b"
-    r"|\b(?:palworld|valheim|satisfactory|rust|enshrouded|ark|zomboid|v\s*rising|7\s*days|cs2)\b.*\bserver\b.*\binstall)")
+    r"|\b(?:install|set\s*up|deploy)\b.*\b" + _GAME_WORD + r"\b.*" + _SERVER_WORD
+    + r"|\b" + _GAME_WORD + r"\b.*" + _SERVER_WORD + r".*\binstall)")
+
+
+def names_a_game_install(title: str) -> bool:
+    """§17.1339 — does this TITLE name the install of a game server?
+
+    Not when the only game word is half of the guest's name, and not when the
+    step's object is something else entirely (a key, a driver, an agent).
+    """
+    t = str(title or "")
+    if _NOT_A_GAME_OBJECT_RE.search(t):
+        return False
+    return bool(_STEAM_TITLE_RE.search(t))
 
 
 def derive_param(name: str, node: dict) -> str:
@@ -345,7 +370,7 @@ INSTALL_STEAM_SERVER = Template(
     # the TITLE names the install of a game/dedicated server; a description that merely mentions the
     # guest "palworld-server" (ADD82: install the guest agent in it) does not make a step a game install
     applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(getattr(truth, "agent", False))
-                                and bool(_STEAM_TITLE_RE.search(str((node or {}).get("title") or "")))
+                                and names_a_game_install(str((node or {}).get("title") or ""))
                                 and not _INSTALL_OS_RE.search(_text(node)),
     params=[
         Param("GID", "subject"),
@@ -441,6 +466,30 @@ _IN_GUEST_SIGNAL_RE = re.compile(
     r"|\b(?:enabled|active|listening)\b|\b(?:UDP|TCP)\s*\d{2,5}\b|\bport\s*\d{2,5}\b", re.I)
 
 
+#: §17.1339b — `pct exec 111`, `qm guest exec 106`, `pct push 103`: the HOST's way of
+#: doing work inside a named guest.
+_HOST_INTO_GUEST_RE = re.compile(
+    r"\b(?:pct|qm)\s+(?:guest\s+)?(?:exec|push|pull|set|config|start|stop|reboot)\s+(\d{3,5})\b", re.I)
+
+
+def guests_the_host_is_told_to_touch(node: dict) -> set[str]:
+    """The guest ids a step's own text addresses through host commands."""
+    return {m.group(1) for m in _HOST_INTO_GUEST_RE.finditer(_text(node))}
+
+
+def spans_guests(node: dict) -> bool:
+    """§17.1339b — does this step's work cross more than one guest?
+
+    Live, the step that gives the panel a key reads it from container 111 and
+    appends it on VM 106. Every guest template serves ONE guest, so a step that
+    names two cannot be drafted from any of them; its words ("service", "inside
+    the container") made `_IN_GUEST_SIGNAL_RE` fire and it went to a single-guest
+    template, which drafted work in the wrong machine. Two guests addressed from
+    the host is host-side work, whatever words are in view.
+    """
+    return len(guests_the_host_is_told_to_touch(node)) >= 2
+
+
 def host_side_only(node: dict) -> bool:
     """§17.1329 — is this step host-side work ONLY?
 
@@ -453,6 +502,8 @@ def host_side_only(node: dict) -> bool:
     wins only when nothing in the text points inside the guest.
     """
     text = _text(node)
+    if spans_guests(node):                      # §17.1339b — no single-guest template fits
+        return True
     return bool(_HOST_SIDE_RE.search(text)) and not _IN_GUEST_SIGNAL_RE.search(text)
 
 

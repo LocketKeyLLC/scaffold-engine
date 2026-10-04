@@ -1,0 +1,20 @@
+{
+ "ADD135": {
+  "node_key": "ADD135",
+  "title": "Make the machines that serve the operator's goals start on boot",
+  "description": "MEASURED 2026-10-03 23:56 UTC, after the Proxmox host rebooted: `grep -H onboot /etc/pve/lxc/*.conf /etc/pve/qemu-server/*.conf` shows `onboot: 1` on containers 101 jellyfin, 102 prowlarr, 103 radarr, 104 sonarr, 105 download-client and 130 pihole, and NOTHING for VM 106 palworld-server, CT 111 control-panel or CT 120 caddy-proxy. So a power event leaves the game server, the panel and the proxy that exposes it stopped, with nobody told: after this reboot all three were down while the media stack came back by itself. Set the boot flag on those three (`qm set 106 --onboot 1`, `pct set 111 --onboot 1`, `pct set 120 --onboot 1`), and give them a start order so the proxy comes up after the panel it fronts (`--startup order=...`). Leave VM 100 gpu-vm and VM 110 ai-vm alone: they are workbenches the operator starts when needed, not services anyone reaches from outside. Done when `grep -H 'onboot\\|startup' /etc/pve/qemu-server/106.conf /etc/pve/lxc/111.conf /etc/pve/lxc/120.conf` shows the flag on all three.",
+  "status": "pending"
+ },
+ "ADD137": {
+  "node_key": "ADD137",
+  "title": "Give the control panel an ssh key it can use on VM 106 (palworld-server)",
+  "description": "The panel's Palworld page reads and writes the game server's own settings file over ssh, from container 111 to VM 106, every time the operator opens it. Nothing has given that service a credential there, so without this step the page fails with publickey the first time it is used while the step that wrote it still reports success.\n\nMEASURED 2026-10-04: `control-panel.service` in CT 111 declares no `User=`, so the panel runs as root (`ExecStart=/usr/bin/node server.js`) and /root/.ssh already exists there. VM 106 is at 192.168.1.106 and `/home/aedefruscio/.ssh/authorized_keys` is present, 824 bytes, 2 keys.\n\nThis is HOST-SIDE work across two guests, so it runs from the Proxmox host with `pct exec` and `qm guest exec`, not inside either guest:\n  1. `pct exec 111 -- sh -c 'test -f /root/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N \"\" -f /root/.ssh/id_ed25519'` -- no passphrase, because a service cannot type one.\n  2. `pct exec 111 -- cat /root/.ssh/id_ed25519.pub` -- read the public key.\n  3. Keep a copy of the target first, then APPEND that one line on VM 106 through its agent: `qm guest exec 106 -- sh -c 'cp -a /home/aedefruscio/.ssh/authorized_keys /home/aedefruscio/.ssh/authorized_keys.bak.$(date +%Y%m%d%H%M%S) && printf \"%s\\n\" \"<the key>\" >> /home/aedefruscio/.ssh/authorized_keys'` -- append, never overwrite: two keys are already there and both are in use.\n\nDone when `qm guest exec 106 -- sh -c 'wc -l < /home/aedefruscio/.ssh/authorized_keys'` reads 3 and `pct exec 111 -- ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new aedefruscio@192.168.1.106 true` succeeds from inside the container.",
+  "status": "pending"
+ },
+ "ADD66": {
+  "node_key": "ADD66",
+  "title": "Bring the PalWorld service (palworld.service) up on UDP 8211 inside VM 106",
+  "description": "Inside VM 106 (palworld-server): the dedicated server is installed under /opt/palworld (T23, 2026-10-03, SteamCMD app 2394010, user steam) and its systemd unit is /etc/systemd/system/palworld.service (written by T23, rewritten and enabled by T24). Nothing has started it. Start it: systemctl enable --now palworld.service, then wait for the listener. Done when `systemctl is-active palworld.service` prints active and `ss -ulnp` inside the guest shows a UDP listener on port 8211.",
+  "status": "done"
+ }
+}
