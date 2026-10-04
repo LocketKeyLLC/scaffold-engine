@@ -112,7 +112,10 @@ def test_a_secret_the_runner_holds_becomes_a_reference_not_a_question():
     """The value stays on the target: the engine writes `$NAME`, asks nothing,
     and the runner expands it as an environment variable when it runs."""
     runbook = ("## Run this\n```bash\npct exec 120 -- app-cli --key <API_TOKEN> --host <APP_HOST>\n```\n"
-               "## Inputs needed\n- <API_TOKEN> the upstream token\n- <APP_HOST> where the app runs\n")
+               "## Inputs needed\n- <API_TOKEN> the upstream token\n- <APP_HOST> where the app runs\n"
+               # §17.1345 — a block with no check is refused for that alone; these
+               # tests are about the secret, so give them the check they should have had.
+               "## Verify\n- the app answers: `pct exec 120 -- systemctl is-active app-cli`\n")
     spec = _spec()
     frame = sr.frame_run({"node_key": "T1", "title": "wire it"}, runbook, spec,
                          {"allow": ["pct exec"], "secrets": ["API_TOKEN"]})
@@ -129,7 +132,10 @@ def test_a_secret_nothing_holds_yet_is_asked_for_once():
     to hold it bought nothing that out-of-band delivery does not already buy,
     and made the operator edit a file on the target by hand."""
     runbook = ("## Run this\n```bash\npct exec 120 -- app-cli --key <API_TOKEN>\n```\n"
-               "## Inputs needed\n- <API_TOKEN> the upstream token\n")
+               "## Inputs needed\n- <API_TOKEN> the upstream token\n"
+               # §17.1345 — a block with no check is refused for that alone; these
+               # tests are about the secret, so give them the check they should have had.
+               "## Verify\n- the app answers: `pct exec 120 -- systemctl is-active app-cli`\n")
     frame = sr.frame_run({"node_key": "T1", "title": "wire it"}, runbook, _spec(),
                          {"allow": ["pct exec"], "secrets": []})
     asked = [i for i in frame["inputs"] if i["name"] == "API_TOKEN"]
