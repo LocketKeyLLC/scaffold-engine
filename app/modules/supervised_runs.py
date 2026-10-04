@@ -1424,7 +1424,8 @@ _GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+)\s+(\d{3
 
 
 def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
-                                   files: Optional[list[dict]] = None) -> list[dict]:
+                                   files: Optional[list[dict]] = None,
+                                   inventory: Optional[dict] = None) -> list[dict]:
     """§17.1285 — a step ABOUT a guest whose commands all run on the host.
 
     Live, ADD82 "Install and enable QEMU Guest Agent in VM 106" drafted
@@ -1443,6 +1444,14 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     """
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
+    # §17.1344 — an id no machine has is not a guest. Live, the step that hands the
+    # shared media tree to the services says "in-container 999:996 is host
+    # 100999:100996" (their uid and gid), `container 999` read as a guest, and this
+    # rule refused the step's own `chown -R 100999:100996 /oasis/media` for running
+    # on the host "instead of guest 999". Run was withheld for two correct commands.
+    if inventory is not None:
+        from app.modules.machine_truth import known_guest
+        ids = [g for g in ids if known_guest(g, inventory, text + "\n" + "\n".join(str(c) for c in commands or []))]
     if not ids or not commands:
         return []
     cmds = [str(c) for c in commands]
@@ -3980,7 +3989,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     # §17.1285 — a step about a guest whose commands never leave the host.
-    refused = refused + commands_never_reach_the_guest(cmds, node, shape_files)
+    refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
