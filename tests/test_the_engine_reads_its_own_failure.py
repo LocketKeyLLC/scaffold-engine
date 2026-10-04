@@ -171,6 +171,9 @@ def test_frame_run_withholds_run_for_such_a_block():
                          SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
     assert frame["refused"] and frame["suggested"] == "myself"
     frame_ok = sr.frame_run({"node_key": "ADD111", "title": "Set up Pi-hole"},
-                            f"## Run this\n\n```bash\n{GOOD}\n```\n",
+                            # §17.1345 — with a check, because a block that has none is
+                            # refused for that alone; this test is about the error read.
+                            f"## Run this\n\n```bash\n{GOOD}\n```\n\n"
+                            f"## Verify\n\n- Pi-hole answers: `pct exec 130 -- systemctl is-active pihole-FTL`\n",
                             SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
     assert frame_ok["refused"] == [] and frame_ok["suggested"] == "run"

@@ -82,11 +82,26 @@ def test_frame_run_turns_run_off_for_such_a_block():
 
 
 def test_frame_run_offers_the_corrected_block():
-    """The vacuity check: with the flag present, Run comes back."""
+    """The vacuity check: with the flag present, Run comes back.
+
+    §17.1345 — the block carries a check now, because a block with none is refused
+    for that alone: this test is about the error flag, so give it the check it
+    should always have had (the value read back, not the command that wrote it)."""
+    frame = sr.frame_run({"node_key": "ADD96", "title": "t"},
+                         f"## Run this\n\n```bash\n{POST_OK}\n```\n\n"
+                         f"## Verify\n\n- the indexer is listed: `curl -s --fail-with-body "
+                         f'"http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: $K"`\n',
+                         SimpleNamespace(name="pve-runner"), {"allow": ["curl"]})
+    assert frame["refused"] == [] and frame["suggested"] == "run"
+
+
+def test_a_corrected_block_with_no_check_is_still_refused():
+    """§17.1345 — the flag is not the only thing a runnable block needs."""
     frame = sr.frame_run({"node_key": "ADD96", "title": "t"},
                          f"## Run this\n\n```bash\n{POST_OK}\n```\n",
                          SimpleNamespace(name="pve-runner"), {"allow": ["curl"]})
-    assert frame["refused"] == [] and frame["suggested"] == "run"
+    assert [r for r in frame["refused"] if "no check at all" in r["why"]]
+    assert frame["suggested"] == "myself"
 
 
 def test_the_rule_is_in_the_channel_rules():
