@@ -414,11 +414,19 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
     return out
 
 
+#: §17.1361 — the guest a line addresses: `pct exec 105 -- …`.
+_IN_GUEST_LINE_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>\d{3,5})\b", re.I)
 #: §17.1353 — an in-place substitution: `sed -i 's|PAT|REPL|' PATH`, `perl -pi -e "s/…/…/" PATH`.
 #: The flag token is read from the words BEFORE the expression, so `sed -n`/`sed -e` are not it.
 _INPLACE_FLAG_RE = re.compile(r"(?<![\w-])-[A-Za-z.]*i[A-Za-z.]*(?![\w-])")
 #: the first `s<delim>PATTERN<delim>` of the expression
 _SUB_RE = re.compile(r"(?<![\w$])s(?P<d>[|/#,@:!~])(?P<pat>(?:\\.|(?!(?P=d)).)*?)(?P=d)")
+#: §17.1361 — `/ADDRESS/a text`, `/ADDRESS/i text`, `/ADDRESS/c text`: the address
+#: must EXIST in the file or the append writes nothing. Live, ADD132 ran
+#: `sed -i '/^\[Preferences\]/a WebUI\\Username=admin…' …/qBittorrent-data.conf`
+#: against a file with no `[Preferences]` in it; nothing was written, exit 0, and the
+#: step's own login check caught it only afterwards.
+_ADDR_RE = re.compile(r"(?<![\w$])(?P<d>[/|#])(?P<pat>(?:\\.|(?!(?P=d)).)+?)(?P=d)\s*(?P<verb>[aic])\b")
 #: the last word of the line: the file the edit lands in
 _EDIT_TARGET_RE = re.compile(r"(\"[^\"]+\"|'[^']+'|/[^\s<>|;&]+)\s*$")
 #: `cp SRC DST` / `install … SRC DST` — where a file this block edits came from
@@ -440,10 +448,15 @@ def in_place_substitutions(texts: list[str]) -> list[tuple[str, str, str]]:
             head = re.split(r"['\"]", ln, maxsplit=1)[0]
             if not _INPLACE_FLAG_RE.search(head):
                 continue
-            sub, target = _SUB_RE.search(ln), _EDIT_TARGET_RE.search(ln)
-            if not sub or not target:
+            target = _EDIT_TARGET_RE.search(ln)
+            if not target:
                 continue
-            out.append((ln[:200], target.group(1).strip("\"'"), sub.group("pat")))
+            # §17.1361 — a substitution's PATTERN and an append's ADDRESS are the same
+            # question: does the file hold this text? Neither can fail for missing it.
+            found = _SUB_RE.search(ln) or _ADDR_RE.search(ln)
+            if not found:
+                continue
+            out.append((ln[:200], target.group(1).strip("\"'"), found.group("pat")))
     return out
 
 
@@ -458,6 +471,11 @@ def literal_anchor(pattern: str) -> str:
         pat = pat[1:]
     if pat.endswith("$") and not pat.endswith("\\$"):
         pat = pat[:-1]
+    # §17.1361 — a sed address escapes its brackets: `^\[Preferences\]`. Those are
+    # the regex's own punctuation, not a shell escape, so they are unwrapped before
+    # the question is asked; anything else backslashed is still left alone.
+    for esc, plain in ((r"\[", "["), (r"\]", "]"), (r"\.", "."), (r"\/", "/"), (r"\-", "-")):
+        pat = pat.replace(esc, plain)
     if any(c in pat for c in ("$", "`", "\\")):
         return ""                              # an expansion or an escape: not ours to resolve
     best = max(re.split(r"[.*+?\[\]()^${}|]+", pat), key=len, default="")
@@ -490,11 +508,19 @@ async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: st
     `grep -c -F` through the runner, against the target or, when this block copies the
     target into place, against the source it copies. Unreadable means no judgment.
     """
-    if spec is None or not str(gid or "").isdigit():
+    if spec is None:
         return []
     out: list[dict] = []
     seen: set = set()
     for ln, path, pat in in_place_substitutions(texts):
+        # §17.1361 — read the file in the guest the LINE addresses. ADD132's edit ran
+        # `pct exec 105 -- sed -i …` while the step's subject guest was 103, where
+        # that path does not exist: the read would have come back "No such file" and
+        # the inert edit would have gone unjudged.
+        _g = _IN_GUEST_LINE_RE.search(ln)
+        here = _g.group("gid") if _g else str(gid or "")
+        if not here.isdigit():
+            continue
         anchor = literal_anchor(pat)
         if not path.startswith("/") or not anchor or not _ANCHOR_SAFE_RE.fullmatch(anchor):
             continue
@@ -509,7 +535,7 @@ async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: st
         where, count = "", None
         for cand in [path] + [c for c in (copied_from(texts, path),) if c and c != path]:
             got = str(await _read(
-                spec, f'pct exec {gid} -- grep -c -F -- "{anchor}" {cand}') or "").strip()
+                spec, f'pct exec {here} -- grep -c -F -- "{anchor}" {cand}') or "").strip()
             tail = got.split("\n")[-1].strip() if got else ""
             if tail.isdigit():
                 where, count = cand, int(tail)
