@@ -5034,6 +5034,128 @@ def verify_expectations(runbook: str) -> dict[str, str]:
     return {m.group(1).strip(): m.group(2).strip() for m in _EXPECT_RE.finditer(body)}
 
 
+#: §17.1365 — a config KEY the block writes: `Key=value` appended or substituted,
+#: in a file or through a tool. The name is what a check would have to read back.
+_WRITES_KEY_RE = re.compile(
+    r"(?:^|[\s'\"(;&|>])(?P<key>[A-Za-z][\w.\\-]{2,60}?)\s*=\s*(?=[^\s=])"
+    r"|s[|/#,@:!~](?:\^)?(?P<skey>[A-Za-z][\w.\\-]{2,60}?)\s*=")
+#: §17.1365 — a line that MODIFIES AN EXISTING file: an append (`>>`, `tee -a`),
+#: an in-place `sed`, or a sed append/insert/change. A WHOLE-file write is
+#: deliberately not here: a block that creates a unit file and checks
+#: `systemctl is-active <unit>` has a perfectly good witness -- the service cannot
+#: run unless the file was written. Measured, that distinction is the difference
+#: between flagging ADD132 alone and flagging T23, T24 and ADD114 as well, each of
+#: which writes `Description=`/`After=`/`Type=` into a NEW unit and proves it with
+#: `is-active`. The keys that need reading back are the ones appended or
+#: substituted into a config a running service already had. `/dev/null` is never a
+#: file anyone reads back.
+_WRITES_TO_A_FILE_RE = re.compile(
+    r">>\s*[\"']?(?!/dev/)(?:/|\$)|(?<![\w-])tee\s+-a\s+(?!/dev/)|"
+    r"sed\s+(?:-\S+\s+)*-i|[|/#](?:\^)?\[?[A-Za-z][^|/#\n]{0,60}\]?[|/#]\s*[aic]\s", re.I)
+#: names that are shell plumbing, not a setting a check could read
+_NOT_A_SETTING = frozenset({
+    "if", "then", "else", "fi", "for", "do", "done", "while", "case", "esac",
+    "set", "export", "local", "readonly", "echo", "printf", "true", "false",
+    "DEBIAN_FRONTEND", "PATH", "HOME", "LANG", "LC_ALL", "IFS", "PS1", "TERM",
+    "GID", "UNIT", "CONF", "HASH", "RESULT", "LOGIN_RESULT", "deadline", "state",
+    "result", "code", "i", "f", "name", "value", "id", "key", "salt",
+    # §17.1365 — systemd-run's own options and ssh's, which the engine's templates
+    # write on every detached step
+    "StandardOutput", "StandardError", "SSHPASS", "StrictHostKeyChecking",
+    "BatchMode", "ConnectTimeout", "UserKnownHostsFile", "LogLevel", "START",
+    "mac", "order"})
+
+
+def keys_the_block_writes(commands: list[str], files: Optional[list[dict]] = None) -> list[str]:
+    """Every settings KEY this block would write, by name.
+
+    §17.1365 — what a check has to read back for a pre-pass to mean anything.
+    """
+    out: list[str] = []
+    for t in [str(c) for c in commands or []] + \
+             [str((f or {}).get("content") or "") for f in files or []]:
+        # §17.1365 — a heredoc BODY is part of the write that opened it:
+        # `tee /etc/x.conf <<EOF` / `Key=1` / `EOF` writes `Key`, and the key is
+        # not on the line that names the file.
+        in_heredoc: Optional[str] = None
+        for ln in t.split("\n"):
+            s = ln.strip()
+            if in_heredoc is not None:
+                if s == in_heredoc:
+                    in_heredoc = None
+                    continue
+            elif s.startswith("#"):
+                continue
+            if in_heredoc is None:
+                _hd = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", ln)
+                if _hd and _WRITES_TO_A_FILE_RE.search(ln):
+                    in_heredoc = _hd.group(1)
+            # §17.1365 — the key must be written INTO A FILE. Measured over the
+            # job's own history, the first cut of this flagged six blocks for
+            # command OPTIONS and throwaway redirects: `systemd-run -p
+            # StandardOutput=append:/root/.scaffold_step.log`, `ssh -o
+            # BatchMode=yes`, `SSHPASS=… sshpass -e`, and any line ending
+            # `>/dev/null`. None of those is a setting a check could read back.
+            if in_heredoc is None and not _WRITES_TO_A_FILE_RE.search(s):
+                continue
+            for m in _WRITES_KEY_RE.finditer(s):
+                key = (m.group("key") or m.group("skey") or "").strip()
+                key = key.lstrip("$").strip("\"'")
+                if not key or key in _NOT_A_SETTING or (key.isupper() and len(key) <= 3):
+                    continue
+                # an option's argument (`-p K=v`, `-o K=v`, `--opt K=v`) is not a
+                # setting, and nor is an environment prefix before a command
+                before = s[:m.start()].rstrip()
+                if re.search(r"(?:^|\s)(?:-[A-Za-z]|--[\w-]+)\s*$", before):
+                    continue
+                if key not in out:
+                    out.append(key)
+    return out
+
+
+def checks_can_witness_the_change(commands: list[str], verify: list[str],
+                                  files: Optional[list[dict]] = None) -> str:
+    """``""`` when some check reads back a key the block writes, else why not.
+
+    §17.1365 — `already_met` reads the step's own checks off the machine BEFORE
+    the block runs and records the step `done` when every one is `confirmed`.
+    That is sound only if a check could have FAILED. Live, 2026-10-04: ADD132
+    ("Make Radarr and Sonarr actually drive qBittorrent, and prove the
+    connection") was recorded
+
+        already met: 3 verify check(s) read off pve-runner before the run confirm the goal
+
+    while its checks only `GET …/api/v3/downloadclient` — a list that held a
+    `qBittorrent` entry before the step and after it. Measured afterwards:
+    `qBittorrent.conf` holds `WebUI\\Port` and nothing else, and the WebUI answers
+    **403** from off the box. The step's work -- writing `WebUI\\Username` and
+    `WebUI\\Password_PBKDF2` -- never happened, no check read either key, and the
+    goal was recorded met.
+
+    So: when a block writes named settings and no check names one of them, the
+    checks cannot witness the change, and a pre-pass is not evidence. A block that
+    writes no settings (ADD84's `growpart` + `resize2fs`, confirmed by `df -h /`)
+    is untouched -- that case is what §17.1302 is for.
+    """
+    keys = keys_the_block_writes(commands, files)
+    if not keys:
+        return ""                     # nothing named is written: §17.1302's own case
+    # §17.1365 — the same key is spelled three ways across the layers: the block
+    # writes `WebUI\\\\Username` through two quoting levels, the file holds
+    # `WebUI\\Username`, and a check greps `^WebUI.Username=` with a regex dot. The
+    # comparison is on the letters and digits alone.
+    def _alnum(x: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "", str(x or ""))
+
+    blob = _alnum("\n".join(str(c or "") for c in verify or []))
+    for key in keys:
+        if _alnum(key) and _alnum(key) in blob:
+            return ""
+    return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
+            + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
+            + ", and no check reads any of them back")
+
+
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
     """§17.1302 — read the step's OWN verify checks off the machine before the
     block is parked. When every check confirms the step's goal, the step is
@@ -5056,6 +5178,14 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     """
     verify_cmds = [str(c) for c in (frame or {}).get("verify") or []]
     if not verify_cmds or not (frame or {}).get("commands"):
+        return None
+    # §17.1365 — a pre-pass means nothing when the checks could not have failed.
+    _blind = checks_can_witness_the_change(
+        [str(c) for c in (frame or {}).get("commands") or []], verify_cmds,
+        (frame or {}).get("files") or [])
+    if _blind:
+        logger.warning("supervised_run_already_met_blind node=%s why=%s",
+                       (node or {}).get("node_key"), _blind)
         return None
     pasted, ran = await run_verify(spec, verify_cmds, env)
     answered = [r for r in ran or [] if r.get("ran")]
