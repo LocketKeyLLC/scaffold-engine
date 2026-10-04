@@ -381,8 +381,17 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
         return []
     out: list[dict] = []
     joined = "\n".join(str(t or "") for t in texts)
+    # §17.1364b — a COMMENT that mentions a section is not placement. Live, ADD132's
+    # draft appended `WebUI\Username` to the END of a 5-section config and this gate
+    # skipped it, because the block carried the line
+    #     # Append the new credentials under [Preferences]
+    # and `_SECTION_AWARE_RE` scanned the whole text, comments included. It landed
+    # in `[Preferences]` only because that section happens to be last in the file --
+    # and qBittorrent rewrites that file itself, so the order is not a guarantee.
+    # Same lesson as §17.1327b, one gate over.
+    executed = "\n".join(l for l in joined.split("\n") if not l.lstrip().startswith("#"))
     for ln, path in appends_a_key(texts):
-        if _SECTION_AWARE_RE.search(joined):
+        if _SECTION_AWARE_RE.search(executed):
             continue                           # the block already places it in a section
         if path.startswith("$"):
             m = re.search(rf"^\s*{re.escape(path.lstrip('${').rstrip('}'))}=[\"']?(/[^\s\"']+)",

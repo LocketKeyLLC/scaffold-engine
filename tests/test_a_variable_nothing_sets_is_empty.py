@@ -25,16 +25,36 @@ def _vars(cmds, files=None, policy=POLICY):
 
 
 def test_the_live_draft_is_refused():
+    r"""ADD131's draft, and §17.1364 sharpened the reason: the reference sits in a
+    SINGLE-quoted `pct exec` payload, so it is guest 103's shell that expands it,
+    where neither a host assignment nor a runner secret reaches."""
     bad = ['pct exec 103 -- sh -c \'curl -s -H "X-Api-Key: $RADARR_API_KEY" http://127.0.0.1:7878/api/v3/rootfolder\'']
     out = _vars(bad)
     assert len(out) == 1, out
     why = out[0]["why"]
-    assert "`$RADARR_API_KEY` is read here and nothing sets it" in why
-    # §17.1352 — the reason lists what there IS, from the runner's file and the
-    # engine's own store together. In THIS policy the engine holds nothing, so the
-    # key really is empty; where it holds the key, the refusal is gone (below).
-    assert "the values the engine and the runner have between them are MASS_PASSWORD" in why
-    assert "expands to NOTHING" in why and "401" in why
+    assert "`$RADARR_API_KEY` is expanded by GUEST 103's own shell" in why
+    assert "expands to NOTHING" in why or "expands\nto NOTHING" in why
+    assert "MASS_PASSWORD" in why, why      # what the engine DOES hold, and where
+
+
+def test_a_held_name_in_a_guest_payload_is_still_empty():
+    r"""§17.1364, measured against the previous commit: with `held` in scope but no
+    notion of WHICH SHELL expands the name, this very shape came back
+
+        BEFORE: 0 refusals   <-- ACCEPTED: the header would go out EMPTY
+        AFTER : 1 refusal    -> "expanded by GUEST 103's own shell…"
+
+    So §17.1352 -- teaching the gate that the engine holds `RADARR_API_KEY` --
+    had re-opened §17.1348's original ADD131 defect for every single-quoted guest
+    payload. A fix that widens a lookup without respecting scope makes a false
+    accept out of a false refusal."""
+    bad = ['pct exec 103 -- sh -c \'curl -s -H "X-Api-Key: $RADARR_API_KEY" http://127.0.0.1:7878/api/v3/rootfolder\'']
+    out = _vars(bad, None, HELD)
+    assert len(out) == 1, "a name the ENGINE holds is still empty inside the guest"
+    assert "expanded by GUEST 103" in out[0]["why"]
+    # and the same call with the HOST expanding it is fine
+    good = ['pct exec 103 -- sh -c "curl -s -H \'X-Api-Key: $RADARR_API_KEY\' http://127.0.0.1:7878/api/v3/rootfolder"']
+    assert _vars(good, None, HELD) == []
 
 
 def test_a_read_in_the_same_command_is_the_fix():
