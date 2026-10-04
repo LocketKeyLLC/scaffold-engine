@@ -41,7 +41,15 @@ _HOST_SIDE_RE = re.compile(
     # pushed it off the agent template; host-side is resizing the DISK (`qm resize`, "resize VM 106's disk").
     r"\b(?:(?:qm|pct) resize|resize (?:the )?(?:vm \d+'?s? )?(?:disk|volume)|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
-    r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b)", re.I)
+    r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"
+    # §17.1335 — `qm`, `pct`, `pvesm`, `pvesh` and `pveum` do not exist inside a guest, so a step
+    # whose own text names one of them with a subcommand is host-side work. Live, after the host
+    # rebooted, "Make the machines that serve the operator's goals start on boot" names
+    # `qm set 106 --onboot 1` and `pct set 111 --onboot 1`; the list above knew `qm resize` and
+    # `set … cpu|memory`, so the step was drafted as an ssh INTO VM 106 and then refused four
+    # times by its own preconditions. `pct exec` / `qm guest exec` are excluded: those are how the
+    # host reaches INSIDE a guest, and the in-guest signal decides those steps.
+    r"|(?:qm|pct|pvesm|pvesh|pveum)\s+(?!exec\b|guest\b)[a-z][a-z-]{1,14}\b)", re.I)
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 #: §17.1291 — a step about the guest's CONSOLE is host-side work on its serial socket, not an ssh
 #: §17.1298 — the console is the TASK ("read VM 106's serial console", "peek at the console"), not a word in

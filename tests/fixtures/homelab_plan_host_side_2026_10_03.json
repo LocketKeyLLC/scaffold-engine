@@ -1,0 +1,446 @@
+[
+{
+"node_key": "ADD78",
+"title": "Open port 8790 on 192.168.1.156's firewall for the engine",
+"status": "done",
+"description": "What the engine checked from its own host: 192.168.1.156 is reachable from the engine host (it answers on port 22, 8006) but port 8790 times out \u2014 the port is being dropped by a firewall on that host.\n\nOn Proxmox that is the host firewall. This opens port 8790 to 192.168.1.0/24 only (the helper still requires the token), then shows the firewall state:\n```bash\npve-firewall status; ss -tlnp | grep 8790\npvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 8790 --source 192.168.1.0/24 --enable 1 --comment 'scaffold local runner'\nsleep 3; pve-firewall status\n```\nIf `pve-firewall status` says **disabled**, the drop is elsewhere \u2014 paste the output of `iptables -S INPUT | head -20; nft list ruleset 2>/dev/null | grep -n 8790` instead.\nDone when the paste shows the ACCEPT rule for port 8790 and pve-firewall status says enabled/running \u2014 I re-check the connection from the engine on every paste.\n\n_Engine capability repair: local_runner port_filtered_"
+},
+{
+"node_key": "ADD11",
+"title": "Stop caddy-proxy and clear its Caddyfile",
+"status": "done",
+"description": "Stop LXC container 120 (caddy-proxy) and truncate its /etc/caddy/Caddyfile to 0 bytes so it can be rebuilt block-by-block. Done when `pct status 120` reports 'stopped' and `pct exec 120 -- wc -c /etc/caddy/Caddyfile` (or a host-side check) confirms the file is 0 bytes.\n\n[Plan update \u2014 operator constraint]: Remove this step; instead keep LXC 120 running and reload Caddy (e.g. 'caddy reload --config /etc/caddy/Caddyfile') to apply the already-validated Caddyfile, optionally running 'caddy fmt --overwrite' first to clear the formatting warning."
+},
+{
+"node_key": "ADD15",
+"title": "Set VM 106's scsi0 disk to 40G on local-lvm",
+"status": "skipped",
+"description": "Reconcile VM 106 (palworld-server) so its scsi0 disk is a 40G volume on local-lvm, matching the claimed 40G disk. If a scsi0 disk already exists at a different size, resize it to 40G; otherwise create/recreate the disk at 40G and attach it as scsi0. Done when `qm config 106` shows scsi0 on local-lvm with size=40G."
+},
+{
+"node_key": "ADD16",
+"title": "Attach the Ubuntu 22.04.3 ISO to VM 110's ide2 CD-ROM",
+"status": "done",
+"description": "Upload the Ubuntu 22.04.3 ISO to a Proxmox storage (e.g. local) and attach it to VM 110 (ai-vm) as the ide2 CD-ROM drive, replacing the current 'none,media=cdrom'. Done when 'qm config 110' shows ide2 pointing at the ISO file with media=cdrom.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 is already installed and running with GPU workload verified, so no ISO attachment is required."
+},
+{
+"node_key": "ADD18",
+"title": "Set static IP and gateway on LXC 111's net0",
+"status": "skipped",
+"description": "Configure container 111 (control-panel) with a static address of 192.168.1.25/24 and gateway 192.168.1.1 on its net0 interface, replacing the current guest-configured addressing. Done when `pct config 111` shows net0 with ip=192.168.1.25/24,gw=192.168.1.1 and the container is restarted so the new addressing takes effect."
+},
+{
+"node_key": "ADD19",
+"title": "Give VM 106 a 40G local-lvm boot disk",
+"status": "done",
+"description": "Attach a 40G disk on local-lvm to VM 106 (palworld-server) as scsi0 so its storage matches the claimed 40G disk. If scsi0 is absent, create it with `qm set 106 --scsi0 local-lvm:40`; if a smaller/other disk already occupies scsi0, resize or recreate it to 40G. Done when `qm config 106` shows scsi0 on local-lvm with size=40G."
+},
+{
+"node_key": "ADD20",
+"title": "Attach the Ubuntu 22.04.3 ISO to VM 110's ide2 CD-ROM",
+"status": "skipped",
+"description": "Attach the Ubuntu 22.04.3 server ISO to the ide2 CD-ROM slot of VM 110 (ai-vm), which currently shows 'ide2: none,media=cdrom'. Done when 'qm config 110' reports ide2 pointing at the ISO file (e.g. ide2: <storage>:iso/ubuntu-22.04.3-....iso,media=cdrom) and the ISO is confirmed present in the target storage."
+},
+{
+"node_key": "ADD21",
+"title": "Start the control-panel-backend PM2 process in LXC 111",
+"status": "done",
+"description": "Bring up the PM2-managed 'control-panel-backend' process (id 1) inside container 111. Done when `pct exec 111 -- pm2 list` shows the process online/status 'online' and the backend is listening on port 3001 (confirmed via `pct exec 111 -- ss -tlnp | grep :3001`)."
+},
+{
+"node_key": "ADD22",
+"title": "Give VM 106 (palworld-server) a 40G local-lvm boot disk",
+"status": "done",
+"description": "Attach a 40G disk on local-lvm as VM 106's scsi0 (creating it if none exists) so the VM's storage matches the claimed 40G disk. Done when `qm config 106` shows scsi0 on local-lvm with size=40G."
+},
+{
+"node_key": "ADD25",
+"title": "Attach the Ubuntu 22.04.3 ISO to VM 110's ide2 CD-ROM",
+"status": "skipped",
+"description": "Set VM 110 (ai-vm)'s ide2 to the Ubuntu 22.04.3 ISO so the guest can boot/install from it. Done when `qm config 110` shows ide2 pointing at the Ubuntu 22.04.3 ISO (media=cdrom) instead of the current 'none'."
+},
+{
+"node_key": "ADD111",
+"title": "Set up Pi-hole as the home network's DNS, blocking ads and trackers",
+"status": "done",
+"description": "The operator asked for this directly: \"there should of been a portion regarding creating security for the home lab including pi hole\". It was never in the plan \u2014 the brief asked for \"the best possible security\" and that was never turned into anything concrete, so this is new work, not a repair.\n\nGoal: every device in the house resolves names through Pi-hole, so ads, trackers and known malicious domains are blocked for the whole network \u2014 phones and TVs included, with nothing to install on them.\n\nPut it in its own unprivileged LXC on the Proxmox host with a STATIC address, because every device on the network will depend on it. Read the host for what is already there rather than asking: `pct list` shows the containers in use and the addresses in use.\n\nTwo things the operator must not be left to discover:\n  - If Pi-hole is the only resolver and its container is down, the whole house loses DNS. Say in plain words what happens then and how they get back (a second resolver, or the router's own DNS as a fallback), and set it up.\n  - Blocklists that are too aggressive break things people actually use. Start with the default lists, and say how to unblock one thing when something breaks.\n\nThey are not expected to know the technology. Do not ask them which blocklists to use or which DNS upstream to pick \u2014 choose sensible ones, name them, and say what each means for them.\n\nDone when a device on the LAN resolves through Pi-hole and a known ad domain comes back blocked.\n\nFACTS READ OFF THE HOST just now \u2014 use these, do not ask for them:\n\n  IDs ALREADY TAKEN (Proxmox shares one id space between containers and VMs \u2014 `pct list` and `qm list` together):\n    containers 101 jellyfin, 102 prowlarr, 103 radarr, 104 sonarr, 105 download-client, 111 control-panel, 120 caddy-proxy\n    VMs        100 gpu-vm, 106 palworld-server, 110 ai-vm\n    So 100 is NOT free \u2014 use 130, which is free.\n\n  STORAGE (`pvesm status`):\n    local      dir      \u2014 this is the one that holds container templates (vztmpl)\n    local-lvm  lvmthin  \u2014 container/VM disks; use this for an 8G rootfs\n    oasis      zfspool  \u2014 the 5.7 TB media pool, NOT for this container's rootfs\n\n  NETWORK (`ip route`, `ip -4 addr`):\n    subnet 192.168.1.0/24, gateway 192.168.1.1, bridge vmbr0, the host itself is 192.168.1.156\n    static addresses already in use on the LAN: .21 prowlarr, .22 radarr, .23 sonarr, .25 control-panel, .156 the host\n    192.168.1.30 does not answer a ping, so use that for Pi-hole.\n\n  So: CTID 130, template storage `local`, rootfs on `local-lvm`, ip=192.168.1.30/24, gw=192.168.1.1.\n\nTWO THINGS THE PREVIOUS DRAFT GOT WRONG \u2014 do not repeat them:\n  1. Its `--net0` was `name=eth0,ip=...,gw=...` with NO `bridge=`. A container NIC with no bridge is not attached to anything: Pi-hole would install into something with no network and the whole step would look like it worked. It must be `--net0 name=eth0,bridge=vmbr0,ip=192.168.1.30/24,gw=192.168.1.1`.\n  2. It offered CTID 100, which is the gpu-vm. Check the id against BOTH lists before using it.\n\nOne caveat to tell the operator in plain words, because it is the thing that bites later: 192.168.1.30 is free right now, but if the Spectrum router's DHCP range includes it, the router could hand the same address to a phone one day and the house would lose DNS intermittently. Say that, and tell them where to look on the router to confirm the DHCP range starts above .30 \u2014 or to reserve .30 for Pi-hole there.\n\nDO NOT ENABLE PI-HOLE'S DHCP SERVER IN THIS STEP. The previous draft ended with\n    pct exec 130 -- pihole -a enabledhcp 192.168.1.50 192.168.1.200 192.168.1.1 255.255.255.0 86400\nwhich turns Pi-hole into a DHCP server handing out 192.168.1.50\u2013200 on a LAN that already has one \u2014 the Spectrum router. Two DHCP servers on one network produce intermittent failures that are miserable to diagnose: some devices get an address from one, some from the other, and it looks like random WiFi trouble for weeks.\n\nThis step's job is DNS only: a Pi-hole that resolves and filters, reachable at its static address. How devices come to USE it is ADD112's job, and there the ROUTER hands out Pi-hole's address as the DNS server. Pi-hole-as-DHCP is the FALLBACK in ADD112, used only if the Spectrum firmware refuses a custom DNS server \u2014 and if it is ever used, the router's own DHCP must be turned OFF first, in the same breath, never both at once.\n\nSo: no `enabledhcp`, no `--dhcp`, nothing that hands out addresses. Finish with Pi-hole answering queries on 192.168.1.30 and nothing else changed about the network.\n\nWHAT THE LAST ATTEMPT GOT WRONG \u2014 read off the machine, do not repeat it:\n\n  1. It ran `pveam update && pveam list local | grep debian-12` and that command NEEDS ROOT. This runner executes WRITES with sudo but READS unprivileged, so the output was a permission refusal (`ipcc_send_rec[1] failed`, `Unable to load access control list`, rc=1) \u2014 not a statement about the system. Do not put a privileged `pveam`/`pvesm`/`pct config` READ in this step: it will fail and it is not needed.\n  2. Having failed that read, it went straight to `pct create` WITHOUT downloading the template. The create genuinely ran, made the logical volume and the filesystem, then rolled back:\n        volume 'local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst' does not exist\n        unable to create CT 130\n    The template has to be FETCHED before the container can be built from it.\n\nSO: `pveam download local debian-12-standard_12.7-1_amd64.tar.zst` is a WRITE and runs with sudo, which means it is allowed and it is all that is needed \u2014 no listing, no availability check. Put it immediately before `pct create`, and let the create be the thing that proves the template arrived. If the exact filename has moved on, the download failing says so plainly and that is a better signal than a refused read.\n\nEverything else about the last attempt was right and should be kept: CTID 130, `local:vztmpl/\u2026` for the template, `--rootfs local-lvm:8`, `--net0 name=eth0,bridge=vmbr0,ip=192.168.1.30/24,gw=192.168.1.1`, `--unprivileged 1`, `--onboot 1`, the Pi-hole unattended install, `pihole -a -p $MASS_PASSWORD`, and NO DHCP.\n\nTHE TEMPLATE NAME, READ OFF THE HOST \u2014 the operator has now granted the runner root for `pveam` reads, so this is measured, not remembered:\n\n  $ pveam available --section system\n    system          debian-12-standard_12.12-1_amd64.tar.zst\n\nThe name is `debian-12-standard_12.12-1_amd64.tar.zst`. The previous attempt used `debian-12-standard_12.7-1_amd64.tar.zst`, which Proxmox answered with \"no such template\" \u2014 that version was invented. Use the measured name in BOTH the download and the `local:vztmpl/\u2026` path of `pct create`, and do not write a version number you have not read.\n\n`pveam available` now works through the runner, so if the name has moved again, read it rather than guess.\n\nWHERE THIS STEP ACTUALLY IS NOW \u2014 read off the host, so do not redo what is done:\n\n  $ pct list            -> 130 exists\n  $ pct exec 130 -- ip -4 addr show eth0\n      inet 192.168.1.30/24 brd 192.168.1.255 scope global eth0\n  $ pct exec 130 -- ls /etc/pihole\n      ls: cannot access '/etc/pihole': No such file or directory\n\nSo container 130 is BUILT, running, and on the right address. The template is downloaded and cached. What is left is Pi-hole itself, which is not installed.\n\nGuard the create rather than repeating it \u2014 `pct status 130 >/dev/null 2>&1 || pct create 130 \u2026` \u2014 so re-running this step finishes it instead of colliding with its own earlier work. Same for `pct start`: `pct status 130 | grep -q running || pct start 130`.\n\nWHY THE INSTALL FAILED, and what actually fixes it: `curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended` dropped into Pi-hole's interactive dialog anyway and exited \u2014\n      Please continue when the static addressing has been configured.\n      [i] Installer exited\n`--unattended` does not mean \"answer the questions for me\": it means \"read the answers from /etc/pihole/setupVars.conf and do not ask\". With no such file there is nothing to read, so it shows the dialog. WRITE THAT FILE FIRST, then run the installer unattended.\n\nIt needs at least the interface, the static address and gateway this container already has (eth0, 192.168.1.30/24, 192.168.1.1), the upstream resolvers to forward to, whether to install the web interface and the web server, whether to log queries, and the privacy level. Use the values already measured above rather than asking. Write it with `printf \u2026 | tee` per the channel rules \u2014 no heredoc \u2014 after `mkdir -p /etc/pihole`.\n\nThen the password (`pihole -a -p $MASS_PASSWORD`) and a check that it resolves.\n\nWHERE IT IS NOW \u2014 Pi-hole IS INSTALLED. Read off the machine:\n  pihole-FTL is active; Core v6.4.3, Web v6.6, FTL v6.7.1; gravity loaded 74,761 domains\n  `pct exec 130 -- dig +short google.com @127.0.0.1` -> 142.250.189.110  (resolving)\n  /etc/pihole/pihole.toml: [dns.blocking] active = true, mode = \"NULL\"; interface = \"eth0\"; port 53; [dhcp] active = false  (DHCP correctly OFF, as this step requires)\n  /etc/pihole/setupVars.conf no longer exists \u2014 v6 migrated it into pihole.toml and removed it, which is expected; do not treat its absence as a failure.\n\nTWO THINGS REMAIN. Do not rebuild anything; finish these.\n\n1. THE PASSWORD COMMAND FAILED ON PATH, not on Pi-hole:\n     pct exec 130 -- pihole -a -p \"$MASS_PASSWORD\"\n     lxc-attach: Failed to exec \"pihole\"   rc=127\n   `pihole` is at /usr/local/bin/pihole and `pct exec` runs with a minimal PATH that does not include /usr/local/bin. Use the ABSOLUTE path, or a login shell (`pct exec 130 -- bash -lc '\u2026'`). Note this is Pi-hole v6: confirm the current password subcommand rather than assuming `-a -p`, which changed in v6 \u2014 read `pihole --help` through the runner if unsure instead of guessing.\n\n2. BLOCKING IS NOT ACTUALLY BLOCKING, even though it is enabled in config:\n     pct exec 130 -- dig +short ad.doubleclick.net @127.0.0.1 -> 142.250.177.230  (a real IP)\n   Gravity says 74,761 domains are loaded and [dns.blocking] active = true, so the question is WHY a query is not being filtered \u2014 not whether to re-run the installer. Diagnose it from the machine: is the domain actually in gravity (`pihole -q`), is FTL answering the query it is being asked (check its own query log), does a domain you KNOW is on StevenBlack's list get blocked. Find the cause before changing anything.\n\nThis step is done when a known-blocked domain returns the blocking reply and the admin password is set \u2014 not when the installer has run."
+},
+{
+"node_key": "ADD115",
+"title": "Add every public indexer Prowlarr listed, and connect it to Radarr and Sonarr",
+"status": "done",
+"description": "ADD96's output is the authoritative list: 88 public indexer definitions this Prowlarr ships, each with its exact name, implementation and configContract. Read it from the upstream context.\n\nWHY THE OBVIOUS APPROACH WILL NOT WORK, so do not attempt it:\n  * 88 separate `curl -X POST` commands exceed the block's limit (24), so most would be silently dropped.\n  * A generic shell loop over the names cannot work either: each indexer needs ITS OWN `fields` from the schema entry (baseUrl and so on), and several names contain spaces (\"Bangumi Moe\", \"Free JAV Torrent\").\n  * Do not hand-write bodies from memory. The previous attempt sent `implementation: Torznab` for indexers that are actually `Cardigann`/`CardigannSettings`, and `priority: 0` which Prowlarr rejects (it must be 1-50; 25 is the default).\n\nSO USE THE SCHEMA OBJECTS THEMSELVES. The clean way, and the one the channel can carry: write a small script to the host with `printf '%s\\n' ... | tee /tmp/add_indexers.py`, then run it as a second command. Two self-contained commands, no heredoc, nothing multi-line in a single command.\n\nThe script should: fetch `GET /api/v1/indexer/schema`, keep every entry whose privacy is `public`, and for each one POST that entry back to `/api/v1/indexer` unchanged except for setting `priority` to 25 and enabling it \u2014 because the schema entry already carries the correct name, implementation, configContract and fields. Have it print one line per indexer saying added or failed with the reason, and a final count of added out of total.\n\nThe API key is `$PROWLARR_API_KEY` from the engine's store \u2014 reference it, and let the runner expand it; do not write a key into the script or ask the operator for one.\n\nTHEN connect the applications, which is small enough to do directly: add Radarr (http://192.168.1.22:7878, `$RADARR_API_KEY`) and Sonarr (http://192.168.1.23:8989, `$SONARR_API_KEY`) to `/api/v1/applications` with full sync, then trigger a sync so the indexers appear in both. Every write uses `--fail-with-body` so a rejection is not mistaken for success.\n\nThe operator asked for breadth \u2014 \"public and free with largest selections\", \"as many as possible\". Add all 88 that the list contains, not a sample, and report how many landed. Do not ask them to type an indexer name: the list is in the upstream output.\n\nDone when Prowlarr lists the added indexers and both Radarr and Sonarr show them.\n\nREAD THE API KEYS OFF THE MACHINE, NOT FROM THE ENVIRONMENT. The operator's point, and they are right: each of these services keeps its own key in its own config file, so nothing has to be threaded into the script at all.\n\nMeasured just now:\n  pct exec 102 -- ls -l /var/lib/prowlarr/config.xml  ->  513 bytes, exists\n  Prowlarr runs as `/opt/Prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr`, so its config is `/var/lib/prowlarr/config.xml` and the key is the `<ApiKey>` element in it. Radarr and Sonarr follow the same pattern in containers 103 and 104 \u2014 check their own ExecStart `-data=` path rather than assuming.\n\nSo have the script read each key itself with `pct exec <ctid> -- cat <that path>` and pull the `<ApiKey>` value out. That is better than the stored copy for three reasons worth stating: the key cannot be stale, nothing secret has to cross from the engine into the script, and the value never appears in any command, block or log.\n\nThe previous attempt failed twice on exactly this. First `python3 /tmp/add_indexers.py` with the script reading `os.environ[\"PROWLARR_API_KEY\"]` \u2014 the runner only injects a stored value into a command that mentions it, so the variable was simply absent (`KeyError`). Then the redraft switched to `os.environ.get(...)`, which removes the error and leaves the key None, so every request would have failed 401 instead. Reading the key from the container avoids the whole question.\n\nDo not print a key, and do not write one into a file.\n\nTHE LAST RUN GOT FURTHER THAN ANY BEFORE IT. What worked, and the two things that did not.\n\nWORKED: the script was written, compiled and ran; `get_key(102, \u2026)` read Prowlarr's key out of the container; the schema fetch succeeded; all 88 public definitions were attempted. Keep all of that.\n\nFAILED 1 \u2014 EVERY POST RETURNED HTTP 400. `failed: Anidex - HTTP Error 400`, `failed: NewStudio - HTTP Error 400`, and so on for all of them. A schema entry is a TEMPLATE, not a postable body: posting `dict(entry)` back with only `priority` and `enable` set is missing what Prowlarr requires. The very first attempt at this step told us one of them \u2014\n     \"propertyName\": \"AppProfileId\", \"errorMessage\": \"'App Profile Id' must be greater than '0'\"\nso the body needs a real `appProfileId`. Read the available profiles (`GET /api/v1/appprofile`) and use an actual id rather than guessing 1. Then, instead of assuming that is the only missing field, have the script PRINT the 400 response body for the first failure and stop \u2014 Prowlarr says exactly which property it rejected, and one honest error beats 88 identical ones.\n\nFAILED 2 \u2014 a root-needing substitution inside a non-root command. Commands 3-5 were\n     curl \u2026 -H \"X-Api-Key: $(pct exec 102 -- cat \u2026)\"\nand the inner `pct exec` ran unprivileged and was refused, even though the same `pct exec` worked fine from inside the SCRIPT. So do the application wiring in the script too: add Radarr (192.168.1.22:7878) and Sonarr (192.168.1.23:8989) and trigger the sync from Python, reading each key with the same `get_key` helper. Do not put a privileged substitution inside a `curl`.\n\nReport the count that actually landed, and if the first POST fails, show its response body rather than looping through 88 failures.\n\nTHE BODY IS NOW CORRECT. Proof from the last run: the rejection changed from a validation complaint to\n    \"Unable to connect to indexer, indexer's server is unavailable. HTTP request failed: [502:BadGateway] [GET] at [https://anidex.info/...]\"\nProwlarr accepted `appProfileId` and `priority` and got as far as TESTING the indexer \u2014 and anidex.info answered 502. Keep the body exactly as it is.\n\nNOW DISTINGUISH TWO KINDS OF FAILURE. The last run stopped at the first one and so added 0 of 89 because a single dead tracker halted everything. That is wrong here:\n\n  - A VALIDATION failure (the body is wrong -- a property named, a value out of range, a missing field) means every other add would fail the same way. STOP, print the body, fix it.\n  - An AVAILABILITY failure about that ONE indexer (\"unable to connect\", \"server is unavailable\", 502, 503, timeout, DNS for that site) says nothing about the others. SKIP it, count it, and CARRY ON. Many public trackers are dead or blocked at any given moment; that is normal and is not a reason to add none.\n\n  - \"Should be unique\" means the thing ALREADY EXISTS. Radarr and Sonarr are already registered as applications in Prowlarr -- that is what the last two runs were told. Treat it as already-done, not a failure, and do not fail the step over it.\n\nReport three numbers at the end: added, already present, and unreachable -- with the names of the unreachable ones so the operator can see which sites were down rather than wondering why the count is short. The operator asked for breadth; getting most of 89 is the goal, not all-or-nothing."
+},
+{
+"node_key": "ADD116",
+"title": "Give the media-stack containers working DNS (point them at Pi-hole)",
+"status": "done",
+"description": "FIVE OF SEVEN CONTAINERS HAVE NO WORKING DNS. Measured just now through the runner:\n\n  getent hosts github.com\n    host            -> 140.82.114.4   works\n    101 jellyfin    -> 140.82.114.4   works\n    130 pihole      -> 140.82.112.3   works  (it was given --nameserver 1.1.1.1)\n    102 prowlarr    -> TIMED OUT\n    103 radarr      -> TIMED OUT\n    104 sonarr      -> TIMED OUT\n    105 download-client -> TIMED OUT\n    111 control-panel   -> TIMED OUT\n\n  pct exec 102 -- cat /etc/resolv.conf\n    # --- BEGIN PVE ---\n    search tail3692cc.ts.net\n    nameserver 100.100.100.100\n    nameserver fd7a:115c:a1e0::53\n    # --- END PVE ---\n\n`100.100.100.100` is Tailscale's MagicDNS. Those containers inherited it from the host and it does not answer for them, so they can resolve NOTHING. This is why every one of the 88 Prowlarr indexer validations failed with \"Unable to connect to indexer \u2026 Resource temporarily unavailable (anidex.info:443)\" \u2014 the body was fine, the name could not be resolved. It also means Radarr, Sonarr and the download client cannot reach any tracker or metadata service, so nothing would ever download even once indexers are added.\n\nGOAL: those five containers resolve names again, through Pi-hole at 192.168.1.30 \u2014 which is what it was set up for and needs nothing from the router.\n\nSet the nameserver per container on the Proxmox host and confirm each one resolves afterwards. Do not change the HOST's own resolver: it works, Tailscale depends on it, and breaking it would take the engine's own channel with it.\n\nTwo things to get right:\n  - Pi-hole (130) must NOT be pointed at itself in a loop; leave its own resolver alone.\n  - If Pi-hole is ever down these five lose DNS, so say that plainly in the output and give them a second resolver as a fallback alongside it.\n\nWorth telling the operator in one line: this is the part of the DNS work that IS achievable without the Spectrum app \u2014 per-container, on the host. The app only matters for devices that get their DNS from the router.\n\nDone when all five resolve github.com, and Pi-hole's query log shows the lookups arriving.\n\nTHE EXACT FORM, because two attempts have now got it wrong. `pct set --nameserver` takes ONE argument which is a single space-separated list, QUOTED:\n\n    pct set 102 --nameserver \"192.168.1.30 1.1.1.1\"\n\nTwo separate arguments gives `400 too many arguments` (attempt 1). Repeating the option -- `--nameserver 192.168.1.30 --nameserver 1.1.1.1` -- is not valid either (attempt 2). One option, one quoted value, both addresses inside the quotes. Same for all five containers."
+},
+{
+"node_key": "ADD27",
+"title": "Set static IP and gateway on LXC 111's net0",
+"status": "skipped",
+"description": "Configure container 111 (control-panel) with a static address by setting net0 to ip=192.168.1.25/24,gw=192.168.1.1 (keeping its existing bridge=vmbr0, firewall=1, and hwaddr BC:24:11:66:89:94). Done when `pct config 111` shows net0 carrying ip=192.168.1.25/24,gw=192.168.1.1 and the container can reach the gateway at 192.168.1.1."
+},
+{
+"node_key": "ADD29",
+"title": "Start the control-panel-backend PM2 process in LXC 111",
+"status": "skipped",
+"description": "Inside LXC 111, start the PM2-managed process 'control-panel-backend' (id 1) so the control panel backend is running again. Confirm done when PM2 reports the process online and the backend is listening on port 3001 (e.g. `pct exec 111 -- pm2 list` shows status online, and `pct exec 111 -- ss -tlnp | grep 3001` shows a LISTEN on *:3001)."
+},
+{
+"node_key": "ADD30",
+"title": "Set static IP and gateway on LXC 111's net0",
+"status": "skipped",
+"description": "Configure container 111 (control-panel) with a static address by setting net0 to include ip=192.168.1.25/24 and gw=192.168.1.1 on bridge vmbr0, keeping its existing MAC BC:24:11:66:89:94 and firewall=1. Done when pct config 111 shows the net0 line carrying ip=192.168.1.25/24,gw=192.168.1.1 and the container is restarted so the new addressing takes effect."
+},
+{
+"node_key": "ADD32",
+"title": "Start the control-panel-backend PM2 process in LXC 111",
+"status": "skipped",
+"description": "Start the PM2-managed process 'control-panel-backend' (id 1) inside LXC container 111 (control-panel). Done when `pct exec 111 -- pm2 list` shows the process with status 'online' and the backend is listening on port 3001 (confirmed via `pct exec 111 -- ss -tlnp | grep :3001`)."
+},
+{
+"node_key": "ADD36",
+"title": "Configure VM 100 for GPU passthrough and Ubuntu 22.04",
+"status": "done",
+"description": "Set VM 100's guest OS type to l26 (Linux 6.x/Ubuntu 22.04) and attach the NVIDIA GPU(s) via hostpci passthrough so the guest can use them directly. Done when `qm config 100` shows ostype: l26 and a hostpci0 line mapping the intended GPU (e.g. the Tesla P40), and the VM can be started without the host claiming the device."
+},
+{
+"node_key": "ADD37",
+"title": "Set nameserver 192.168.1.1 on container 101",
+"status": "skipped",
+"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver via `pct set 101 -nameserver 192.168.1.1`. Done when `pct config 101` shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. `pct exec 101 -- getent hosts defrusciohomelab.duckdns.org` returns an address)."
+},
+{
+"node_key": "ADD38",
+"title": "Resize VM 106's scsi0 disk to 40G",
+"status": "skipped",
+"description": "Grow (or recreate) VM 106 (palworld-server)'s scsi0 disk so it is 40G, matching the claimed 40G disk. Since the VM is currently running, stop it first, then resize the disk (e.g. qm resize 106 scsi0 40G) and start it again. Done when `qm config 106` reports scsi0 size=40G and `qm status 106` reports status: running."
+},
+{
+"node_key": "ADD39",
+"title": "Attach the Ubuntu 22.04.3 ISO to VM 110's ide2 CD-ROM",
+"status": "skipped",
+"description": "Upload the Ubuntu 22.04.3 ISO to a Proxmox storage (e.g. local) and attach it to VM 110 (ai-vm) as the ide2 CD-ROM drive, replacing the current 'none,media=cdrom'. Done when 'qm config 110' shows ide2 pointing at the ISO file with media=cdrom."
+},
+{
+"node_key": "ADD41",
+"title": "Start the control-panel backend under PM2 in LXC 111",
+"status": "skipped",
+"description": "Inside LXC container 111 (control-panel), launch the backend at /opt/control-panel-backend/server.js under PM2 with the process name 'control-panel-backend' so it registers as PM2 id 1. Done when `pct exec 111 -- pm2 list` shows 'control-panel-backend' with id 1 and status online, and the backend is listening on *:3001."
+},
+{
+"node_key": "ADD44",
+"title": "Add GPU passthrough (hostpci0) to VM 100",
+"status": "skipped",
+"description": "Attach a GPU to VM 100 by setting hostpci0 to the card's PCI address with pcie=1 (the Tesla P40 is confirmed at 02:00.0 on this host; if the additional GPU is intended instead, confirm its address with lspci first). Done when `qm config 100` shows the hostpci0 entry and `qm start 100` succeeds with `qm status 100` reporting 'status: running'.\n\n[Plan update \u2014 operator constraint]: Remove this step; GPU passthrough is already complete on VM 110 (ai-vm) per its config showing hostpci0 02:00.0,pcie=1."
+},
+{
+"node_key": "ADD45",
+"title": "Set nameserver 192.168.1.1 in container 101's config",
+"status": "done",
+"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver by setting the nameserver in its Proxmox config (pct set 101 --nameserver 192.168.1.1). Done when pct config 101 shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. pct exec 101 -- getent hosts defrusciohomelab.duckdns.org returns an address)."
+},
+{
+"node_key": "ADD46",
+"title": "Resize VM 106's scsi0 disk to 40G",
+"status": "skipped",
+"description": "Bring VM 106 (palworld-server) scsi0 to the claimed 40G size. If the disk already exists on local-lvm, grow it with `qm resize 106 scsi0 40G`; if it is missing or on another storage, recreate it on local-lvm at 40G. Done when `qm config 106` shows scsi0 on local-lvm with size=40G and the VM still starts (`qm status 106` \u2192 running).\n\n[Plan update \u2014 operator constraint]: Remove this step \u2014 the disk is already 100G on local-lvm (larger than the claimed 40G), and qm resize cannot shrink a disk, so no resize is needed or possible."
+},
+{
+"node_key": "ADD48",
+"title": "Set VM 110's boot order to ide2 (boot the Ubuntu installer)",
+"status": "done",
+"description": "Upload the Ubuntu 22.04.3 ISO to Proxmox storage (e.g. local) and attach it to VM 110 (ai-vm) as ide2 with media=cdrom, then set the boot order to ide2 so the VM boots from the installer. Done when `qm config 110` shows ide2 pointing at the ISO (media=cdrom) and boot: order=ide2."
+},
+{
+"node_key": "ADD50",
+"title": "Start container 111 (control-panel)",
+"status": "done",
+"description": "Bring LXC container 111 (control-panel) back up so its backend can be launched. Done when `pct status 111` reports 'status: running'."
+},
+{
+"node_key": "ADD51",
+"title": "Start LXC 111 (control-panel) and confirm it is running",
+"status": "skipped",
+"description": "Start container 111 with `pct start 111` and confirm it is up with `pct status 111` reporting 'status: running'. This restores the control-panel container so its backend (server.js) can be launched and bind to *:3001."
+},
+{
+"node_key": "ADD52",
+"title": "Start the control-panel backend in LXC 111 on port 3001",
+"status": "pending",
+"description": "Ensure container 111 (control-panel) is running, then launch its backend by running `node server.js` from /opt/control-panel-backend inside the container (server.js is the real entry point, not index.js). Done when `pct exec 111 -- ss -tlnp | grep :3001` shows the node process LISTENing on *:3001 and `curl http://192.168.1.25:3001` returns HTTP 404."
+},
+{
+"node_key": "ADD53",
+"title": "Set VM 106's scsi0 disk to 40G on local-lvm",
+"status": "done",
+"description": "Bring VM 106 (palworld-server) into the claimed 40G disk state by resizing its existing scsi0 disk to 40G on local-lvm, or recreating it at 40G if resizing is not possible. Done when `qm config 106` shows scsi0 on local-lvm with size=40G."
+},
+{
+"node_key": "ADD55",
+"title": "Attach Ubuntu 22.04.3 ISO to VM 110's ide2 and set boot order to ide2",
+"status": "skipped",
+"description": "Attach the Ubuntu 22.04.3 installer ISO to VM 110 (ai-vm)'s ide2 CD-ROM slot and set the boot order to prioritize ide2 so the VM boots the installer. Done when `qm config 110` shows ide2 pointing at the ISO (media=cdrom) and boot order lists ide2 first (e.g. order=ide2;scsi0)."
+},
+{
+"node_key": "ADD56",
+"title": "Write the full Caddyfile into LXC 120 and validate it",
+"status": "skipped",
+"description": "Recreate /etc/caddy/Caddyfile inside container 120 (caddy-proxy) with the complete 17-line, 406-byte content containing all five handle_path reverse_proxy blocks (jellyfin, prowlarr, radarr, sonarr, panel). Because single-shot writes have truncated here, append the file block-by-block via `pct exec 120 -- tee -a` rather than one write. Done when `pct exec 120 -- caddy validate --config /etc/caddy/Caddyfile` returns 'Valid configuration' and the on-disk file is 406 bytes."
+},
+{
+"node_key": "ADD57",
+"title": "Start VM 106 (palworld-server)",
+"status": "skipped",
+"description": "Boot the palworld-server VM on the Proxmox host with 'qm start 106' and confirm it is up by checking 'qm status 106' reports 'status: running'."
+},
+{
+"node_key": "ADD58",
+"title": "Configure VM 100 for GPU passthrough with an Ubuntu 22.04 guest type",
+"status": "done",
+"description": "Set VM 100's guest OS type to Ubuntu 22.04 (ostype l26) and attach a hostpci GPU passthrough entry for the additional GPU in the server (not the Tesla P40 at 02:00.0, which is already passed to VM 110). First identify the additional GPU's PCI address (e.g. via lspci on root@pve), then apply `qm set 100 --ostype l26` and `qm set 100 --hostpci0 <addr>,pcie=1`. Done when `qm config 100` shows ostype l26 and a hostpci0 entry pointing at the additional GPU, and VM 100 starts successfully.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 100 no longer exists and the AI VM is VM 110, which already has GPU passthrough (hostpci0 02:00.0) and ostype l26 configured per fact 22.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 already has hostpci0 02:00.0,pcie=1 and ostype l26, so no additional GPU passthrough configuration is needed.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 already has GPU passthrough (hostpci0 02:00.0,pcie=1) and ostype l26 configured, so no additional GPU passthrough work is needed.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 already has GPU passthrough (hostpci0 02:00.0,pcie=1) and ostype l26 configured, so no additional GPU passthrough configuration is needed.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 already has GPU passthrough (hostpci0 02:00.0,pcie=1) and ostype l26, so no additional GPU passthrough configuration is needed.\n\n[Plan update \u2014 operator constraint]: Remove this step; VM 110 already has GPU passthrough (hostpci0 02:00.0,pcie=1) and ostype l26, so no additional GPU passthrough configuration is needed."
+},
+{
+"node_key": "ADD59",
+"title": "Expand VM 106's disk to 100GB",
+"status": "skipped",
+"description": "Recreate VM 106 (palworld-server)'s scsi0 disk at 100GB on local-lvm using the proven delete-and-recreate method: stop VM 106, delete scsi0, free local-lvm:vm-106-disk-0, then set scsi0 to local-lvm:100. Done when `qm config 106 | grep scsi0` reports local-lvm:vm-106-disk-0,size=100G."
+},
+{
+"node_key": "ADD60",
+"title": "Attach the Ubuntu 22.04.3 ISO to VM 110's ide2 CD-ROM",
+"status": "skipped",
+"description": "Set VM 110 (ai-vm)'s ide2 CD-ROM to the Ubuntu 22.04.3 ISO already present in Proxmox storage, replacing the current 'none,media=cdrom'. Done when `qm config 110` shows ide2 pointing at the ISO file (e.g. local:iso/ubuntu-22.04.3-live-server-amd64.iso,media=cdrom) and the VM's boot order still lists ide2 so it can boot the installer."
+},
+{
+"node_key": "ADD61",
+"title": "Set static IP and gateway on control-panel (CT 111) net0",
+"status": "skipped",
+"description": "Configure net0 of container 111 (control-panel) with static address 192.168.1.25/24 and gateway 192.168.1.1 on the Proxmox host, then reboot the container so the new addressing takes effect. Done when `pct config 111` shows ip=192.168.1.25/24 and gw=192.168.1.1 on net0 and the container is reachable at 192.168.1.25."
+},
+{
+"node_key": "ADD62",
+"title": "Start LXC container 111 (control-panel)",
+"status": "skipped",
+"description": "Bring container 111 (control-panel) back to a running state on the Proxmox host. Done when `pct status 111` reports status 'running'."
+},
+{
+"node_key": "ADD63",
+"title": "Install gnupg and add the Jellyfin apt repository in container 101",
+"status": "done",
+"description": "Inside LXC 101 (jellyfin), install gnupg and create /etc/apt/sources.list.d/jellyfin.list pointing at the Jellyfin bookworm repository (repo.jellyfin.org/debian bookworm), then refresh apt. Done when `pct exec 101 -- apt-get update` completes without errors and the jellyfin.list file exists with the correct repo line.\n\n[Plan update \u2014 operator constraint]: Skip this step; the Jellyfin repository is already present via jellyfin.sources and the signing key exists at /etc/apt/keyrings/jellyfin.gpg. Optionally just run `pct exec 101 -- apt-get update` to confirm it works."
+},
+{
+"node_key": "ADD64",
+"title": "Expand VM 106 (palworld-server) disk to 100GB",
+"status": "skipped",
+"description": "Resize VM 106's scsi0 disk on local-lvm to 100G. Done when `qm config 106` reports scsi0 as local-lvm:vm-106-disk-0,size=100G."
+},
+{
+"node_key": "ADD65",
+"title": "Verify QEMU Guest Agent responds on VM 106",
+"status": "done",
+"description": "Start VM 106 and confirm the QEMU guest agent is reachable from the Proxmox host. Done when `qm agent 106 ping` returns a successful response.\n\n[Plan update \u2014 operator constraint]: The Caddyfile/caddy absence does not affect QEMU guest agent verification on VM 106; this step is unrelated to the fact.\n\n[Plan update \u2014 operator constraint]: VM 106 is a QEMU VM; verify the guest agent via 'qm agent 106 ping' and install qemu-guest-agent inside the guest OS, not via pct exec."
+},
+{
+"node_key": "ADD135",
+"title": "Make the machines that serve the operator's goals start on boot",
+"status": "pending",
+"description": "MEASURED 2026-10-03 23:56 UTC, after the Proxmox host rebooted: `grep -H onboot /etc/pve/lxc/*.conf /etc/pve/qemu-server/*.conf` shows `onboot: 1` on containers 101 jellyfin, 102 prowlarr, 103 radarr, 104 sonarr, 105 download-client and 130 pihole, and NOTHING for VM 106 palworld-server, CT 111 control-panel or CT 120 caddy-proxy. So a power event leaves the game server, the panel and the proxy that exposes it stopped, with nobody told: after this reboot all three were down while the media stack came back by itself. Set the boot flag on those three (`qm set 106 --onboot 1`, `pct set 111 --onboot 1`, `pct set 120 --onboot 1`), and give them a start order so the proxy comes up after the panel it fronts (`--startup order=...`). Leave VM 100 gpu-vm and VM 110 ai-vm alone: they are workbenches the operator starts when needed, not services anyone reaches from outside. Done when `grep -H 'onboot\\|startup' /etc/pve/qemu-server/106.conf /etc/pve/lxc/111.conf /etc/pve/lxc/120.conf` shows the flag on all three."
+},
+{
+"node_key": "ADD67",
+"title": "Attach Ubuntu 22.04.3 ISO to VM 110 and set boot order to ide2",
+"status": "skipped",
+"description": "Attach the Ubuntu 22.04.3 installer ISO to VM 110 (ai-vm)'s ide2 CD-ROM slot and set its boot order to boot from ide2 first. Done when `qm config 110` shows ide2 pointing at the Ubuntu 22.04.3 ISO (media=cdrom) and boot order=ide2, so the VM will boot the installer on next start."
+},
+{
+"node_key": "ADD68",
+"title": "Set static IP on control-panel container 111",
+"status": "done",
+"description": "Add ip=192.168.1.25/24,gw=192.168.1.1 to net0 of container 111 (control-panel) via pct set, then reboot the container and confirm it holds 192.168.1.25/24 with gateway 192.168.1.1."
+},
+{
+"node_key": "ADD69",
+"title": "Start LXC 111 (control-panel)",
+"status": "skipped",
+"description": "Bring the control-panel container back up so its backend can be launched. Done when `pct status 111` reports 'running' (and `pct exec 111 -- true` returns cleanly)."
+},
+{
+"node_key": "ADD7",
+"title": "Delete all remaining VMs and containers",
+"status": "skipped",
+"description": "Remove every remaining VM (106, 110) and container (101, 102, 103, 104, 105, 111, 120) from the Proxmox host so the environment is cleared for the redeployment. Done when `qm list` and `pct list` both return no entries (only the header row, no VMID lines).\n\n[Plan update \u2014 operator constraint]: Remove this step entirely; the VMs and containers are the deployed production services and must be preserved, not deleted."
+},
+{
+"node_key": "ADD81",
+"title": "Expand VM 106 (palworld-server) disk to 100GB",
+"status": "skipped",
+"description": "Resize VM 106's scsi0 disk to 100G on local-lvm using the proven stop \u2192 delete scsi0 \u2192 free \u2192 re-set sequence, then start the VM. Done when `qm config 106` shows scsi0 with size=100G and the VM is running.\n\n[Plan update \u2014 operator constraint]: VM 106 is a QEMU VM; resize scsi0 via qm/qemu tooling (qm set / qm resize), not pct/LXC tooling."
+},
+{
+"node_key": "ADD82",
+"title": "Install and enable QEMU Guest Agent in VM 106",
+"status": "done",
+"description": "Install qemu-guest-agent inside the palworld-server guest (VM 106) and confirm it answers.\n\nMEASURED ON THE HOST (read-only, just checked):\n  qm status 106      -> running, booting from scsi0 (100G)\n  qm agent 106 ping  -> \"QEMU guest agent is not running\"\n  ip neigh           -> no entry for the VM's NIC bc:24:11:e8:9f:7a\n  qm config 106      -> agent: 1 is ALREADY set on the VM\n\nThe host therefore has NO way in to this guest right now, and three methods are\nruled out by that, not by preference:\n  - `pct exec 106` cannot address a VM at all (pct is for containers).\n  - `qm guest exec 106` needs the agent that this step installs. Chicken and egg.\n  - SSH needs an address, and the guest has no network presence the host can see.\n\nSo this one is done at the console, by hand:\n  1. Open https://192.168.1.156:8006, select VM 106 (palworld-server), click Console.\n  2. Log in to the guest.\n  3. Install and start the agent:\n\n```bash\nsudo apt-get update\nsudo apt-get install -y qemu-guest-agent\nsudo systemctl enable --now qemu-guest-agent\nsystemctl is-active qemu-guest-agent\n```\n\n  4. If the guest has no network either, fix that first \u2014 apt cannot reach the\n     mirrors without it \u2014 and say so here rather than working around it.\n\n`agent: 1` is already set on the VM, so nothing is needed on the host side.\nDone when `qm agent 106 ping` answers from the host (that is ADD65).\n\nENGINE CORRECTION (2026-10-02): the lines above that say \"NO way in to this guest right now, and three methods are\"; \"Chicken and egg\"; \"no network presence the host can see\"; \"done at the console, by hand:\" are SUPERSEDED -- the engine measured otherwise after they were written: `sudo apt-get update` runs in the runner's own shell on the Proxmox HOST, and the step is about VM/CT 106 -- live, this would have installed qemu-guest-agent on the host instead of in VM 106 (a `qm agent 106 ping` beside it is a read and reaches nothing). Every command that CHANGES something must reach the guest: a container with `pct exec 106 -- <command>`; a VM with `qm guest exec 106 -- <command>` (needs the agent) or over ssh -- and a VM WITHOUT the agent is reached by finding its address from its MAC (`qm config 106` \u2192 net0 MAC \u2192 `ip neigh show`, after `qm start 106` and a wait) and `SSHPASS=\"$MASS_PASSWORD\" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, as ONE bash script under ## Write these files run with `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`. A host-side operation ON the guest is `qm \u2026/pct \u2026 106`. The step is the operator's only when ssh itself is refused -- say which command refused and why. The commands quoted above are the GUEST's and run inside it through that ssh. The account inside guest 106 is <PALWORLD_USER> (the operator fills it; nothing the engine holds names it); the password is `$MASS_PASSWORD`, by name. Nothing here is done at a console by hand."
+},
+{
+"node_key": "ADD83",
+"title": "Expand VM 106 disk to ~100GB",
+"status": "skipped",
+"description": "Resize VM 106 (palworld-server) scsi0 to 100G on local-lvm using the proven stop \u2192 delete scsi0 \u2192 pvesm free \u2192 qm set sequence, then restart the VM. Done when `qm config 106` shows scsi0 at 100G and the VM is running.\n\n[Plan update \u2014 operator constraint]: VM 106 is a QEMU VM; expand scsi0 via qm/qemu tooling, not pct/LXC tooling."
+},
+{
+"node_key": "ADD84",
+"title": "Grow the VM 106 filesystem to fill the disk",
+"status": "done",
+"description": "Inside the palworld-server guest, grow the partition and filesystem so the OS sees the full ~100GB (e.g. growpart + resize2fs, or the distro's equivalent). Done when `df -h` inside the guest reports the root filesystem at ~100GB.\n\n[Plan update \u2014 operator constraint]: VM 106 is a QEMU VM; run growpart/resize2fs inside the guest via SSH or qm guest exec, not pct exec."
+},
+{
+"node_key": "ADD85",
+"title": "Create, enable, and start palworld.service",
+"status": "skipped",
+"description": "Write a systemd unit for the PalWorld dedicated server inside VM 106, enable it to start on boot, and start it. Done when `systemctl is-active palworld.service` returns active and the server process is listening on its game port.\n\n[Plan update \u2014 operator constraint]: VM 106 is a QEMU VM; write/enable/start palworld.service inside the guest via SSH or qm guest exec, not pct exec."
+},
+{
+"node_key": "ADD86",
+"title": "Set VM 110 boot order to ide2",
+"status": "skipped",
+"description": "Change VM 110 (ai-vm) so it boots from its CD-ROM (ide2, the Ubuntu 22.04 live-server ISO) first. Done when `qm config 110` shows boot order=ide2 (e.g. 'boot: order=ide2')."
+},
+{
+"node_key": "ADD87",
+"title": "Start LXC 111 (control-panel)",
+"status": "skipped",
+"description": "Start container 111 (control-panel) on the Proxmox host so it is running again. Done when `pct status 111` reports status 'running'."
+},
+{
+"node_key": "ADD89",
+"title": "Start LXC container 111 (control-panel)",
+"status": "skipped",
+"description": "Bring container 111 (control-panel) to a running state so its filesystem can be inspected. Done when `pct status 111` reports status 'running' and `pct exec 111 -- ls /opt` lists the /opt directory contents."
+},
+{
+"node_key": "ADD9",
+"title": "Start VM 106 (palworld-server)",
+"status": "pending",
+"description": "Start VM 106 (palworld-server) on the Proxmox host so the game server can be brought up. Confirm it is done when `qm status 106` reports `status: running`."
+},
+{
+"node_key": "ADD94",
+"title": "Re-attach VM 106's detached disk and grow it to 100G",
+"status": "done",
+"description": "RECOVERY \u2014 VM 106's disk is currently DETACHED. ADD81 ran its stop -> delete scsi0 -> free -> re-set sequence and died after the detach, so `qm config 106` now shows `unused0: local-lvm:vm-106-disk-0` and NO scsi0 line, `boot: order=ide2` points at an empty CD-ROM, and the VM reports `running` with nothing to boot. The LV `vm-106-disk-0` is intact at 40.00g; the resize never happened.\n\nDo NOT re-run a delete/free sequence \u2014 the disk is already detached and deleting `unused0` would destroy the data. Re-attach it, then grow it:\n\n```bash\nqm stop 106\nqm set 106 --scsi0 local-lvm:vm-106-disk-0\nqm disk resize 106 scsi0 100G\nqm set 106 --boot order=scsi0\nqm start 106\n```\n\nDone when `qm config 106` shows `scsi0: local-lvm:vm-106-disk-0,size=100G`, `boot: order=scsi0`, and `qm status 106` reports running with the guest actually booted (ADD65's `qm agent 106 ping` is the check that follows)."
+},
+{
+"node_key": "ADD118",
+"title": "Read VM 106's serial console: why it has no network address",
+"status": "done",
+"description": "VM 106 (palworld-server) boots Ubuntu from its new disk (bridge fdb has learned its MAC bc:24:11:e8:9f:7a on tap106i0; the disk is being written) but after two boots it has NO network address the host can see \u2014 neither the DHCP seed nor the static seed (cloud-init `ipconfig0: ip=192.168.1.106/24,gw=192.168.1.1`, confirmed by `qm cloudinit dump 106 network`) produced an ARP reply or a neighbour entry. The guest's console is the only place that says why. Read it from the host, read-only in effect: the VM has `serial0: socket`, so\n\n```bash\nprintf '\\n' | timeout 8 socat -t 6 - UNIX-CONNECT:/var/run/qemu-server/106.serial0\n```\n\nsends ONE newline (harmless at a login prompt or a boot log) and prints whatever the guest's console shows in the next six seconds \u2014 a login prompt with the hostname, cloud-init messages, a GRUB or initramfs prompt, or a kernel panic. Do not type anything else into the console. Report the text verbatim; that text decides the next step (a cloud-init that never saw its seed, a NIC with a different name, a guest stuck before networking)."
+},
+{
+"node_key": "ADD119",
+"title": "Reset VM 106 and capture its serial console during boot (why it has no address)",
+"status": "done",
+"description": "VM 106 (palworld-server) boots Ubuntu from its new cloud-image disk and talks on the wire (the bridge learned its MAC), yet it has no network address under either a DHCP seed or the static seed ipconfig0 ip=192.168.1.106/24,gw=192.168.1.1 \u2014 and a newline sent to its serial console (ADD118) produced nothing in six seconds: the guest is not interactive on its console. The boot log is the witness that remains. From the host: capture the serial console (serial0: socket, /var/run/qemu-server/106.serial0) for about 140 seconds while the VM is hard-reset (qm reset 106 \u2014 it has no state worth keeping until it reaches the network), then print the tail: GRUB, the kernel command line, systemd's network targets, cloud-init's datasource line (NoCloud or \"no datasource\"), its ci-info network table, and the login prompt. That text decides the fix to the install step."
+},
+{
+"node_key": "ADD117",
+"title": "Install Ubuntu 22.04 on VM 106 unattended (cloud image + cloud-init)",
+"status": "done",
+"description": "VM 106 (palworld-server) has NO operating system: its only disk, local-lvm:vm-106-disk-0 (100G), has never been written (`lvs` Data% 0.00, no partition table \u2014 the engine measured this on 2026-10-02; ADD5's install was removed by ADD53's `pvesm free`). Install Ubuntu Server 22.04 on VM 106 UNATTENDED \u2014 no console interaction at any point \u2014 the Proxmox way, from the host (the runner runs here as root):\n\n1. Download the Ubuntu 22.04 (jammy) cloud image to the host if it is not already there: `curl -fL -o /var/lib/vz/template/jammy-server-cloudimg-amd64.img https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img` (about 700 MB).\n2. Stop VM 106 if it is running (`qm status 106 | grep -q running && qm stop 106`), then import the image as a new disk on local-lvm (`qm importdisk 106 /var/lib/vz/template/jammy-server-cloudimg-amd64.img local-lvm` \u2014 it appears as `unused0`, named vm-106-disk-1), attach it as the boot disk (`qm set 106 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-106-disk-1 --boot order=scsi0`) and grow it to 100G (`qm resize 106 scsi0 100G`; cloud-init grows the filesystem on first boot). The old empty disk vm-106-disk-0 becomes unused: detach and free it (`qm set 106 --delete unused0` after confirming which unusedN it is, then `pvesm free local-lvm:vm-106-disk-0`) \u2014 nothing is lost, it was never written.\n3. Attach a cloud-init drive and seed it: `qm set 106 --ide2 local-lvm:cloudinit --ciuser aedefruscio --cipassword \"$MASS_PASSWORD\" --sshkeys /root/.ssh/id_rsa.pub --ipconfig0 ip=dhcp --nameserver 192.168.1.1 --agent 1 --serial0 socket --vga serial0`. The password is the stored MASS_PASSWORD, referenced BY NAME exactly as written (the runner expands it; the value never appears in any block); the SSH key is this host's own public key, so the engine can log in afterwards.\n4. Start VM 106 (`qm start 106`), then wait for it to come up on the network: its NIC MAC is in `qm config 106` (net0); loop up to 12 \u00d7 10 s over a sweep (`nmap -sn 192.168.1.0/24 >/dev/null 2>&1`) and `ip neigh show | grep -i <mac>` until an address appears, then `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new aedefruscio@<address> 'lsb_release -ds'` until it answers (cloud-init needs a minute on first boot).\n\nDone when that ssh prints \"Ubuntu 22.04\u2026\" and `qm config 106` shows scsi0 = local-lvm:vm-106-disk-1 (100G) and ide2 = the cloud-init drive. Installing qemu-guest-agent inside the guest is ADD82's job, not this step's. The whole sequence is one bash script under ## Write these files, run as `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`; every lookup a wait loop expects to be empty ends in `|| true`."
+},
+{
+"node_key": "ADD121",
+"title": "LXC 111: scaffold the control-panel backend (Node/Express) with an editable config-driven capability registry",
+"status": "done",
+"description": "On LXC 111, create /opt/control-panel-backend with package.json, an Express server (server.js) that serves a JSON capability/config registry from a plain editable file, and a config file listing exactly the THREE capabilities ADD99 decided: palworld-settings, media-request, scaffold-engine. No UI yet, no auth yet. On container 111. Done when `pct exec 111 -- cat /opt/control-panel-backend/config/capabilities.json` shows the three.\n\n[Engine split of ADD100 \u2014 1 of 7]"
+},
+{
+"node_key": "ADD122",
+"title": "LXC 111: implement the Palworld settings capability (read/write the server's own settings file)",
+"status": "pending",
+"description": "On LXC 111, add a backend route that reads and writes the Palworld server's settings (switches etc.) by editing the Palworld config file at PALWORLD_IP 192.168.1.106 over SSH as PALWORLD_USER aedefruscio, exposing GET/PUT of the settings keys. No UI yet. On container 111. Done when `pct exec 111 -- grep -n 'palworld' /opt/control-panel-backend/server.js` shows it.\n\n[Engine split of ADD100 \u2014 2 of 8]"
+},
+{
+"node_key": "ADD129",
+"title": "Give Radarr, Sonarr and the download client the shared media storage at /media",
+"status": "pending",
+"description": "MEASURED 2026-10-03: the host has a 5.3 TB pool at /oasis with /oasis/media EMPTY. Jellyfin (CT 101) mounts it as `mp0: /oasis/media,mp=/media,ro=1`. Radarr (103), Sonarr (104) and the download client (105) have NO mount points at all \u2014 each has only an 8 GB root disk \u2014 so downloads land on a container's root disk and nothing ever reaches /oasis/media, which is why Jellyfin's library is empty. On the Proxmox host: create /oasis/media/movies, /oasis/media/tv and /oasis/media/downloads, then mount /oasis/media into 103, 104 and 105 at the SAME path /media, read-write (`pct set 103 -mp0 /oasis/media,mp=/media`, same for 104 and 105), leaving Jellyfin's read-only mount as it is. The path must match in all four so Radarr and Sonarr can hardlink or move a finished download instead of copying it. Done when `pct exec 103 -- ls /media` lists movies, tv and downloads, and the same for 104 and 105."
+},
+{
+"node_key": "ADD130",
+"title": "Point qBittorrent's downloads at /media/downloads in container 105",
+"status": "pending",
+"description": "In CT 105 (download-client, 192.168.1.24) qbittorrent-nox is active with its WebUI on port 8080 and its config at /var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf. Set the default save path (and the temp path if one is set) to /media/downloads so finished torrents land on the shared storage, then restart qbittorrent-nox. Do not change the WebUI port or the credentials, and do not touch the AirVPN setup from ADD102. Done when `pct exec 105 -- grep -E 'SavePath' /var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf` shows /media/downloads."
+},
+{
+"node_key": "ADD131",
+"title": "Set Radarr's root folder to /media/movies and Sonarr's to /media/tv",
+"status": "pending",
+"description": "Radarr's own API key is in /var/lib/radarr/config.xml inside CT 103 and Sonarr's in /var/lib/sonarr/config.xml inside CT 104 \u2014 READ them from there, never ask the operator for them. Radarr's database still holds a root folder under /movies on its own root disk. Through each app's API (Radarr 127.0.0.1:7878, Sonarr 127.0.0.1:8989, from inside the container), add the root folder /media/movies to Radarr and /media/tv to Sonarr and remove the old one that points at the container's own disk. Done when `pct exec 103 -- curl -s -H \"X-Api-Key: <read from config.xml>\" http://127.0.0.1:7878/api/v3/rootfolder` lists /media/movies and the matching Sonarr call lists /media/tv."
+},
+{
+"node_key": "ADD123",
+"title": "LXC 111: implement the media request capability (Radarr/Sonarr request path)",
+"status": "pending",
+"description": "On LXC 111, add a backend route that takes a movie/TV title and calls the Radarr (192.168.1.22:7878) and Sonarr lookup/add APIs to make the media server fetch it, using API keys read from a config file the operator's values populate. No UI yet. On container 111. Done when `pct exec 111 -- grep -n 'radarr\\|sonarr' /opt/control-panel-backend/server.js` shows it.\n\n[Engine split of ADD100 \u2014 3 of 8]"
+},
+{
+"node_key": "ADD124",
+"title": "LXC 111: implement the scaffold-engine capability (reach the engine's own AI surface)",
+"status": "pending",
+"description": "On LXC 111, add a backend route that proxies to scaffold-engine's own surface so the operator can test/use larger local models on the Tesla P40 (24GB), with the engine's address read from config (operator-supplied value). No UI yet. On container 111. Done when `pct exec 111 -- grep -n 'scaffold' /opt/control-panel-backend/server.js` shows it.\n\n[Engine split of ADD100 \u2014 4 of 8]"
+},
+{
+"node_key": "ADD125",
+"title": "LXC 111: implement the network-view capability (read-only Pi-hole API)",
+"status": "pending",
+"description": "On LXC 111, add a backend route that reads Pi-hole's own API (LXC 130) for queries, block fraction, top blocked domains, and per-client activity, read-only, with the Pi-hole address and API token read from config. No UI yet. On container 111. Done when `pct exec 111 -- grep -n 'pihole' /opt/control-panel-backend/server.js` shows it.\n\n[Engine split of ADD100 \u2014 5 of 8]"
+},
+{
+"node_key": "ADD126",
+"title": "LXC 111: build the single-page frontend rendering the three capabilities from the registry",
+"status": "pending",
+"description": "On LXC 111, create /opt/control-panel-ui with a single page that reads the capability registry and renders exactly four sections: the Palworld settings editor, the media request box, the scaffold-engine surface, and the read-only network view (Pi-hole). Four, because ADD100's own text adds the network view to the first three: \"That makes FOUR capabilities, not three: Palworld settings, the media request box, scaffold-engine, and this network view.\" No auth yet. On container 111. Done when `pct exec 111 -- cat /opt/control-panel-ui/index.html` shows it.\n\n[Engine split of ADD100 \u2014 6 of 8]"
+},
+{
+"node_key": "ADD127",
+"title": "LXC 111: add authentication and wire the systemd service so the panel runs and survives reboot",
+"status": "pending",
+"description": "On LXC 111, add a single authentication layer (password/token from config) in front of the whole panel, create the control-panel.service systemd unit, enable and start it, and confirm it listens on the container's address. On container 111. Done when `pct exec 111 -- systemctl is-active control-panel.service` shows it.\n\n[Engine split of ADD100 \u2014 7 of 8]"
+},
+{
+"node_key": "ADD128",
+"title": "Proxmox host: expose the panel outside the house behind authentication (reverse proxy + TLS)",
+"status": "pending",
+"description": "On the Proxmox host, install/configure Caddy as a TLS reverse proxy in front of the panel so the operator reaches it from outside via a domain (defrusciohomelab.duckdns.org), keeping the panel's own authentication as the only gate; document in plain words what the operator types on their phone and what must stay running. On container 111. Done when `pct exec 111 -- curl -fsS http://127.0.0.1:PORT/health || true` shows it.\n\n[Engine split of ADD100 \u2014 8 of 8]"
+},
+{
+"node_key": "ADD110",
+"title": "Start container 120 (caddy-proxy)",
+"status": "done",
+"description": "Container 120 (caddy-proxy) is stopped. It is the reverse proxy that serves the control panel from outside the house, which the operator has decided they want, so ADD100's build was refused until it is running.\n\nStart it and confirm it came up. One command starts it; one read confirms it.\n\nDone when `pct status 120` reports running."
+},
+{
+"node_key": "ADD114",
+"title": "Make the control-panel backend come back on its own after a reboot",
+"status": "done",
+"description": "ADD21 tried to do this with `pct exec 111 -- pm2 start 1` and could not: read off the machine just now, `pct exec 111 -- pm2 list` prints an EMPTY table and spawning the daemon was the first thing that command did \u2014 so PM2 was not running and had no saved process list, and process id 1 never existed. `pm2 start 1` could not have worked whatever the container's state.\n\nWhat IS true: the backend is serving. `pct exec 111 -- ss -tlnp` shows `node` listening on `*:3001`. It is running as a bare process, so it does NOT come back after a reboot, and that is the actual gap.\n\nGoal: the control-panel backend starts by itself when container 111 boots, and keeps running if it crashes.\n\nDecide the mechanism yourself and say why in one line \u2014 a systemd unit inside the container is the ordinary answer on a Debian/Ubuntu LXC and needs nothing extra installed; PM2 is fine too if it is already there for a reason. Do not ask the operator to choose between process managers; they are not expected to know the difference.\n\nRead what is actually running before you change it \u2014 replacing a working process with a managed one must not leave the panel down. Bring the managed one up and confirm `*:3001` is still answering.\n\nDone when the backend survives `pct reboot 111` and `*:3001` is listening again afterwards."
+},
+{
+"node_key": "T23",
+"title": "Install PalWorld server",
+"status": "done",
+"description": ""
+},
+{
+"node_key": "ADD66",
+"title": "Bring the PalWorld service (palworld.service) up on UDP 8211 inside VM 106",
+"status": "pending",
+"description": "Inside VM 106 (palworld-server): the dedicated server is installed under /opt/palworld (T23, 2026-10-03, SteamCMD app 2394010, user steam) and its systemd unit is /etc/systemd/system/palworld.service (written by T23, rewritten and enabled by T24). Nothing has started it. Start it: systemctl enable --now palworld.service, then wait for the listener. Done when `systemctl is-active palworld.service` prints active and `ss -ulnp` inside the guest shows a UDP listener on port 8211."
+}
+]
