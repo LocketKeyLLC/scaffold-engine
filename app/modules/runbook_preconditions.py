@@ -390,8 +390,12 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
             if not m:
                 continue                       # a variable the engine cannot resolve: no judgment
             path = m.group(1)
-        ok, out_text = await _read(spec, f"pct exec {gid} -- sh -c 'grep -c \"^\\[\" {path}'")
-        if not ok:
+        # §17.1353 — `_read` returns the LISTING, not `(ok, text)`. This site unpacked
+        # it as a pair, so every call raised ValueError into `unmet`'s warning and this
+        # rule never once fired in production. A mocked read hid it: all four of its
+        # tests stubbed `_read` with a 2-tuple the real function never returns.
+        out_text = await _read(spec, f"pct exec {gid} -- sh -c 'grep -c \"^\\[\" {path}'")
+        if not str(out_text or "").strip():
             continue                           # unreadable: nothing is refused out of blindness
         try:
             sections = int((out_text or "0").strip().split("\n")[-1])
@@ -407,6 +411,121 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
             f"in that file sits under `[BitTorrent]`: the run reported success, the key was in the file, "
             f"the check found it, and nothing read it. Put the line INSIDE its section (a `sed` range on the "
             f"header, or the file's own tool) and make the check read the SECTION, not just the key.")})
+    return out
+
+
+#: §17.1353 — an in-place substitution: `sed -i 's|PAT|REPL|' PATH`, `perl -pi -e "s/…/…/" PATH`.
+#: The flag token is read from the words BEFORE the expression, so `sed -n`/`sed -e` are not it.
+_INPLACE_FLAG_RE = re.compile(r"(?<![\w-])-[A-Za-z.]*i[A-Za-z.]*(?![\w-])")
+#: the first `s<delim>PATTERN<delim>` of the expression
+_SUB_RE = re.compile(r"(?<![\w$])s(?P<d>[|/#,@:!~])(?P<pat>(?:\\.|(?!(?P=d)).)*?)(?P=d)")
+#: the last word of the line: the file the edit lands in
+_EDIT_TARGET_RE = re.compile(r"(\"[^\"]+\"|'[^']+'|/[^\s<>|;&]+)\s*$")
+#: `cp SRC DST` / `install … SRC DST` — where a file this block edits came from
+_COPIED_RE = re.compile(
+    r"^\s*(?:sudo\s+)?(?:cp|install)\s+(?:-\S+\s+)*(?P<src>\"[^\"]+\"|'[^']+'|/[^\s<>|;&]+)\s+"
+    r"(?P<dst>\"[^\"]+\"|'[^']+'|/[^\s<>|;&]+)\s*$")
+#: what may be embedded in a double-quoted `grep -F` word: no quote, no `$`, no backtick
+_ANCHOR_SAFE_RE = re.compile(r"[A-Za-z0-9_<>/=:,.+ -]{4,80}")
+
+
+def in_place_substitutions(texts: list[str]) -> list[tuple[str, str, str]]:
+    """``[(line, path, pattern)]`` for every in-place substitution with a literal target."""
+    out: list[tuple[str, str, str]] = []
+    for t in texts:
+        for raw in str(t or "").split("\n"):
+            ln = raw.strip()
+            if ln.startswith("#") or not re.search(r"(?<![\w-])(?:sed|perl)(?![\w-])", ln):
+                continue
+            head = re.split(r"['\"]", ln, maxsplit=1)[0]
+            if not _INPLACE_FLAG_RE.search(head):
+                continue
+            sub, target = _SUB_RE.search(ln), _EDIT_TARGET_RE.search(ln)
+            if not sub or not target:
+                continue
+            out.append((ln[:200], target.group(1).strip("\"'"), sub.group("pat")))
+    return out
+
+
+def literal_anchor(pattern: str) -> str:
+    """The longest run of plain text a regex pattern must find verbatim, or ``""``.
+
+    `<ContentType>.*</ContentType>` must find `</ContentType>`; `^${KEY}=.*` holds a
+    shell expansion this cannot resolve, so it yields nothing and is not judged.
+    """
+    pat = str(pattern or "")
+    if pat.startswith("^"):
+        pat = pat[1:]
+    if pat.endswith("$") and not pat.endswith("\\$"):
+        pat = pat[:-1]
+    if any(c in pat for c in ("$", "`", "\\")):
+        return ""                              # an expansion or an escape: not ours to resolve
+    best = max(re.split(r"[.*+?\[\]()^${}|]+", pat), key=len, default="")
+    return best if len(best) >= 4 and re.search(r"[A-Za-z0-9]", best) else ""
+
+
+def copied_from(texts: list[str], path: str) -> str:
+    """The source a `cp`/`install` in this same block puts at `path` (backups aside)."""
+    for t in texts:
+        for raw in str(t or "").split("\n"):
+            m = _COPIED_RE.match(raw)
+            if not m or ".bak" in raw:
+                continue
+            if m.group("dst").strip("\"'") == str(path):
+                return m.group("src").strip("\"'")
+    return ""
+
+
+async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: str) -> list[dict]:
+    r"""§17.1353 — a substitution whose pattern the file does not hold changes nothing.
+
+    Live, 2026-10-04: ADD133 gave two new Jellyfin libraries their content type with
+    `sed -i 's|<ContentType>.*</ContentType>|<ContentType>movies</ContentType>|'` over a
+    copy of an existing library's `options.xml`. That file has no `ContentType` element —
+    Jellyfin 10.11 keeps a library's type in a `<type>.collection` marker file — so the
+    edit matched nothing, exited 0, and changed nothing. The step reported success, its
+    check read only the `.mblink` paths, and both libraries came out as mixed content.
+
+    `sed -i` cannot fail for not matching, so the file is what settles it: one
+    `grep -c -F` through the runner, against the target or, when this block copies the
+    target into place, against the source it copies. Unreadable means no judgment.
+    """
+    if spec is None or not str(gid or "").isdigit():
+        return []
+    out: list[dict] = []
+    seen: set = set()
+    for ln, path, pat in in_place_substitutions(texts):
+        anchor = literal_anchor(pat)
+        if not path.startswith("/") or not anchor or not _ANCHOR_SAFE_RE.fullmatch(anchor):
+            continue
+        if (path, anchor) in seen:
+            continue
+        seen.add((path, anchor))
+        # The runner's read-only channel takes a bare `grep`, not a shell script: an
+        # assignment is "not a known read-only command". So: the target, and when the
+        # block copies the target into place (ADD133 did), the source it copies -- a
+        # file that does not exist yet answers with grep's own "No such file", which
+        # is not a count and so is not a judgment.
+        where, count = "", None
+        for cand in [path] + [c for c in (copied_from(texts, path),) if c and c != path]:
+            got = str(await _read(
+                spec, f'pct exec {gid} -- grep -c -F -- "{anchor}" {cand}') or "").strip()
+            tail = got.split("\n")[-1].strip() if got else ""
+            if tail.isdigit():
+                where, count = cand, int(tail)
+                break
+        if count is None or count > 0:
+            continue    # unreadable (no judgment from blindness), or the pattern is there
+        out.append({"command": ln, "why": (
+            f"this edit changes NOTHING: `{anchor}` does not appear in {where} -- read just now, 0 "
+            f"matches. `sed -i` cannot fail for matching nothing: it exits 0, the file is untouched, "
+            f"the step reports success and the setting is never set. Live (§17.1353), ADD133 set two "
+            f"Jellyfin libraries' content type with `s|<ContentType>.*</ContentType>|...|` against a "
+            f"file holding no such element; both libraries came out as mixed content and the check, "
+            f"which read only the `.mblink` paths, passed. Read the file and change what it actually "
+            f"holds. When the setting is not in that file at all, the application keeps it elsewhere "
+            f"-- another file, a marker file, or its own API -- so find where, and make this step's "
+            f"check read the setting back out rather than checking that a file exists.")})
     return out
 
 
@@ -488,6 +607,12 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, subjects[0]))
         except Exception as exc:
             logger.warning("append_section_check_failed err=%r", exc)
+    # §17.1353 — an in-place substitution whose pattern the file does not hold is inert.
+    if subjects:
+        try:
+            out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, subjects[0]))
+        except Exception as exc:
+            logger.warning("inert_edit_check_failed err=%r", exc)
     # §17.1303 — the block reaches the step's guest at an address the machine
     # contradicts. Live, ADD84 (VM 106, measured at 192.168.1.106 by its MAC in
     # `ip neigh`, pinned as PALWORLD_IP) drew `ssh <PALWORLD_USER>@192.168.1.127`

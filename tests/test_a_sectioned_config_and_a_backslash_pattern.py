@@ -100,47 +100,9 @@ class _Spec:
     endpoint = "http://192.168.1.156:8790/mcp/"
 
 
-@pytest.mark.asyncio
-async def test_a_sectioned_file_refuses_the_bare_append(monkeypatch):
-    r"""The FILE settles it: `grep -c '^\['` on the real config returns 5."""
-    async def fake_read(spec, command):
-        assert "grep -c" in command and "qBittorrent.conf" in command, command
-        return True, str(LIVE_CONF.count("\n[") + LIVE_CONF.startswith("["))
-    monkeypatch.setattr(rp, "_read", fake_read)
-    script = ("CONF=/var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf\n"
-              "printf '%s\\n' 'Session\\DefaultSavePath=/media/downloads' >> \"$CONF\"\n")
-    out = await rp.a_bare_append_lands_in_the_last_section(_Spec(), [script], "105")
-    assert len(out) == 1, out
-    why = out[0]["why"]
-    assert "SECTIONED config" in why and "[Preferences]" in why and "[BitTorrent]" in why
-    assert "read the SECTION, not just the key" in why
-
-
-@pytest.mark.asyncio
-async def test_a_flat_file_is_left_alone(monkeypatch):
-    async def fake_read(spec, command):
-        return True, "0"
-    monkeypatch.setattr(rp, "_read", fake_read)
-    out = await rp.a_bare_append_lands_in_the_last_section(
-        _Spec(), ["echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf"], "105")
-    assert out == []
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_file_is_not_judged(monkeypatch):
-    async def fake_read(spec, command):
-        return False, ""
-    monkeypatch.setattr(rp, "_read", fake_read)
-    script = "printf '%s\\n' 'a=b' >> /etc/some.conf\n"
-    assert await rp.a_bare_append_lands_in_the_last_section(_Spec(), [script], "105") == []
-
-
-@pytest.mark.asyncio
-async def test_a_block_that_places_the_key_in_its_section_is_not_refused(monkeypatch):
-    async def fake_read(spec, command):
-        return True, "5"
-    monkeypatch.setattr(rp, "_read", fake_read)
-    script = (r"sed -i '/^\[BitTorrent\]/a Session\DefaultSavePath=/media/downloads' "
-              "/var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf\n"
-              "printf '%s\\n' 'Session\\DefaultSavePath=/media/downloads' >> /tmp/other.conf\n")
-    assert await rp.a_bare_append_lands_in_the_last_section(_Spec(), [script], "105") == []
+# §17.1353 — the four tests that USED to live here stubbed `_read` itself with a
+# `(ok, text)` pair the real function never returns, and so could not see that the
+# call site unpacked it that way: the rule raised ValueError on every call and never
+# fired in production. They are replaced by
+# tests/test_an_edit_the_file_cannot_match.py, which patches the TRANSPORT and lets
+# the real `_read` — and its real one-string contract — run.
