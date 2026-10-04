@@ -229,6 +229,75 @@ async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
 MAX_SERVICES = 6
 
 
+def _norm(s: str) -> str:
+    """A service name with the punctuation and case taken out: `ss` says
+    `Radarr` and `qbittorrent-nox` where a step says `radarr`, `qBittorrent`."""
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def listeners_in(ss_text: str) -> list[str]:
+    """Every process name holding a listening port, in the order `ss` reports them.
+
+    `sshd`, `master` (postfix) and `systemd` are on every guest and name no app.
+    """
+    out: list[str] = []
+    for m in _LISTEN_RE.finditer(str(ss_text or "")):
+        for p in _PROC_RE.finditer(m.group("users") or ""):
+            name = p.group("proc")
+            if name and name not in out and name not in ("sshd", "master", "systemd"):
+                out.append(name)
+    return out
+
+
+def _same_service(a: str, b: str) -> bool:
+    """Is `a` the name of the thing `b` is? `qbittorrent` IS `qbittorrent-nox`."""
+    x, y = _norm(a), _norm(b)
+    if len(x) < 4 or len(y) < 4:
+        return False
+    return x == y or x.startswith(y) or y.startswith(x)
+
+
+async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dict] = None,
+                                       limit: int = 10) -> dict:
+    """``{service name: guest id}`` for the services a step NAMES, from what listens.
+
+    §17.1356 — the pause measured services only in the step's SUBJECT guest, so a
+    step spanning guests drafted blind about the others. Live, 2026-10-04: ADD132
+    ("Make Radarr and Sonarr actually drive qBittorrent") was measured in guest
+    103 alone — Radarr's — and of the eleven drafter prompts that followed, ONE
+    carried the string `qbittorrent-nox` and none carried that service's config
+    path. The draft duly said `systemctl restart qbittorrent` (the unit is
+    `qbittorrent-nox`) against `/var/lib/qbittorrent/…` (it is
+    `/var/lib/qbittorrent-nox/.config/…`), and the engine refused its own block
+    for facts it had never been given.
+
+    One `ss -tlnp` per running container — the same read `read_services` opens
+    with — is enough: qBittorrent names itself `qbittorrent-nox` there, which no
+    guest NAME would have revealed (its container is called `download-client`).
+
+    Unreadable guests are skipped; a name nothing listens as is simply absent.
+    """
+    wanted = [str(n) for n in (names or []) if str(n).strip()]
+    if spec is None or not wanted:
+        return {}
+    running = [g for g, st in sorted((cts or {}).items()) if str(st) == "running"]
+    found: dict = {}
+    for gid in running[:limit]:
+        if len(found) == len(wanted):
+            break
+        ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
+        if not ok:
+            continue
+        procs = listeners_in(ss_text)
+        for name in wanted:
+            if name in found:
+                continue
+            if any(_same_service(name, p) for p in procs):
+                found[name] = str(gid)
+    logger.warning("service_guests named=%s found=%s", wanted, found)
+    return found
+
+
 async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                         mentioned: Optional[list[str]] = None) -> list[ServiceTruth]:
     """Measure the services on one running container: what listens, and what each
@@ -238,30 +307,48 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
     ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
     if not ok:
         return []
-    procs: list[str] = []
-    for m in _LISTEN_RE.finditer(ss_text):
-        for p in _PROC_RE.finditer(m.group("users") or ""):
-            name = p.group("proc")
-            if name and name not in procs and name not in ("sshd", "master", "systemd"):
-                procs.append(name)
-    wanted: list[str] = []
-    for u in units or []:
-        base = re.sub(r"\.service$", "", str(u))
-        low = re.sub(r"[^a-z0-9]", "", base.lower())
-        if any(low.startswith(re.sub(r"[^a-z0-9]", "", p.lower())[:4]) or
-               re.sub(r"[^a-z0-9]", "", p.lower()).startswith(low[:4]) for p in procs) \
-                or base in (mentioned or []):
-            wanted.append(base)
+    procs = listeners_in(ss_text)      # §17.1356 — one parser, used by the guest lookup too
+    # §17.1356 — a name is a CANDIDATE for a unit name, never a unit name. Three
+    # sources disagree on purpose: `ss` reports the PROCESS (`Radarr`,
+    # `qbittorrent-nox`), the step uses an English word (`qbittorrent`), and the
+    # unit is a third thing (`radarr.service`, `qbittorrent-nox.service`) whose
+    # name is case-sensitive. Measuring the step's word gave the drafter
+    # `qbittorrent.service (inactive)` as a FACT, which it wrote, and which the
+    # engine then refused as "not a unit anything the engine holds names"; and
+    # resolving to the listener alone loses `Radarr`, because `systemctl show
+    # Radarr` is not `radarr.service`. So each name carries its alternatives and
+    # `LoadState` picks the one the guest actually has.
+    wanted: list[list[str]] = []
+    def _add(cands: list[str]) -> None:
+        clean = [c for c in dict.fromkeys(cands) if c]
+        if clean and not any(set(clean) & set(w) for w in wanted):
+            wanted.append(clean)
+    for p_name in procs:
+        _add([p_name, p_name.lower()])
     for name in mentioned or []:
-        if name not in wanted:
-            wanted.append(name)
+        hit = next((p for p in procs if _same_service(name, p)), "")
+        _add([hit, hit.lower(), name] if hit else [name])
     out: list[ServiceTruth] = []
-    for base in wanted[:MAX_SERVICES]:
-        ok, show = await _probe(spec, f"pct exec {gid} -- sh -c 'systemctl show -p Id -p User -p Group "
-                                      f"-p ExecStart -p FragmentPath -p ActiveState {base}'")
-        if not ok or not show.strip():
+    for cands in wanted[:MAX_SERVICES]:
+        base, sh = "", {}
+        for cand in cands:
+            ok, show = await _probe(spec, f"pct exec {gid} -- sh -c 'systemctl show -p Id -p User -p Group "
+                                          f"-p ExecStart -p FragmentPath -p ActiveState -p LoadState {cand}'")
+            if not ok or not show.strip():
+                continue
+            # §17.1356 — systemctl answers for a unit it has never heard of:
+            # ActiveState comes back `inactive`, which reads as a service that
+            # exists and is stopped. Measuring every mentioned name in every guest
+            # that way produced six phantom facts (`radarr.service (inactive)` on
+            # the download client, and so on) beside the three real ones.
+            # `LoadState=not-found` is the difference, and it is also what picks
+            # the right spelling out of this name's alternatives.
+            if (parse_show(show).get("LoadState") or "").strip() == "not-found":
+                continue
+            base, sh = cand, parse_show(show)
+            break
+        if not base:
             continue
-        sh = parse_show(show)
         unit = sh.get("Id") or f"{base}.service"
         user = sh.get("User") or ""
         s = ServiceTruth(guest=str(gid), unit=unit, name=re.sub(r"\.service$", "", unit),
