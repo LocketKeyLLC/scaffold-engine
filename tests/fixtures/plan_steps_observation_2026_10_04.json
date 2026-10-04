@@ -1,0 +1,65 @@
+[
+ {
+  "node_key": "ADD101",
+  "tool": "LLM",
+  "status": "done",
+  "title": "Decide: which VPN, before any torrent traffic starts",
+  "description": "DECISION — the operator has no VPN yet (answered 2026-09-30). Three concrete options, and one common recommendation to avoid.  WHY THIS MATTERS: with BitTorrent, the addresses of everyone sharing a file are visible to everyone else in that swarm, including to companies that collect them and send notices to your ISP. A VPN puts someone else's address there instead.  WHAT TO LOOK FOR — one feature decides this, \"port forwarding\". Without it downloads still work but are much slower, because other people cannot connect back to you. This is why the popular choice below is the wrong one:    AVOID Mullvad for this. It is an excellent VPN and is recommended everywhere,   but it REMOVED port forwarding in 2023. Paying for it here would be paying for   the slow version.  THE OPTIONS (prices are the long-plan rate and should be confirmed on the site before paying — they change):    A. Private Internet Access (PIA) — roughly $2-3/month on a 2-3 year plan.      Port forwarding yes. The most commonly used with this exact setup, so when      something breaks the answer is already written down somewhere.    B. AirVPN — roughly EUR 2-4/month. Port forwarding yes, and you choose the      ports yourself. Built by and for this use; the site is technical-looking but      the engine handles that part.    C. ProtonVPN — roughly $4-5/month. Port forwarding yes on paid plans. The most      mainstream name of the three, from the Proton Mail company, if you would      rather use a provider you have heard of.  Any of the three works. If you have no preference, A is the safest default for this setup.  SECOND HALF — what goes through it. Recommended: ONLY the download client. It runs in its own container routed through the VPN, so if the VPN drops the downloads stop rather than leaking, while Jellyfin and everything else keep their normal connection and stay reachable from your own network. Routing the whole server is the alternative and it commonly breaks access from home.  Done when the operator names A, B, C or their own choice, and confirms download-client-only (or says otherwise)."
+ },
+ {
+  "node_key": "ADD113",
+  "tool": "LLM",
+  "status": "done",
+  "title": "Review what the home lab exposes and close what should not be open",
+  "description": "The brief's first requirement was \"the best possible security\" and the plan turned that into firewall groups and VLANs and nothing else. With outside access now decided (the operator wants the panel reachable from away), what is exposed matters more, not less.  Goal: an honest account of what this home lab exposes, and every unnecessary hole closed.  Read the machine for the answer rather than reasoning about it: what is listening, on which guest, reachable from where. `ss -tlnp` inside each guest, the Proxmox firewall files that already exist (`/etc/pve/firewall/`), and the router's forwarded ports the operator can read off its page. Do not guess at the current state — it is readable.  Report it as a list the operator can act on: what is open, why it is open, and for each thing that should not be, the change that closes it. Anything reachable from the internet must be behind authentication — the panel can start and stop machines and reaches their media stack.  Do not ask them to choose between security postures. Recommend, explain the trade-off in everyday terms, and make the changes they accept.  Done when nothing is reachable from outside the house except what the operator agreed to, and they have the list."
+ },
+ {
+  "node_key": "ADD132",
+  "tool": "LLM",
+  "status": "pending",
+  "title": "Make Radarr and Sonarr actually drive qBittorrent, and prove the connection",
+  "description": "Radarr and Sonarr already hold the download client (measured: `{name: qBittorrent, implementation: QBittorrent, enable: true, host: 192.168.1.24, port: 8080, movieCategory: radarr}` in Radarr, the same with `tvCategory: tv-sonarr` in Sonarr). What is missing is that neither can AUTHENTICATE: both get `403 Forbidden` from http://192.168.1.24:8080, and that WebUI has no credentials at all.  DECIDED (ADD139, the operator): set a password, and use the one the engine already holds. `MASS_PASSWORD` is one of the five names the engine holds, resolved at run time, so nothing is asked and the value never appears in a command line, a file, or any record -- it travels by name only.  MEASURED: qBittorrent is 4.5.2-3+deb12u1, which stores the WebUI password HASHED as `WebUI\\\\Password_PBKDF2=\"@ByteArray(<base64 salt>:<base64 hash>)\"` (PBKDF2-HMAC-SHA512, 100000 iterations, 64-byte key, 16-byte salt). The WebUI keys live under `[Preferences]`, where `WebUI\\\\Port=8080` already is -- unlike the save path, which belongs under `[BitTorrent]`. The service rewrites this file when it stops, so it must be stopped before the file is touched.  Write ONE host-side script and run it with `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`:  ```bash # 1. hash the password ON THE HOST, so the value never crosses into a container's command line HASH=$(python3 - <<'EOF' import base64, hashlib, os salt = os.urandom(16) key = hashlib.pbkdf2_hmac('sha512', os.environ['MASS_PASSWORD'].encode(), salt, 100000, 64) print('@ByteArray(' + base64.b64encode(salt).decode() + ':' + base64.b64encode(key).decode() + ')') EOF ) # 2. stop the service, set the username and that hash under [Preferences], start it # 3. PROVE it from the host, where the password is in the environment: #    curl -s -d \"username=admin&password=$MASS_PASSWORD\" http://192.168.1.24:8080/api/v2/auth/login #    must print exactly: Ok. # 4. tell Radarr and Sonarr the same username and password, through their own APIs, reading each key #    inside its own container, then run each app's downloadclient/test ```  If the login does not print `Ok.`, the hash format is wrong for this build: say so and stop, do not carry on to Radarr and Sonarr. That login is the only proof the hash is right.  Done when all three agree: the login prints `Ok.`, `pct exec 103 -- sh -c 'curl -s -X POST -H \"X-Api-Key: $(cat /var/lib/radarr/config.xml 2>/dev/null | sed -n \"s:.*<ApiKey>\\\\(.*\\\\)</ApiKey>.*:\\\\1:p\" | head -n 1)\" -H \"Content-Type: application/json\" -d @- http://127.0.0.1:7878/api/v3/downloadclient/test'` returns success for Radarr, and the same call on 104 against 8989 returns success for Sonarr."
+ },
+ {
+  "node_key": "ADD133",
+  "tool": "LLM",
+  "status": "done",
+  "title": "Add Jellyfin libraries for /media/movies and /media/tv",
+  "description": "Jellyfin (CT 101, 192.168.1.20:8096) mounts the shared storage read-only at /media and currently has no library pointing at it. Add a Movies library for /media/movies and a TV library for /media/tv, then trigger a scan. Done when Jellyfin's own API lists both libraries with those paths.  MEASURED 2026-10-04 (read, do not re-discover): Jellyfin is 10.11.11, server name \"DeFruscio Media\", its API answers 200 on http://127.0.0.1:8096 and `StartupWizardCompleted` is true. It ALREADY has one library: `/var/lib/jellyfin/root/default/Media/` holding `media.mblink` whose whole contents are `/media`, and an `options.xml` of 4846 bytes, both owned by jellyfin and dated 2026-08-30. So Jellyfin has been watching the shared path all along; it was empty until the mounts went in, which is why nothing ever appeared.  A Jellyfin library is a directory on disk, not an API call: `/var/lib/jellyfin/root/default/<Name>/<name>.mblink` holds the path and `options.xml` holds the type. So copy the shape the machine already has rather than inventing one: read the existing `Media/options.xml`, write `Movies/movies.mblink` = `/media/movies` with a movies-type options.xml and `Shows/shows.mblink` = `/media/tv` with a tvshows-type one, `chown -R jellyfin:jellyfin` both, then `systemctl restart jellyfin`. No API key is needed for any of that, and none exists.  Leave the existing `Media` library in place unless it double-counts the same files once the two typed libraries exist. Done when both directories hold the right mblink paths, Jellyfin restarts and answers 200 on /System/Info/Public, and its log shows the two new libraries being scanned."
+ },
+ {
+  "node_key": "ADD134",
+  "tool": "LLM",
+  "status": "failed",
+  "title": "Prove the whole chain: ask for one title and watch it arrive in Jellyfin",
+  "description": "End to end, with one title the operator names (or any film that is free to distribute): add it in Radarr, confirm Prowlarr returns releases, qBittorrent takes the torrent and saves under /media/downloads, Radarr imports it into /media/movies, and Jellyfin lists it after a scan. Report each hop with the command that showed it. Done when Jellyfin's API lists the title and the file is under /media/movies."
+ },
+ {
+  "node_key": "ADD95",
+  "tool": "LLM",
+  "status": "done",
+  "title": "Decide: how should films and TV actually arrive?",
+  "description": "DECISION — nobody has chosen this and the plan installed the whole stack for it anyway.  Prowlarr, Radarr, Sonarr and a download client are installed on this host and NONE of them is configured: no sources, nothing connected to anything, no folders, no quality chosen. Right now nothing will ever download.  In plain terms, three things need deciding, and there are no wrong answers:  1. WHERE things are searched for. Public sources are free and need no account; private ones need an invite or a signup but are faster and more reliable. Do you already have accounts anywhere, or should this use public sources only?  2. HOW they download. Two families: BitTorrent (peer to peer — anyone can see what you are downloading unless you use a VPN) or Usenet (a paid subscription, around $5-10/month, private and usually faster). Which would you rather?  3. WHAT quality. Bigger files look better and fill the 12TB faster. Roughly: 1080p (about 3-8GB a film, good on any TV), or 4K (about 20-60GB, only worth it on a 4K TV).  Answer in your own words — you do not need the product names. The next steps are written from whatever you choose."
+ },
+ {
+  "node_key": "ADD96",
+  "tool": "LLM",
+  "status": "done",
+  "title": "List the public indexers this Prowlarr can add",
+  "description": "ONE JOB ONLY: find out which indexers this Prowlarr can actually add, and report them.  A supervised block is a FIXED list of commands, decided before any of them run, so a single step cannot read a list and then act on each item of it — that was the previous attempt's problem. It read the schema and then either POSTed names from memory (none of which Prowlarr had definitions for) or fell back to one `<INDEXER_NAME>` placeholder for the operator to type. So this step only READS, and ADD115 does the adding with this step's output in hand.  Fetch `GET /api/v1/indexer/schema` from Prowlarr at 192.168.1.21:9696 with `$PROWLARR_API_KEY` (the key is in the engine's store; reference it, never ask for it).  Report, as the step's output, every definition whose privacy is `public` — for each one its exact `name`, its `implementation` and its `configContract`. Those three are what an add needs and all three must be the schema's own values, not remembered ones. Say how many public definitions there are in total.  Nothing is changed here. Done when the list is in this step's output."
+ },
+ {
+  "node_key": "ADD98",
+  "tool": "LLM",
+  "status": "done",
+  "title": "Prove it end to end: ask for one film and watch it arrive in Jellyfin",
+  "description": "The check that matters. Add one film in Radarr, let it search, and follow it through: the download client picks it up, the file lands in the media folder, Jellyfin shows it. Done when you can play that film from Jellyfin. If it stalls, the step that stalls is the one to fix — say where it stopped."
+ },
+ {
+  "node_key": "T38",
+  "tool": "LLM",
+  "status": "pending",
+  "title": "Document architecture and setup",
+  "description": "  [Plan update — operator constraint]: Document the flat 192.168.1.0/24 architecture with firewall security-group segmentation, and note the HP switch is not placed between modem and router.  [Plan update — operator constraint]: Document the public domain defrusciohomelab.duckdns.org, its DuckDNS dynamic-DNS setup, the Caddy public HTTPS routes, and the port-forwarding/dmz security-group path for outside access.  [Plan update — operator constraint]: Document that Tailscale is installed on the Proxmox host itself (not a dedicated LXC/VM), including the subnet-route advertisement and IP-forwarding config, and note the deviation from the original dedicated-container plan.  [Plan update — operator constraint]: Documentation must reflect that /etc/pve/firewall/groups/ does not yet exist and the security groups still need to be created, rather than claiming they are in place."
+ }
+]
