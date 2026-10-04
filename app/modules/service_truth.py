@@ -1,0 +1,386 @@
+"""§17.1346 — the engine measures the SERVICES on a guest, not just the guest.
+
+`machine_truth` measures machines: running or not, disks, MAC, address, agent,
+units. Nothing measured the APPLICATIONS on them — which guest an app lives in,
+which port it answers on, where its config is, which user it runs as, whether it
+rewrites that config itself. So every draft re-derived all of it from the step's
+prose, and every rule that reads prose became a new way to be wrong. One day's
+worth, all the same shape:
+
+* a step about an ssh key was drafted as a 4.6 GB game install, because the guest
+  is NAMED after the game (§17.1339);
+* the shared-storage step was drafted inside Jellyfin, the one container that
+  already had the mount, because its measured note mentioned Jellyfin first
+  (§17.1340);
+* `in-container 999:996` — a service's uid and gid — read as guest 999, and a
+  correct host command was refused for not reaching it (§17.1344);
+* an edit to qBittorrent's config was thrown away because the service rewrites
+  that file on shutdown, which nothing knew (§17.1343);
+* the root-folder step put Sonarr's call inside Radarr's container, where there is
+  no sonarr config and nothing listening on 8989.
+
+Every one of those is a fact a machine will state plainly when asked. This module
+asks:
+
+    systemctl show -p Id -p User -p Group -p ExecStart -p FragmentPath <unit>
+    ss -tlnp                      → the port, with the process holding it
+    id <user>                     → uid, gid
+    stat -c '%U:%G %a %n' <conf>  → who owns the config, and who may write it
+
+and hands the answers to the drafter as facts and to the gates as values to
+compare against, in place of prose.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+logger = logging.getLogger("scaffold")
+
+#: `ExecStart={ path=/opt/Radarr/Radarr ; argv[]=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr ; … }`
+_ARGV_RE = re.compile(r"argv\[\]=(?P<argv>[^;]*)")
+#: `LISTEN 0 512 *:7878 *:* users:(("Radarr",pid=127,fd=319))`
+_LISTEN_RE = re.compile(r"^LISTEN\s+\S+\s+\S+\s+(?P<local>\S+)\s+\S+\s*(?:users:\((?P<users>.*)\))?\s*$", re.M)
+_PROC_RE = re.compile(r'\("(?P<proc>[^"]+)",pid=(?P<pid>\d+)')
+#: `uid=999(radarr) gid=996(radarr) groups=…`
+_ID_RE = re.compile(r"uid=(?P<uid>\d+)\((?P<user>[^)]*)\)\s+gid=(?P<gid>\d+)\((?P<group>[^)]*)\)")
+#: `radarr:radarr 644 /var/lib/radarr/config.xml`
+_STAT_RE = re.compile(r"^(?P<owner>[^:\s]+):(?P<group>[^\s]+)\s+(?P<mode>\d{3,4})\s+(?P<path>\S.*)$", re.M)
+#: where an app is told to keep its data: `-data=/var/lib/radarr`, `--config /etc/x`
+_DATA_RE = re.compile(r"(?:^|\s)(?:-{1,2}(?:data|config|configdir|conf|config-file)[= ])(?P<path>/[^\s]+)")
+
+
+@dataclass
+class ServiceTruth:
+    """What a machine says about one service it runs. Every field is a read; a
+    field that could not be read is empty, never a guess."""
+    guest: str = ""
+    unit: str = ""
+    name: str = ""
+    state: str = ""
+    user: str = ""
+    group: str = ""
+    uid: str = ""
+    gid: str = ""
+    argv: str = ""
+    fragment: str = ""
+    data_dir: str = ""
+    #: §17.1346b — every config file the service has, because one app keeps several
+    #: (`qBittorrent.conf` beside `qBittorrent-data.conf`, Jellyfin's four XMLs) and
+    #: a gate that knows only the first misses the file the step actually edits.
+    configs: tuple[str, ...] = ()
+    config_stat: dict = field(default_factory=dict)   # path -> (owner:group, mode)
+    ports: tuple[str, ...] = ()
+    reads: dict = field(default_factory=dict)
+
+    @property
+    def config(self) -> str:
+        return self.configs[0] if self.configs else ""
+
+    @property
+    def config_owner(self) -> str:
+        return (self.config_stat.get(self.config) or ("", ""))[0]
+
+    @property
+    def config_mode(self) -> str:
+        return (self.config_stat.get(self.config) or ("", ""))[1]
+
+    def rewrites(self, path: str) -> Optional[bool]:
+        """Can this service write `path`? None when unmeasured."""
+        owner, mode = self.config_stat.get(str(path or ""), ("", ""))
+        if not owner or not self.user:
+            return None
+        try:
+            bits = int(mode or "0", 8)
+        except ValueError:
+            return None
+        who, _, grp = owner.partition(":")
+        if who == self.user:
+            return bool(bits & 0o200)
+        if grp and grp == self.group:
+            return bool(bits & 0o020)
+        return False
+
+    @property
+    def rewrites_its_own_config(self) -> Optional[bool]:
+        """Can this service write the file that configures it?
+
+        §17.1343 — qBittorrent's conf is `qbittorrent-nox:qbittorrent-nox 664`, so
+        the service owns it and rewrites the whole file when it shuts down: an edit
+        made while it runs is replaced. Caddy's Caddyfile is root-owned and caddy
+        runs as `caddy`, so editing it live is safe. None when unmeasured.
+        """
+        hits = [self.rewrites(p) for p in self.configs]
+        return True if any(h is True for h in hits) else (False if any(h is False for h in hits) else None)
+
+    def says(self) -> str:
+        """One line for the drafter: the facts, not prose."""
+        bits = [f"{self.name} on guest {self.guest}"]
+        if self.ports:
+            bits.append("port " + "/".join(self.ports))
+        if self.user:
+            bits.append(f"runs as {self.user}" + (f" (uid {self.uid}, gid {self.gid})" if self.uid else ""))
+        if self.unit:
+            bits.append(f"unit {self.unit}" + (f" ({self.state})" if self.state else ""))
+        if self.config:
+            own = self.rewrites_its_own_config
+            bits.append(f"config {self.config}" + (" (the service rewrites it: stop it before editing)"
+                                                   if own else " (not writable by the service)" if own is False else ""))
+        return " · ".join(bits)
+
+
+def parse_show(text: str) -> dict:
+    """`systemctl show -p …` into a dict, with `ExecStart`'s argv pulled out."""
+    out: dict = {}
+    for ln in str(text or "").split("\n"):
+        if "=" not in ln:
+            continue
+        k, _, v = ln.partition("=")
+        out[k.strip()] = v.strip()
+    m = _ARGV_RE.search(out.get("ExecStart", ""))
+    if m:
+        out["argv"] = " ".join(m.group("argv").split())
+    return out
+
+
+def parse_id(text: str) -> tuple[str, str, str, str]:
+    """``(user, uid, group, gid)`` out of `id <user>`."""
+    m = _ID_RE.search(str(text or ""))
+    return (m.group("user"), m.group("uid"), m.group("group"), m.group("gid")) if m else ("", "", "", "")
+
+
+def parse_stat(text: str) -> tuple[str, str, str]:
+    """``(owner:group, mode, path)`` out of `stat -c '%U:%G %a %n'`."""
+    m = _STAT_RE.search(str(text or ""))
+    return (f"{m.group('owner')}:{m.group('group')}", m.group("mode"), m.group("path")) if m else ("", "", "")
+
+
+def parse_stats(text: str) -> list[tuple[str, str, str]]:
+    """``[(owner:group, mode, path)]`` for every line of a multi-file `stat`."""
+    out: list[tuple[str, str, str]] = []
+    for m in _STAT_RE.finditer(str(text or "")):
+        out.append((f"{m.group('owner')}:{m.group('group')}", m.group("mode"), m.group("path").strip()))
+    return out
+
+
+def ports_of(ss_text: str, proc: str) -> tuple[str, ...]:
+    """The ports a process is LISTENing on, from `ss -tlnp`.
+
+    The process name is the binary's, not the unit's (`Radarr` for
+    `radarr.service`), so the match is case-insensitive on a prefix.
+    """
+    want = re.sub(r"[^a-z0-9]", "", str(proc or "").lower())[:8]
+    if not want:
+        return ()
+    out: list[str] = []
+    for m in _LISTEN_RE.finditer(str(ss_text or "")):
+        users = m.group("users") or ""
+        names = [re.sub(r"[^a-z0-9]", "", p.group("proc").lower()) for p in _PROC_RE.finditer(users)]
+        if not any(n.startswith(want[:4]) or want.startswith(n[:4]) for n in names if n):
+            continue
+        port = str(m.group("local")).rsplit(":", 1)[-1]
+        if port.isdigit() and port not in out:
+            out.append(port)
+    return tuple(out)
+
+
+def data_dir_of(argv: str) -> str:
+    """Where the service was told to keep its data (`-data=/var/lib/radarr`)."""
+    m = _DATA_RE.search(" " + str(argv or ""))
+    return m.group("path").rstrip("/") if m else ""
+
+
+def config_candidates(name: str, user: str, data_dir: str, home: str = "") -> list[str]:
+    """Paths worth a `stat`, most specific first. No invention: each is either the
+    service's own data dir, or its home, or a name the unit itself gave."""
+    out: list[str] = []
+    if data_dir:
+        out += [f"{data_dir}/config.xml", f"{data_dir}/{name}.conf", f"{data_dir}/settings.json"]
+    base = (home or f"/var/lib/{name}").rstrip("/")
+    # §17.1346b — the directory under `.config` is the APP's own spelling, not the
+    # unit's: qBittorrent keeps its file at `.config/qBittorrent/qBittorrent.conf`
+    # while the service is `qbittorrent-nox`. The shell's glob finds it; guessing
+    # the capitalisation does not.
+    out += [f"{base}/config.xml", f"{base}/.config/*/*.conf", f"{base}/*.conf", f"/etc/{name}/*.xml"]
+    return list(dict.fromkeys(out))
+
+
+def table(services: list[ServiceTruth]) -> str:
+    """The facts block handed to every draft about this step's machines."""
+    lines = [s.says() for s in services if s.name]
+    return ("SERVICES MEASURED ON THESE MACHINES (read just now; use these values, do not infer others):\n"
+            + "\n".join(f"- {ln}" for ln in lines)) if lines else ""
+
+
+async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
+    """``(ok, output)`` — ``ok`` None when the runner could not be asked."""
+    try:
+        from app.modules.assist_local_runner import _plain_output, unwrap_guest_exec
+        from app.modules.mcp_client import call_tool
+        res = await call_tool(spec, "run_readonly", {"command": command, "timeout_s": 20})
+        return (not bool(res.is_error)), unwrap_guest_exec(command, _plain_output(res) or "")
+    except Exception as exc:
+        logger.warning("service_truth_probe_failed cmd=%r err=%r", command, exc)
+        return None, ""
+
+
+MAX_SERVICES = 6
+
+
+async def read_services(spec, gid: str, units: Optional[list[str]] = None,
+                        mentioned: Optional[list[str]] = None) -> list[ServiceTruth]:
+    """Measure the services on one running container: what listens, and what each
+    listener is. Fail-soft per field; unreadable means empty, never a guess."""
+    if spec is None or not gid:
+        return []
+    ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
+    if not ok:
+        return []
+    procs: list[str] = []
+    for m in _LISTEN_RE.finditer(ss_text):
+        for p in _PROC_RE.finditer(m.group("users") or ""):
+            name = p.group("proc")
+            if name and name not in procs and name not in ("sshd", "master", "systemd"):
+                procs.append(name)
+    wanted: list[str] = []
+    for u in units or []:
+        base = re.sub(r"\.service$", "", str(u))
+        low = re.sub(r"[^a-z0-9]", "", base.lower())
+        if any(low.startswith(re.sub(r"[^a-z0-9]", "", p.lower())[:4]) or
+               re.sub(r"[^a-z0-9]", "", p.lower()).startswith(low[:4]) for p in procs) \
+                or base in (mentioned or []):
+            wanted.append(base)
+    for name in mentioned or []:
+        if name not in wanted:
+            wanted.append(name)
+    out: list[ServiceTruth] = []
+    for base in wanted[:MAX_SERVICES]:
+        ok, show = await _probe(spec, f"pct exec {gid} -- sh -c 'systemctl show -p Id -p User -p Group "
+                                      f"-p ExecStart -p FragmentPath -p ActiveState {base}'")
+        if not ok or not show.strip():
+            continue
+        sh = parse_show(show)
+        unit = sh.get("Id") or f"{base}.service"
+        user = sh.get("User") or ""
+        s = ServiceTruth(guest=str(gid), unit=unit, name=re.sub(r"\.service$", "", unit),
+                         state=sh.get("ActiveState") or "", user=user, group=sh.get("Group") or "",
+                         argv=sh.get("argv") or "", fragment=sh.get("FragmentPath") or "")
+        s.reads["systemctl show"] = unit
+        s.data_dir = data_dir_of(s.argv)
+        s.ports = ports_of(ss_text, s.name) or ports_of(ss_text, (s.argv.split("/")[-1].split()[0] if s.argv else ""))
+        if user:
+            ok2, id_text = await _probe(spec, f"pct exec {gid} -- sh -c 'id {user}'")
+            if ok2:
+                _u, s.uid, _g, s.gid = parse_id(id_text)
+        cands = config_candidates(s.name, user, s.data_dir)
+        ok3, found = await _probe(spec, f"pct exec {gid} -- sh -c 'ls -1d {' '.join(cands)} 2>/dev/null'")
+        paths = [ln.strip() for ln in (found or "").split("\n") if ln.strip().startswith("/")] if ok3 else []
+        if paths:
+            ok4, st_text = await _probe(spec, f"pct exec {gid} -- sh -c 'stat -c \"%U:%G %a %n\" "
+                                              + " ".join(paths[:8]) + "'")
+            if ok4:
+                s.configs = tuple(paths[:8])
+                s.config_stat = {p: (o, m) for o, m, p in parse_stats(st_text)}
+                s.reads["stat"] = f"{len(s.config_stat)} config file(s)"
+        out.append(s)
+    logger.warning("service_truth_read guest=%s services=%s", gid, [s.name for s in out])
+    return out
+
+
+#: a command that runs INSIDE a guest
+_IN_GUEST_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>\d{3,5})\b", re.I)
+#: an edit to a path
+_EDIT_RE = re.compile(r"\b(?:sed\s+-i|tee\s|cat\s*>|printf|echo)\b[^\n]*?(?P<path>/[\w./-]+\.(?:conf|xml|ini|cfg|json|yaml|yml))")
+_STOPS_RE = re.compile(r"\bsystemctl\s+stop\s+(?P<unit>[\w@.-]+)", re.I)
+
+
+def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
+                             services: list[ServiceTruth]) -> list[dict]:
+    """§17.1346 — a command running in one guest using another guest's port or path.
+
+    Live: the root-folder step put both calls inside container 103 — Radarr's, and
+    Sonarr's, reading `/var/lib/sonarr/config.xml` and calling `127.0.0.1:8989`.
+    Inside 103 there is no sonarr config and nothing listening on 8989, so the
+    second call could only fail. The measured services say which machine each value
+    belongs to.
+    """
+    if not services:
+        return []
+    by_guest: dict[str, list[ServiceTruth]] = {}
+    for s in services:
+        by_guest.setdefault(s.guest, []).append(s)
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for seg in t.split("\n"):
+            m = _IN_GUEST_RE.search(seg)
+            if not m:
+                continue
+            here = m.group("gid")
+            mine = by_guest.get(here) or []
+            for s in services:
+                if s.guest == here or not (s.ports or s.data_dir):
+                    continue
+                hit = next((p for p in s.ports if re.search(rf"[:\s]{p}\b", seg)), "")
+                path = s.data_dir if (s.data_dir and s.data_dir in seg) else ""
+                if not hit and not path:
+                    continue
+                if any((hit and hit in o.ports) or (path and path == o.data_dir) for o in mine):
+                    continue                       # the same value exists here too
+                out.append({"command": seg.strip()[:200], "why": (
+                    f"this runs inside guest {here}, and {hit or path} belongs to {s.name} on guest "
+                    f"{s.guest} (measured: " + s.says() + f"). Inside {here} there is nothing of {s.name}'s "
+                    f"-- the call can only fail. Address {s.name} in ITS guest: "
+                    f"`pct exec {s.guest} -- sh -c '…'`, one command per machine.")})
+                break
+    return out
+
+
+def edits_a_config_the_service_rewrites(commands: list[str], files: Optional[list[dict]],
+                                        services: list[ServiceTruth]) -> list[dict]:
+    """§17.1346 — editing a config the service itself writes, while it runs.
+
+    Live (§17.1343): qBittorrent's conf is `qbittorrent-nox:qbittorrent-nox 664`,
+    so the service rewrites the whole file on shutdown and the edit made while it
+    ran was replaced on restart. The run reported success and changed nothing. A
+    config NOT writable by the service (root-owned, service running as its own
+    user) is left alone.
+    """
+    out: list[dict] = []
+    owns = [s for s in services if s.configs]
+    if not owns:
+        return []
+    joined = "\n".join([str(c) for c in commands or []] +
+                       [str((f or {}).get("content") or "") for f in files or []])
+    stopped = {m.group("unit").replace(".service", "") for m in _STOPS_RE.finditer(joined)}
+    for s in owns:
+        if s.name in stopped:
+            continue
+        for m in _EDIT_RE.finditer(joined):
+            path = m.group("path")
+            if path not in s.configs or s.rewrites(path) is not True:
+                continue
+            owner, mode = s.config_stat.get(path, ("", ""))
+            out.append({"command": m.group(0).strip()[:200], "why": (
+                f"{path} is written by {s.name} itself (measured: owner {owner}, mode "
+                f"{mode}, service runs as {s.user}), and it rewrites the whole file when it stops. "
+                f"An edit made while it runs is replaced the moment the service restarts -- live, that run "
+                f"reported success and changed nothing. Stop it first: `systemctl stop {s.name}`, wait for "
+                f"the process to go, edit, then start it, and read the value back AFTER the restart.")})
+            break
+    return out
+
+
+#: the apps a step's own words name, so a service that holds no port is measured too
+_NAME_RE = re.compile(r"\b(radarr|sonarr|prowlarr|lidarr|readarr|bazarr|jellyfin|plex|emby|qbittorrent(?:-nox)?|"
+                      r"transmission(?:-daemon)?|deluged?|sabnzbd|caddy|nginx|pihole|pihole-FTL|unbound|"
+                      r"palworld|control-panel|jackett|overseerr|tautulli)\b", re.I)
+
+
+def names_in(node: Optional[dict]) -> list[str]:
+    """The service names a step's text mentions, lower-cased and deduplicated."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    return list(dict.fromkeys(m.group(1).lower() for m in _NAME_RE.finditer(text)))
