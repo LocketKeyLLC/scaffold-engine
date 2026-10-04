@@ -767,7 +767,14 @@ _OVERWRITE_RE = re.compile(
     r"^\s*(?:sudo\s+)?(?:tee\s+(?!-a\b)(?P<tee>/[^\s<>|;&]+)\s*(?:<<|<)"
     r"|cat\s*>\s*(?P<cat>/[^\s<>|;&]+)"
     r"|(?:cp|mv)\s+(?:-\S+\s+)*\S+\s+(?P<cpmv>/[^\s<>|;&]+)\s*$"
-    r"|install\s+(?:-\S+\s+\S+\s+|-\S+\s+)*\S+\s+(?P<inst>/[^\s<>|;&]+)\s*$)")
+    r"|install\s+(?:-\S+\s+\S+\s+|-\S+\s+)*\S+\s+(?P<inst>/[^\s<>|;&]+)\s*$"
+    # §17.1341 — an edit IN PLACE is an overwrite too. Live, ADD130's draft changed
+    # the live qBittorrent config with `sed -i "s|^${KEY}=.*|${KEY}=/media/downloads|"
+    # "$CONF"` and appended to it, with no copy kept: the rule only knew lines that
+    # REPLACE a whole file, so a config the service was running on could be rewritten
+    # with nothing to go back to.
+    r"|(?:sed|perl)\s+(?:-\S+\s+)*-i\S*\s+(?:-\S+\s+)*(?:'[^']*'|\"[^\"]*\"|\S+)\s+(?P<inplace>[\"']?\$?\{?[A-Za-z_][\w]*\}?[\"']?|/[^\s<>|;&]+)\s*$"
+    r"|(?:printf|echo)\s+.*>>\s*(?P<append>[\"']?\$?\{?[A-Za-z_][\w]*\}?[\"']?|/[^\s<>|;&]+)\s*$)")
 
 
 def keep_a_copy_before_overwrites(remote_commands: str) -> str:
@@ -790,7 +797,9 @@ def keep_a_copy_before_overwrites(remote_commands: str) -> str:
             continue
         m = _OVERWRITE_RE.match(ln)
         if m and not ln.lstrip().startswith("#"):
-            path = next(v for v in (m.group("tee"), m.group("cat"), m.group("cpmv"), m.group("inst")) if v)
+            path = next(v for v in (m.group("tee"), m.group("cat"), m.group("cpmv"), m.group("inst"),
+                                    m.group("inplace"), m.group("append")) if v)
+            path = path.strip("\"'")                # §17.1341 — `"$CONF"` is a path too
             out.append(f'[ -e "{path}" ] && cp -a "{path}" "{path}.bak.$(date +%Y%m%d%H%M%S)"')
         out.append(ln)
         hd = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", ln)
