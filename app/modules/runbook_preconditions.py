@@ -198,6 +198,144 @@ def _first_line_with(texts: list[str], pattern: "re.Pattern[str]") -> str:
     return ""
 
 
+#: `cat > f <<'EOF'`, `<<-MARK`, `<<"M"` — a heredoc opener and its marker
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def heredoc_depths(text: str) -> list[int]:
+    """The heredoc depth of every line of a shell text.
+
+    §17.1338 — depth says who runs a line. Depth 0 is the script itself; depth 1 is
+    a heredoc body the script writes and then RUNS (live, the container template
+    pushes `<<'REMOTE'` into the guest and runs it there); depth 2 and deeper is
+    content that body writes to a file — a Node route, a config — which nothing in
+    this step executes. An ssh there is the service's problem, not the block's.
+    """
+    out: list[int] = []
+    stack: list[str] = []
+    for ln in str(text or "").split("\n"):
+        if stack and ln.strip() == stack[-1]:
+            stack.pop()
+            out.append(len(stack) + 1)       # the terminator belongs to the body
+            continue
+        out.append(len(stack))
+        m = _HEREDOC_OPEN_RE.search(ln)
+        if m:
+            stack.append(m.group(2))
+    return out
+
+
+def executed_lines(text: str, max_depth: int = 1) -> list[str]:
+    """The lines of `text` a step actually runs (heredoc depth <= `max_depth`)."""
+    lines = str(text or "").split("\n")
+    return [ln for ln, d in zip(lines, heredoc_depths(text), strict=False) if d <= max_depth]
+
+
+def written_content_lines(text: str, min_depth: int = 2) -> list[str]:
+    """The lines `text` WRITES into a file rather than runs."""
+    lines = str(text or "").split("\n")
+    return [ln for ln, d in zip(lines, heredoc_depths(text), strict=False) if d >= min_depth]
+
+
+def ssh_target_in(line: str) -> tuple[str, str]:
+    """``(user, host)`` the ssh on this line reaches, as far as it can be read.
+
+    §17.1338 — the key rule used to attribute every ssh to the step's SUBJECT
+    guest. Live, ADD122 writes a Node route into container 111 whose code ssh's
+    OUT to the PalWorld VM, and the refusal said "nothing has put this host's key
+    on guest 111" and told the drafter to prefix an ssh the block does not run.
+    An ssh is judged by the target it names.
+    """
+    m = _SSH_TARGET_RE.search(str(line or ""))
+    return ((str(m.group(1) or "").rstrip("@"), str(m.group(2) or ""))) if m else ("", "")
+
+
+def _guest_for_target(host: str, inv: Optional[dict], subjects: list[str]) -> str:
+    """The guest id `host` names: by measured address, by a `<NAME_IP>` style
+    placeholder against the inventory's names, else ''. Never the subject by
+    default — that assumption is the defect this fixes."""
+    if not host:
+        return ""
+    names = (inv or {}).get("names") or {}
+    for gid, nm in names.items():
+        word = re.sub(r"[^a-z0-9]", "", str(nm or "").lower())
+        if word and word[:6] and word[:6] in re.sub(r"[^a-z0-9]", "", host.lower()):
+            return str(gid)
+    for gid, addrs in ((inv or {}).get("addresses") or {}).items():
+        if host in (addrs if isinstance(addrs, (list, tuple)) else [addrs]):
+            return str(gid)
+    return ""
+
+
+#: an address the file itself names: a literal, or a `<GUEST_IP>` placeholder
+_FILE_HOST_RE = re.compile(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3})(?![\w.])|<([A-Z][A-Z0-9_]*_IP)>")
+
+
+def host_a_file_reaches(content: str, line: str) -> str:
+    """The host a file's ssh goes to: the ssh line's own target, else the address
+    the FILE names (`const PALWORLD_IP = '192.168.1.106'`), else ''.
+
+    §17.1338 — ADD122's route holds `execFileSync('ssh', [...])` with the address in
+    a constant at the top of the file. Reading only the ssh line finds nothing, and
+    assuming the step's subject names the wrong machine entirely.
+    """
+    _u, host = ssh_target_in(line)
+    if host:
+        return host
+    hosts: list[str] = []
+    for m in _FILE_HOST_RE.finditer(str(content or "")):
+        h = m.group(1) or (f"<{m.group(2)}>" if m.group(2) else "")
+        if h and not h.endswith(".0") and not h.endswith(".255") and h not in hosts:
+            hosts.append(h)
+    return hosts[0] if len(hosts) == 1 else ""
+
+
+_THIS_GUEST = "this step's guest"
+
+
+def _file_ssh_needs_its_own_credential(files: Optional[list[dict]], subjects: list[str],
+                                       inv: Optional[dict], plan: Optional[list[dict]]) -> list[dict]:
+    """§17.1338 — a written file whose code ssh's somewhere at RUNTIME.
+
+    The remedy is never "prefix the ssh in this block": there is no such ssh. The
+    service the file becomes needs a credential of its own on the target, which is
+    a step of its own. Said once per (file, target), naming the file, the host it
+    reaches and the guest it reaches FROM.
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    here = subjects[0] if subjects else ""
+    for f in files or []:
+        content = str((f or {}).get("content") or "")
+        path = str((f or {}).get("path") or "") or "the written file"
+        written = written_content_lines(content)
+        for line in written:
+            if not _SSH_RE.search(line) or "sshpass" in line or "ssh-copy-id" in line:
+                continue
+            if line.lstrip().startswith("#"):
+                continue
+            host = host_a_file_reaches("\n".join(written), line)
+            if not host:
+                continue                  # nothing readable to name: no judgment
+            target = _guest_for_target(host, inv, subjects)
+            if target and key_known_for(target, ((inv or {}).get("names") or {}).get(target, ""), plan):
+                continue                  # a finished step put a key there
+            if (path, host) in seen:
+                continue
+            seen.add((path, host))
+            out.append({"command": line.strip()[:200], "why": (
+                f"{path} runs `ssh` at RUNTIME, from inside guest {here or _THIS_GUEST} to {host}"
+                + (f" (guest {target})" if target else "")
+                + ". Nothing has given that service a credential there, so the request fails with publickey "
+                  "the first time anyone uses the page -- while this step's checks pass, because the file is "
+                  "on disk. This is not a prefix for this block: it needs a step that generates a key for the "
+                  f"service user in guest {here or '?'} and installs it on {host}, with this step waiting for "
+                  "it. A password in the service's environment is the other way; a key is the one that "
+                  "survives a restart.")})
+            break                          # one judgment per file
+    return out
+
+
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
                 inventory: Optional[dict] = None, truth=None) -> list[dict]:
@@ -226,6 +364,10 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     if _tg and _tg not in subjects:
         subjects.append(_tg)
     uses_ssh = any(_SSH_RE.search(t) for t in texts)
+    # §17.1338 — which texts are COMMANDS the block runs, and which are the
+    # contents of files it writes. An ssh inside a written file runs later, from
+    # the guest the file lands in, against whatever target the file names: it is
+    # not this block reaching into its own subject.
     out: list[dict] = []
     inv = inventory if inventory is not None else (await read_inventory(spec) if spec is not None else None)
     # §17.1288g — an ssh into the step's guest with no key of ours on it and
@@ -234,15 +376,21 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     if uses_ssh and subjects:
         # §17.1290b — cloud-init's `--sshkeys` installs this host's key as surely as ssh-copy-id does
         copies = any("ssh-copy-id" in t or "--sshkeys" in t for t in texts)
-        bare = [ln for t in texts for ln in str(t).split("\n")
-                if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln and not ln.lstrip().startswith("#")]
-        if bare and not copies:
+        # §17.1338 — only the lines the step RUNS decide this rule. A line two
+        # heredocs deep is content a script writes to a file (a Node route, a
+        # config); it is judged below, against the host that content names.
+        def _bare(t: str) -> list[str]:
+            return [ln for ln in executed_lines(t)
+                    if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln
+                    and not ln.lstrip().startswith("#")]
+        cmd_bare = [ln for t in texts for ln in _bare(str(t))]
+        if cmd_bare and not copies:
             names = (inv or {}).get("names") or {}
             for gid in subjects:
                 known = key_known_for(gid, names.get(gid, ""), plan)
                 if known:
                     continue
-                out.append({"command": bare[0].strip()[:200], "why": (
+                out.append({"command": cmd_bare[0].strip()[:200], "why": (
                     f"nothing has put this host's key on guest {gid}: no finished step installed one there "
                     f"and this block copies none, so `ssh -o BatchMode=yes` is refused by the guest before "
                     f"anything runs (publickey). Before the first ssh: `SSHPASS=\"$MASS_PASSWORD\" sshpass -e "
@@ -250,6 +398,8 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                     f"itself with `SSHPASS=\"$MASS_PASSWORD\" sshpass -e`. The password travels by name; "
                     f"nothing here can type one.")})
                 break
+        if not copies:
+            out.extend(_file_ssh_needs_its_own_credential(files, subjects, inv, plan))
     # §17.1303 — the block reaches the step's guest at an address the machine
     # contradicts. Live, ADD84 (VM 106, measured at 192.168.1.106 by its MAC in
     # `ip neigh`, pinned as PALWORLD_IP) drew `ssh <PALWORLD_USER>@192.168.1.127`
