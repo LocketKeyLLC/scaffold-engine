@@ -344,7 +344,19 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
     T23 had no id in its text, so no truth was read, no template applied, and the
     draft went over ssh with sudo into a VM whose agent answers."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
-    m = _SUBJECT_RE.search(text)
+    # §17.1340 — a guest the step's own commands ACT ON outranks one it merely
+    # mentions. Live, ADD129 ("give Radarr, Sonarr and the download client the
+    # shared media storage") carries a measured note that names `Jellyfin (CT 101)`
+    # before it names anything else, and `pct set 103 -mp0 …` as the work. The
+    # subject came back 101 — the one container that already had the mount — and
+    # the step was drafted as work INSIDE Jellyfin.
+    from app.modules.runbook_templates import guests_the_host_is_told_to_touch
+    acted_on = guests_the_host_is_told_to_touch(node or {})
+    if len(acted_on) == 1:
+        return next(iter(acted_on))
+    if len(acted_on) > 1:
+        return None                     # it spans guests: no single subject to measure
+    m = _SUBJECT_RE.search(str((node or {}).get("title") or "")) or _SUBJECT_RE.search(text)
     if m:
         return m.group(1)
     names = (inventory or {}).get("names") or {}
