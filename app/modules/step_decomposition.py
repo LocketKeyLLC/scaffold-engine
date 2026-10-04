@@ -171,6 +171,156 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
     return out
 
 
+# ── §17.1334: the numbering and any stated count survive a child coming or going ──
+#: `[Engine split of ADD100 — 5 of 8]`, as `children_from` writes it
+_STAMP_RE = re.compile(r"\[Engine split of (?P<parent>[A-Za-z0-9_.:-]+)\s*[—–-]\s*(?P<n>\d+) of (?P<total>\d+)\]")
+#: a child that says how many of something there are: "renders exactly four sections"
+_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+_NUM_WORD = {v: k for k, v in _WORDS.items()}
+_COUNT_RE = re.compile(
+    r"\b(?:exactly|all|the)\s+(?P<num>one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?P<kind>sections?|capabilit(?:y|ies)|tiles?|parts?|items?)\b", re.I)
+#: §17.1334b — what a capability child calls itself. The word alone is not the
+#: signal: live, ADD121 builds "an editable config-driven capability registry"
+#: and ADD126 renders "the three capabilities from the registry" — neither IS a
+#: capability. The shape is `implement the <X> capability`.
+_CAPABILITY_RE = re.compile(r"\bimplement\b[^.]*?\bcapabilit(?:y|ies)\b", re.I)
+
+
+def split_children(plan: Optional[list[dict]], parent_key: str) -> list[dict]:
+    """This parent's children, in plan order, with their stamp parsed."""
+    mark = SPLIT_MARK.format(key=parent_key)
+    out = []
+    for n in plan or []:
+        body = str(n.get("description") or "")
+        if mark not in body:
+            continue
+        m = _STAMP_RE.search(body)
+        out.append({**n, "_n": int(m.group("n")) if m else None,
+                    "_total": int(m.group("total")) if m else None})
+    return out
+
+
+def parent_of(node: Optional[dict]) -> str:
+    """The step this one is a child of, from its own stamp, or ''."""
+    m = _STAMP_RE.search(str((node or {}).get("description") or ""))
+    return m.group("parent") if m else ""
+
+
+def stamp_edits(plan: Optional[list[dict]], parent_key: str) -> list[dict]:
+    """The children whose `n of N` no longer matches the plan.
+
+    Live (§17.1334): ADD100 was split twice, and after the second run the plan
+    held `ADD121 — 1 of 7` beside `ADD122 — 2 of 8`. Two different totals for
+    one split, and a child numbered 5 twice. The numbers are the engine's own
+    record of what it decided; a stale one misreports the work.
+    """
+    kids = split_children(plan, parent_key)
+    total = len(kids)
+    out: list[dict] = []
+    for i, k in enumerate(kids):
+        want_n, want_total = i + 1, total
+        if k["_n"] == want_n and k["_total"] == want_total:
+            continue
+        body = str(k.get("description") or "")
+        new = _STAMP_RE.sub(f"[Engine split of {parent_key} — {want_n} of {want_total}]", body, count=1)
+        if new == body:
+            continue
+        out.append({"node_key": str(k.get("node_key")), "description": new,
+                    "says": f"{k['_n']} of {k['_total']}", "should_be": f"{want_n} of {want_total}"})
+    return out
+
+
+def count_edits(plan: Optional[list[dict]], parent_key: str) -> list[dict]:
+    """The children that state a count of their siblings which is no longer true.
+
+    Live (§17.1334): ADD126 was titled "the single-page frontend rendering the
+    three capabilities" and said it "renders exactly three sections", while
+    ADD100's own text asks for FOUR capabilities and four capability children
+    stood in the plan. A step that builds the surface for its siblings must not
+    carry a smaller number than the siblings it has: that is how a capability
+    the operator asked for goes missing with nothing refused.
+
+    Nothing is rewritten in place (§17.1334b). ADD121's text lists the three by
+    NAME ("palworld-settings, media-request, scaffold-engine") and is a DONE
+    step; swapping its number would leave a list of three behind a word saying
+    four, and would falsify a record of what ran. A PENDING child gets the
+    correction APPENDED, naming every sibling it must cover. A finished child
+    gets a note on the frame and no write at all.
+    """
+    kids = split_children(plan, parent_key)
+    caps = [k for k in kids if _CAPABILITY_RE.search(str(k.get("title") or ""))]
+    real = len(caps)
+    if real < 2:
+        return []                      # nothing to count
+    names = ", ".join(f"{k.get('node_key')} {_short_title(k)}" for k in caps)
+    out: list[dict] = []
+    for k in kids:
+        if _CAPABILITY_RE.search(str(k.get("title") or "")):
+            continue                   # a capability step counts no siblings
+        said = raw = kind = ""
+        for field in ("title", "description"):
+            m = _COUNT_RE.search(str(k.get(field) or ""))
+            if not m:
+                continue
+            raw, kind = m.group("num"), m.group("kind")
+            said = int(raw) if raw.isdigit() else _WORDS.get(raw.lower(), 0)
+            if said and said != real:
+                break
+            said = ""
+        if not said:
+            continue
+        word = _NUM_WORD.get(real, str(real))
+        hit = {"node_key": str(k.get("node_key")), "siblings": real,
+               "says": f"{raw} {kind}", "should_be": f"{word} {kind}"}
+        correction = (f"ENGINE MEASURED: the plan holds {real} capability steps ({names}); this step says "
+                      f"{raw} {kind}. Cover all {word}.")
+        if str(k.get("status") or "pending") != "pending":
+            hit["note"] = correction          # a finished step's record is not rewritten
+        else:
+            hit["description"] = str(k.get("description") or "").rstrip() + "\n\n" + correction
+        out.append(hit)
+    return out
+
+
+def _short_title(node: dict) -> str:
+    """`implement the media request capability (…)` → `media request`."""
+    t = str(node.get("title") or "")
+    m = re.search(r"\bimplement\s+(?:the\s+)?(.+?)\s+capabilit", t, re.I)
+    return m.group(1) if m else t.split(":")[-1].strip()[:40]
+
+
+async def reconcile_split(job_id: str, plan: Optional[list[dict]], parent_key: str) -> list[str]:
+    """Apply both corrections through the node editor; return what was said on the frame."""
+    if not parent_key:
+        return []
+    from app.modules import node_editor
+    from app.database import get_db
+    said: list[str] = []
+    jobs = [("renumbered", e) for e in stamp_edits(plan, parent_key)] + \
+           [("recounted", e) for e in count_edits(plan, parent_key)]
+    if not jobs:
+        return []
+    async for db in get_db():
+        for what, e in jobs:
+            try:
+                fields = {f: e[f] for f in ("title", "description") if f in e}
+                res = await node_editor.edit_node(
+                    job_id, e["node_key"], fields,
+                    edited_by=f"engine:split of {parent_key} ({what})", db=db, cascade=False)
+                if res.get("error"):
+                    logger.warning("split_reconcile_failed node=%s err=%s", e["node_key"], res["error"])
+                    continue
+                said.append(f"{e['node_key']} said `{e['says']}`; the plan holds {e['should_be']}" if what == "renumbered"
+                            else f"{e['node_key']} said `{e['says']}` while {e['siblings']} capability steps stand "
+                                 f"in the plan; corrected to `{e['should_be']}`")
+            except Exception as exc:
+                logger.warning("split_reconcile_error node=%s err=%r", e["node_key"], exc)
+        break
+    return said
+
+
 async def propose_split(node: dict, brief, environment: Optional[dict], upstream: str = "",
                         reason: str = "") -> list[dict]:
     """Ask for the ordered steps. Fail-soft to ``[]`` — a step that cannot be split
