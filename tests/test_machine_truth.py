@@ -282,8 +282,10 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     calls = body.count("supervised_runs.draft_runbook(")
     assert calls >= 8 and body.count("truth=_truth") >= calls, f"{calls} drafts, {body.count('truth=_truth')} carry the truth"
     assert "decision_pause_restart_after_reopen" in body
-    # §17.1330 — three restarts now: a step already met, a reopen/insert this step waits for, a split
-    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 3
+    # §17.1334 — four restarts now: a step already met, a reopen/insert this step
+    # waits for, a split, and a split's numbering or stated count corrected on this
+    # step's own text (the draft reads that text, so it restarts rather than drafts).
+    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 4
     assert "step_split_restart" in body
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')
 
@@ -359,7 +361,15 @@ async def test_after_an_os_install_is_recorded_done_the_voided_steps_are_reopene
     assert "_mt.after_step_done(job_id, {" in src, "the run's done write calls it"
     esrc = pathlib.Path(__import__("app.modules.execution_agent", fromlist=["x"]).__file__).read_text(encoding="utf-8")
     assert "machine_truth.after_step_done(job_id, run_node)" in esrc, "the already-met done write calls it"
-    assert "SELECT node_key, title, status, completed_at FROM dag_nodes" in esrc, "plan rows carry completed_at"
+    # §17.1334 — the plan read carries every field its consumers use, and an order:
+    # `already_split` reads `description` and the renumbering needs the order.
+    _i = esrc.index("async def _pause_for_decision(")
+    _body = esrc[_i:esrc.index("\nasync def ", _i + 10)]
+    _sel = _body[_body.index("SELECT node_key, title"):]
+    _sel = _sel[:_sel.index("{\"j\": job_id}")]
+    for _col in ("node_key", "title", "description", "status", "completed_at", "execution_order"):
+        assert _col in _sel, f"plan rows carry {_col}: {_sel}"
+    assert "ORDER BY execution_order" in _sel, _sel
 
 
 
