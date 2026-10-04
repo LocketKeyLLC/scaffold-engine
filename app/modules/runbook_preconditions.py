@@ -529,9 +529,112 @@ async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: st
     return out
 
 
+#: §17.1359 — an API path the block's CHECK reads: `…/api/v3/downloadclient`,
+#: `…/api/v2/app/preferences`. The last path segment is the name of the thing.
+_API_PATH_RE = re.compile(
+    r"https?://(?P<host>\[[0-9a-fA-F:]+\]|[A-Za-z0-9_.-]+):(?P<port>\d{2,5})"
+    r"(?P<path>/[A-Za-z0-9_./-]*)")
+#: a name written INTO a file: an XML element, or a `Key=`/`"key":` assignment
+_WRITES_NAME_RE = re.compile(
+    r"</?(?P<el>[A-Za-z][A-Za-z0-9_]{3,40})>|(?P<key>[A-Za-z][A-Za-z0-9_\\]{3,40})\s*=|"
+    r"\\?\"(?P<jkey>[A-Za-z][A-Za-z0-9_]{3,40})\\?\"\s*:")
+
+
+def _api_names_the_checks_read(verify: list[str]) -> dict:
+    """``{port: {name}}`` — what each check reads, and from which service's API."""
+    out: dict = {}
+    for c in verify or []:
+        for m in _API_PATH_RE.finditer(str(c or "")):
+            segs = [s for s in (m.group("path") or "").split("/") if s]
+            # drop the api/version prefix: `api`, `v3`, `v2`
+            names = [s for s in segs if s.lower() != "api" and not re.fullmatch(r"v\d+", s.lower())]
+            if names:
+                out.setdefault(m.group("port"), set()).add(names[-1].lower())
+    return out
+
+
+async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: list[str],
+                                               services: Optional[list] = None) -> list[dict]:
+    r"""§17.1359 — the work writes a setting into a config the file has no concept of,
+    while the step's own check reads that same setting from the service's API.
+
+    Live, 2026-10-04. ADD132's clean frame — no refusals, Run suggested — did the
+    qBittorrent half correctly and then, for each *arr:
+
+        pct exec 103 -- systemctl stop radarr.service
+        pct exec 103 -- python3 …  # insert <DownloadClientConfig>… into /var/lib/radarr/config.xml
+        pct exec 103 -- systemctl start radarr.service
+
+    while its check read `http://127.0.0.1:7878/api/v3/downloadclient`. Measured on
+    the machine:
+
+        grep -c -i downloadclient /var/lib/radarr/config.xml   ->  0
+        elements in that file: ApiKey Port BindAddress AuthenticationMethod … UrlBase
+        /var/lib/radarr/radarr.db                              ->  CREATE TABLE "DownloadClients"
+        /api/v3/downloadclient                                 ->  200
+
+    Download clients live in the database, behind the API. The block would have
+    bounced both services, polluted two configs, registered nothing — and its own
+    check would have come back empty. What pushed it there is the engine's own fact
+    line, *"config … (the service rewrites it: stop it before editing)"*, which
+    reads as "this is where you configure it".
+
+    The check is the authority: §17.1345 already forces it to read the real result.
+    So when the work writes a name into a config and the check reads that same name
+    from that service's API, and the config the engine reads has no instance of it,
+    the API is the surface. Unreadable means no judgment.
+    """
+    if spec is None or not services:
+        return []
+    want = _api_names_the_checks_read(verify)
+    if not want:
+        return []
+    out: list[dict] = []
+    seen: set = set()
+    joined = "\n".join(str(t or "") for t in texts or [])
+    for svc in services:
+        ports = {str(p) for p in (getattr(svc, "ports", ()) or ())}
+        names: set = set()
+        for port, got in want.items():
+            if port in ports:
+                names |= got
+        cfg = str(getattr(svc, "config", "") or "")
+        gid = str(getattr(svc, "guest", "") or "")
+        if not names or not cfg.startswith("/") or not gid.isdigit():
+            continue
+        if cfg not in joined:
+            continue                       # the block does not write this config
+        for name in sorted(names):
+            if (cfg, name) in seen:
+                continue
+            seen.add((cfg, name))
+            # the block introduces that name into the file
+            if not any(name == (m.group("el") or m.group("key") or m.group("jkey") or "").lower()
+                       or (m.group("el") or m.group("key") or m.group("jkey") or "").lower().startswith(name)
+                       for m in _WRITES_NAME_RE.finditer(joined)):
+                continue
+            got = await _read(spec, f'pct exec {gid} -- grep -c -i -F -- "{name}" {cfg}')
+            tail = str(got or "").strip().split("\n")[-1].strip()
+            if not tail.isdigit() or int(tail) > 0:
+                continue                   # unreadable, or the config does know it
+            api = next((f"port {p}" for p in sorted(ports) if p in want), "its API")
+            out.append({"command": f"writes `{name}` into {cfg}", "why": (
+                f"this step's own check reads `{name}` from {getattr(svc, 'name', 'the service')}'s API on "
+                f"{api}, and the work writes it into {cfg} -- a file that has no instance of `{name}` "
+                f"(read just now, 0 matches). The two are different surfaces and the check is the one that "
+                f"settles it: a setting the API serves lives where the API keeps it, which for these apps "
+                f"is their database, not their config file. Live (§17.1359), ADD132 would have stopped "
+                f"{getattr(svc, 'name', 'the service')}, inserted a `<DownloadClientConfig>` element into a "
+                f"config whose only elements are the app's own (ApiKey, Port, BindAddress, "
+                f"AuthenticationMethod ...), restarted it, registered nothing, and failed its own check. "
+                f"Do the write through the same API the check reads.")})
+    return out
+
+
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
-                inventory: Optional[dict] = None, truth=None) -> list[dict]:
+                inventory: Optional[dict] = None, truth=None,
+                services: Optional[list] = None, verify: Optional[list[str]] = None) -> list[dict]:
     """``[{command, why}]`` for every command the host contradicts.
 
     `plan` is the job's nodes, so a refusal can name the step that would make
@@ -613,6 +716,13 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, subjects[0]))
         except Exception as exc:
             logger.warning("inert_edit_check_failed err=%r", exc)
+    # §17.1360 — the work writes a setting into a config that has no concept of it
+    # while the step's own check reads it from the service's API.
+    if services and verify:
+        try:
+            out.extend(await writes_where_the_check_does_not_read(spec, texts, verify, services))
+        except Exception as exc:
+            logger.warning("surface_check_failed err=%r", exc)
     # §17.1303 — the block reaches the step's guest at an address the machine
     # contradicts. Live, ADD84 (VM 106, measured at 192.168.1.106 by its MAC in
     # `ip neigh`, pinned as PALWORLD_IP) drew `ssh <PALWORLD_USER>@192.168.1.127`

@@ -2663,10 +2663,31 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
         async def _pre_for(rb: str) -> list[dict]:
+            # §17.1359 — a TypeError here is a PROGRAMMING error, not a machine the
+            # engine could not read, and `except Exception` turned one into "no
+            # contradictions". `services=` was added to this call in §17.1346 and
+            # never to `unmet`'s signature, so every frame for a day came back with
+            # an empty `preconditions` list and ONE swallowed warning:
+            #   preconditions_failed … err=TypeError("unmet() got an unexpected
+            #   keyword argument 'services'")
+            # That silently disabled the whole machine-contradiction layer -- the
+            # stopped guest, the VM-vs-container tool, the missing ssh key, the
+            # measured address, the resolver, §17.1343's section rule and §17.1353's
+            # inert edit. It is re-raised so it can never be mistaken for blindness.
+            _f = supervised_runs.file_writes(rb) if (policy or {}).get("can_write_files") else []
+            _args = dict(plan=_plan_rows, files=_f, node=run_node, inventory=_inv,
+                         truth=_truth, services=_services,
+                         verify=supervised_runs.verify_commands(rb))
             try:
-                _f = supervised_runs.file_writes(rb) if (policy or {}).get("can_write_files") else []
-                return await unmet(supervised_runs.runbook_commands(rb), spec, plan=_plan_rows,
-                                   files=_f, node=run_node, inventory=_inv, truth=_truth, services=_services)
+                return await unmet(supervised_runs.runbook_commands(rb), spec, **_args)
+            except TypeError as exc:
+                if "unmet()" in str(exc):
+                    logger.error("preconditions_signature_mismatch job=%s node=%s err=%r",
+                                 job_id, run_node.get("node_key"), exc)
+                    raise
+                logger.warning("preconditions_failed job=%s node=%s err=%r",
+                               job_id, run_node.get("node_key"), exc)
+                return []
             except Exception as exc:
                 logger.warning("preconditions_failed job=%s node=%s err=%r",
                                job_id, run_node.get("node_key"), exc)
