@@ -186,6 +186,7 @@ async def engine_address(spec) -> Optional[str]:
 def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = "", neigh: str = "",
                      fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
                      plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,
+                     guest_uptime: Optional[float] = None,
                      sibling_config: str = "", units_text: str = "") -> GuestTruth:
     """The pure half: build the truth from texts the reads returned. Tested on
     the live fixtures; ``read_guest_truth`` only fetches the texts."""
@@ -237,6 +238,13 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
         if ok is not None:
             t.resolves = bool(ok) and bool((out or "").strip()) and "not running" not in (out or "").lower()
             t.reads["getent hosts"] = ((out or "").strip() or "(printed nothing)")[:200]
+            # §17.1336 — a guest that started seconds ago has not finished starting its
+            # resolver. A failed probe there is UNKNOWN, so nothing is inserted and
+            # nothing waits on it; the next pause measures it again.
+            if t.resolves is False and guest_uptime is not None and guest_uptime < YOUNG_GUEST_S:
+                t.resolves = None
+                t.reads["getent hosts"] = (f"(printed nothing, but the guest had been up only "
+                                           f"{guest_uptime:.0f}s — not read as a verdict)")
     if sibling_config:
         m = re.search(r"^nameserver:\s*(.+)$", sibling_config, re.M)
         if m:
@@ -258,6 +266,21 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
     return t
 
 
+#: §17.1336 — a probe INSIDE a guest that started seconds ago says nothing about the
+#: guest. Live, ADD9 ran `qm start 106` at 00:27:44; the pause measured
+#: `getent hosts deb.debian.org` at 00:28:09 — 25 s later, before systemd-resolved
+#: was up — read it as "cannot resolve names", inserted a step to set a nameserver
+#: and made the PalWorld service step wait for it. The same probe answered correctly
+#: minutes later. Below this age a failed in-guest probe is UNKNOWN, not a verdict.
+YOUNG_GUEST_S = 90.0
+
+
+def uptime_s(text: str) -> Optional[float]:
+    """Seconds out of `/proc/uptime` ("1234.56 789.01"), or None."""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)", str(text or ""))
+    return float(m.group(1)) if m else None
+
+
 async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Optional[list[dict]] = None) -> GuestTruth:
     """Measure guest ``gid`` once: the inventory (already read this pause) plus
     four reads. Every read is fail-soft; a field that could not be read is None."""
@@ -275,11 +298,14 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
         if kind == "vm" and ((inventory or {}).get("vms") or {}).get(gid) == "running":
             agent_ping = await _probe(spec, f"qm agent {gid} ping")
     dns: Optional[tuple[Optional[bool], str]] = None
+    guest_uptime: Optional[float] = None          # §17.1336 — read only when a probe came back empty
     sibling_config = ""
     cts = (inventory or {}).get("cts") or {}
     if spec is not None and kind == "ct" and cts.get(gid) == "running":
         dns = await _probe(spec, f"pct exec {gid} -- timeout 5 getent hosts deb.debian.org")
         if dns[0] is not None and not (dns[1] or "").strip():
+            _ok, _up = await _probe(spec, f"pct exec {gid} -- cat /proc/uptime")   # §17.1336
+            guest_uptime = uptime_s(_up) if _ok else None
             other = next((c for c, st in cts.items() if st == "running" and c != gid), None)
             if other:
                 _ok, sibling_config = await _probe(spec, f"pct config {other}")
@@ -288,6 +314,10 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
         cmd = f"qm guest exec {gid} -- timeout 5 getent hosts deb.debian.org"
         ok, out = await _probe(spec, cmd)
         dns = (ok, unwrap_guest_exec(cmd, out)) if ok is not None else None
+        if dns is not None and dns[0] is not None and not (dns[1] or "").strip():
+            _cmd = f"qm guest exec {gid} -- cat /proc/uptime"                      # §17.1336
+            _ok, _up = await _probe(spec, _cmd)
+            guest_uptime = uptime_s(unwrap_guest_exec(_cmd, _up)) if _ok else None
     units_text = ""
     if spec is not None:
         _list = "systemctl list-unit-files --type=service --no-legend"
@@ -301,6 +331,7 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
             units_text = unwrap_guest_exec(_cmd, _out) if _ok else ""
     t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
                          agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "",
+                         guest_uptime=guest_uptime,
                          units_text=units_text)
     logger.warning("machine_truth guest=%s %s", gid, {k: (f"{len(v)} units" if k == "units" and v is not None else v)
                                                       for k, v in t.to_dict().items() if k not in ("reads", "disks")})
@@ -608,6 +639,36 @@ async def reopen_voided_work(job_id: str, plan: list[dict], gid: str, name: str 
     return done
 
 
+async def place_before(job_id: str, key: str, before_key: str) -> bool:
+    """Move `key` immediately before `before_key` in execution order.
+
+    §17.1336 — `insert_node` appends at the END of the order. Live, the nameserver
+    step the measurement inserted landed last (order 165) while the step that now
+    waited for it sat at 111: every other step in the plan would have run first,
+    and the step the operator was waiting on was last in the queue. A prerequisite
+    the engine inserts belongs where it is needed, exactly as a split's children do.
+    """
+    from app.database import async_session
+    from app.modules import node_editor
+    try:
+        async with async_session() as db:
+            listing = await node_editor.list_nodes(job_id, db)
+        order = [str(n.get("node_key")) for n in (listing or {}).get("nodes") or []]
+        if key not in order or before_key not in order:
+            return False
+        order = [k for k in order if k != key]
+        at = order.index(before_key)
+        async with async_session() as db:
+            res = await node_editor.reorder_nodes(job_id, order[:at] + [key] + order[at:], db=db,
+                                                  edited_by=f"engine:measured — {key} runs before {before_key}")
+        ok = not isinstance(res, dict) or res.get("status", "ok") == "ok"
+        logger.warning("machine_truth_placed_before job=%s node=%s before=%s ok=%s", job_id, key, before_key, ok)
+        return bool(ok)
+    except Exception as exc:
+        logger.warning("machine_truth_place_before_failed job=%s node=%s err=%r", job_id, key, exc)
+        return False
+
+
 async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTruth, needs: set[str],
                                plan: Optional[list[dict]]) -> list[str]:
     """Act on the contradictions through the existing primitives, say what was
@@ -662,6 +723,7 @@ async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTr
                             if node is not None:
                                 node["depends_on"] = deps + [ins["node_key"]]
                             done.append(f"{cur} now waits for {ins['node_key']}")
+                            await place_before(job_id, ins["node_key"], cur)      # §17.1336
                 else:
                     logger.warning("machine_truth_insert_refused job=%s node=%s res=%r", job_id, ins["node_key"], res)
             except Exception as exc:
