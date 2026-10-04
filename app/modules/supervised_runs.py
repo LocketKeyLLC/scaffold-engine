@@ -3665,7 +3665,16 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
     A reference is satisfied when the block ASSIGNS it, the runner holds it as a
     secret, or the shell always provides it. Anything else is empty at run time.
     """
-    have = set(_SHELL_VARS) | {str(x) for x in ((policy or {}).get("secrets") or [])}
+    # §17.1352 — the names the ENGINE holds count as much as the ones in the
+    # runner's own file. Live, this gate refused `$MASS_PASSWORD` with "the runner
+    # holds no secrets" while `runner_secrets.names()` answered AIRVPN_WG_CONF,
+    # MASS_PASSWORD, PROWLARR_API_KEY, RADARR_API_KEY, SONARR_API_KEY -- five values
+    # the engine has had all along, two of them the very API keys §17.1332 taught it
+    # to read off the machines. The operator said so twice before the measurement
+    # proved it: "it should already have the password".
+    have = (set(_SHELL_VARS)
+            | {str(x) for x in ((policy or {}).get("secrets") or [])}
+            | {str(x) for x in ((policy or {}).get("held") or [])})
     texts = [str(c) for c in commands or []]
     file_by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
     out: list[dict] = []
@@ -3681,11 +3690,11 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                 if name in have or name in assigned or name.isdigit():
                     continue
                 out.append({"command": cmd.strip()[:200], "why": (
-                    f"`${name}` is read here and nothing sets it: the block never assigns it, the runner "
-                    f"holds "
-                    + (("only " + ", ".join(sorted(str(x) for x in ((policy or {}).get("secrets") or []))))
-                       if (policy or {}).get("secrets") else "no secrets")
-                    + ", and a guest's environment does not carry it either. It expands to NOTHING, so the "
+                    f"`${name}` is read here and nothing sets it: the block never assigns it, and the "
+                    f"values the engine and the runner have between them are "
+                    + (", ".join(sorted({str(x) for x in ((policy or {}).get("secrets") or [])}
+                                        | {str(x) for x in ((policy or {}).get("held") or [])})) or "none")
+                    + ". A guest's environment does not carry it either, so it expands to NOTHING and the "
                       "command runs with an empty value -- live (§17.1348), an empty `X-Api-Key` header made "
                       "an app answer 401, which reads like a wrong key rather than a value that was never "
                       "there. Either read the value in the same command (a command substitution) or assign "

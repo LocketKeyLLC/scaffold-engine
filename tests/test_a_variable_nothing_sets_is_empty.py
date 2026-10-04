@@ -30,7 +30,10 @@ def test_the_live_draft_is_refused():
     assert len(out) == 1, out
     why = out[0]["why"]
     assert "`$RADARR_API_KEY` is read here and nothing sets it" in why
-    assert "holds only MASS_PASSWORD" in why
+    # §17.1352 — the reason lists what there IS, from the runner's file and the
+    # engine's own store together. In THIS policy the engine holds nothing, so the
+    # key really is empty; where it holds the key, the refusal is gone (below).
+    assert "the values the engine and the runner have between them are MASS_PASSWORD" in why
     assert "expands to NOTHING" in why and "401" in why
 
 
@@ -104,3 +107,37 @@ def test_the_frame_refuses_it_and_the_chain_redrafts():
 
 def test_nothing_is_judged_with_no_commands():
     assert _vars([]) == [] and _vars(None) == []
+
+# ── §17.1352: a secret the ENGINE holds is a value it has ────────────────────
+#: what `runner_secrets.names()` answered on this machine, measured 2026-10-04
+HELD = {"allow": ["ANY"], "secrets": [], "can_write_files": True,
+        "held": ["AIRVPN_WG_CONF", "MASS_PASSWORD", "PROWLARR_API_KEY", "RADARR_API_KEY", "SONARR_API_KEY"]}
+
+
+def test_a_name_the_engine_holds_is_not_empty():
+    """The runner's own file held nothing, so the first cut of this gate refused
+    `$MASS_PASSWORD` with "the runner holds no secrets" -- while the ENGINE had five
+    values, two of them the very API keys §17.1332 taught it to read off the
+    machines. The operator said so twice before the measurement proved it."""
+    assert _vars(['curl -H "X-Api-Key: $RADARR_API_KEY" http://127.0.0.1:7878/api/v3/rootfolder'], None, HELD) == []
+    assert _vars(['curl -H "X-Api-Key: $SONARR_API_KEY" http://127.0.0.1:8989/api/v3/rootfolder'], None, HELD) == []
+    assert _vars(['bash /tmp/x.sh'], [{"path": "/tmp/x.sh", "content": 'echo "$MASS_PASSWORD" | head -c 0\n'}], HELD) == []
+
+
+def test_a_name_nothing_holds_is_still_refused_and_the_reason_lists_what_there_is():
+    out = _vars(['curl -H "K: $NOT_HELD" http://x'], None, HELD)
+    assert len(out) == 1
+    why = out[0]["why"]
+    assert "the values the engine and the runner have between them are" in why
+    assert "MASS_PASSWORD" in why and "RADARR_API_KEY" in why, why
+    assert "$NOT_HELD" in why
+
+
+def test_with_nothing_held_or_stored_the_reason_says_none():
+    out = _vars(['echo "$RADARR_API_KEY"'], None, {"allow": ["ANY"]})
+    assert len(out) == 1 and "between them are none" in out[0]["why"], out[0]["why"]
+
+
+def test_both_sources_count_together():
+    pol = {"secrets": ["RUNNER_ONLY"], "held": ["ENGINE_ONLY"]}
+    assert _vars(['echo "$RUNNER_ONLY $ENGINE_ONLY"'], None, pol) == []
