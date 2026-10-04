@@ -25,8 +25,14 @@ import pytest
 
 from app.modules import supervised_runs as sr
 
-POST = 'curl -s -X POST "http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: $K" -d \'{"name":"1337x"}\''
-POST_OK = 'curl -s --fail-with-body -X POST "http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: $K" -d \'{}\''
+# §17.1348 — the key is READ in the command. `$K` was a name nothing set, which the
+# empty-variable gate now refuses for its own reason: this file is about the error
+# flag, so it reads the key the way the engine writes it.
+_KEY = '$(cat /var/lib/prowlarr/config.xml | sed -n "s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p" | head -n 1)'
+POST = ('curl -s -X POST "http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: ' + _KEY
+        + '" -d \'{"name":"1337x"}\'')
+POST_OK = ('curl -s --fail-with-body -X POST "http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: '
+           + _KEY + '" -d \'{}\'')
 
 
 # ── §17.1234: make the exit code mean something ──────────────────────────
@@ -75,7 +81,7 @@ def test_the_redraft_treats_it_as_a_shape_it_can_fix():
 def test_frame_run_turns_run_off_for_such_a_block():
     frame = sr.frame_run({"node_key": "ADD96", "title": "t"},
                          f"## Run this\n\n```bash\n{POST}\n```\n",
-                         SimpleNamespace(name="pve-runner"), {"allow": ["curl"]})
+                         SimpleNamespace(name="pve-runner"), {"allow": ["ANY"]})
     assert frame["refused"], "a write that cannot report an error must not be offered as runnable"
     assert frame["suggested"] == "myself"
     assert "Run it through pve-runner" not in [o.get("label") for o in frame["options"]]
@@ -91,7 +97,7 @@ def test_frame_run_offers_the_corrected_block():
                          f"## Run this\n\n```bash\n{POST_OK}\n```\n\n"
                          f"## Verify\n\n- the indexer is listed: `curl -s --fail-with-body "
                          f'"http://192.168.1.21:9696/api/v1/indexer" -H "X-Api-Key: $K"`\n',
-                         SimpleNamespace(name="pve-runner"), {"allow": ["curl"]})
+                         SimpleNamespace(name="pve-runner"), {"allow": ["ANY"]})
     assert frame["refused"] == [] and frame["suggested"] == "run"
 
 
@@ -99,7 +105,7 @@ def test_a_corrected_block_with_no_check_is_still_refused():
     """§17.1345 — the flag is not the only thing a runnable block needs."""
     frame = sr.frame_run({"node_key": "ADD96", "title": "t"},
                          f"## Run this\n\n```bash\n{POST_OK}\n```\n",
-                         SimpleNamespace(name="pve-runner"), {"allow": ["curl"]})
+                         SimpleNamespace(name="pve-runner"), {"allow": ["ANY"]})
     assert [r for r in frame["refused"] if "no check at all" in r["why"]]
     assert frame["suggested"] == "myself"
 
@@ -123,7 +129,7 @@ async def _run(verdicts, *, verify=("curl -s http://h/api/v1/indexer",)):
     db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
     waiting = {"kind": "run", "node_key": "ADD96", "title": "Add the search sources to Prowlarr",
                "runbook": "## Run this", "commands": [POST], "verify": list(verify), "refused": []}
-    with patch.object(sr, "channel", AsyncMock(return_value=(SimpleNamespace(name="pve-runner"), {"allow": ["curl"]}))), \
+    with patch.object(sr, "channel", AsyncMock(return_value=(SimpleNamespace(name="pve-runner"), {"allow": ["ANY"]}))), \
          patch("app.modules.assist_supervised.gate_block", return_value=([POST], [])), \
          patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed_ok())), \
          patch("app.modules.assist_local_runner.run_probes",
