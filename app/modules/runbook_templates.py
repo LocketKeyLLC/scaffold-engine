@@ -732,6 +732,12 @@ FREE_PARAM_SYSTEM_VERIFY = (
     "guest machine and whose output shows whether THIS step's goal is already met (df, ls, cat, systemctl "
     "is-active, dpkg -l, ss, ip). Check what this step itself leaves behind: for an install, the binary, "
     "directory or file it installs (`ls -la /opt/palworld/PalServer.sh`), not a service a later step creates. "
+    # §17.1355 — live, ADD132's check was `ls -la /tmp/in_ct_103.sh`: the engine's OWN
+    # wrapper, on the wrong machine, proving nothing. The slot never said that path
+    # was not the step's to look at.
+    "NEVER look at the script that is running this step: /tmp/in_ct_*.sh, /tmp/in_vm_*.sh and "
+    "/root/.scaffold_step* are the engine's own scaffolding, they are not this step's result, and a "
+    "check that reads one of them confirms nothing. "
     "Output exactly one ```bash fence containing that one command and nothing else: "
     "no sudo, no writes, no pipes to files, no placeholders, no comments."
 )
@@ -743,6 +749,12 @@ FREE_PARAM_SYSTEM = (
     "DEBIAN_FRONTEND is set), no placeholders, no comments, no explanations outside the fence. "
     "Package installs and service enables are the usual content; do not start, stop, resize or "
     "reconfigure the VM or container itself -- that is the host's business and the script's. "
+    # §17.1355 — live, ADD132's whole payload was `MASS_PASSWORD="$MASS_PASSWORD" bash
+    # /tmp/in_ct_103.sh`: the shape of the template's OWN run line, reproduced as the
+    # step's work. The slot never said that path was the engine's.
+    "The script carrying your commands is the engine's: /tmp/in_ct_*.sh, /tmp/in_vm_*.sh and "
+    "/root/.scaffold_step* are its paths, they already run, and your commands must never invoke, "
+    "write or read them -- a payload that calls the script running it does nothing at all. "
     "Content the step specifies (a config file, a unit, a key) is reproduced from what earlier steps and "
     "the facts established -- never a stand-in such as example.com, admin@example.com or a sample site: "
     "a value you do not have is a <NAME> placeholder the operator fills. A config file written whole begins "

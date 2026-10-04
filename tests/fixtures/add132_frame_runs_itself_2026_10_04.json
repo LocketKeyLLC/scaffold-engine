@@ -1,0 +1,24 @@
+{
+ "node_key": "ADD132",
+ "title": "Make Radarr and Sonarr actually drive qBittorrent, and prove the connection",
+ "files": [
+  {
+   "path": "/tmp/in_ct_103.sh",
+   "content": "#!/usr/bin/env bash\n# Run this step's commands inside container 103 as root.\nset -uo pipefail\nGID=103\npct status \"$GID\" | grep -q running || pct start \"$GID\"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status \"$GID\" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_103_remote.sh <<'REMOTE'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\nMASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/in_ct_103.sh\nREMOTE\n\n# \u00a717.1317 \u2014 long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner's 180 s budget. Live, T23's\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT=\"scaffold-ADD132\"\nginfo() { pct exec \"$GID\" -- bash -c \"$1\" 2>/dev/null; }\ncase \"${1:-start}\" in\n  start)\n    pct push \"$GID\" /tmp/in_ct_103_remote.sh /root/.scaffold_step.sh >/dev/null || { echo \"FAILED: pct push into $GID\"; exit 1; }\n    ginfo \"systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported; true\" >/dev/null\n    ginfo \"systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash /root/.scaffold_step.sh\" >/dev/null \\\n      || { echo \"FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)\"; exit 1; }\n    echo \"started $UNIT inside $GID\"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ \"$SECONDS\" -lt \"$deadline\" ]; do\n      state=\"$(ginfo \"systemctl is-active $UNIT\" | tr -d '[:space:]')\"\n      case \"$state\" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state=\"$(ginfo \"systemctl is-active $UNIT\" | tr -d '[:space:]')\"\n    if [ \"$state\" = \"active\" ] || [ \"$state\" = \"activating\" ]; then\n      if [ \"${1:-start}\" = \"last\" ]; then echo \"FAILED: $UNIT is still running after the whole wait budget; the step did not finish\"; ginfo \"tail -n 20 /root/.scaffold_step.log\"; exit 1; fi\n      echo \"STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)\"; ginfo \"tail -n 3 /root/.scaffold_step.log\"; exit 0\n    fi\n    result=\"$(ginfo \"systemctl show -p Result --value $UNIT\" | tr -d '[:space:]')\"\n    code=\"$(ginfo \"systemctl show -p ExecMainStatus --value $UNIT\" | tr -d '[:space:]')\"\n    # \u00a717.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23's eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z \"$(ginfo \"cat /root/.scaffold_step.reported 2>/dev/null\")\" ]; then\n      ginfo \"echo done > /root/.scaffold_step.reported\" >/dev/null\n      ginfo \"cat /root/.scaffold_step.log 2>/dev/null | tail -n 60\"\n      ginfo \"cat /root/.scaffold_step.err 2>/dev/null | tail -n 20\" >&2\n    else\n      echo \"(the log was printed by the phase that saw $UNIT finish)\"\n    fi\n    if [ \"$result\" = \"success\" ] || { [ -z \"$result\" ] && [ \"$code\" = \"0\" ]; }; then echo \"$UNIT finished (exit ${code:-0})\"; exit 0; fi\n    echo \"FAILED: $UNIT ended with Result=$result exit=${code:-?}\"; exit \"${code:-1}\"\n    ;;\n  *) echo \"unknown phase: $1\"; exit 2;;\nesac\n"
+  }
+ ],
+ "verify": [
+  "pct exec 103 -- bash -c \"ls -la /tmp/in_ct_103.sh\""
+ ],
+ "commands": [
+  "bash /tmp/in_ct_103.sh start",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh wait",
+  "bash /tmp/in_ct_103.sh last"
+ ]
+}
