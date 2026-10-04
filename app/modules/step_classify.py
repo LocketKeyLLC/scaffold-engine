@@ -56,6 +56,18 @@ _LEADING_CHANGE_RE = re.compile(
     r"start|remove|delete|give|move|rename|import|register|connect|wire|apply|update|upgrade|rebuild|"
     r"expand|resize|attach|detach|grow|implement|build|forward|fix|repair|refresh|put|make)\b", re.I)
 _OBSERVE_RE = re.compile(r"\b(?:done when|verif(?:y|ied|ies)|confirm(?:s|ed)?|check(?:s|ed)? that|reports?|returns?|prints?|shows?)\b", re.I)
+#: §17.1354 — a step whose TITLE opens with an OBSERVATION verb. Live, ADD134
+#: ("Prove the whole chain: ask for one title and watch it arrive in Jellyfin")
+#: ran as a model task and was failed for producing INSTRUCTIONS: 24 commands
+#: written out for machines the engine can reach. A model cannot observe a
+#: machine, so a step whose RESULT is an observation of one is hands-on.
+_LEADING_OBSERVE_RE = re.compile(
+    r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*|the\s+)?"
+    r"(?P<verb>prove|confirm|verify|check|test|watch|measure|observe)\b", re.I)
+#: a criterion only the machine can settle: a done-when, an API, a numbered
+#: port, an absolute path, an exit code.
+_MACHINE_CRITERION_RE = re.compile(
+    r"(?:\bdone when\b|\bapi\b|\bport\s+\d|/[a-z0-9_.-]+/|\bexits?\s+0\b)", re.I)
 # An UNQUOTED command in prose — "(pct set 101 --nameserver 192.168.1.1)",
 # "via pct set, then reboot", "(iptables -L PVEFW-HOST-IN -n -v | grep 8790)".
 # Only a head from the state-check's subcommand table counts, and only when
@@ -268,6 +280,15 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
             svc, lead = _NAME_RE.search(title), _LEADING_CHANGE_RE.match(title)
             if svc and lead:
                 return True, f"verb:{lead.group('verb').lower()} service:{svc.group(1).lower()}"
+            # §17.1354 — and a step whose own title asks for an OBSERVATION of a
+            # service the engine knows, against a criterion only the machine can
+            # settle, is hands-on for the same reason: nothing a model writes can
+            # satisfy it. Measured over all 169 steps of the live plan, this flags
+            # exactly two -- ADD134 and ADD98, the same end-to-end proof twice --
+            # and no step with an observation verb in its title is left out.
+            obs = _LEADING_OBSERVE_RE.match(title)
+            if svc and obs and _MACHINE_CRITERION_RE.search(text):
+                return True, f"observe:{obs.group('verb').lower()} service:{svc.group(1).lower()}"
         except Exception:
             pass
         return False, ""
