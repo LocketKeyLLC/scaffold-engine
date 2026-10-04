@@ -336,6 +336,80 @@ def _file_ssh_needs_its_own_credential(files: Optional[list[dict]], subjects: li
     return out
 
 
+#: §17.1343 — `printf '%s\n' 'Key=Value' >> /path/conf`, `echo "K=V" >> "$CONF"`:
+#: a key appended to the END of a file.
+_APPEND_KEY_RE = re.compile(
+    r"\b(?:printf|echo|tee\s+-a)\b[^\n>]*?(?P<kv>['\"][^'\"\n]*=[^'\"\n]*['\"])?[^\n>]*>>\s*"
+    r"(?P<path>\"[^\"]+\"|'[^']+'|\$\{?[A-Za-z_]\w*\}?|/[^\s<>|;&]+)")
+#: a section header being written in the same block, or a tool that knows sections
+_SECTION_AWARE_RE = re.compile(
+    # a `[Section]` literal — plain, or escaped inside a sed address — or a tool that
+    # understands sections
+    r"\\?\[[A-Za-z][\w .-]*\\?\]|crudini|configparser|ConfigParser|augtool", re.I)
+
+
+def appends_a_key(texts: list[str]) -> list[tuple[str, str]]:
+    """``[(line, path)]`` — every bare append of a `key=value` line, with its target."""
+    out: list[tuple[str, str]] = []
+    for t in texts:
+        for ln in str(t or "").split("\n"):
+            if ln.lstrip().startswith("#") or "=" not in ln:
+                continue
+            m = _APPEND_KEY_RE.search(ln)
+            if not m:
+                continue
+            path = m.group("path").strip("\"'")
+            if (ln, path) not in out:
+                out.append((ln, path))
+    return out
+
+
+async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: str) -> list[dict]:
+    r"""§17.1343 — a key appended to a SECTIONED config is read as a different setting.
+
+    Live, 2026-10-04: ADD130 appended `Session\DefaultSavePath=/media/downloads` to
+    qBittorrent's config with `>>`. The run reported success, the key was in the file,
+    and the step's check found it — but `>>` writes to the END, which landed it under
+    `[Preferences]`, while every other `Session\` key in that file sits under
+    `[BitTorrent]` and the app reads it as `BitTorrent/Session\DefaultSavePath`. The
+    setting was inert, and nothing said so.
+
+    The file itself settles it, so the file is read: a `grep -c '^\['` through the
+    runner. Unreadable means no judgment.
+    """
+    if spec is None or not gid:
+        return []
+    out: list[dict] = []
+    joined = "\n".join(str(t or "") for t in texts)
+    for ln, path in appends_a_key(texts):
+        if _SECTION_AWARE_RE.search(joined):
+            continue                           # the block already places it in a section
+        if path.startswith("$"):
+            m = re.search(rf"^\s*{re.escape(path.lstrip('${').rstrip('}'))}=[\"']?(/[^\s\"']+)",
+                          joined, re.M)
+            if not m:
+                continue                       # a variable the engine cannot resolve: no judgment
+            path = m.group(1)
+        ok, out_text = await _read(spec, f"pct exec {gid} -- sh -c 'grep -c \"^\\[\" {path}'")
+        if not ok:
+            continue                           # unreadable: nothing is refused out of blindness
+        try:
+            sections = int((out_text or "0").strip().split("\n")[-1])
+        except (TypeError, ValueError):
+            continue
+        if sections <= 0:
+            continue                           # a flat config: a bare append is right
+        out.append({"command": ln.strip()[:200], "why": (
+            f"{path} is a SECTIONED config ({sections} `[section]` headers, read just now), and `>>` "
+            f"appends to the END of the file -- the key lands in whatever section happens to be last and "
+            f"the application reads it as a different setting. Live (§17.1343), "
+            f"`Session\\DefaultSavePath` landed under `[Preferences]` while every other `Session\\` key "
+            f"in that file sits under `[BitTorrent]`: the run reported success, the key was in the file, "
+            f"the check found it, and nothing read it. Put the line INSIDE its section (a `sed` range on the "
+            f"header, or the file's own tool) and make the check read the SECTION, not just the key.")})
+    return out
+
+
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
                 inventory: Optional[dict] = None, truth=None) -> list[dict]:
@@ -400,6 +474,13 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 break
         if not copies:
             out.extend(_file_ssh_needs_its_own_credential(files, subjects, inv, plan))
+    # §17.1343 — a key appended to the END of a SECTIONED config is read as a
+    # different setting: the file itself settles it, so the file is read.
+    if subjects:
+        try:
+            out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, subjects[0]))
+        except Exception as exc:
+            logger.warning("append_section_check_failed err=%r", exc)
     # §17.1303 — the block reaches the step's guest at an address the machine
     # contradicts. Live, ADD84 (VM 106, measured at 192.168.1.106 by its MAC in
     # `ip neigh`, pinned as PALWORLD_IP) drew `ssh <PALWORLD_USER>@192.168.1.127`

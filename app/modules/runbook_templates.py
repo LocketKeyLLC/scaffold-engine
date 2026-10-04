@@ -777,6 +777,48 @@ _OVERWRITE_RE = re.compile(
     r"|(?:printf|echo)\s+.*>>\s*(?P<append>[\"']?\$?\{?[A-Za-z_][\w]*\}?[\"']?|/[^\s<>|;&]+)\s*$)")
 
 
+#: §17.1343 — `grep -E "…\\X…"` / `grep "…\\X…"`: a pattern with a backslash inside
+#: DOUBLE quotes. The shell halves the escape, so grep sees `\X` and an ERE/BRE reads
+#: that as a plain `X`. Live, qBittorrent's key is `Session\DefaultSavePath` and
+#: `grep -E "Session\\DefaultSavePath"` exited 1 against a file holding exactly that
+#: line, under `set -e`, ending a step whose edit had in fact worked.
+_GREP_BACKSLASH_RE = re.compile(
+    r"(?P<head>\bgrep\s+)(?P<flags>(?:-[A-Za-z]+\s+)*)(?P<pat>\"[^\"]*\\\\[^\"]*\")")
+
+
+def grep_a_backslash_as_a_fixed_string(commands: list[str]) -> tuple[list[str], list[dict]]:
+    r"""A double-quoted grep pattern holding a backslash becomes `grep -F`.
+
+    §17.1343 — measured, not reasoned: against a file holding
+    `Session\DefaultSavePath=/media/downloads`, `grep -E "Session\\DefaultSavePath"`
+    exits 1 and `grep -F "Session\\DefaultSavePath"` matches. A fixed string is what
+    the author meant in every case the engine has seen; `-F` says so and costs
+    nothing. Under `set -e` that exit 1 ended a step whose edit had in fact worked.
+    """
+    out: list[str] = []
+    repairs: list[dict] = []
+    for c in commands or []:
+        fixed = str(c)
+        for m in list(_GREP_BACKSLASH_RE.finditer(fixed)):
+            flags = [t for t in (m.group("flags") or "").split() if t.startswith("-")]
+            if any("F" in t for t in flags):
+                continue                                   # already a fixed string
+            kept = []
+            for t in flags:
+                letters = t[1:].replace("E", "").replace("G", "")
+                if letters:
+                    kept.append("-" + letters)
+            head = m.group("head") + " ".join(["-F", *kept]) + " " + m.group("pat")
+            fixed = fixed.replace(m.group(0), head, 1)
+            repairs.append({"why": (
+                "made the grep a fixed-string search (`-F`): its pattern holds a backslash inside double "
+                "quotes, so the shell halves the escape and the expression reads it as a plain letter. "
+                "Measured (§17.1343): against a file holding that very line, the `-E` form exits 1 while "
+                "`-F` matches -- and under `set -e` that exit ended a step whose edit had worked.")})
+        out.append(fixed)
+    return out, repairs
+
+
 def keep_a_copy_before_overwrites(remote_commands: str) -> str:
     """Before every line that replaces a file, a line that keeps the old one.
 
@@ -966,5 +1008,9 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                     check = check2
             out[p.name] = check
         else:
-            out[p.name] = repair_apt_state_first(bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced)))   # §17.1314, §17.1317, §17.1320
+            _text_in = repair_apt_state_first(bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced)))
+            # §17.1343 — the grep that ended ADD130 was a line INSIDE this script, not a
+            # command, so the repair runs on the rendered text as well.
+            _lines, _ = grep_a_backslash_as_a_fixed_string(_text_in.split("\n"))
+            out[p.name] = "\n".join(_lines)   # §17.1314, §17.1317, §17.1320, §17.1343
     return out
