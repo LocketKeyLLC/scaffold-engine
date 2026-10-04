@@ -107,6 +107,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "and nothing sets it",                           # §17.1348
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
+                   "this file RUNS ITSELF",                         # §17.1355
+                   "reads only the engine's OWN script",            # §17.1355
                    "rewrites the whole file when it stops",         # §17.1346
                    "appears only in the verify",                   # §17.1288
                    "inside an ssh command line",                   # §17.1288b
@@ -839,6 +841,94 @@ _SCRIPT_ENV_READ = re.compile(
 
 #: the file a `tee` is writing, when that file is a script.
 _TEE_SCRIPT = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
+
+
+#: §17.1355 — the engine's OWN scaffolding, written by `run_in_container`/`run_on_host`:
+#: the wrapper the runner executes, the payload it pushes, and the path it lands on
+#: inside the guest. None of these is the step's result.
+_SCAFFOLD_PATH_RE = re.compile(
+    r"/tmp/in_(?:ct|vm|host)_\d{2,5}(?:_remote)?\.sh|/root/\.scaffold_step(?:\.\w+)?")
+#: a path at a command position: `bash P`, `sh -x P`, `source P`, `. P`, or P itself
+def _invokes(text: str, path: str) -> bool:
+    esc = re.escape(path)
+    return bool(re.search(rf"(?:^|[\n;&|]|&&|\|\|)\s*(?:[A-Za-z_]\w*=\S*\s+)*"
+                          rf"(?:(?:ba|da|z|k)?sh|source|\.)\s+(?:-\S+\s+)*{esc}\b", text)
+                or re.search(rf"(?:^|[\n;&|])\s*(?:[A-Za-z_]\w*=\S*\s+)*{esc}\b", text))
+
+
+def the_block_runs_its_own_scaffolding(files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1355 — a written file whose content runs the file itself.
+
+    Live, 2026-10-04, ADD132's frame. The template writes `/tmp/in_ct_103.sh` —
+    the wrapper the runner executes — and the model's payload inside it was, in
+    full:
+
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        MASS_PASSWORD=… bash /tmp/in_ct_103.sh
+
+    The step was told to run itself. Inside container 103 that path does not
+    exist, so it fails; if it did exist it would recurse. There is no work in it
+    at all, and nothing said so: every other gate reads the COMMANDS, which are
+    the template's own `bash /tmp/in_ct_103.sh start|wait|last` and perfectly
+    correct.
+
+    Only the file's own path counts, so the template's legitimate mentions of the
+    payload it writes and pushes elsewhere are untouched.
+    """
+    out: list[dict] = []
+    for f in files or []:
+        path = str((f or {}).get("path") or "").strip()
+        body = str((f or {}).get("content") or "")
+        if not path.startswith("/") or not body.strip():
+            continue
+        if not _invokes(body, path):
+            continue
+        out.append({"command": path, "why": (
+            f"this file RUNS ITSELF: {path} is the script the engine writes to carry this step out, and "
+            f"the commands inside it invoke that same path. Inside the guest it does not exist, so the "
+            f"step fails; if it did exist it would recurse. Either way there is no work in it. Live "
+            f"(§17.1355), ADD132's whole payload was `MASS_PASSWORD=… bash {path}` and the step was told "
+            f"to run itself. Write the commands that do the work -- the `curl` against the service's API, "
+            f"the edit, the restart -- not a call to the engine's own wrapper.")})
+    return out
+
+
+def a_check_that_only_reads_the_scaffolding(verify: list[str],
+                                            files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1355 — a check that reads only the engine's own script proves nothing.
+
+    Live, ADD132's frame offered exactly one check:
+
+        pct exec 103 -- bash -c "ls -la /tmp/in_ct_103.sh"
+
+    That file is the engine's wrapper, it lives on the HOST and not in the guest,
+    and its existence says nothing about Radarr, Sonarr or qBittorrent. §17.1345
+    asks for a check and this satisfies it while confirming nothing — the same
+    hole §17.1343 fell through, one level down.
+
+    A check that reads a config the block WROTE is a real check (§17.1343 asks
+    for exactly that), so only the engine's own scaffolding paths count here.
+    """
+    cmds = [str(c) for c in (verify or []) if str(c).strip()]
+    if not cmds:
+        return []                      # §17.1345's refusal covers an empty check
+    own = {str((f or {}).get("path") or "") for f in (files or [])}
+    def _only_scaffolding(cmd: str) -> bool:
+        paths = re.findall(r"/[A-Za-z0-9_./-]+", cmd)
+        real = [p for p in paths
+                if not _SCAFFOLD_PATH_RE.fullmatch(p) and p not in own]
+        return bool(paths) and not real
+    if not all(_only_scaffolding(c) for c in cmds):
+        return []                      # at least one check looks at something else
+    return [{"command": cmds[0][:120], "why": (
+        "every check in this block reads only the engine's OWN script for this step, not the result the "
+        "step is supposed to leave. Live (§17.1355), ADD132's only check was "
+        "`pct exec 103 -- ls -la /tmp/in_ct_103.sh` -- the wrapper the runner executes, which lives on the "
+        "host and not in the guest, and whose existence says nothing about whether Radarr and Sonarr can "
+        "reach the download client. Name a command that reads the RESULT: the value back out of the "
+        "service's API, the key inside its section, the port answering. A step confirmed by the presence "
+        "of the engine's own file is a step recorded done having changed nothing.")}]
 
 
 def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -4107,6 +4197,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds, shape_files)
+    # §17.1355 — the block mistook the engine's own scaffolding for the work:
+    # a written file that runs itself, and a check that reads only that file.
+    refused = refused + the_block_runs_its_own_scaffolding(shape_files)
+    refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
     # §17.1288 — a check must use what the run used; a secret rides no ssh
     # command line; the neighbour table is read warm. Three readings of one frame.
     refused = refused + _vhits                            # §17.1288 — only when no check would be left
