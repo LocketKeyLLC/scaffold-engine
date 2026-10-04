@@ -119,3 +119,59 @@ def test_only_the_live_multi_guest_step_spans_in_the_whole_plan():
     assert hits == ["ADD135"], hits
     singles = [n for n in PLAN if len(rt.guests_the_host_is_told_to_touch(n)) == 1]
     assert len(singles) > 20, "the common case stays the common case"
+
+# ── §17.1340: the guest a step ACTS ON outranks the one it mentions ───────────
+from app.modules import machine_truth as mt            # noqa: E402
+
+
+def test_the_subject_is_the_guest_the_step_acts_on():
+    """Live, ADD129's measured note names `container 101 (jellyfin)` before anything
+    else and `pct set 103 -mp0 …` as the work. The subject came back 101 — the one
+    container that already had the mount — and the step was drafted as work inside
+    Jellyfin."""
+    mentions_first = {"node_key": "ADD129", "title": "Give Radarr the shared media storage at /media",
+                      "description": "Jellyfin (CT 101) mounts it read-only. Run `pct set 103 "
+                                     "-mp0 /oasis/media,mp=/media` so Radarr can write."}
+    assert mt.subject_guest(mentions_first) == "103", "the guest the command addresses"
+
+
+def test_several_guests_acted_on_leave_no_single_subject():
+    node = {"node_key": "ADD135", "title": "Make the machines start on boot",
+            "description": "qm set 106 --onboot 1, pct set 111 --onboot 1, pct set 120 --onboot 1"}
+    assert mt.subject_guest(node) is None, "it spans guests; there is nothing single to measure"
+    assert rt.spans_guests(node) is True
+
+
+def test_a_title_id_beats_a_description_id_when_no_command_decides():
+    node = {"node_key": "X", "title": "Grow VM 106's filesystem",
+            "description": "Earlier, container 101 was given the same treatment."}
+    assert mt.subject_guest(node) == "106"
+
+
+def test_the_name_route_still_works():
+    """§17.1316 — T23 had no id in its text at all."""
+    node = {"node_key": "T23", "title": "Install PalWorld server", "description": "Install it."}
+    assert mt.subject_guest(node, {"names": {"106": "palworld-server"}}) == "106"
+
+
+def test_one_subject_reader():
+    """§17.1340 — `runbook_templates.subject_gid` used to search the text itself and
+    drifted: the pause measured one guest and the template rendered another."""
+    import inspect
+    src = inspect.getsource(rt.subject_gid)
+    assert "subject_guest" in src and "_SUBJECT_RE" not in src, src
+
+
+def test_only_four_steps_in_the_live_plan_change_subject():
+    """Measured: ADD115 and ADD116 gain a subject their commands name, ADD135 loses
+    one because it spans, and ADD129 moves from the container it mentions to the one
+    it acts on."""
+    import re as _re
+    SUB = _re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", _re.I)
+    changed = []
+    for n in PLAN:
+        text = f"{n['title']}\n{n['description'] or ''}"
+        m = SUB.search(text)
+        if (m.group(1) if m else None) != mt.subject_guest(n):
+            changed.append(n["node_key"])
+    assert set(changed) <= {"ADD115", "ADD116", "ADD135", "ADD129"}, changed

@@ -541,10 +541,11 @@ def intent_of(node: dict) -> Optional[str]:
 
 
 def subject_gid(node: dict, truth=None) -> Optional[str]:
-    m = _SUBJECT_RE.search(_text(node))
-    if m:
-        return m.group(1)
-    return str(getattr(truth, "gid", "") or "") or None       # §17.1316 — the pause measured the guest the text names by name
+    """§17.1340 — ONE reader. This used to search the text itself and drifted from
+    `machine_truth.subject_guest`: the pause measured one guest and the template
+    rendered another."""
+    from app.modules.machine_truth import subject_guest
+    return subject_guest(node) or (str(getattr(truth, "gid", "") or "") or None)
 
 
 def select_template(node: dict, truth) -> Optional[Template]:
