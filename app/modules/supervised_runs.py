@@ -941,6 +941,12 @@ _HTTP_BODY_RE = re.compile(r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--j
 _HTTP_GET_RE = re.compile(r"-X\s*['\"]?GET\b", re.I)
 #: the port a URL in that line reaches
 _URL_PORT_RE = re.compile(r"https?://[^\s'\"]*?:(?P<port>\d{2,5})(?:[/\s'\"]|$)")
+#: §17.1362b — the port AND the path, so a login can be told from a change
+_URL_PATH_RE = re.compile(r"https?://[^\s'\"]*?:(?P<port>\d{2,5})(?P<path>/[A-Za-z0-9_./-]*)")
+#: a POST that authenticates rather than configuring: its LAST path segment is the
+#: verb. `/api/v2/auth/login` is exempt; `/api/v3/authentication` is not.
+_AUTH_VERBS = frozenset({"login", "logout", "signin", "signout", "token", "session",
+                         "authenticate", "auth"})
 
 
 def api_ports_changed(texts: list[str]) -> dict:
@@ -954,8 +960,22 @@ def api_ports_changed(texts: list[str]) -> dict:
                 continue
             if not (_HTTP_WRITE_RE.search(ln) or _HTTP_BODY_RE.search(ln)):
                 continue
-            for m in _URL_PORT_RE.finditer(ln):
+            for m in _URL_PATH_RE.finditer(ln) or ():
+                # §17.1362b — a LOGIN changes no configuration; it is how a block
+                # PROVES a change it made elsewhere. Live, ADD132 sets qBittorrent's
+                # password by editing its config and then posts to
+                # `…:8080/api/v2/auth/login`, failing hard unless the answer is
+                # `Ok.` -- and §17.1362 refused the frame for not "reading back" a
+                # change the API never made. Measured: the whole recorded corpus
+                # holds exactly one POST-shaped endpoint, `/api/v3/rootfolder`, a
+                # real change; no login shape is lost by this.
+                seg = [s for s in (m.group("path") or "").split("/") if s]
+                if seg and seg[-1].lower() in _AUTH_VERBS:
+                    continue
                 out.setdefault(m.group("port"), ln.strip()[:200])
+            for m in _URL_PORT_RE.finditer(ln):
+                if not _URL_PATH_RE.search(ln):
+                    out.setdefault(m.group("port"), ln.strip()[:200])
     return out
 
 
