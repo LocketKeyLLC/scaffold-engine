@@ -444,6 +444,13 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # not this block reaching into its own subject.
     out: list[dict] = []
     inv = inventory if inventory is not None else (await read_inventory(spec) if spec is not None else None)
+    # §17.1344 — an id no machine has is not a guest. Live, "in-container 999:996"
+    # (the services' uid and gid) read as guest 999, and the host-side `chown` was
+    # refused for "not reaching guest 999". The inventory settles it, so this runs
+    # AFTER it is read; with no inventory, or for an id this block creates, nothing
+    # changes.
+    from app.modules.machine_truth import known_guest
+    subjects = [g for g in subjects if known_guest(g, inv, subject + "\n" + "\n".join(texts))]
     # §17.1288g — an ssh into the step's guest with no key of ours on it and
     # none copied in this block. Judged from the plan (the engine's own record
     # of what it finished), so it needs no host read.

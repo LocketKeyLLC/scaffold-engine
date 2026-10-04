@@ -1254,7 +1254,10 @@ def test_the_guest_gate_is_wired_into_frame_run():
     from app.modules import supervised_runs as sr
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
-    assert "commands_never_reach_the_guest(cmds, node, shape_files)" in body, "the gate reads the files too (§17.1286)"
+    # §17.1344 — and the INVENTORY, so an id no machine has ("in-container 999:996")
+    # cannot make the rule refuse a correct host-side command.
+    assert "commands_never_reach_the_guest(cmds, node, shape_files, inventory)" in body, \
+        "the gate reads the files and the inventory (§17.1286, §17.1344)"
 
 
 # ───── §17.1287b — it is the WRITES that must reach the guest

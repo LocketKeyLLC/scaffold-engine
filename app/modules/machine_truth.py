@@ -338,6 +338,28 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
     return t
 
 
+#: §17.1344 — `pct create 121`, `qm create 107`: an id this block brings into being
+_CREATES_RE = re.compile(r"\b(?:pct|qm)\s+(?:create|clone|restore)\s+(\d{3,5})\b", re.I)
+
+
+def known_guest(gid: str, inventory: Optional[dict], text: str = "") -> bool:
+    """Is `gid` a guest this host actually has (or one this block creates)?
+
+    §17.1344 — with no inventory the answer is yes: blindness refuses nothing and
+    invents nothing. With one, an id it does not list is not a guest, because a
+    number in prose (`uid=999`, `in-container 999:996`, a port, a size) is not a
+    machine.
+    """
+    if not gid:
+        return False
+    if inventory is None:
+        return True
+    have = set((inventory.get("cts") or {})) | set((inventory.get("vms") or {})) | set((inventory.get("names") or {}))
+    if not have:
+        return True                        # unreadable listings: no judgment
+    return str(gid) in {str(h) for h in have} or any(m.group(1) == str(gid) for m in _CREATES_RE.finditer(text or ""))
+
+
 def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Optional[str]:
     """The guest a step is about: by id ("VM 106", "LXC 120") or, §17.1316, by NAME
     against the inventory ("Install PalWorld server" → 106 palworld-server). Live,
@@ -356,9 +378,15 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
         return next(iter(acted_on))
     if len(acted_on) > 1:
         return None                     # it spans guests: no single subject to measure
-    m = _SUBJECT_RE.search(str((node or {}).get("title") or "")) or _SUBJECT_RE.search(text)
-    if m:
-        return m.group(1)
+    # §17.1344 — an id no machine has is not a guest. Live, the step that hands the
+    # shared media tree to the services says "in-container 999:996 is host
+    # 100999:100996" (the services' uid and gid), and `container 999` read as a
+    # guest: the subject became 999, and the host-side `chown` was refused for "not
+    # reaching guest 999". When the inventory is readable, an id it does not list is
+    # not a subject -- unless this very block creates it.
+    for m in [_SUBJECT_RE.search(str((node or {}).get("title") or "")), *_SUBJECT_RE.finditer(text)]:
+        if m and known_guest(m.group(1), inventory, text):
+            return m.group(1)
     names = (inventory or {}).get("names") or {}
     hits = [gid for gid, name in names.items() if name and _mentions_guest(text, gid, str(name))]
     return hits[0] if len(hits) == 1 else None
