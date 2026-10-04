@@ -105,6 +105,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "and nothing sets it",                           # §17.1348
+                   "is expanded by GUEST",                          # §17.1364
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
@@ -3852,6 +3853,29 @@ _SHELL_VARS = frozenset({
 })
 
 
+#: §17.1364 — `pct exec N -- sh -c '…'` / `qm guest exec N -- bash -c "…"`: the
+#: payload another machine runs, and WHO expands the variables inside it. A
+#: SINGLE-quoted payload reaches the guest verbatim and the guest's shell expands
+#: it; a DOUBLE-quoted one is expanded by the host before the call is made.
+_GUEST_PAYLOAD_RE = re.compile(
+    r"(?<![\w-])(?:pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>\d{3,5})\b"
+    r"(?:(?!--\s)[^\n])*?--\s+(?:(?:ba|da|z|k)?sh)\s+-c\s+(?P<q>['\"])(?P<payload>(?:\\.|(?!(?P=q)).)*)(?P=q)",
+    re.S)
+
+
+def guest_payloads(text: str) -> list[tuple[str, str, str]]:
+    """``[(gid, quote, payload)]`` — what each guest is told to run, and in which
+    shell its variables expand.
+
+    §17.1364 — measured on the live host: inside `pct exec 105 -- sh -c '…'` the
+    environment is the GUEST's (`PATH=/sbin:/bin:/usr/sbin:/usr/bin`, where the
+    host's is `/usr/local/sbin:…`) and a host variable is simply absent
+    (`HASH=[]`). `pct exec` has no flag that carries one in.
+    """
+    return [(m.group("gid"), m.group("q"), m.group("payload"))
+            for m in _GUEST_PAYLOAD_RE.finditer(str(text or ""))]
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -3881,13 +3905,59 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
     texts = [str(c) for c in commands or []]
     file_by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
     out: list[dict] = []
+    def _assigned_in(blobs: list) -> set:
+        out_set = {m.group("name") for b in blobs for m in _VAR_SET_RE.finditer(b)}
+        out_set |= {g for b in blobs for m in _VAR_BIND_RE.finditer(b)
+                    for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        return out_set
+
     for cmd in texts:
         # a command that RUNS a written file carries that file's references too
         bodies = [cmd] + [body for path, body in file_by_path.items() if path and path in cmd]
-        assigned = {m.group("name") for body in bodies for m in _VAR_SET_RE.finditer(body)}
-        assigned |= {g for body in bodies for m in _VAR_BIND_RE.finditer(body)
-                     for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        # §17.1364 — a variable is judged in the shell that EXPANDS it. A
+        # single-quoted payload handed to `pct exec N -- sh -c '…'` reaches the
+        # guest verbatim, and the guest expands it against the GUEST's environment:
+        # measured on the live host, `PATH=/sbin:/bin:/usr/sbin:/usr/bin` there
+        # against `/usr/local/sbin:…` on the host, and a host variable reads back
+        # empty (`HASH=[]`). `pct exec` has no flag that carries one in. So the
+        # host's assignments -- and the runner's secrets, which it injects into the
+        # process IT starts -- do not reach inside; only what the payload itself
+        # sets does. Live, ADD132's draft computed `HASH=$(python3 …)` on the host
+        # and wrote `WebUI\\Password_PBKDF2=$HASH` inside a single-quoted guest
+        # payload: the password would have been written EMPTY, and §17.1348 passed
+        # it because something in the block did assign that name.
+        guest_bits: list = []
         for body in bodies:
+            for gid, quote, payload in guest_payloads(body):
+                if quote == "'":
+                    guest_bits.append((gid, payload))
+        host_bodies = list(bodies)
+        for _gid, payload in guest_bits:
+            host_bodies = [b.replace(payload, " ") for b in host_bodies]
+        assigned = _assigned_in(host_bodies)
+        for gid, payload in guest_bits:
+            inside = _assigned_in([payload]) | set(_SHELL_VARS)
+            for m in _VAR_REF_RE.finditer(payload):
+                name = m.group("brace") or m.group("bare")
+                if name in inside or name.isdigit():
+                    continue
+                held_here = sorted({str(x) for x in ((policy or {}).get("secrets") or [])}
+                                   | {str(x) for x in ((policy or {}).get("held") or [])})
+                out.append({"command": cmd.strip()[:200], "why": (
+                    f"`${name}` is expanded by GUEST {gid}'s own shell, not by the host: it sits inside the "
+                    f"single-quoted payload of `pct exec {gid} -- sh -c '…'`, which reaches the guest "
+                    f"verbatim. Nothing inside that payload assigns it, a guest's environment does not "
+                    f"carry the host's, and `pct exec` has no flag that passes one in -- measured on this "
+                    f"host, `PATH` inside the guest is `/sbin:/bin:/usr/sbin:/usr/bin` against "
+                    f"`/usr/local/sbin:…` outside it, and a host variable reads back empty. So it expands "
+                    f"to NOTHING there"
+                    + (f" (the runner's own values -- {', '.join(held_here)} -- are injected into the "
+                       f"process it starts on the HOST, which is not this shell either)" if held_here else "")
+                    + ". Let the HOST expand it before the call -- close the quote around it, "
+                      "`sh -c '… '\"$NAME\"' …'`, or double-quote the whole payload -- or assign it "
+                      "inside the payload from something the guest can read.")})
+                break
+        for body in host_bodies:
             for m in _VAR_REF_RE.finditer(body):
                 name = m.group("brace") or m.group("bare")
                 if name in have or name in assigned or name.isdigit():
