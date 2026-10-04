@@ -472,9 +472,40 @@ _HOST_INTO_GUEST_RE = re.compile(
     r"\b(?:pct|qm)\s+(?:guest\s+)?(?:exec|push|pull|set|config|start|stop|reboot)\s+(\d{3,5})\b", re.I)
 
 
-def guests_the_host_is_told_to_touch(node: dict) -> set[str]:
-    """The guest ids a step's own text addresses through host commands."""
-    return {m.group(1) for m in _HOST_INTO_GUEST_RE.finditer(_text(node))}
+def guests_the_host_is_told_to_touch(node: dict, services: Optional[list] = None) -> set[str]:
+    """The guest ids a step touches: the ones its own text addresses through host
+    commands, PLUS the guests of the services it names.
+
+    §17.1351 — the engine MEASURED where each app lives (§17.1346), so a step that
+    says "make Radarr and Sonarr drive qBittorrent" touches 103, 104 and 105 whether
+    or not anyone wrote those numbers into its text. Live, ADD132 named only
+    `pct exec 103` in a check, so the step read as one guest's work and was drafted
+    as a script inside Radarr's container -- which then tried to
+    `systemctl stop qbittorrent.service` in a container that has no such unit. The
+    operator: "the engine already knows the information anyways."
+    """
+    out = {m.group(1) for m in _HOST_INTO_GUEST_RE.finditer(_text(node))}
+    if services:
+        try:
+            from app.modules.service_truth import names_in
+            named = set(names_in(node))
+            for s in services:
+                name = str(getattr(s, "name", "") or "").lower()
+                guest = str(getattr(s, "guest", "") or "")
+                if not guest or not name:
+                    continue
+                # the unit's name, or the app's own word inside it (qbittorrent-nox → qbittorrent)
+                if name in named or any(n and (name.startswith(n) or n.startswith(name)) for n in named):
+                    out.add(guest)
+        except Exception:
+            pass
+    return out
+
+
+def spans_guests_with(node: dict, services: Optional[list] = None) -> bool:
+    """§17.1351 — does the step's work cross more than one guest, counting the
+    guests of the services it names?"""
+    return len(guests_the_host_is_told_to_touch(node, services)) >= 2
 
 
 def spans_guests(node: dict) -> bool:
@@ -548,9 +579,13 @@ def subject_gid(node: dict, truth=None) -> Optional[str]:
     return subject_guest(node) or (str(getattr(truth, "gid", "") or "") or None)
 
 
-def select_template(node: dict, truth) -> Optional[Template]:
+def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
     """The first template whose ``applies`` holds for this step and this
     measured guest; None means today's model-written path."""
+    # §17.1351 — every guest template serves ONE guest. A step that touches several,
+    # counting the guests of the services it names, can be drafted from none of them.
+    if spans_guests_with(node, services):
+        return None
     if not subject_gid(node, truth):
         return None
     for t in TEMPLATES:

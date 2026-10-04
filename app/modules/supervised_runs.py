@@ -2514,7 +2514,7 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
 
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "", spec=None,
-                        environment: dict | None = None, truth=None) -> str:
+                        environment: dict | None = None, truth=None, services: list | None = None) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them.
 
@@ -2540,7 +2540,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     if truth is not None and for_channel:
         try:
             from app.modules import runbook_templates as rt
-            tpl = rt.select_template(node, truth)
+            tpl = rt.select_template(node, truth, services)   # §17.1351
             if tpl is not None:
                 model_vals = await rt.fill_free_params(tpl, node, str(b if isinstance(b, str) else json.dumps(b, default=str)),
                                                        upstream=upstream, environment=environment,   # §17.1306

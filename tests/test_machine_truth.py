@@ -119,7 +119,7 @@ def test_the_pause_measures_once_and_reconciles_after_the_first_frame():
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
     assert body.count("machine_truth.read_guest_truth(") == 1, "measured ONCE per pause"
-    assert body.index("machine_truth.read_guest_truth(") < body.index("supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth)"), \
+    assert body.index("machine_truth.read_guest_truth(") < body.index("supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)"), \
         "§17.1290 — the first draft is rendered from the measured truth, so the measurement comes first"
     assert "machine_truth.reconcile_from_truth(job_id, run_node, _truth, _needs, _plan_rows)" in body
     assert "_record_engine_fact" not in src, "the ad-hoc §17.1288p hook is superseded by the one table"
