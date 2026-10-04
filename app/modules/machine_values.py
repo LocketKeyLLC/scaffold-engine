@@ -44,8 +44,10 @@ logger = logging.getLogger("scaffold")
 #: the *arr family: one shape, one element, one file per app
 _ARR_APPS = ("prowlarr", "radarr", "sonarr", "lidarr", "readarr", "whisparr")
 
-#: `<ApiKey>…</ApiKey>` out of the first config.xml that has one
-_ARR_EXTRACT = (r"sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' | head -n 1")
+#: `<ApiKey>…</ApiKey>` out of the first config.xml that has one. §17.1342 — the
+#: sed script is DOUBLE-quoted, because this whole read is substituted inside a
+#: `pct exec <gid> -- sh -c '…'` whose own quotes are single.
+_ARR_EXTRACT = (r'sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1')
 
 #: `<RADARR_API_KEY>`, `<SONARR_APIKEY>`, `<PROWLARR_KEY>` — the shapes the
 #: drafter actually writes (live: all three of ADD115's were `<APP_API_KEY>`).
@@ -65,8 +67,15 @@ class Readable:
         return " or ".join(self.paths)
 
     def read(self, gid: Optional[str] = None) -> str:
-        """The shell that prints the value. With ``gid``, from the host through
-        `pct exec`; without, from inside the guest the script already runs in."""
+        """The shell that prints the value, read INSIDE the guest that owns it.
+
+        §17.1342 — `gid` is kept for the host-side form, but the host form does not
+        work on an unprivileged runner: the runner raises its own privileges for the
+        LEADING command only, so a `pct exec` inside `$( … )` runs as the runner's
+        own user and fails with `Unable to load access control list`. The key then
+        comes back EMPTY and the request goes out with an empty header — a 401 that
+        looks like a wrong key. Measured on pve-runner, 2026-10-04.
+        """
         cat = "cat " + " ".join(self.paths) + " 2>/dev/null"
         if gid:
             cat = f"pct exec {gid} -- sh -c {_sq(cat)}"
@@ -136,13 +145,25 @@ def read_on_the_machine(commands: list[str], verify: list[str],
             logger.info("machine_values: %s is readable but the inventory names no %s guest "
                         "-- left as an input", name, r.app)
             continue
-        ph, inline = f"<{name}>", f"$({r.read(gid)})"
-        out_cmds = [c.replace(ph, inline) for c in out_cmds]
-        out_verify = [v.replace(ph, inline) for v in out_verify]
+        ph, inside = f"<{name}>", f"$({r.read(None)})"
+        # §17.1342 — the read goes WHERE THE COMMAND GOES. A command already running
+        # in that guest reads the key there, with no `pct` in the substitution; a host
+        # command is left alone, because the host form cannot work (see `read`).
+        hit = False
+        for seq in (out_cmds, out_verify):
+            for i, c in enumerate(seq):
+                if ph in c and addresses_guest(c, gid):
+                    seq[i] = c.replace(ph, inside)
+                    hit = True
+        if not hit:
+            logger.info("machine_values: %s needs the call to run inside guest %s -- left as an input",
+                        name, gid)
+            continue
         notes.append({"why": (
-            f"read {name} off the machine instead of asking: {r.app} keeps it in {r.where} on guest "
-            f"{gid}. Live (§17.1332), ADD115's run block read all three *arr keys itself while the "
-            f"same step's checks asked the operator to paste them.")})
+            f"read {name} inside guest {gid} instead of asking: {r.app} keeps it in {r.where} there, and "
+            f"the call already runs in that guest, so the key never leaves the machine. Live (§17.1332), "
+            f"ADD115's run block read all three *arr keys itself while the same step's checks asked the "
+            f"operator to paste them.")})
     return out_cmds, out_verify, notes
 
 
@@ -234,6 +255,15 @@ def engine_still_asked(inputs: Optional[list[dict]], address: Optional[str]) -> 
     return out
 
 
+#: `pct exec 103 -- …`, `qm guest exec 106 -- …`: a command that runs INSIDE a guest
+_ADDRESSES_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\b", re.I)
+
+
+def addresses_guest(command: str, gid: str) -> bool:
+    """§17.1342 — does this command run inside guest `gid`?"""
+    return any(m.group(1) == str(gid) for m in _ADDRESSES_RE.finditer(str(command or "")))
+
+
 def still_asked(inputs: Optional[list[dict]], inventory: Optional[dict] = None) -> list[dict]:
     """The inputs the frame would still ASK for although a machine holds them —
     the other end of the structural fix (§17.1085). One refusal per value, with
@@ -248,8 +278,9 @@ def still_asked(inputs: Optional[list[dict]], inventory: Optional[dict] = None) 
         if gid is None:
             continue           # no machine is named for it: asking is all that is left
         out.append({"command": f"the value <{name}>", "why": (
-            f"<{name}> is not a question for the operator: {r.app} writes it into {r.where} on its own "
-            f"guest, so read it there -- `{r.read(gid)}` -- and use that command substitution in the "
-            f"command. Live (§17.1332), three *arr keys were asked for in checks while the same "
-            f"step's run block read them off the disk.")})
+            f"<{name}> is not a question for the operator: {r.app} writes it into {r.where} on guest {gid}. "
+            f"Put the call INSIDE that guest and read the key there, in one command -- "
+            f"`pct exec {gid} -- sh -c 'curl -s -H \"X-Api-Key: $({r.read(None)})\" "
+            f"http://127.0.0.1:<port>/api/...'`. §17.1342: a `pct exec` inside `$( … )` on the host runs "
+            f"unprivileged and returns nothing, so the header goes out empty and the app answers 401.")})
     return out

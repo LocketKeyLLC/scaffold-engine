@@ -53,21 +53,36 @@ def test_the_live_checks_asked_the_operator_for_three_keys():
     assert all(i["secret"] for i in inputs if i["name"].endswith("API_KEY")), "and they are secrets"
 
 
-def test_the_engine_reads_each_key_off_its_own_guest():
+def test_the_host_side_checks_are_not_filled_because_that_cannot_work():
+    """§17.1342 corrects §17.1332. ADD115's checks curl the apps from the HOST, and
+    a `pct exec` inside `$( … )` there runs unprivileged and returns nothing, so the
+    header would go out empty and the app would answer 401. The engine does not
+    write a read it cannot perform; it says what to do instead."""
     cmds, verify, notes = mv.read_on_the_machine([], _checks(), INV)
-    assert not any("_API_KEY>" in v for v in verify), verify
-    for app, gid in (("prowlarr", "102"), ("radarr", "103"), ("sonarr", "104")):
-        hit = [v for v in verify if f"/var/lib/{app}/config.xml" in v]
-        assert hit, (app, verify)
-        assert f"pct exec {gid} --" in hit[0], hit[0]
-        assert "<ApiKey>" in hit[0], "it reads the element the app writes"
-    assert len(notes) == 3 and all("instead of asking" in n["why"] for n in notes)
+    assert verify == _checks() and notes == []
+    out = mv.still_asked([{"name": "PROWLARR_API_KEY", "secret": True}], INV)
+    assert len(out) == 1 and "pct exec 102 -- sh -c" in out[0]["why"]
+    assert "127.0.0.1" in out[0]["why"], "the call belongs in the guest that owns the key"
+
+
+def test_the_engine_reads_the_key_when_the_call_runs_in_the_guest():
+    """The shape measured working on pve-runner."""
+    inside = ["pct exec 103 -- sh -c 'curl -s -H \"X-Api-Key: <RADARR_API_KEY>\" "
+              "http://127.0.0.1:7878/api/v3/rootfolder'"]
+    cmds, _v, notes = mv.read_on_the_machine(inside, [], INV)
+    assert "<RADARR_API_KEY>" not in cmds[0]
+    assert "/var/lib/radarr/config.xml" in cmds[0] and "<ApiKey>" in cmds[0]
+    assert cmds[0].count("pct exec") == 1
+    assert len(notes) == 1 and "inside guest 103" in notes[0]["why"]
 
 
 def test_the_substituted_checks_are_valid_shell():
     """A command substitution inside a quoted header, with a sed script inside it:
-    bash settles whether that parses, not the author."""
-    _, verify, _ = mv.read_on_the_machine([], _checks(), INV)
+    bash settles whether that parses, not the author. §17.1342 — judged on the
+    in-guest shape, which is the one the engine writes."""
+    inside = [f"pct exec 103 -- sh -c 'curl -s -H \"X-Api-Key: <RADARR_API_KEY>\" "
+              f"http://127.0.0.1:7878/api/v3/{p}'" for p in ("rootfolder", "downloadclient")]
+    verify, _v2, _n = mv.read_on_the_machine(inside, [], INV)
     script = "#!/bin/bash\n" + "\n".join(verify) + "\n"
     p = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
     assert p.returncode == 0, p.stderr
@@ -113,7 +128,7 @@ pct exec 103 -- systemctl is-active radarr
 
 ## Verify
 
-- Radarr's root folders: `curl -s -H "X-Api-Key: <RADARR_API_KEY>" http://192.168.1.22:7878/api/v3/rootfolder`
+- Radarr's root folders: `pct exec 103 -- sh -c 'curl -s -H "X-Api-Key: <RADARR_API_KEY>" http://127.0.0.1:7878/api/v3/rootfolder'`
 """
 
 
@@ -124,7 +139,7 @@ def test_the_frame_asks_for_nothing_and_keeps_the_check():
     assert [i["name"] for i in frame["inputs"]] == [], frame["inputs"]
     assert len(frame["verify"]) == 1, frame["verify"]
     assert "/var/lib/radarr/config.xml" in frame["verify"][0]
-    assert any("read RADARR_API_KEY off the machine" in w for w in frame["engine_fixed"]), frame["engine_fixed"]
+    assert any("read RADARR_API_KEY inside guest 103" in w for w in frame["engine_fixed"]), frame["engine_fixed"]
     assert not any("API_KEY" in str(r.get("command", "")) for r in frame["refused"]), frame["refused"]
 
 
