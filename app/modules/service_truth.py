@@ -391,6 +391,28 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         cands = config_candidates(s.name, user, s.data_dir)
         ok3, found = await _probe(spec, f"pct exec {gid} -- sh -c 'ls -1d {' '.join(cands)} 2>/dev/null'")
         paths = [ln.strip() for ln in (found or "").split("\n") if ln.strip().startswith("/")] if ok3 else []
+        # §17.1361 — a service can have SEVERAL config files, and `ls` returns them
+        # alphabetically. Live, qBittorrent keeps `qBittorrent.conf` (5 sections,
+        # `[Preferences]`, `WebUI\Port=8080`) beside `qBittorrent-data.conf` (1
+        # section, no `[Preferences]`), and `-` sorts before `.`, so the facts named
+        # the one with no settings in it. ADD132 then wrote the WebUI password into
+        # that file, its `sed /^\[Preferences\]/a` matched nothing, and the login
+        # check said `Fails.`. Which file holds the settings is measurable: count the
+        # `[section]` headers and `key=` lines. All files are kept; the richest leads.
+        if len(paths) > 1:
+            ok5, counts = await _probe(
+                spec, f"pct exec {gid} -- sh -c 'grep -c -E \"^\\[|^[A-Za-z][A-Za-z0-9_.-]*=\" "
+                      + " ".join(paths[:8]) + " 2>/dev/null'")
+            if ok5:
+                score = {}
+                for ln in (counts or "").split("\n"):
+                    bits = ln.strip().rsplit(":", 1)
+                    if len(bits) == 2 and bits[1].strip().isdigit():
+                        score[bits[0].strip()] = int(bits[1].strip())
+                if any(score.values()):
+                    paths = sorted(paths, key=lambda q: -score.get(q, 0))
+                    s.reads["config settings"] = ", ".join(f"{q.rsplit('/', 1)[-1]}={score.get(q, 0)}"
+                                                           for q in paths[:4])
         if paths:
             ok4, st_text = await _probe(spec, f"pct exec {gid} -- sh -c 'stat -c \"%U:%G %a %n\" "
                                               + " ".join(paths[:8]) + "'")
