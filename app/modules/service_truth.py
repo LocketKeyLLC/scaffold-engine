@@ -207,6 +207,33 @@ def config_candidates(name: str, user: str, data_dir: str, home: str = "") -> li
     return list(dict.fromkeys(out))
 
 
+def measured_units_by_guest(services: list) -> dict:
+    """``{guest: [unit names]}`` for every service the engine MEASURED.
+
+    §17.1357 — `unsourced_service_name` was handed `_truth.units`: the unit list
+    of the step's SUBJECT guest alone. ADD132's draft said
+    `pct exec 105 -- systemctl is-active qbittorrent-nox.service` — correct,
+    measured that evening, `LoadState=loaded` — and was refused with
+    "`qbittorrent-nox` is not a unit anything the engine holds names", because
+    103's list does not have it.
+
+    By GUEST, not pooled: a union would also stop refusing `pct exec 103 --
+    systemctl restart qbittorrent-nox`, the right unit in the wrong container,
+    and measurement says nothing else catches that (`values_from_another_guest`
+    judges ports, data dirs and configs, not units).
+    """
+    out: dict = {}
+    for svc in services or []:
+        gid = str(getattr(svc, "guest", "") or "")
+        if not gid:
+            continue
+        names = out.setdefault(gid, [])
+        for n in (getattr(svc, "name", ""), re.sub(r"\.service$", "", str(getattr(svc, "unit", "")))):
+            if n and n not in names:
+                names.append(n)
+    return out
+
+
 def table(services: list[ServiceTruth]) -> str:
     """The facts block handed to every draft about this step's machines."""
     lines = [s.says() for s in services if s.name]
