@@ -45,6 +45,16 @@ _INLINE_BACKTICK_RE = re.compile(r"`([a-z][\w.+-]*(?:\s+[^`\n]{1,250})?)`")
 _INLINE_QUOTE_RE = re.compile(r"'([a-z][\w.+-]*(?:\s+[^'\n]{1,150})?)'")
 #: both, for the places that only need to BLANK inline code out of prose
 _INLINE_RE = re.compile(r"`[^`\n]{2,250}`|'[a-z][\w.+-]*(?:\s+[^'\n]{1,150})?'")
+#: §17.1349 — the verb a step's title OPENS with, after an optional `LXC 111:` prefix.
+#: The leading verb is what the step DOES: "List the indexers this Prowlarr can add"
+#: opens with `List` and changes nothing, so it is not claimed, while "Add Jellyfin
+#: libraries …" is. Deliberately absent: document, decide, review, research, list,
+#: prove, verify, check — the model's own work, or a read.
+_LEADING_CHANGE_RE = re.compile(
+    r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*|the\s+)?"
+    r"(?P<verb>add|set|point|enable|disable|create|write|mount|configure|install|reinstall|restart|stop|"
+    r"start|remove|delete|give|move|rename|import|register|connect|wire|apply|update|upgrade|rebuild|"
+    r"expand|resize|attach|detach|grow|implement|build|forward|fix|repair|refresh|put|make)\b", re.I)
 _OBSERVE_RE = re.compile(r"\b(?:done when|verif(?:y|ied|ies)|confirm(?:s|ed)?|check(?:s|ed)? that|reports?|returns?|prints?|shows?)\b", re.I)
 # An UNQUOTED command in prose — "(pct set 101 --nameserver 192.168.1.1)",
 # "via pct set, then reboot", "(iptables -L PVEFW-HOST-IN -n -v | grep 8790)".
@@ -244,7 +254,25 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
         _intent = intent_of(node or {})
     except Exception:
         _intent = None
-    _fallback = (True, f"template:{_intent}") if _intent else (False, "")   # the answer when no command says so
+    # §17.1349 — the answer when NO command in the text says so: a step whose own
+    # TITLE names a service the engine knows and opens with a verb that changes
+    # something is hands-on by construction. Live, "Add Jellyfin libraries for
+    # /media/movies and /media/tv" carries only paths in its backticks, so nothing
+    # said "work": it would have run as a model task and written instructions, the
+    # way ADD131 burned three attempts (§17.1347). It is a FALLBACK, so a command
+    # that writes still gives the more precise reason.
+    def _by_its_own_words() -> tuple[bool, str]:
+        try:
+            from app.modules.service_truth import _NAME_RE
+            title = str((node or {}).get("title") or "")
+            svc, lead = _NAME_RE.search(title), _LEADING_CHANGE_RE.match(title)
+            if svc and lead:
+                return True, f"verb:{lead.group('verb').lower()} service:{svc.group(1).lower()}"
+        except Exception:
+            pass
+        return False, ""
+
+    _fallback = (True, f"template:{_intent}") if _intent else _by_its_own_words()
     cmds = step_commands(text)
     if not cmds:
         return _fallback
