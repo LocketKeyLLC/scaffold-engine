@@ -104,6 +104,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "a secret cannot be written into a file",       # §17.1280
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
+                   "and nothing sets it",                           # §17.1348
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "rewrites the whole file when it stops",         # §17.1346
@@ -3622,6 +3623,79 @@ def repair_lookups_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict],
     return out, repairs
 
 
+#: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
+_VAR_REF_RE = re.compile(r"\$\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)")
+#: `NAME=value`, `export NAME=value`, `NAME="$(…)"` — a value the block sets itself
+_VAR_SET_RE = re.compile(
+    # the name may open the line, follow a separator, or sit just inside a quote
+    # (`bash -c 'K=$(…); …'`), but never follow a letter or a dash (`--key=value`)
+    r"(?:^|[;&|(\s'\"])(?P<name>[A-Za-z_][A-Za-z0-9_]*)=", re.M)
+#: §17.1348b — the other ways a shell binds a name, all of them in the engine's own
+#: templates: `for h in $(seq 1 254)`, `while read -r line`, `read PORT`, a `local`.
+_VAR_BIND_RE = re.compile(
+    r"\bfor\s+(?P<for>[A-Za-z_][A-Za-z0-9_]*)\s+in\b"
+    r"|\bselect\s+(?P<sel>[A-Za-z_][A-Za-z0-9_]*)\s+in\b"
+    r"|\bread\b(?:\s+-\S+)*\s+(?P<read>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|\b(?:local|declare|typeset)\s+(?P<loc>[A-Za-z_][A-Za-z0-9_]*)")
+#: names the shell or the runner always provides
+_SHELL_VARS = frozenset({
+    "HOME", "PATH", "USER", "LOGNAME", "PWD", "OLDPWD", "SHELL", "TERM", "LANG", "LC_ALL", "TMPDIR",
+    "SECONDS", "RANDOM", "IFS", "PS1", "PS2", "HOSTNAME", "UID", "EUID", "PPID", "BASH", "BASH_VERSION",
+    "SHLVL", "LINENO", "FUNCNAME", "REPLY", "OPTARG", "OPTIND", "DEBIAN_FRONTEND", "SSHPASS", "SUDO_ASKPASS",
+    # §17.1348c — AWK's own fields and variables. `awk '{print $NF}'` lives inside the
+    # engine's own address sweep; `$NF` is not a shell name and nothing should set it.
+    "NF", "NR", "FNR", "FS", "OFS", "RS", "ORS", "FILENAME", "RSTART", "RLENGTH", "SUBSEP",
+    "CONVFMT", "OFMT", "ENVIRON", "ARGC", "ARGV",
+})
+
+
+def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
+    """§17.1348 — a command that reads a variable nothing provides.
+
+    Live, 2026-10-04: ADD131's draft carried
+    `curl -H "X-Api-Key: $RADARR_API_KEY" http://127.0.0.1:7878/api/v3/rootfolder`
+    inside `pct exec 103`. Nothing sets that name -- the runner resolves only the
+    secrets it holds, and a container's environment does not carry it -- so the
+    header would have gone out EMPTY and the app would have answered 401, which
+    reads like a wrong key rather than a value that was never there. The engine had
+    just been taught to read that key off the machine (§17.1332/1342); the draft
+    replaced the read with a name, and nothing noticed because the gates looked for
+    `<PLACEHOLDER>`, not `$NAME`.
+
+    A reference is satisfied when the block ASSIGNS it, the runner holds it as a
+    secret, or the shell always provides it. Anything else is empty at run time.
+    """
+    have = set(_SHELL_VARS) | {str(x) for x in ((policy or {}).get("secrets") or [])}
+    texts = [str(c) for c in commands or []]
+    file_by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    out: list[dict] = []
+    for cmd in texts:
+        # a command that RUNS a written file carries that file's references too
+        bodies = [cmd] + [body for path, body in file_by_path.items() if path and path in cmd]
+        assigned = {m.group("name") for body in bodies for m in _VAR_SET_RE.finditer(body)}
+        assigned |= {g for body in bodies for m in _VAR_BIND_RE.finditer(body)
+                     for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        for body in bodies:
+            for m in _VAR_REF_RE.finditer(body):
+                name = m.group("brace") or m.group("bare")
+                if name in have or name in assigned or name.isdigit():
+                    continue
+                out.append({"command": cmd.strip()[:200], "why": (
+                    f"`${name}` is read here and nothing sets it: the block never assigns it, the runner "
+                    f"holds "
+                    + (("only " + ", ".join(sorted(str(x) for x in ((policy or {}).get("secrets") or []))))
+                       if (policy or {}).get("secrets") else "no secrets")
+                    + ", and a guest's environment does not carry it either. It expands to NOTHING, so the "
+                      "command runs with an empty value -- live (§17.1348), an empty `X-Api-Key` header made "
+                      "an app answer 401, which reads like a wrong key rather than a value that was never "
+                      "there. Either read the value in the same command (a command substitution) or assign "
+                      "it in the block before use.")})
+                break
+        if out and out[-1]["command"] == cmd.strip()[:200]:
+            continue
+    return out
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
                files: Optional[list[dict]] = None) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply.
@@ -3988,7 +4062,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                             + _st.edits_a_config_the_service_rewrites(cmds, files, services))
         except Exception as exc:
             logger.warning("service_truth_gates_failed err=%r", exc)
-    refused = list(refused) + list(preconditions or []) + _mv_asked + _svc_refused   # §17.1213, §17.1332, §17.1346
+    # §17.1348 — a variable nothing sets expands to nothing, and the command runs
+    # with an empty value rather than failing loudly.
+    _empty_vars = variables_nothing_sets(cmds, files, policy)
+    refused = list(refused) + list(preconditions or []) + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
