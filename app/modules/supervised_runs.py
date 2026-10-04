@@ -104,6 +104,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "a secret cannot be written into a file",       # §17.1280
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
+                   "has no check at all",                           # §17.1345
                    "appears only in the verify",                   # §17.1288
                    "inside an ssh command line",                   # §17.1288b
                    "reads the neighbour table cold",               # §17.1288c
@@ -4001,6 +4002,19 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1288 — a check must use what the run used; a secret rides no ssh
     # command line; the neighbour table is read warm. Three readings of one frame.
     refused = refused + _vhits                            # §17.1288 — only when no check would be left
+    # §17.1345 — a block with NO check proves nothing. Every piece of machinery that
+    # confirms a step reads its checks: §17.1302 records an already-met step from
+    # them, the post-run judge reads them, §17.1343's inert key passed because a
+    # check looked at the file and not at the section. A block with none is recorded
+    # done on exit codes alone, which is how a step "succeeds" having changed
+    # nothing that matters. Live, ADD131 was drafted with `verify: []`.
+    if cmds and not verify:
+        refused = refused + [{"command": cmds[0][:120], "why": (
+            "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
+            "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
+            "had it, and the application never read it). Name at least one command that READS the result "
+            "the step is supposed to leave -- the value back out of the API, the key inside its section, "
+            "the service active -- not the command that made it.")}]
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
