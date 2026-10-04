@@ -35,7 +35,16 @@ logger = logging.getLogger("scaffold")
 _FENCE_RE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
 # `qm agent 106 ping` / 'ip -brief link show veth105i0' — a quoted run of text
 # that starts like a command name and has at least one argument or flag.
-_INLINE_RE = re.compile(r"[`']([a-z][\w.+-]*(?:\s+[^`'\n]{1,150})?)[`']")
+#: §17.1347 — a BACKTICKED command is read whole: only a backtick ends it, so the
+#: single quotes inside `pct exec 103 -- sh -c 'curl -X POST …'` are part of the
+#: command, not its end. Live, that span was cut at the first quote, so the write
+#: inside `sh -c` was invisible: the step ran as a model task three times, wrote
+#: instructions each time, and failed on "produced INSTRUCTIONS, not work".
+_INLINE_BACKTICK_RE = re.compile(r"`([a-z][\w.+-]*(?:\s+[^`\n]{1,250})?)`")
+#: a single-quoted run still ends at the next single quote
+_INLINE_QUOTE_RE = re.compile(r"'([a-z][\w.+-]*(?:\s+[^'\n]{1,150})?)'")
+#: both, for the places that only need to BLANK inline code out of prose
+_INLINE_RE = re.compile(r"`[^`\n]{2,250}`|'[a-z][\w.+-]*(?:\s+[^'\n]{1,150})?'")
 _OBSERVE_RE = re.compile(r"\b(?:done when|verif(?:y|ied|ies)|confirm(?:s|ed)?|check(?:s|ed)? that|reports?|returns?|prints?|shows?)\b", re.I)
 # An UNQUOTED command in prose — "(pct set 101 --nameserver 192.168.1.1)",
 # "via pct set, then reboot", "(iptables -L PVEFW-HOST-IN -n -v | grep 8790)".
@@ -144,8 +153,12 @@ def step_commands(text: str) -> list[tuple[str, str]]:
                 out.append((ln, ""))
     prose = _FENCE_RE.sub(" ", t)
     for sentence in re.split(r"(?<=[.!?\n])\s+", prose):
-        for m in _INLINE_RE.finditer(sentence):
+        seen_here: set[str] = set()
+        for m in list(_INLINE_BACKTICK_RE.finditer(sentence)) + list(_INLINE_QUOTE_RE.finditer(sentence)):
             cand = m.group(1).strip()
+            if cand in seen_here:
+                continue
+            seen_here.add(cand)
             if cand.startswith("/") or "=" in cand.split(" ", 1)[0]:
                 continue                          # a path or an assignment, not a command
             if not _plausible_head(cand):
