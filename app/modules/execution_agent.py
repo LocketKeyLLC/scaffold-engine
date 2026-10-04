@@ -2573,6 +2573,25 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         except Exception as exc:
             logger.warning("preconditions_failed job=%s node=%s err=%r",
                            job_id, run_node.get("node_key"), exc)
+        # §17.1346 — and the SERVICES on the machines this step touches, measured
+        # once: which guest each app lives in, its port, its user, its config, and
+        # whether it rewrites that config itself. Every draft gets them as facts.
+        _services: list = []
+        try:
+            from app.modules import machine_truth as _mt0
+            from app.modules import runbook_templates as _rt
+            from app.modules import service_truth as _st
+            _touch = sorted(_rt.guests_the_host_is_told_to_touch(run_node))
+            _subj = _mt0.subject_guest(run_node, _inv)
+            if _subj and _subj not in _touch:
+                _touch.append(_subj)
+            _cts = (_inv or {}).get("cts") or {}
+            for _g in _touch[:3]:
+                if _cts.get(_g) == "running":
+                    _services += await _st.read_services(spec, _g, units=list((_inv or {}).get("units") or []) or None,
+                                                         mentioned=_st.names_in(run_node))
+        except Exception as exc:
+            logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
         # capability steps there are, are reconciled against the plan BEFORE this
         # step is drafted: the draft reads the step's text, so a stale count is how
@@ -2605,6 +2624,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         except Exception as exc:
             logger.warning("machine_truth_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
         # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
+        if _services:                      # §17.1346 — facts, in place of prose
+            from app.modules import service_truth as _st2
+            up_block = (up_block + "\n\n" + _st2.table(_services)).strip()
         runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth)
 
         async def _pre_for(rb: str) -> list[dict]:
@@ -2618,7 +2640,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
         # §17.1289 — reconcile the record from the measurement: a durable fact
         # about the machine goes to the ledger; a finished step whose effect
         # the machine does not show is reopened (no cascade) unless a pending
@@ -2678,7 +2700,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
                                                    preconditions=await _pre_for(retry), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                 if second["commands"] and not second["refused"]:
                     logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
                                    job_id, run_node.get("node_key"), len(second["commands"]))
@@ -2711,7 +2733,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                             if again:
                                 third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
                                                                   preconditions=await _pre_for(again), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                                 if third["commands"] and not third["refused"]:
                                     logger.warning("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
                                                    job_id, run_node.get("node_key"), len(third["commands"]))
@@ -2741,7 +2763,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                             if last:
                                                 fourth = supervised_runs.frame_run(run_node, last, spec, policy, env=_env,
                                                                                    preconditions=await _pre_for(last), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                                                 if fourth["commands"] and not fourth["refused"]:
                                                     logger.warning("supervised_run_redraft_last_clean job=%s node=%s commands=%d",
                                                                    job_id, run_node.get("node_key"), len(fourth["commands"]))
@@ -2771,7 +2793,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     if _api:
                         _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
                                                           preconditions=await _pre_for(_api), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                         # §17.1211's lesson: only ever trade UP. An empty frame
                         # must never replace an empty frame's better sibling.
                         if _apif.get("commands"):
@@ -2802,7 +2824,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _vb:
                     _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
                                                    preconditions=await _pre_for(_vb), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                     # §17.1211's rule — only ever trade UP: the redraft must keep
                     # the commands AND actually gain a runnable check.
                     # §17.1269 — never trade a runnable block for a refused one.
@@ -2827,7 +2849,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _wr:
                     _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
                                                      preconditions=await _pre_for(_wr), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                     # only trade UP: a redraft that still only reads is no better
                     if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
                             _wrf["commands"], run_node):
@@ -2854,7 +2876,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
                                                        env=_env, preconditions=await _pre_for(_again), upstream=up_block, units=(_truth.units if _truth is not None else None), inventory=_inv,
-                                                    engine_address=_eaddr)
+                                                    engine_address=_eaddr, services=_services)
                     # §17.1211's lesson in miniature: never replace a working
                     # block with an empty one.
                     # §17.1287 — and never a RUNNABLE block for a refused one: live, this

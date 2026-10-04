@@ -105,6 +105,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "has no check at all",                           # §17.1345
+                   "the call can only fail",                        # §17.1346
+                   "rewrites the whole file when it stops",         # §17.1346
                    "appears only in the verify",                   # §17.1288
                    "inside an ssh command line",                   # §17.1288b
                    "reads the neighbour table cold",               # §17.1288c
@@ -3896,7 +3898,7 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
               units: Optional[list[str]] = None, inventory: Optional[dict] = None,
-              engine_address: Optional[str] = None) -> dict:
+              engine_address: Optional[str] = None, services: Optional[list] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -3966,7 +3968,18 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                    if _dummies else files)
     _secret_files = secrets_in_files(files, inputs)
     runnable, refused = gate_block(shape, policy.get("allow") or [])
-    refused = list(refused) + list(preconditions or []) + _mv_asked   # §17.1213, §17.1332
+    # §17.1346 — the services the engine MEASURED on these machines judge the block's
+    # values: a port or a data dir that belongs to another guest, and an edit to a
+    # config the service rewrites itself.
+    _svc_refused: list[dict] = []
+    if services:
+        try:
+            from app.modules import service_truth as _st
+            _svc_refused = (_st.values_from_another_guest(cmds, files, services)
+                            + _st.edits_a_config_the_service_rewrites(cmds, files, services))
+        except Exception as exc:
+            logger.warning("service_truth_gates_failed err=%r", exc)
+    refused = list(refused) + list(preconditions or []) + _mv_asked + _svc_refused   # §17.1213, §17.1332, §17.1346
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
