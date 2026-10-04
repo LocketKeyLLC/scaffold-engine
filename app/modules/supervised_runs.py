@@ -108,6 +108,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
+                   "no check reads that API back",                  # §17.1362
                    "same API the check reads",                      # §17.1360
                    "this file RUNS ITSELF",                         # §17.1355
                    "reads only the engine's OWN script",            # §17.1355
@@ -931,6 +932,73 @@ def a_check_that_only_reads_the_scaffolding(verify: list[str],
         "reach the download client. Name a command that reads the RESULT: the value back out of the "
         "service's API, the key inside its section, the port answering. A step confirmed by the presence "
         "of the engine's own file is a step recorded done having changed nothing.")}]
+
+
+#: §17.1362 — an HTTP call that CHANGES something: an explicit method, or `curl -d`
+#: (which is a POST unless `-X GET` says otherwise).
+_HTTP_WRITE_RE = re.compile(r"-X\s*['\"]?(?P<m>POST|PUT|PATCH|DELETE)\b", re.I)
+_HTTP_BODY_RE = re.compile(r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])")
+_HTTP_GET_RE = re.compile(r"-X\s*['\"]?GET\b", re.I)
+#: the port a URL in that line reaches
+_URL_PORT_RE = re.compile(r"https?://[^\s'\"]*?:(?P<port>\d{2,5})(?:[/\s'\"]|$)")
+
+
+def api_ports_changed(texts: list[str]) -> dict:
+    """``{port: line}`` for every HTTP call in these texts that changes state."""
+    out: dict = {}
+    for t in texts:
+        for ln in str(t or "").split("\n"):
+            if ln.lstrip().startswith("#"):
+                continue
+            if _HTTP_GET_RE.search(ln):
+                continue
+            if not (_HTTP_WRITE_RE.search(ln) or _HTTP_BODY_RE.search(ln)):
+                continue
+            for m in _URL_PORT_RE.finditer(ln):
+                out.setdefault(m.group("port"), ln.strip()[:200])
+    return out
+
+
+def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
+                                      files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1362 — the block changed something through an API no check reads back.
+
+    Measured over every recorded step of the live job: **4** make a state-changing
+    HTTP call, **3** never read that API in their checks — and those three are
+    exactly the steps whose record is false or that failed:
+
+        ADD97   "point Radarr and Sonarr at the download client"  recorded done, never done
+        ADD98   "prove it end to end"                             recorded done, proved nothing
+        ADD134  "prove the whole chain"                           failed as a model task
+
+    The one that does read it back is the one that worked. `curl -s` without
+    `--fail` exits 0 on a 400 or a 403, so a rejected `PUT` leaves no trace: the
+    only thing that can tell is a check that asks the API what it now holds.
+
+    Live, 2026-10-04: ADD132's redraft `PUT`s the download client into Radarr and
+    Sonarr and checks `systemctl is-active qbittorrent-nox.service` — the service
+    runs either way. Its own previous draft had read both back, which is the shape
+    this asks for.
+    """
+    changed = api_ports_changed([str(c) for c in commands or []]
+                                + [str((f or {}).get("content") or "") for f in files or []])
+    if not changed:
+        return []
+    read = {m.group("port") for c in (verify or []) for m in _URL_PORT_RE.finditer(str(c or ""))}
+    missing = sorted(p for p in changed if p not in read)
+    if not missing:
+        return []
+    port = missing[0]
+    return [{"command": changed[port], "why": (
+        f"this block CHANGES something through the API on port {port} and no check reads that API back. "
+        f"`curl` without `--fail` exits 0 on a 400 or a 403, so a request the service rejected leaves no "
+        f"trace at all -- the step is recorded done and nothing happened. Measured over this job's own "
+        f"history (§17.1362): of four steps that changed state through an API, the three that never read "
+        f"it back are ADD97 (\"point Radarr and Sonarr at the download client\" -- recorded done, never "
+        f"done, and the reason the download client answered 403 for weeks), ADD98 (\"prove it end to end\" "
+        f"-- recorded done, proved nothing) and ADD134; the one that did read it back is the one that "
+        f"worked. Add a check that GETs the same endpoint and shows the value now there -- not the "
+        f"service's state, which is the same either way.")}]
 
 
 def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -4243,6 +4311,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
             "the service active -- not the command that made it.")}]
+    # §17.1362 — a change made through an API that no check reads back.
+    refused = refused + changes_an_api_without_reading_it(cmds, verify, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
