@@ -3469,6 +3469,13 @@ async def execute_all_nodes(
                 if _asked is not None:
                     yield _sse("awaiting_decision", _asked)
                     return
+                # §17.1337 — the pause can settle THIS step (§17.1302 records an
+                # already-met step done), reopen another, insert a prerequisite or
+                # reorder the plan. The peek above is stale by now, and telling the
+                # UI that a step started when it will never run leaves it on screen
+                # as "running" for good: `node_start` marks it, and only `node_done`
+                # or `node_failed` clears it.
+                node = await _peek_next_node(job_id)
             if node is not None:
                 yield _sse("node_start", {
                     "job_id": job_id,
