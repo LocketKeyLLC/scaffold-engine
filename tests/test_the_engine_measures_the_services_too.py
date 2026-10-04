@@ -180,4 +180,5 @@ def test_the_pause_measures_the_services_and_hands_them_over():
     body = src[i:src.index("\nasync def ", i + 10)]
     assert "service_truth as _st" in body and "read_services(spec, _g" in body
     assert body.count("services=_services") >= 8, "every draft of the chain gets them"
-    assert "_st2.table(_services)" in body, "and the drafter sees them as facts"
+    # §17.1363 — the facts now carry the SCOPE of the reading behind them
+    assert "_st2.table(_services, _reading)" in body, "and the drafter sees them as facts"

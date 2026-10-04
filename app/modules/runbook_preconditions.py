@@ -364,7 +364,7 @@ def appends_a_key(texts: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: str) -> list[dict]:
+async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: str, reading=None) -> list[dict]:
     r"""§17.1343 — a key appended to a SECTIONED config is read as a different setting.
 
     Live, 2026-10-04: ADD130 appended `Session\DefaultSavePath=/media/downloads` to
@@ -396,7 +396,13 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
         # tests stubbed `_read` with a 2-tuple the real function never returns.
         out_text = await _read(spec, f"pct exec {gid} -- sh -c 'grep -c \"^\\[\" {path}'")
         if not str(out_text or "").strip():
-            continue                           # unreadable: nothing is refused out of blindness
+            # §17.1363 — "nothing is refused out of blindness" was right and silent:
+            # the blindness itself is now in the frame.
+            if reading is not None:
+                reading.gap(f"the section layout of {path}",
+                            "the runner could not count its `[section]` headers, so a bare "
+                            "append into it could not be judged")
+            continue
         try:
             sections = int((out_text or "0").strip().split("\n")[-1])
         except (TypeError, ValueError):
@@ -494,7 +500,7 @@ def copied_from(texts: list[str], path: str) -> str:
     return ""
 
 
-async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: str) -> list[dict]:
+async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: str, reading=None) -> list[dict]:
     r"""§17.1353 — a substitution whose pattern the file does not hold changes nothing.
 
     Live, 2026-10-04: ADD133 gave two new Jellyfin libraries their content type with
@@ -540,8 +546,13 @@ async def an_in_place_edit_the_file_cannot_match(spec, texts: list[str], gid: st
             if tail.isdigit():
                 where, count = cand, int(tail)
                 break
-        if count is None or count > 0:
-            continue    # unreadable (no judgment from blindness), or the pattern is there
+        if count is None:
+            if reading is not None:
+                reading.gap(path, f"could not be read in guest {here}, so an edit whose "
+                                  f"pattern it may not contain could not be judged")
+            continue
+        if count > 0:
+            continue                                        # the pattern is there
         out.append({"command": ln, "why": (
             f"this edit changes NOTHING: `{anchor}` does not appear in {where} -- read just now, 0 "
             f"matches. `sed -i` cannot fail for matching nothing: it exits 0, the file is untouched, "
@@ -580,7 +591,7 @@ def _api_names_the_checks_read(verify: list[str]) -> dict:
 
 
 async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: list[str],
-                                               services: Optional[list] = None) -> list[dict]:
+                                               services: Optional[list] = None, reading=None) -> list[dict]:
     r"""§17.1359 — the work writes a setting into a config the file has no concept of,
     while the step's own check reads that same setting from the service's API.
 
@@ -641,8 +652,13 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
                 continue
             got = await _read(spec, f'pct exec {gid} -- grep -c -i -F -- "{name}" {cfg}')
             tail = str(got or "").strip().split("\n")[-1].strip()
-            if not tail.isdigit() or int(tail) > 0:
-                continue                   # unreadable, or the config does know it
+            if not tail.isdigit():
+                if reading is not None:
+                    reading.gap(cfg, f"could not be read in guest {gid}, so whether it holds "
+                                     f"`{name}` is unknown")
+                continue
+            if int(tail) > 0:
+                continue                   # the config does know it
             api = next((f"port {p}" for p in sorted(ports) if p in want), "its API")
             out.append({"command": f"writes `{name}` into {cfg}", "why": (
                 f"this step's own check reads `{name}` from {getattr(svc, 'name', 'the service')}'s API on "
@@ -660,7 +676,8 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
                 inventory: Optional[dict] = None, truth=None,
-                services: Optional[list] = None, verify: Optional[list[str]] = None) -> list[dict]:
+                services: Optional[list] = None, verify: Optional[list[str]] = None,
+                reading=None) -> list[dict]:
     """``[{command, why}]`` for every command the host contradicts.
 
     `plan` is the job's nodes, so a refusal can name the step that would make
@@ -733,20 +750,20 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # different setting: the file itself settles it, so the file is read.
     if subjects:
         try:
-            out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, subjects[0]))
+            out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, subjects[0], reading=reading))
         except Exception as exc:
             logger.warning("append_section_check_failed err=%r", exc)
     # §17.1353 — an in-place substitution whose pattern the file does not hold is inert.
     if subjects:
         try:
-            out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, subjects[0]))
+            out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, subjects[0], reading=reading))
         except Exception as exc:
             logger.warning("inert_edit_check_failed err=%r", exc)
     # §17.1360 — the work writes a setting into a config that has no concept of it
     # while the step's own check reads it from the service's API.
     if services and verify:
         try:
-            out.extend(await writes_where_the_check_does_not_read(spec, texts, verify, services))
+            out.extend(await writes_where_the_check_does_not_read(spec, texts, verify, services, reading=reading))
         except Exception as exc:
             logger.warning("surface_check_failed err=%r", exc)
     # §17.1303 — the block reaches the step's guest at an address the machine

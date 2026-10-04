@@ -156,7 +156,7 @@ def test_the_layer_runs_it():
     """Verify the lane: a rule `unmet` never calls is no rule."""
     import inspect
     src = inspect.getsource(rp.unmet)
-    assert "writes_where_the_check_does_not_read(spec, texts, verify, services)" in src
+    assert "writes_where_the_check_does_not_read(spec, texts, verify, services, reading=reading)" in src
 
 
 def test_the_refusal_asks_the_drafter_again():

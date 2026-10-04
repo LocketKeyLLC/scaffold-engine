@@ -2577,6 +2577,22 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # once: which guest each app lives in, its port, its user, its config, and
         # whether it rewrites that config itself. Every draft gets them as facts.
         _services: list = []
+        # §17.1363 — one record of what this pause actually READ, and what it could
+        # not. It travels into the facts (so the drafter is told not to invent a
+        # value for a gap), into the frame (so the operator sees it beside
+        # `refused`), and into the record (so the judge does not read silence as
+        # proof). Six of §17.1352–1362b were a narrow reading asserted as a
+        # complete one; this is the thing that makes the narrowness visible.
+        from app.modules.measured import Reading
+        _reading = Reading()
+        if _inv is None:
+            _reading.gap("the host's own inventory",
+                         "`pct list` / `qm list` could not be read — no guest state, "
+                         "no disks, no ISOs")
+        else:
+            _reading.note("the guests on the host",
+                          f"{len((_inv or {}).get('cts') or {})} container(s), "
+                          f"{len((_inv or {}).get('vms') or {})} VM(s)")
         try:
             from app.modules import machine_truth as _mt0
             from app.modules import runbook_templates as _rt
@@ -2594,16 +2610,21 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # running container finds them; no guest NAME would have (qBittorrent's
             # container is called `download-client`).
             _named = _st.names_in(run_node)
-            _where = await _st.guests_of_the_named_services(spec, _named, _cts) if _named else {}
+            _where = (await _st.guests_of_the_named_services(spec, _named, _cts, reading=_reading)
+                      if _named else {})
             # the step's own guest first, then the guests its services are in
             _order = ([_subj] if _subj else []) + [_where[n] for n in _named if n in _where] + _touch
             _touch = list(dict.fromkeys(g for g in _order if g))
             for _g in _touch[:4]:
+                if _cts.get(_g) != "running" and _g:
+                    _reading.gap(f"the services in guest {_g}",
+                                 f"the step touches it and it is {_cts.get(_g) or 'not a container'}")
                 if _cts.get(_g) == "running":
                     # `units` was always None: the inventory carries no unit list.
                     # The listeners on the guest and the names the step mentions are
                     # what `read_services` goes on.
-                    _services += await _st.read_services(spec, _g, mentioned=_named)
+                    _services += await _st.read_services(spec, _g, mentioned=_named,
+                                                        reading=_reading)
         except Exception as exc:
             logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
@@ -2635,8 +2656,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _gid = machine_truth.subject_guest(run_node, _inv)      # §17.1316 — by id, or by name against the inventory
             if _gid:
                 _truth = await machine_truth.read_guest_truth(spec, _gid, _inv, _plan_rows)
+            if _truth is not None:
+                _reading.absorb(getattr(_truth, "reads", {}) or {},
+                                prefix=f"guest {getattr(_truth, 'gid', '?')} · ")
+            elif _gid:
+                _reading.gap(f"guest {_gid}", "the step is about it and it could not be read")
         except Exception as exc:
             logger.warning("machine_truth_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+            _reading.gap("the step's own guest", f"the measurement raised {type(exc).__name__}")
         # §17.1357 — the units the unit-name gate judges against: the subject guest's
         # list AND every unit the engine measured on the step's other guests. Live,
         # ADD132's draft said `systemctl is-active qbittorrent-nox.service` against
@@ -2657,9 +2684,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         except Exception as exc:
             logger.warning("measured_units_failed job=%s err=%r", job_id, exc)
         # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
-        if _services:                      # §17.1346 — facts, in place of prose
+        if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2
-            up_block = (up_block + "\n\n" + _st2.table(_services)).strip()
+            up_block = (up_block + "\n\n" + _st2.table(_services, _reading)).strip()
         runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
         async def _pre_for(rb: str) -> list[dict]:
@@ -2677,7 +2704,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _f = supervised_runs.file_writes(rb) if (policy or {}).get("can_write_files") else []
             _args = dict(plan=_plan_rows, files=_f, node=run_node, inventory=_inv,
                          truth=_truth, services=_services,
-                         verify=supervised_runs.verify_commands(rb))
+                         verify=supervised_runs.verify_commands(rb), reading=_reading)
             try:
                 return await unmet(supervised_runs.runbook_commands(rb), spec, **_args)
             except TypeError as exc:
@@ -2689,11 +2716,16 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                job_id, run_node.get("node_key"), exc)
                 return []
             except Exception as exc:
+                # §17.1363 — the layer not running is a GAP, not "nothing
+                # contradicts this block". §17.1359 made the signature mismatch
+                # loud; this makes every other failure visible in the frame.
                 logger.warning("preconditions_failed job=%s node=%s err=%r",
                                job_id, run_node.get("node_key"), exc)
+                _reading.gap("what the machine contradicts",
+                             f"the precondition layer raised {type(exc).__name__} and judged nothing")
                 return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
-                                          preconditions=await _pre_for(runbook), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                          preconditions=await _pre_for(runbook), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
         # §17.1289 — reconcile the record from the measurement: a durable fact
         # about the machine goes to the ledger; a finished step whose effect
@@ -2753,7 +2785,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env, truth=_truth, services=_services)
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
-                                                   preconditions=await _pre_for(retry), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                   preconditions=await _pre_for(retry), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                 if second["commands"] and not second["refused"]:
                     logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
@@ -2786,7 +2818,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                         spec=spec, environment=_env, truth=_truth, services=_services)
                             if again:
                                 third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
-                                                                  preconditions=await _pre_for(again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                                  preconditions=await _pre_for(again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                 if third["commands"] and not third["refused"]:
                                     logger.warning("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
@@ -2816,7 +2848,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                                        environment=_env, truth=_truth, services=_services)
                                             if last:
                                                 fourth = supervised_runs.frame_run(run_node, last, spec, policy, env=_env,
-                                                                                   preconditions=await _pre_for(last), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                                                   preconditions=await _pre_for(last), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                                 if fourth["commands"] and not fourth["refused"]:
                                                     logger.warning("supervised_run_redraft_last_clean job=%s node=%s commands=%d",
@@ -2846,7 +2878,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env, truth=_truth, services=_services)
                     if _api:
                         _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
-                                                          preconditions=await _pre_for(_api), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                          preconditions=await _pre_for(_api), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                         # §17.1211's lesson: only ever trade UP. An empty frame
                         # must never replace an empty frame's better sibling.
@@ -2877,7 +2909,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                          retry_note=_nv, spec=spec, environment=_env, truth=_truth, services=_services)
                 if _vb:
                     _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
-                                                   preconditions=await _pre_for(_vb), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                   preconditions=await _pre_for(_vb), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # §17.1211's rule — only ever trade UP: the redraft must keep
                     # the commands AND actually gain a runnable check.
@@ -2902,7 +2934,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                           retry_note=_ro, spec=spec, environment=_env, truth=_truth, services=_services)
                 if _wr:
                     _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
-                                                     preconditions=await _pre_for(_wr), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                     preconditions=await _pre_for(_wr), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # only trade UP: a redraft that still only reads is no better
                     if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
@@ -2929,7 +2961,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env, truth=_truth, services=_services)
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
-                                                       env=_env, preconditions=await _pre_for(_again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, inventory=_inv,
+                                                       env=_env, preconditions=await _pre_for(_again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # §17.1211's lesson in miniature: never replace a working
                     # block with an empty one.

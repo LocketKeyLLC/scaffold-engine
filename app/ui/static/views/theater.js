@@ -853,6 +853,9 @@ export function renderTheater(container, jobId, ctx = {}) {
     const cmds = Array.isArray(d.commands) ? d.commands : [];
     const verify = Array.isArray(d.verify) ? d.verify : [];
     const refused = Array.isArray(d.refused) ? d.refused : [];
+    // §17.1363 — what the engine could NOT read for this step. A draft built on a
+    // narrow reading used to look exactly like one built on a complete one.
+    const notMeasured = Array.isArray(d.not_measured) ? d.not_measured : [];
     const canRun = cmds.length > 0 && refused.length === 0;
     // §17.1187 — the values the runbook asked for (<NAME> placeholders): one
     // field each, the command preview fills in as they are typed, and Run
@@ -1018,6 +1021,9 @@ export function renderTheater(container, jobId, ctx = {}) {
           // engine has already recorded it there (§17.1194), so the install
           // line on that page contains it.
           ...permissionHelp(refused)) : null,
+        notMeasured.length ? el("div", { class: "decision-unread" },
+          el("div", { class: "decision-run-label", text: "What the engine could not read for this step — anything here is not a fact it checked:" }),
+          ...notMeasured.map((g) => el("div", { class: "mono faint", text: `${g.what} — ${g.why}` }))) : null,
         d.why ? el("div", { class: "decision-why dim", text: `${d.why} — your call.` }) : null,
         el("details", { class: "decision-runbook" }, el("summary", { text: "The full runbook the engine drafted" }),
           el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
