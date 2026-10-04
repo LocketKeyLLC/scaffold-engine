@@ -4194,7 +4194,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
               preconditions: Optional[list[dict]] = None, upstream: str = "",
               units: Optional[list[str]] = None, inventory: Optional[dict] = None,
               engine_address: Optional[str] = None, services: Optional[list] = None,
-              units_by_guest: Optional[dict] = None) -> dict:
+              units_by_guest: Optional[dict] = None, reading=None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered).
 
@@ -4428,6 +4428,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         # operator approves what they are shown. Never a silent repair.
         "engine_fixed": [r["why"] for r in _repairs],
         "secrets_resolved": secrets_resolved, "secrets_missing": secrets_missing,
+        # §17.1363 — what the engine READ for this step, and what it could not.
+        # The frame carried 24 fields and exactly one shaped like a gap
+        # (`secrets_missing`), so a draft built on a narrow reading looked exactly
+        # like one built on a complete one -- to the drafter, to the gates, to the
+        # operator and to the post-run judge.
+        "not_measured": (reading.gaps() if reading is not None else []),
         "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",

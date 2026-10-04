@@ -234,11 +234,19 @@ def measured_units_by_guest(services: list) -> dict:
     return out
 
 
-def table(services: list[ServiceTruth]) -> str:
-    """The facts block handed to every draft about this step's machines."""
+def table(services: list[ServiceTruth], reading=None) -> str:
+    """The facts block handed to every draft about this step's machines.
+
+    §17.1363 — followed by the SCOPE of those facts. The header asserts "read
+    just now; use these values, do not infer others" and used to say nothing
+    about what had NOT been read, so a draft could not tell a measured blank
+    from an unmeasured one — which is how §17.1356/1357/1360/1361 happened.
+    """
     lines = [s.says() for s in services if s.name]
-    return ("SERVICES MEASURED ON THESE MACHINES (read just now; use these values, do not infer others):\n"
+    head = ("SERVICES MEASURED ON THESE MACHINES (read just now; use these values, do not infer others):\n"
             + "\n".join(f"- {ln}" for ln in lines)) if lines else ""
+    scope = reading.says() if reading is not None else ""
+    return "\n\n".join([t for t in (head, scope) if t])
 
 
 async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
@@ -285,7 +293,7 @@ def _same_service(a: str, b: str) -> bool:
 
 
 async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dict] = None,
-                                       limit: int = 10) -> dict:
+                                       limit: int = 10, reading=None) -> dict:
     """``{service name: guest id}`` for the services a step NAMES, from what listens.
 
     §17.1356 — the pause measured services only in the step's SUBJECT guest, so a
@@ -308,31 +316,61 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
     if spec is None or not wanted:
         return {}
     running = [g for g, st in sorted((cts or {}).items()) if str(st) == "running"]
+    # §17.1363 — a guest that is not running is a GAP, not an absence of services
+    if reading is not None:
+        for g, st in sorted((cts or {}).items()):
+            if str(st) != "running":
+                reading.gap(f"guest {g}", f"{st} — nothing in it could be read")
     found: dict = {}
+    swept: list = []
     for gid in running[:limit]:
         if len(found) == len(wanted):
             break
         ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
         if not ok:
+            if reading is not None:
+                reading.gap(f"guest {gid}", "the runner could not read `ss -tlnp` in it"
+                            if ok is None else "`ss -tlnp` in it answered nothing")
             continue
+        swept.append(str(gid))
         procs = listeners_in(ss_text)
         for name in wanted:
             if name in found:
                 continue
             if any(_same_service(name, p) for p in procs):
                 found[name] = str(gid)
+    if reading is not None:
+        if swept:
+            reading.note("what listens in guest(s) " + ", ".join(swept), "ss -tlnp")
+        # §17.1363 — a guest the sweep never reached because every service the step
+        # names was already placed is NOT a gap: the engine is not ignorant of
+        # anything this step needs. The `read:` line above says where it stopped.
+        # §17.1363 — a name the sweep looked for and did not find is a NEGATIVE
+        # READING, not a gap: the engine did look. Only "I could not look" is a
+        # gap, which is the whole distinction this record exists to draw -- and the
+        # first draft of it got this wrong, filing nine findings as gaps.
+        for name in wanted:
+            if name not in found:
+                reading.note(f"{name} is not running",
+                             "nothing listens as it in any guest that could be read")
     logger.warning("service_guests named=%s found=%s", wanted, found)
     return found
 
 
 async def read_services(spec, gid: str, units: Optional[list[str]] = None,
-                        mentioned: Optional[list[str]] = None) -> list[ServiceTruth]:
+                        mentioned: Optional[list[str]] = None, reading=None) -> list[ServiceTruth]:
     """Measure the services on one running container: what listens, and what each
     listener is. Fail-soft per field; unreadable means empty, never a guess."""
     if spec is None or not gid:
         return []
     ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
     if not ok:
+        # §17.1363 — an empty list here used to be indistinguishable from "this
+        # guest runs nothing". It is a gap, and it is recorded as one.
+        if reading is not None:
+            reading.gap(f"the services in guest {gid}",
+                        "the runner could not read `ss -tlnp` in it" if ok is None
+                        else "`ss -tlnp` in it answered nothing")
         return []
     procs = listeners_in(ss_text)      # §17.1356 — one parser, used by the guest lookup too
     # §17.1356 — a name is a CANDIDATE for a unit name, never a unit name. Three
@@ -421,6 +459,24 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                 s.config_stat = {p: (o, m) for o, m, p in parse_stats(st_text)}
                 s.reads["stat"] = f"{len(s.config_stat)} config file(s)"
         out.append(s)
+    # §17.1363 — the provenance each ServiceTruth already recorded now travels
+    # with the facts instead of only into the log, and a name this guest does not
+    # have is a gap rather than a silence.
+    if reading is not None:
+        for s in out:
+            reading.absorb(s.reads, prefix=f"{s.name} in guest {gid} · ")
+            if len(s.configs) > 1 and not s.reads.get("config settings"):
+                reading.gap(f"{s.name}'s config", f"{len(s.configs)} candidate files, "
+                                                  f"none scored — the first is named above")
+            if not s.configs:
+                reading.note(f"{s.name} has no config file",
+                             "none of the candidate paths exist on the guest")
+            if not s.user:
+                reading.note(f"{s.name} runs as root", "its unit names no User=")
+        # §17.1363 — `systemctl show` answering `LoadState=not-found` is a reading.
+        # It is also noise at per-guest-per-name granularity (nine lines for three
+        # services across three guests), and the sweep above already states which
+        # guest each named service lives in, so nothing is recorded here.
     logger.warning("service_truth_read guest=%s services=%s", gid, [s.name for s in out])
     return out
 

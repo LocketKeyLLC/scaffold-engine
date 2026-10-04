@@ -1823,6 +1823,8 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 }
 .decision-run-block { max-height: 30vh; overflow: auto; white-space: pre; margin: 0; }
 .decision-refused { border: 1px solid var(--warn); border-radius: 8px; padding: 0.5rem 0.7rem; margin-top: 0.5rem; }
+/* §17.1363 — the scope of what the engine read: a gap, not a refusal */
+.decision-unread { border: 1px dashed var(--dim, #8b949e); border-radius: 8px; padding: 0.5rem 0.7rem; margin-top: 0.5rem; }
 .decision-runbook { margin-top: 0.6rem; }
 .decision-runbook summary { cursor: pointer; }
 /* §17.1187 — the values a runbook asks for */
