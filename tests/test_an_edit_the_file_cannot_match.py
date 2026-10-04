@@ -277,3 +277,14 @@ def test_no_read_call_site_unpacks_the_listing_as_a_pair():
                 and isinstance(val.value.func, ast.Name) and val.value.func.id == "_read"):
             bad.append(node.lineno)
     assert bad == [], f"_read unpacked as a tuple at line(s) {bad}"
+
+
+def test_the_refusal_asks_the_drafter_again():
+    """§17.1353's marker was never put in `_SHAPE_REFUSALS`, so even once the
+    layer ran (§17.1359) this refusal would have PARKED the frame instead of
+    redrafting it. Verify the lane, not just the assertion."""
+    from app.modules.supervised_runs import refusal_kinds
+    refused = [{"why": (
+        "this edit changes NOTHING: `</ContentType>` does not appear in /x/options.xml "
+        "-- read just now, 0 matches.")}]
+    assert refusal_kinds({"refused": refused}) == {"this edit changes NOTHING"}

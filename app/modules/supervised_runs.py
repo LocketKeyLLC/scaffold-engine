@@ -107,6 +107,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "and nothing sets it",                           # §17.1348
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
+                   "this edit changes NOTHING",                     # §17.1353
+                   "same API the check reads",                      # §17.1360
                    "this file RUNS ITSELF",                         # §17.1355
                    "reads only the engine's OWN script",            # §17.1355
                    "rewrites the whole file when it stops",         # §17.1346
