@@ -2583,13 +2583,27 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules import service_truth as _st
             _touch = sorted(_rt.guests_the_host_is_told_to_touch(run_node))
             _subj = _mt0.subject_guest(run_node, _inv)
-            if _subj and _subj not in _touch:
-                _touch.append(_subj)
             _cts = (_inv or {}).get("cts") or {}
-            for _g in _touch[:3]:
+            # §17.1356 — and the guest each service the step NAMES actually lives in.
+            # Measuring only the subject guest is how ADD132 ("Make Radarr and Sonarr
+            # actually drive qBittorrent") was measured in 103 alone: of the eleven
+            # drafter prompts that followed, ONE carried `qbittorrent-nox` and none
+            # carried its config path, so the draft said `systemctl restart
+            # qbittorrent` against `/var/lib/qbittorrent/…` and the engine refused
+            # its own block for facts it had never been given. One `ss -tlnp` per
+            # running container finds them; no guest NAME would have (qBittorrent's
+            # container is called `download-client`).
+            _named = _st.names_in(run_node)
+            _where = await _st.guests_of_the_named_services(spec, _named, _cts) if _named else {}
+            # the step's own guest first, then the guests its services are in
+            _order = ([_subj] if _subj else []) + [_where[n] for n in _named if n in _where] + _touch
+            _touch = list(dict.fromkeys(g for g in _order if g))
+            for _g in _touch[:4]:
                 if _cts.get(_g) == "running":
-                    _services += await _st.read_services(spec, _g, units=list((_inv or {}).get("units") or []) or None,
-                                                         mentioned=_st.names_in(run_node))
+                    # `units` was always None: the inventory carries no unit list.
+                    # The listeners on the guest and the names the step mentions are
+                    # what `read_services` goes on.
+                    _services += await _st.read_services(spec, _g, mentioned=_named)
         except Exception as exc:
             logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
