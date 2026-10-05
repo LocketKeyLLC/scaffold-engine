@@ -48,6 +48,47 @@ def enabled() -> bool:
     return bool(settings.execution_supervised_runs_enabled)
 
 
+async def channel_state(db: AsyncSession) -> tuple[str, str]:
+    """``(state, detail)`` — WHY there is no write channel, when there is none.
+
+    §17.1369 — `channel()` returns None for three different situations and the
+    callers cannot tell them apart:
+
+      * `"off"`        the valve is off, or MCP is disabled
+      * `"none"`       no runner is registered at all
+      * `"unreachable"` a runner IS registered and its policy could not be read
+
+    The third is a GAP in what the engine knows, not a fact about the work. Live,
+    2026-10-05: the Proxmox host went off the LAN (`no route to host`, no ping),
+    `write_policy` raised `McpError: All connection attempts failed`, `channel()`
+    answered None, and the hands-on gate reclassified **151 of 169 steps** and
+    parked the whole job in `awaiting_assist` — handing the operator a plan to
+    carry out by hand because one probe had failed. Absence of a reading rendered
+    as a conclusion, which is §17.1363's shape at the job level.
+
+    `"open"` with the runner's name when a channel exists.
+    """
+    if not enabled() or not settings.mcp_tool_enabled:
+        return ("off", "")
+    try:
+        from app.modules import assist_local_runner as _lr
+        from app.modules import assist_supervised as _sw
+        spec = await _lr.runner_spec(db)
+        if spec is None:
+            return ("none", "")
+        name = str(getattr(spec, "name", "") or "the registered runner")
+        try:
+            pol = await _sw.write_policy(spec)
+        except Exception as exc:
+            return ("unreachable", f"{name}: {type(exc).__name__}")
+        if not pol:
+            return ("unreachable", f"{name}: it answered with no write policy")
+        return ("open", name)
+    except Exception as exc:
+        logger.warning("channel_state_failed err=%r", exc)
+        return ("unreachable", f"the registered runner: {type(exc).__name__}")
+
+
 async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
     """``(runner spec, write policy)`` when a runner with an open write
     channel is registered and the valve is on; else None. Uses the cached
