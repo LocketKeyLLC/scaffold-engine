@@ -4731,6 +4731,57 @@ async def _failure_state(db: AsyncSession, executed: list[dict]) -> str:
         return ""
 
 
+#: §17.1372b — a diagnosis asserting the runner refused, or that a command
+#: changed nothing despite exiting 0.
+_CLAIMS_A_REFUSAL_RE = re.compile(
+    r"refuses\s+mutation|refuse[sd]?\s+(?:the\s+)?(?:write|mutation|command)|"
+    r"success-looking\s+exit|without\s+actually\s+(?:chang|do)ing|"
+    r"did\s+not\s+actually\s+(?:run|change|apply)|silently\s+(?:did\s+nothing|ignored)", re.I)
+#: what the runner's own refusal looks like in a record
+_RUNNER_REFUSAL_MARK = "(refused by the local runner"
+
+
+def diagnosis_contradicts_the_record(executed: list[dict], diagnosis: str) -> str:
+    """Why this diagnosis cannot be true given the record, or ``""``.
+
+    §17.1372b — live, 2026-10-05. ADD135's three commands each exited 0 and the
+    first printed the tool's own confirmation:
+
+        $ qm set 106 --onboot 1 --startup order=10
+        update VM 106: -onboot 1 -startup order=10
+
+    The diagnosis said: *"The most likely cause is that the command was run
+    through the local runner (pve-runner), which refuses mutation verbs — it
+    returned a success-looking exit code without actually changing anything."*
+
+    Measured immediately afterwards: `onboot: 1` and `startup: order=10/20/30` on
+    106, 111 and 120. The work had landed. Nothing in the record carries a runner
+    refusal — `refused` is false on every entry and no output holds
+    `(refused by the local runner` — so the claim is contradicted by the evidence
+    the diagnosis was handed.
+
+    This matters more than a wrong sentence: §17.1366 feeds diagnoses into the
+    NEXT draft, so a false cause actively steers the retry wrong.
+    """
+    text = str(diagnosis or "")
+    if not text.strip() or not _CLAIMS_A_REFUSAL_RE.search(text):
+        return ""
+    refused = [e for e in executed or []
+               if e.get("refused") or _RUNNER_REFUSAL_MARK in str(e.get("output") or "")]
+    if refused:
+        return ""                     # the record does carry a refusal
+    ran = [e for e in executed or [] if not e.get("informational")]
+    zero = [e for e in ran if e.get("exit") == 0]
+    if not ran or len(zero) != len(ran):
+        return ""                     # something really did fail; not this check's business
+    spoke = [e for e in zero if str(e.get("output") or "").strip()]
+    return ("it says the runner refused the work or changed nothing, and the record says otherwise: "
+            f"{len(ran)} command(s) ran, every one exited 0, none is marked refused and none printed "
+            f"the runner's own refusal"
+            + (f", and {len(spoke)} printed the tool's own output (e.g. "
+               f"`{str(spoke[0].get('output') or '').strip().splitlines()[0][:80]}`)" if spoke else ""))
+
+
 async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
                            executed: list[dict], reason: str) -> str:
     """§17.1201 — work out WHY a supervised block failed, and what to try next.
@@ -4778,6 +4829,21 @@ async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
             environment=env, node_key=node_key, domain=_node.get("domain"),
         )
         out = str((res or {}).get("fix") or "").strip()
+        # §17.1372b — a diagnosis that contradicts the record is worse than none,
+        # because §17.1366 hands it to the next draft. Replaced with the facts.
+        _wrong = diagnosis_contradicts_the_record(executed, out)
+        if _wrong:
+            logger.warning("supervised_run_diagnosis_refused job=%s node=%s why=%s",
+                           job_id, node_key, _wrong[:200])
+            lines = "\n".join(f"$ {e.get('command')}\n{str(e.get('output') or '').strip() or '(no output)'}"
+                               for e in (executed or [])[:6])
+            return ("## What the record actually says\n\n"
+                    "The engine drafted a diagnosis and then refused it: " + _wrong + ".\n\n"
+                    "So the commands did run and the machine accepted them. What follows is the record "
+                    "itself, with nothing inferred — read it before retrying, because repeating a write "
+                    "that already happened is not a retry:\n\n```\n" + lines + "\n```\n\n"
+                    "If this step was recorded failed, look first at whether a CHECK is wrong rather "
+                    "than the work: a check that prints nothing says nothing (§17.1372).")
         logger.warning("supervised_run_diagnosed job=%s node=%s chars=%d", job_id, node_key, len(out))
         return out
     except Exception as exc:
@@ -5094,6 +5160,27 @@ async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
                    "expect": (expects or {}).get(c, "")}
                   for i, c in enumerate(verify_cmds, 1)]
         out = await judge_outputs(probes, marked)
+        # §17.1372 — a check that printed NOTHING cannot be evidence against the
+        # step unless the runbook said what it should print. An absence check
+        # ("confirm nothing was set on 100 and 110") answers correctly with
+        # silence, and the judge was reading that silence as "the work did not
+        # land". Where an expectation WAS stated, an empty answer still
+        # contradicts it, so that path keeps biting.
+        _blank = empty_checks(pasted)
+        if _blank:
+            _expects = expects or {}
+            for v in out or []:
+                _vid = str(v.get("id") or "").replace("V:", "V")
+                if _vid not in _blank or str(v.get("verdict") or "") != "contradicted":
+                    continue
+                _cmd = str(v.get("command") or "")
+                if str(_expects.get(_cmd) or "").strip():
+                    continue                      # the runbook said what it shows
+                v["verdict"] = "unknown"
+                v["reason"] = ("this check printed nothing and the step never said what it should "
+                               "print, so it says neither that the work landed nor that it did not: "
+                               + str(v.get("reason") or "")[:160])
+                logger.warning("verify_empty_not_contradicted id=%s cmd=%r", _vid, _cmd[:90])
         back = {v: k for k, v in ids.items()}
         for v in out:
             v["id"] = back.get(str(v.get("id") or ""), v.get("id"))
@@ -5101,6 +5188,41 @@ async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
     except Exception as exc:
         logger.warning("verify_judge_failed err=%r", exc)
         return []
+
+
+#: §17.1372 — a `== V<n> ==` / `== V:<n> ==` marker line in a verify paste.
+_MARKER_LINE_RE = re.compile(r"\s*==\s*V:?(\d+)\s*==\s*$")
+
+
+def empty_checks(pasted: str) -> set:
+    """The check ids (`V1`, `V2`…) whose section in the paste has NO output.
+
+    §17.1372 — a check that printed nothing is AMBIGUOUS, and the judge was
+    treating it as evidence against the step. Live, 2026-10-05, ADD135 set the
+    boot flags on all three guests and was recorded FAILED:
+
+        every command exited 0, but this step's own verify checks say the work did
+        not land: no output — neither onboot nor startup found in 100.conf or 110.conf
+
+    That fourth check exists to confirm VMs 100 and 110 were LEFT ALONE — the
+    step's own text says *"Leave VM 100 gpu-vm and VM 110 ai-vm alone"* — so
+    finding nothing is the correct answer. Measured on the machine straight after:
+    `onboot: 1` and `startup: order=10/20/30` on 106, 111 and 120, and nothing on
+    100 or 110. The work had landed exactly as drafted.
+    """
+    out: set = set()
+    cur, buf = "", []
+    for ln in str(pasted or "").split("\n"):
+        m = _MARKER_LINE_RE.fullmatch(ln)
+        if m:
+            if cur and not "".join(buf).strip():
+                out.add(f"V{cur}")
+            cur, buf = m.group(1), []
+            continue
+        buf.append(ln)
+    if cur and not "".join(buf).strip():
+        out.add(f"V{cur}")
+    return out
 
 
 def contradicted(verdicts: list[dict]) -> list[dict]:

@@ -1,0 +1,31 @@
+{
+ "node_key": "ADD135",
+ "executed": [
+  {
+   "command": "qm set 106 --onboot 1 --startup order=10",
+   "output": "update VM 106: -onboot 1 -startup order=10",
+   "exit": 0,
+   "ok": true,
+   "refused": false,
+   "informational": false
+  },
+  {
+   "command": "pct set 111 --onboot 1 --startup order=20",
+   "output": "",
+   "exit": 0,
+   "ok": true,
+   "refused": false,
+   "informational": false
+  },
+  {
+   "command": "pct set 120 --onboot 1 --startup order=30",
+   "output": "",
+   "exit": 0,
+   "ok": true,
+   "refused": false,
+   "informational": false
+  }
+ ],
+ "reason": "every command exited 0, but this step's own verify checks say the work did not land: no output \u2014 neither onboot nor startup found in 100.conf or 110.conf. A command that fetched an error page still exits 0 \u2014 the check is what settles it.",
+ "diagnosis": "## \ud83d\udc49 Do this next\n\n**Run this now:**\n\n```bash\npct set 120 --onboot 1 --startup order=30\npct set 111 --onboot 1 --startup order=20\nqm set 106 --onboot 1 --startup order=10\n```\n\nThen tell me what it shows.\n\n---\n\n## Diagnosis\n\nThe command `pct set 120 --onboot 1 --startup order=30` exited 0, but the verify check found no `onboot` or `startup` in the config files. The most likely cause is that the command was run through the local runner (pve-runner), which **refuses mutation verbs** \u2014 it returned a success-looking exit code without actually changing anything. The step's own verify check is what settles it, and it says the work did not land.\n\n## Fix\n\n\ud83d\udccd On: the Proxmox host shell (root@pve)\n\nRun these three commands directly in the host shell \u2014 **not** through the local runner:\n\n```bash\npct set 120 --onboot 1 --startup order=30\n```\n\n```bash\npct set 111 --onboot 1 --startup order=20\n```\n\n```bash\nqm set 106 --onboot 1 --startup order=10\n```\n\nThe start order means: VM 106 (palworld-server) starts first (order=10), then CT 111 (control-panel) at order=20, then CT 120 (caddy-proxy) at order=30 \u2014 so the proxy comes up after the panel it fronts.\n\n## Then\n\nVerify the flags landed:\n\n```bash\ngrep -H 'onboot\\|startup' /etc/pve/qemu-server/106.conf /etc/pve/lxc/111.conf /etc/pve/lxc/120.conf\n```\n\nYou should see `onboot: 1` and a `startup:` line on all three files.\n\n## If that fails\n\nIf the grep still shows nothing, run `pct config 120` and `qm config 106` to see the current state of each config file, and paste the output back.\n\n---\n\u2139\ufe0f **Adjusted for your system:** split 2 chained command(s) into separate lines \u2014 the VM console has no copy-paste, so each is typed by hand."
+}
