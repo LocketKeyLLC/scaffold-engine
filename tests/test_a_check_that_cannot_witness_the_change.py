@@ -51,10 +51,13 @@ FRAME = json.loads((pathlib.Path(__file__).parent / "fixtures"
 
 
 def test_the_live_block_writes_the_two_webui_keys():
+    """§17.1370 — the same block also SENDS fields to the *arr APIs, and those
+    count too now, so the WebUI keys are among the written values rather than all
+    of them."""
     keys = keys_the_block_writes(FRAME["commands"], FRAME["files"])
-    assert len(keys) == 2, keys
-    assert all("WebUI" in k for k in keys)
-    assert any("Username" in k for k in keys) and any("Password_PBKDF2" in k for k in keys)
+    webui = [k for k in keys if "WebUI" in k]
+    assert len(webui) == 2, keys
+    assert any("Username" in k for k in webui) and any("Password_PBKDF2" in k for k in webui)
 
 
 def test_a_command_option_is_not_a_setting():
@@ -102,7 +105,10 @@ def test_the_live_frame_cannot_witness_its_own_change():
     why = checks_can_witness_the_change(FRAME["commands"], FRAME["verify"], FRAME["files"])
     assert why, "the checks only GET a list that was already non-empty"
     assert "no check reads any of them back" in why
-    assert "WebUI" in why
+    # the reason names the first few written values; the full set includes both
+    # the config keys and the API fields (§17.1370)
+    keys = keys_the_block_writes(FRAME["commands"], FRAME["files"])
+    assert any(f"`{k}`" in why for k in keys[:4]), why
 
 
 def test_a_check_that_reads_the_key_back_is_enough():
@@ -150,3 +156,69 @@ def test_the_already_met_record_still_names_its_evidence():
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr.already_met)
     assert "all(k == \"confirmed\" for k in kinds)" in src
+
+
+# ------------------- §17.1370 — a field sent to an API is a written value
+
+
+API_FRAME = json.loads((pathlib.Path(__file__).parent / "fixtures"
+                        / "add132_api_fields_false_done_2026_10_05.json").read_text())
+
+
+def test_the_second_false_done_came_through_the_api_surface():
+    r"""Live, 2026-10-05. ADD132 was recorded
+
+        already met: 2 verify check(s) read off pve-runner before the run confirm the goal
+
+    for the SECOND time, by a route §17.1365 did not cover: that draft writes no
+    config key at all — it changes Radarr's and Sonarr's download client through
+    their APIs — so `keys_the_block_writes` was empty and the guard never engaged.
+
+    qBittorrent's own log said what was actually true:
+
+        11:42:34  WebAPI login failure. Reason: IP has been banned, IP: 192.168.1.22, username: admin
+        12:42:30  WebAPI login failure. Reason: invalid credentials, attempt count: 1, IP: 192.168.1.23
+    """
+    from app.modules.supervised_runs import fields_sent_to_an_api
+    sent = fields_sent_to_an_api(API_FRAME["commands"], API_FRAME["files"])
+    assert "username" in sent and "password" in sent
+    assert "host" in sent and "port" in sent
+    why = checks_can_witness_the_change(
+        API_FRAME["commands"], API_FRAME["verify"], API_FRAME["files"])
+    assert why, "the checks read a list that held the client all along"
+    assert "no check reads any of them back" in why
+
+
+def test_the_structure_of_an_arr_object_is_not_a_setting():
+    """`name`, `implementation`, `configContract`, `fields`, `label`, `hint` and
+    the validation-error keys are shape, not settings a check could read."""
+    from app.modules.supervised_runs import fields_sent_to_an_api
+    line = ('curl -X PUT -d \'{"name":"qBittorrent","implementation":"QBittorrent",'
+            '"configContract":"QBittorrentSettings","fields":[{"name":"host","value":"x"}],'
+            '"username":"admin"}\' http://h:7878/api/v3/downloadclient/1')
+    sent = fields_sent_to_an_api([line])
+    assert sent == ["username"], sent
+
+
+def test_a_get_sends_no_fields():
+    from app.modules.supervised_runs import fields_sent_to_an_api
+    assert fields_sent_to_an_api(
+        ["curl -s -H 'X-Api-Key: k' http://h:7878/api/v3/downloadclient"]) == []
+    assert fields_sent_to_an_api(
+        ["curl -s -X GET -d '{\"username\":\"a\"}' http://h:7878/api/v3/x"]) == []
+
+
+def test_a_check_that_reads_the_field_back_satisfies_it():
+    verify = ["pct exec 103 -- sh -c 'curl -s http://127.0.0.1:7878/api/v3/downloadclient "
+              "| grep -o \"username[^,]*\"'"]
+    assert checks_can_witness_the_change(
+        API_FRAME["commands"], verify, API_FRAME["files"]) == ""
+
+
+def test_the_escaped_spellings_of_a_sent_field_are_found():
+    r"""The field arrives through two quoting layers: `\\\"username\\\":`."""
+    from app.modules.supervised_runs import fields_sent_to_an_api
+    line = ('pct exec 103 -- sh -c "curl -X PUT -d \'{\\"username\\":\\"admin\\",'
+            '\\"password\\":\\"$MASS_PASSWORD\\"}\' http://127.0.0.1:7878/api/v3/downloadclient/1"')
+    sent = fields_sent_to_an_api([line])
+    assert "username" in sent and "password" in sent, sent
