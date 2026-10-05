@@ -111,6 +111,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
                    "pasted inside a quoted shell word",             # §17.1367
+                   "reaches port",                                  # §17.1368
                    "same API the check reads",                      # §17.1360
                    "this file RUNS ITSELF",                         # §17.1355
                    "reads only the engine's OWN script",            # §17.1355
@@ -4433,7 +4434,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         try:
             from app.modules import service_truth as _st
             _svc_refused = (_st.values_from_another_guest(cmds, files, services)
-                            + _st.edits_a_config_the_service_rewrites(cmds, files, services))
+                            + _st.edits_a_config_the_service_rewrites(cmds, files, services)
+                            # §17.1368 — and the same mistake from the host side
+                            + _st.loopback_on_the_host(cmds, files, services))
         except Exception as exc:
             logger.warning("service_truth_gates_failed err=%r", exc)
     # §17.1348 — a variable nothing sets expands to nothing, and the command runs
