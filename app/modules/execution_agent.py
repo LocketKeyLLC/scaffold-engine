@@ -2683,6 +2683,24 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                             + _units_by_guest.get(_subj, [])))
         except Exception as exc:
             logger.warning("measured_units_failed job=%s err=%r", job_id, exc)
+        # §17.1366 — a step that FAILED before is drafted with what failed and why.
+        # ADD132 drafted seven times; the engine diagnosed the sixth failure
+        # correctly in a 51 KB call ("send the full existing client object back
+        # with PUT, so configContract and priority stay intact") and the next
+        # drafter prompt, 17 KB, carried none of it -- `reset` NULLs the report,
+        # having audited it first, so the knowledge was kept and never read.
+        try:
+            from app.modules import previous_attempt as _pa
+            async with async_session() as _db_pa:
+                _before = await _pa.carry_forward(_db_pa, job_id,
+                                                  str(run_node.get("node_key") or ""),
+                                                  reading=_reading)
+            if _before:
+                up_block = (up_block + "\n\n" + _before).strip()
+                logger.warning("previous_attempt_carried job=%s node=%s chars=%d",
+                               job_id, run_node.get("node_key"), len(_before))
+        except Exception as exc:
+            logger.warning("previous_attempt_skipped job=%s err=%r", job_id, exc)
         # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
         if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2
