@@ -110,6 +110,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
+                   "pasted inside a quoted shell word",             # §17.1367
                    "same API the check reads",                      # §17.1360
                    "this file RUNS ITSELF",                         # §17.1355
                    "reads only the engine's OWN script",            # §17.1355
@@ -977,6 +978,96 @@ def api_ports_changed(texts: list[str]) -> dict:
             for m in _URL_PORT_RE.finditer(ln):
                 if not _URL_PATH_RE.search(ln):
                     out.setdefault(m.group("port"), ln.strip()[:200])
+    return out
+
+
+#: §17.1367 — `VAR=$(…)`: a value the block did not write, read from a machine.
+_FROM_A_MACHINE_RE = re.compile(
+    # `$((` is arithmetic, not a machine: `deadline=$(( SECONDS + 165 ))` is the
+    # engine's own wait loop, and the first cut of this flagged seven blocks for it.
+    # the closing `)` may be many lines down: ADD132 built its body with a
+    # multi-line `python3 -c '…'`, and requiring the paren on the same line missed
+    # the one variable that actually broke.
+    r"(?:^|[\s;&|(])(?P<name>[A-Za-z_]\w*)=\$\((?!\()(?P<how>[^\n]*)", re.M)
+#: that name interpolated inside the quoted word of a request BODY:
+#: `-d '$VAR'`, `--data \"$VAR\"`, `--json '$VAR'`. A HEADER is deliberately not
+#: here -- `-H \"X-Api-Key: $KEY\"` carries a short controlled value the engine
+#: reads off a config file, and flagging it would refuse the shape every correct
+#: draft uses. A BODY is an arbitrary document from a machine.
+_IN_A_BODY_RE = (
+    r"(?<![\w-])(?:-d|--data|--data-raw|--json)(?![\w-])\s*"
+    r"(?:'[^'\n]*\$(?:\{{)?{name}\b[^'\n]*'|\\?\"[^\"\n]*\$(?:\{{)?{name}\b[^\"\n]*\\?\")")
+#: the channels that have no quoting at all
+_NO_QUOTING_RE = re.compile(r"@-|--data-binary\s+@|-d\s+@|<<<|\|\s*(?:curl|python3|sh|bash)\b|"
+                            r"--data\s+@|-T\s|--upload-file", re.I)
+
+
+def a_machine_value_in_a_shell_word(commands: list[str],
+                                    files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1367 — a value read from a machine, pasted into a shell word.
+
+    Live, 2026-10-04. ADD132's eighth draft did what §17.1366 carried to it: GET
+    the download client, change two fields, PUT the whole object back. It fetched
+    the object into a variable and then interpolated it:
+
+        RADARR_UPDATED=$(echo "$RADARR_CLIENT" | python3 -c '…json.dumps(c)…')
+        pct exec 103 -- sh -c "curl … -d '$RADARR_UPDATED' http://…/downloadclient/1"
+
+    and died with
+
+        sh: 1: Syntax error: "(" unexpected
+
+    Reproduced with real `sh` against the real object: **6,182 bytes, 3
+    apostrophes, 6 parens.** qBittorrent's own help text inside Radarr's client
+    object reads *"See Options -> Web UI -> 'Use HTTPS instead of HTTP' in
+    qBittorrent."* — those apostrophes close the single-quoted `-d '…'`, and a
+    later `(` from `"hint": "(0)"` then parses as shell syntax.
+
+    No amount of escaping fixes it, because the block does not know what the
+    value contains: it came from the machine. A value like that travels on a
+    channel with no quoting — stdin (`-d @-` and a pipe) or a file (`-d @/path`).
+
+    §17.1255/1257 compile what a block hands to another interpreter, and this text
+    compiles: the break only exists once the variable expands. So the judgment is
+    about PROVENANCE, not syntax.
+    """
+    out: list[dict] = []
+    seen: set = set()
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    # §17.1367 — the assignment and the use are often different commands of the
+    # same block, so the names are collected across the WHOLE block before any
+    # line is judged.
+    from_machine: dict = {}
+    for t in texts:
+        for m in _FROM_A_MACHINE_RE.finditer(t):
+            from_machine.setdefault(m.group("name"), m.group("how").strip()[:70])
+    if not from_machine:
+        return []
+    for t in texts:
+        for ln in t.split("\n"):
+            s = ln.strip()
+            if s.startswith("#"):
+                continue
+            for name, how in from_machine.items():
+                if name in seen:
+                    continue
+                if not re.search(_IN_A_BODY_RE.format(name=re.escape(name)), ln):
+                    continue
+                if _NO_QUOTING_RE.search(ln):
+                    continue                      # already passed without quoting
+                seen.add(name)
+                out.append({"command": s[:200], "why": (
+                    f"`${name}` holds whatever `{how}` returned -- a value from the machine, not one this "
+                    f"block wrote -- and it is pasted inside a quoted shell word here. The block cannot "
+                    f"know what characters are in it, and one wrong character ends the quote. Live "
+                    f"(§17.1367), this exact shape died with `sh: 1: Syntax error: \"(\" unexpected`: "
+                    f"Radarr's download-client object is 6,182 bytes holding 3 apostrophes, because "
+                    f"qBittorrent's own help text says \"See Options -> Web UI -> 'Use HTTPS instead of "
+                    f"HTTP' in qBittorrent\", and the first of them closed the `-d '...'` argument so a "
+                    f"later `(` from `\"hint\": \"(0)\"` parsed as shell syntax. Send it on a channel with "
+                    f"no quoting: `-d @-` with the value piped in, or write it to a file and use "
+                    f"`-d @/path/to/file`.")})
     return out
 
 
@@ -4403,6 +4494,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
             "the service active -- not the command that made it.")}]
     # §17.1362 — a change made through an API that no check reads back.
     refused = refused + changes_an_api_without_reading_it(cmds, verify, shape_files)
+    # §17.1367 — a value read from a machine, pasted into a shell word.
+    refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
