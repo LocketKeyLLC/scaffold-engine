@@ -197,7 +197,12 @@ def test_the_structure_of_an_arr_object_is_not_a_setting():
             '"configContract":"QBittorrentSettings","fields":[{"name":"host","value":"x"}],'
             '"username":"admin"}\' http://h:7878/api/v3/downloadclient/1')
     sent = fields_sent_to_an_api([line])
-    assert sent == ["username"], sent
+    # §17.1373 — `host` inside the `fields` array is a real setting and is found
+    # now; `name`, `implementation`, `configContract`, `fields` and `value` are
+    # the object's plumbing and are not.
+    assert sorted(sent) == ["host", "username"], sent
+    for plumbing in ("name", "implementation", "configContract", "fields", "value"):
+        assert plumbing not in sent, plumbing
 
 
 def test_a_get_sends_no_fields():
