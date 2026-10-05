@@ -693,6 +693,39 @@ python3 /tmp/add_indexers.py 10 20
 
 Ten per batch when each item waits on a remote service. A loop over batches INSIDE one script is still one
 command and is refused.
+
+A REQUEST BODY IS A FILE, NEVER A SHELL WORD. When you send JSON you did not write yourself -- an object
+you fetched and changed, anything a machine gave you -- do NOT put it in the command. One apostrophe in
+that value ends the quote and the shell dies on the next bracket. MEASURED on this host: Radarr's
+download-client object is 6,182 bytes and holds three apostrophes, because qBittorrent's own help text
+says "See Options -> Web UI -> 'Use HTTPS instead of HTTP' in qBittorrent" -- and
+`-d '{...that object...}'` died with `sh: 1: Syntax error: "(" unexpected`. Three drafts in a row died
+that way, each with different quoting.
+
+Write the body to a file and point curl at the file:
+
+## Write these files
+
+### /tmp/body.py
+```python
+import json, subprocess
+cur = json.loads(subprocess.run(["pct","exec","103","--","sh","-c",
+      "curl -s -H 'X-Api-Key: KEY' http://127.0.0.1:7878/api/v3/downloadclient/1"],
+      capture_output=True, text=True).stdout)
+cur["priority"] = 1
+open("/tmp/body.json","w").write(json.dumps(cur))
+```
+
+## Run this
+
+```bash
+python3 /tmp/body.py
+pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @/tmp/body.json http://127.0.0.1:7878/api/v3/downloadclient/1'
+```
+
+`-d @/path` and `-d @-` (with the body piped in) are the only two shapes that carry a value whose
+characters you do not control. Better still, do the whole call in Python with `urllib.request` and
+`data=json.dumps(obj).encode()`: then no shell sees the body at all.
 """
 
 

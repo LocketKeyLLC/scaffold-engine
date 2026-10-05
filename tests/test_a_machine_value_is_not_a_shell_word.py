@@ -255,3 +255,35 @@ def test_the_id_draft_is_still_accepted_after_the_widening():
     earlier = json.loads((pathlib.Path(__file__).parent / "fixtures"
                           / "add132_multiline_curl_2026_10_05.json").read_text())
     assert a_machine_value_in_a_shell_word(earlier["commands"], earlier["files"]) == []
+
+
+# ------------- §17.1375 — the drafter is told the shape, not only refused
+
+
+def test_the_file_rules_teach_the_body_shape_up_front():
+    r"""Four entries (§17.1367, §17.1368, §17.1373, §17.1374) caught four quoting
+    variants of the same mistake, and the drafter only ever learned the remedy
+    AFTER being refused — the rules it reads every time said nothing about how to
+    send a body. A gate that refuses without the rule teaching the shape is a loop.
+    """
+    from app.modules.supervised_runs import FILE_RULES
+    assert "A REQUEST BODY IS A FILE, NEVER A SHELL WORD" in FILE_RULES
+    # the measurement, so the rule carries its own evidence
+    assert "6,182 bytes" in FILE_RULES and "three apostrophes" in FILE_RULES
+    assert 'Syntax error: "(" unexpected' in FILE_RULES
+    # both shapes that work, and the better one
+    assert "-d @/tmp/body.json" in FILE_RULES
+    assert "-d @-" in FILE_RULES
+    assert "urllib.request" in FILE_RULES and "data=json.dumps" in FILE_RULES
+
+
+def test_the_rule_and_the_refusal_name_the_same_remedies():
+    """A refusal that names a shape the rules do not teach is how the loop
+    persisted; they must agree."""
+    from app.modules.supervised_runs import FILE_RULES
+    out = a_machine_value_in_a_shell_word(LIVE)
+    assert out
+    why = out[0]["why"]
+    for shape in ("-d @-", "@/path"):
+        assert shape in why, shape
+    assert "-d @-" in FILE_RULES
