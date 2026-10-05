@@ -147,6 +147,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "and nothing sets it",                           # §17.1348
                    "is expanded by GUEST",                          # §17.1364
+                   "never imports or assigns",                      # §17.1377
+                   "different filesystems",                         # §17.1377
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353

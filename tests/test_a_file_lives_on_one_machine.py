@@ -233,6 +233,39 @@ def test_the_rules_own_recommended_shapes_pass_their_own_gate():
         assert a_file_read_on_another_machine([], _block(block)) == [], block
 
 
+# ------------------------------------- a refusal nobody can redraft is a dead end
+
+def test_both_refusals_drive_a_redraft_not_a_park():
+    """§17.1269 — `shape_retry_note` matches a refusal by TEXT against
+    `_SHAPE_REFUSALS`. Unregistered, these two would hand the operator a
+    greyed-out Run and nothing to do; both are shapes the drafter can fix, so
+    both must redraft. The standing §17.1269 guard caught this on the first run.
+    """
+    import app.modules.supervised_runs as sr
+    for refused in (a_program_that_uses_a_name_it_never_defines(LIVE["commands"], LIVE["files"]),
+                    a_file_read_on_another_machine(LIVE["commands"], LIVE["files"])):
+        assert refused, "precondition: the live draft is refused"
+        assert sr.shape_retry_note({"kind": "run", "refused": refused}), \
+            "an unregistered refusal produces no redraft — the §17.1269 dead end"
+
+
+def test_the_redraft_note_carries_the_remedy_the_rules_teach():
+    import app.modules.supervised_runs as sr
+    note = sr.shape_retry_note({"kind": "run", "refused":
+                                a_file_read_on_another_machine(LIVE["commands"], LIVE["files"])})
+    assert "-d @-" in note and "pct exec" in note
+
+
+def test_both_kinds_are_named_so_a_repeat_is_detectable():
+    """§17.1277 — `refusal_kinds` is how a redraft that repeats the same shape is
+    recognised; a refusal missing from the registry is invisible to it."""
+    import app.modules.supervised_runs as sr
+    kinds = sr.refusal_kinds({"refused":
+        a_file_read_on_another_machine(LIVE["commands"], LIVE["files"])
+        + a_program_that_uses_a_name_it_never_defines(LIVE["commands"], LIVE["files"])})
+    assert kinds == {"different filesystems", "never imports or assigns"}, kinds
+
+
 # --------------------------------------------------- wired, and failing loud
 
 def test_both_gates_run_in_frame_run():
