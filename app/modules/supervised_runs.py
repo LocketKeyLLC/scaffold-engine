@@ -719,13 +719,36 @@ open("/tmp/body.json","w").write(json.dumps(cur))
 ## Run this
 
 ```bash
-python3 /tmp/body.py
-pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @/tmp/body.json http://127.0.0.1:7878/api/v3/downloadclient/1'
+python3 /tmp/body.py | pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @- http://127.0.0.1:7878/api/v3/downloadclient/1'
 ```
 
 `-d @/path` and `-d @-` (with the body piped in) are the only two shapes that carry a value whose
 characters you do not control. Better still, do the whole call in Python with `urllib.request` and
 `data=json.dumps(obj).encode()`: then no shell sees the body at all.
+
+THE FILE MUST EXIST ON THE MACHINE THAT READS IT. A guest's `/tmp` is not the host's. The file
+sections above, and anything a host-side `python3` or `>` writes, land ON THE HOST -- so
+`pct exec 103 -- sh -c 'curl … -d @/tmp/body.json'` hands curl inside 103 a path that is not there,
+and curl sends nothing. MEASURED on this host, live: a draft wrote `/tmp/radarr_dc_update.json` with a
+host-side program and read it with `-d @/tmp/radarr_dc_update.json` inside guest 103; the body was in
+a file and every line ran where it claimed to, and the call still could not work.
+
+So when the command that reads the body runs inside a guest, pick one:
+
+- PIPE IT, as above -- `python3 /tmp/body.py | pct exec 103 -- sh -c '… -d @- …'`. Nothing is written
+  in the guest and no path has to match. Prefer this.
+- Or CREATE IT IN THE GUEST, in the same `pct exec` that reads it:
+
+```bash
+pct exec 103 -- sh -c 'cat > /tmp/body.json <<"JSON"
+{"id": 1, "priority": 1}
+JSON
+curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @/tmp/body.json http://127.0.0.1:7878/api/v3/downloadclient/1'
+```
+
+A HEREDOC IS A WHOLE PROGRAM: every name it uses it must import. `python3 - <<'EOF'` that says
+`import json` and then reaches for `os.environ[...]` raises NameError on the first line that runs,
+and under `set -e` the block ends there having changed nothing.
 """
 
 
@@ -4589,6 +4612,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                             + _st.edits_a_config_the_service_rewrites(cmds, files, services)
                             # §17.1368 — and the same mistake from the host side
                             + _st.loopback_on_the_host(cmds, files, services))
+        except TypeError:
+            # §17.1359 — a swallowed TypeError here once disabled ~15 gates for a
+            # day. A signature that no longer matches is a defect in this file,
+            # not a condition to log past.
+            raise
         except Exception as exc:
             logger.warning("service_truth_gates_failed err=%r", exc)
     # §17.1348 — a variable nothing sets expands to nothing, and the command runs
@@ -4672,6 +4700,16 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + asks_for_a_secret_the_store_holds(
         [str(i.get("name") or "") for i in inputs if i.get("secret")], policy, node)   # the ones still ASKED
     refused = refused + waits_on_a_fixed_address(cmds, node, files)
+    # §17.1377 — a body in a file is only a body if the reader's machine can see
+    # the file; and an inline program that never imports what it uses cannot run.
+    refused = refused + a_program_that_uses_a_name_it_never_defines(cmds, shape_files)
+    try:
+        from app.modules import service_truth as _st2
+        refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
+    except TypeError:
+        raise
+    except Exception as exc:                   # pragma: no cover - defensive
+        logger.warning("file_machine_gate_failed err=%r", exc)
     # §17.1319 — a template's run is a LIST of phases; a refusal earned by the file they
     # all run repeats once per phase (live: nine identical lines for one finding). The
     # first command keeps it; the same words are not said again.
@@ -5267,6 +5305,90 @@ async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
 
 #: §17.1372 — a `== V<n> ==` / `== V:<n> ==` marker line in a verify paste.
 _MARKER_LINE_RE = re.compile(r"\s*==\s*V:?(\d+)\s*==\s*$")
+
+
+#: §17.1377 — an inline Python program: `python3 - <<'EOF' … EOF`, `python3 -c "…"`.
+_HEREDOC_PY_RE = re.compile(
+    r"python3?\s+(?:-\s+)?<<\s*[\"']?(?P<tag>[A-Za-z_]\w*)[\"']?\s*\n(?P<body>.*?)\n(?P=tag)",
+    re.S)
+
+
+def a_program_that_uses_a_name_it_never_defines(commands: list[str],
+                                                files: list[dict] | None) -> list[dict]:
+    r"""§17.1377 — an inline Python program referencing a name it never imports.
+
+    Live, 2026-10-05: ADD132's accepted draft wrote the Radarr body with
+
+        python3 - <<'EOF'
+        import json
+        …
+            {"name": "password", "value": os.environ['MASS_PASSWORD']},
+        EOF
+
+    -- `os` imported nowhere. The Sonarr block three lines later says
+    `import json, os`, so the draft knew the import and dropped it once. Under
+    `set -euo pipefail` the NameError ends the run at that step, having changed
+    nothing, and every other gate passed the block.
+
+    Only names that are decidably absent are named: the program is parsed, and
+    builtins, imports, assignments, defs, comprehension and `with`/`for`/`except`
+    targets, and arguments all count as defined.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for m in _HEREDOC_PY_RE.finditer(t):
+            body = m.group("body")
+            missing = _undefined_names(body)
+            if not missing:
+                continue
+            first = body.strip().split("\n")[0][:60]
+            out.append({"command": f"python3 <<{m.group('tag')} … ({first} …)",
+                        "why": (
+                f"this inline Python program uses {', '.join('`' + n + '`' for n in missing)} "
+                f"and never imports or assigns {'them' if len(missing) > 1 else 'it'}, so it "
+                f"raises NameError the moment it runs -- and under `set -e` that ends the "
+                f"block having changed nothing. Live (§17.1377) this was `os.environ[...]` "
+                f"in a program whose only import was `json`, while the next program in the "
+                f"same block had `import json, os`. Add the import.")})
+    return out
+
+
+def _undefined_names(src: str) -> list[str]:
+    """§17.1377 — module-level Load names with nothing binding them. [] if unparseable."""
+    import ast
+    import builtins
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []                              # not our judgment to make
+    bound = set(dir(builtins)) | {"__name__", "__file__", "__doc__"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            bound |= {(a.asname or a.name.split(".")[0]) for a in n.names}
+        elif isinstance(n, ast.ImportFrom):
+            bound |= {(a.asname or a.name) for a in n.names}
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bound.add(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+            for a in list(getattr(n, "args", None) and n.args.args or []) + \
+                    list(getattr(n, "args", None) and n.args.kwonlyargs or []):
+                bound.add(a.arg)
+            for a in (getattr(getattr(n, "args", None), "vararg", None),
+                      getattr(getattr(n, "args", None), "kwarg", None)):
+                if a is not None:
+                    bound.add(a.arg)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound |= set(n.names)
+        elif isinstance(n, ast.arg):
+            bound.add(n.arg)
+    used = {n.id for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return sorted(used - bound)
 
 
 def empty_checks(pasted: str) -> set:

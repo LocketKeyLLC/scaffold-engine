@@ -743,12 +743,32 @@ def where_each_line_runs(text: str) -> dict:
     """
     lines = text.split("\n")
     where: dict = {}
+    # §17.1377c — a line inside a quote an EARLIER line opened belongs to the
+    # command that opened it. `pct exec 103 -- sh -c 'cat > /tmp/b.json <<"JSON"
+    # … JSON\ncurl … -d @/tmp/b.json'` is one command running in 103, and reading
+    # its later lines as the host's refuses the very shape FILE_RULES recommends.
+    open_from = 0                              # line that opened an unclosed quote
     for i, ln in enumerate(lines, 1):
+        if open_from:
+            where[i] = where.get(open_from, SOME_GUEST)
+            if _closes_the_quote(ln, _quote_char(lines[open_from - 1])):
+                open_from = 0
+            continue
         m = _IN_GUEST_RE.search(ln)
         if m:
             where[i] = m.group("gid")
         elif _WRAPPED_RE.search(ln) or _ARGV_EXEC_RE.search(ln):
             where[i] = SOME_GUEST
+        # §17.1377d — and a `\` continuation is the same command too (§17.1373
+        # taught this for the gates' own line splitting; the resolver needs it
+        # as well). Live: a corpus draft put `pct exec 103 -- curl … \` on one
+        # line and its URL four lines down, and the URL read as the host's.
+        if not where.get(i) and _continued_from(lines, i):
+            prev = where.get(_continued_from(lines, i))
+            if prev:
+                where[i] = prev
+        if where.get(i) and _quote_char(ln):
+            open_from = i                      # the wrapper's argument runs on
     for name, span, gid in _dispatch_calls(text):
         for i in range(span[0], span[1] + 1):
             if where.get(i) in (None, SOME_GUEST):
@@ -757,6 +777,57 @@ def where_each_line_runs(text: str) -> dict:
         if where.get(i) in (None, SOME_GUEST):
             where[i] = gid
     return where
+
+
+def _continued_from(lines: list, i: int) -> int:
+    """§17.1377d — the line that STARTED the logical line ending at `i`, or 0.
+
+    Walks back while each predecessor ends in an unescaped backslash, so a command
+    broken over five lines resolves to the machine named on its first.
+    """
+    j = i - 1
+    while j >= 1:
+        prev = lines[j - 1].rstrip()
+        if not prev.endswith("\\") or prev.endswith("\\\\"):
+            return 0 if j == i - 1 else j + 1
+        if j == 1 or not lines[j - 2].rstrip().endswith("\\"):
+            return j
+        j -= 1
+    return 0
+
+
+def _quote_char(line: str) -> str:
+    """§17.1377c — the quote this line leaves OPEN, or "" when it is balanced."""
+    q = ""
+    k = 0
+    while k < len(line):
+        c = line[k]
+        if c == "\\" and q != "'":
+            k += 2
+            continue
+        if q:
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        k += 1
+    return q
+
+
+def _closes_the_quote(line: str, q: str) -> bool:
+    """§17.1377c — does this line close a quote `q` that was already open."""
+    if not q:
+        return True
+    k = 0
+    while k < len(line):
+        c = line[k]
+        if c == "\\" and q != "'":
+            k += 2
+            continue
+        if c == q:
+            return True
+        k += 1
+    return False
 
 
 def _dispatch_calls(text: str) -> list:
@@ -993,6 +1064,183 @@ def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
                         + f"or run the call inside the guest with "
                       f"`pct exec {getattr(svc, 'guest', 'N')} -- …`.")})
     return out
+
+
+#: §17.1377 — a request body (or any file) handed to a command by PATH.
+_FILE_READ_RE = re.compile(
+    r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--json|-T|--upload-file)"
+    r"(?![\w-])\s*[\"']?@?(?P<p>/[^\s\"';|)]+)"
+    r"|(?<![\w>])<\s*[\"']?(?P<p2>/[^\s\"';|)]+)")
+#: §17.1377b — a TRANSFER puts the file on the other machine: `pct push 103 SRC DEST`
+#: lands DEST inside 103, `pct pull 103 SRC DEST` lands DEST on the host, and
+#: `docker cp SRC name:DEST` lands DEST in the container. Measured: without this,
+#: a correct corpus draft that pushed its payload into guest 103 was refused twice.
+_PCT_PUSH_RE = re.compile(
+    r"(?<![\w-])pct\s+(?P<dir>push|pull)\s+(?P<gid>\d+)\s+(?P<a>\S+)\s+(?P<b>\S+)")
+_DOCKER_CP_RE = re.compile(
+    r"(?<![\w-])docker\s+cp\s+(?P<a>\S+)\s+(?P<b>\S+)")
+#: §17.1377 — and the ways a block CREATES one.
+_FILE_WRITE_RE = re.compile(
+    r">>?\s*[\"']?(?P<p>/[^\s\"';|)]+)"
+    r"|(?<![\w-])tee\s+(?:-a\s+)?[\"']?(?P<p2>/[^\s\"';|)]+)"
+    r"|open\(\s*[\"'](?P<p3>/[^\"']+)[\"']\s*,\s*[\"'][wa]")
+
+
+def _outside_quotes_and_substitutions(line: str, at: int) -> bool:
+    r"""§17.1377f — is `at` at the line's own level: no open quote, no open `$(`.
+
+    Quoting restarts inside a command substitution, so a flat quote scan mis-pairs
+    `COUNT="$(qm guest exec 106 -- sh -c "wc -l < /home/u/.ssh/authorized_keys")"`
+    and reads that `<` as the host's when the GUEST performs it. Measured on the
+    corpus: without the `$(` depth this was one false refusal.
+    """
+    q = ""
+    depth = 0
+    k = 0
+    while k < at and k < len(line):
+        c = line[k]
+        if c == "\\" and q != "'":
+            k += 2
+            continue
+        if q == "'":
+            if c == "'":
+                q = ""
+        elif c == "$" and line[k + 1:k + 2] == "(":
+            depth += 1
+            k += 2
+            continue
+        elif depth and c == ")":
+            depth -= 1
+        elif q:
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        k += 1
+    return not q and depth == 0
+
+
+def _redirection_is_the_outer_shells(line: str, at: int) -> bool:
+    r"""§17.1377e — a `<` or `>` the DISPATCHING shell performs, not the guest.
+
+    The engine's own VM template is the case:
+
+        qm guest exec "$GID" … -- bash -c "cat > /root/.scaffold_step.sh" < /tmp/in_vm_106_remote.sh
+
+    The host's shell opens `/tmp/in_vm_106_remote.sh` and feeds it to `qm guest
+    exec` as stdin; nothing inside the VM ever sees that path. Likewise
+    `pct exec 103 -- curl … > /tmp/out.json` writes on the host. A `-d @path` is
+    the opposite: that argument is interpreted by the program inside the guest.
+
+    So a redirection counts as the outer shell's when it sits OUTSIDE the quoted
+    argument on a line that dispatches into a guest.
+    """
+    if not (_WRAPPED_RE.search(line) or _ARGV_EXEC_RE.search(line)):
+        return False
+    return _outside_quotes_and_substitutions(line, at)
+
+
+def a_file_read_on_another_machine(commands: list[str],
+                                   files: Optional[list[dict]]) -> list[dict]:
+    r"""§17.1377 — a file written on one machine and read on another.
+
+    §17.1375 taught the drafter to send a request body through a file instead of a
+    shell word, and §17.1376 let the correct draft through. The next draft took the
+    lesson one machine off (live, 2026-10-05, ADD132):
+
+        python3 - <<'EOF'                                   # on the HOST
+        … json.dump(client, open('/tmp/radarr_dc_update.json', 'w'))
+        EOF
+        pct exec 103 -- sh -c 'curl … -d @/tmp/radarr_dc_update.json …'   # in 103
+
+    The guest's `/tmp` is not the host's, so curl inside 103 cannot see the file it
+    was handed. Nothing refused it: the body WAS in a file, and every line ran where
+    it claimed to. What was wrong is that the writer and the reader are on different
+    machines -- a question only §17.1376's resolver can answer.
+
+    The file CHANNEL counts as a host write: the runner lays those down beside the
+    block, on the machine that runs it.
+    """
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    channel = {str((f or {}).get("path") or "") for f in files or []}
+    channel.discard("")
+    out: list[dict] = []
+    seen: set = set()
+    for t in texts:
+        if _PROMPT_RE.search(t):
+            continue                           # a transcript, not a draft
+        runs_on = where_each_line_runs(t)
+        wrote: dict = {}
+        for i, ln in enumerate(t.split("\n"), 1):
+            if ln.strip().startswith("#"):
+                continue
+            for m in _FILE_WRITE_RE.finditer(ln):
+                path = m.group("p") or m.group("p2") or m.group("p3") or ""
+                if not path:
+                    continue
+                at = runs_on.get(i, THE_HOST)
+                if m.group("p") and _redirection_is_the_outer_shells(ln, m.start()):
+                    at = THE_HOST              # §17.1377e — `pct exec … > /tmp/x`
+                wrote.setdefault(path, at)
+            # §17.1377b — a transfer is a write on the DESTINATION machine, and it
+            # overrides an earlier host-side write of the same path.
+            for m in _PCT_PUSH_RE.finditer(ln):
+                dest = m.group("b")
+                wrote[dest] = m.group("gid") if m.group("dir") == "push" else THE_HOST
+            for m in _DOCKER_CP_RE.finditer(ln):
+                a, b = m.group("a"), m.group("b")
+                if ":" in b and not b.startswith("/"):
+                    wrote[b.split(":", 1)[1]] = SOME_GUEST
+                elif ":" in a and not a.startswith("/"):
+                    wrote[b] = runs_on.get(i, THE_HOST)
+        for i, ln in enumerate(t.split("\n"), 1):
+            if ln.strip().startswith("#"):
+                continue
+            for m in _FILE_READ_RE.finditer(ln):
+                path = m.group("p") or m.group("p2") or ""
+                if not path or path in seen:
+                    continue
+                here = runs_on.get(i, THE_HOST)
+                if m.group("p2") and _redirection_is_the_outer_shells(ln, m.start()):
+                    here = THE_HOST            # §17.1377e — the dispatcher's shell
+                if path in wrote:
+                    there = wrote[path]
+                elif path in channel:
+                    there = THE_HOST           # the runner writes the channel here
+                else:
+                    continue                   # nothing in the block creates it
+                if not _across_machines(there, here):
+                    continue
+                seen.add(path)
+                out.append({"command": ln.strip()[:200], "why": (
+                    f"`{path}` is written on {_machine_words(there)} and read on "
+                    f"{_machine_words(here)}, and those are different filesystems -- the "
+                    f"reader cannot see the file. Live (§17.1377), ADD132's draft built the "
+                    f"request body on the host and then ran `curl … -d @{path}` inside the "
+                    f"guest, where that path does not exist. Create the file ON the machine "
+                    f"that reads it (`pct exec N -- sh -c 'cat > " + path + " <<'JSON'\n"
+                    "…\nJSON'`), or hand the body over stdin with `-d @-` so no path is "
+                    "involved at all.")})
+    return out
+
+
+def _across_machines(a: str, b: str) -> bool:
+    """§17.1377 — two machines that are decidably different.
+
+    `SOME_GUEST` against a named guest is not a claim: the text does not say which
+    guest, so it may well be the same one.
+    """
+    if a == b:
+        return False
+    if THE_HOST in (a, b):
+        return True                            # the host and any guest always differ
+    return SOME_GUEST not in (a, b)
+
+
+def _machine_words(m: str) -> str:
+    return ("the host" if m == THE_HOST else
+            "a guest" if m == SOME_GUEST else f"guest {m}")
 
 
 def edits_a_config_the_service_rewrites(commands: list[str], files: Optional[list[dict]],
