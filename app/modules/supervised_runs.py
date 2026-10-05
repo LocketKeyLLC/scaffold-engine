@@ -978,6 +978,38 @@ def a_check_that_only_reads_the_scaffolding(verify: list[str],
         "of the engine's own file is a step recorded done having changed nothing.")}]
 
 
+def logical_lines(text: str) -> list:
+    r"""The text's lines, with `\` continuations joined into one command.
+
+    §17.1373 — every gate that scans line by line is blind to the way the drafter
+    actually writes a long `curl`:
+
+        curl -s --fail-with-body -X PUT \
+            -H "X-Api-Key: $RADARR_KEY" \
+            -d '{"id":1,…}' \
+            http://192.168.1.22:7878/api/v3/downloadclient/1
+
+    The method is on line 1 and the URL on line 4, so `api_ports_changed` saw a
+    write with no URL and a URL with no write, and §17.1362 — the rule that a
+    change through an API must be read back — returned nothing. Measured live,
+    2026-10-05, on the ADD132 draft that was then accepted with a single
+    `systemctl is-active` check. §17.1367 and §17.1368 learned the same lesson
+    about whole-BLOCK judgments; this is the line-level half of it.
+    """
+    out: list = []
+    pending = ""
+    for raw in str(text or "").split("\n"):
+        ln = pending + raw
+        if ln.rstrip().endswith("\\"):
+            pending = ln.rstrip()[:-1] + " "
+            continue
+        pending = ""
+        out.append(ln)
+    if pending:
+        out.append(pending)
+    return out
+
+
 #: §17.1362 — an HTTP call that CHANGES something: an explicit method, or `curl -d`
 #: (which is a POST unless `-X GET` says otherwise).
 _HTTP_WRITE_RE = re.compile(r"-X\s*['\"]?(?P<m>POST|PUT|PATCH|DELETE)\b", re.I)
@@ -994,10 +1026,13 @@ _AUTH_VERBS = frozenset({"login", "logout", "signin", "signout", "token", "sessi
 
 
 def api_ports_changed(texts: list[str]) -> dict:
-    """``{port: line}`` for every HTTP call in these texts that changes state."""
+    r"""``{port: line}`` for every HTTP call in these texts that changes state.
+
+    §17.1373 — over LOGICAL lines: a `curl` continued with `\` is one command.
+    """
     out: dict = {}
     for t in texts:
-        for ln in str(t or "").split("\n"):
+        for ln in logical_lines(t):
             if ln.lstrip().startswith("#"):
                 continue
             if _HTTP_GET_RE.search(ln):
@@ -5367,6 +5402,11 @@ _NOT_A_SETTING = frozenset({
 #: §17.1365's question — can a check witness it? — is the same question.
 _SENT_FIELD_RE = re.compile(r"\\{0,2}[\"'](?P<field>[A-Za-z][A-Za-z0-9_]{2,40})\\{0,2}[\"']\s*:\s*"
                             r"(?=\\{0,2}[\"']|\$|\d|true|false)")
+#: §17.1373 — `{"name":"username","value":"admin"}`: the *arr `fields` array,
+#: where the setting's name is a VALUE. Escaped through any quoting depth.
+_NAMED_FIELD_RE = re.compile(
+    r'\\{0,2}["\']name\\{0,2}["\']\s*:\s*\\{0,2}["\'](?P<field>[A-Za-z][A-Za-z0-9_]{2,40})\\{0,2}["\']'
+    r'\s*,\s*\\{0,2}["\']value\\{0,2}["\']\s*:')
 #: the fields every *arr object carries as structure, which name no setting
 _NOT_A_SENT_SETTING = frozenset({
     "name", "implementation", "implementationName", "configContract", "protocol",
@@ -5396,13 +5436,23 @@ def fields_sent_to_an_api(commands: list[str], files: Optional[list[dict]] = Non
     out: list[str] = []
     for t in [str(c) for c in commands or []] + \
              [str((f or {}).get("content") or "") for f in files or []]:
-        for ln in t.split("\n"):
+        for ln in logical_lines(t):          # §17.1373
             s = ln.strip()
             if s.startswith("#") or not _HTTP_BODY_RE.search(s):
                 continue
             if _HTTP_GET_RE.search(s):
                 continue
             for m in _SENT_FIELD_RE.finditer(s):
+                field = m.group("field")
+                if field in _NOT_A_SENT_SETTING or field in out:
+                    continue
+                out.append(field)
+            # §17.1373 — the shape the *arr APIs really take: the settings live in
+            # a `fields` array as `{"name":"username","value":"admin"}`, so the
+            # field NAME is a value, not a key, and `_SENT_FIELD_RE` saw only the
+            # object's own `enable` and `priority`. Live, that left `username`,
+            # `password`, `host` and `port` invisible to §17.1370.
+            for m in _NAMED_FIELD_RE.finditer(s):
                 field = m.group("field")
                 if field in _NOT_A_SENT_SETTING or field in out:
                     continue
