@@ -3556,6 +3556,48 @@ async def execute_all_nodes(
         if settings.hands_on_assist_gate_enabled:
             async with async_session() as db:
                 _cls = await _classify_dag_executability(db, job_id)
+                # §17.1369 — an UNREACHABLE runner is not a hand-off. Live,
+                # 2026-10-05: the Proxmox host went off the LAN (`no route to
+                # host`), `write_policy` raised `McpError: All connection attempts
+                # failed`, `channel()` answered None like it does for "no runner
+                # registered", and this gate reclassified 151 of 169 steps and
+                # parked the whole job in `awaiting_assist` -- handing the operator
+                # a plan to carry out by hand because one probe had failed.
+                # Absence of a reading rendered as a conclusion: §17.1363's shape
+                # at the job level. The engine waits for the machine instead.
+                from app.modules import supervised_runs as _sr_chan
+                _ch_state, _ch_why = await _sr_chan.channel_state(db)
+            if _cls["hands_on"] and _ch_state == "unreachable":
+                logger.warning(
+                    "hands_on_gate_held job=%s nonexec=%d/%d runner_unreachable=%s",
+                    job_id, _cls["nonexec"], _cls["total"], _ch_why)
+                # §17.1211 — `blocked` is NOT terminal and is re-enterable, which
+                # is exactly right here: the work has not changed, only what can be
+                # read. Setting it away from 'running' also makes the finally-block
+                # cleanup a no-op, the same reason the hand-off path sets a status.
+                # §17.1119 — every job-status write goes through
+                # `job_state.transition()`; the raw-site ratchet in
+                # tests/test_job_state.py refused the first cut of this, correctly.
+                from app.modules import job_state as _js
+                async with async_session() as db:
+                    await _js.transition(db, job_id, to="blocked",
+                                         expected_from=("running", "executing"),
+                                         reason="hands_on_gate:runner_unreachable")
+                    await db.commit()
+                # §17.1369 — `warning` is the name the operator's page already
+                # renders, and it is the honest one: something is wrong with what
+                # can be READ, and nothing about the work has changed. `blocked` is
+                # declared legacy in the SSE inventory and the SPA renders no such
+                # event, so emitting it would say this to nobody.
+                yield _sse("warning", {
+                    "message": (f"{_ch_why} could not be reached, so the engine cannot tell which of "
+                                f"these {_cls['total']} steps it can carry out itself. It has NOT handed "
+                                f"the plan over — nothing about the work changed, only what can be read "
+                                f"right now. The job is blocked; press Run again once the machine "
+                                f"answers."),
+                    "job_id": job_id, "reason": "runner_unreachable",
+                    "hands_on_nodes": _cls["nonexec"], "total_nodes": _cls["total"]})
+                return
             if _cls["hands_on"]:
                 async with async_session() as db:
                     parked = await _park_job_awaiting_assist(db, job_id, _cls)

@@ -48,6 +48,47 @@ def enabled() -> bool:
     return bool(settings.execution_supervised_runs_enabled)
 
 
+async def channel_state(db: AsyncSession) -> tuple[str, str]:
+    """``(state, detail)`` — WHY there is no write channel, when there is none.
+
+    §17.1369 — `channel()` returns None for three different situations and the
+    callers cannot tell them apart:
+
+      * `"off"`        the valve is off, or MCP is disabled
+      * `"none"`       no runner is registered at all
+      * `"unreachable"` a runner IS registered and its policy could not be read
+
+    The third is a GAP in what the engine knows, not a fact about the work. Live,
+    2026-10-05: the Proxmox host went off the LAN (`no route to host`, no ping),
+    `write_policy` raised `McpError: All connection attempts failed`, `channel()`
+    answered None, and the hands-on gate reclassified **151 of 169 steps** and
+    parked the whole job in `awaiting_assist` — handing the operator a plan to
+    carry out by hand because one probe had failed. Absence of a reading rendered
+    as a conclusion, which is §17.1363's shape at the job level.
+
+    `"open"` with the runner's name when a channel exists.
+    """
+    if not enabled() or not settings.mcp_tool_enabled:
+        return ("off", "")
+    try:
+        from app.modules import assist_local_runner as _lr
+        from app.modules import assist_supervised as _sw
+        spec = await _lr.runner_spec(db)
+        if spec is None:
+            return ("none", "")
+        name = str(getattr(spec, "name", "") or "the registered runner")
+        try:
+            pol = await _sw.write_policy(spec)
+        except Exception as exc:
+            return ("unreachable", f"{name}: {type(exc).__name__}")
+        if not pol:
+            return ("unreachable", f"{name}: it answered with no write policy")
+        return ("open", name)
+    except Exception as exc:
+        logger.warning("channel_state_failed err=%r", exc)
+        return ("unreachable", f"the registered runner: {type(exc).__name__}")
+
+
 async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
     """``(runner spec, write policy)`` when a runner with an open write
     channel is registered and the valve is on; else None. Uses the cached
@@ -989,7 +1030,31 @@ _FROM_A_MACHINE_RE = re.compile(
     # the closing `)` may be many lines down: ADD132 built its body with a
     # multi-line `python3 -c '…'`, and requiring the paren on the same line missed
     # the one variable that actually broke.
-    r"(?:^|[\s;&|(])(?P<name>[A-Za-z_]\w*)=\$\((?!\()(?P<how>[^\n]*)", re.M)
+    # §17.1367b — the match consumes only the NAME; the window of what produces it
+    # is sliced after. A greedy `[\s\S]{0,400}` group here swallowed the following
+    # assignments, so `finditer` skipped them and the rule flipped which draft it
+    # caught. The producer is often inside a multi-line `python3 -c '…'`, several
+    # lines below the assignment, so a single line is not enough to look at.
+    r"(?:^|[\s;&|(])(?P<name>[A-Za-z_]\w*)=\$\((?!\()", re.M)
+def _substitution_body(text: str, at: int, cap: int = 1200) -> str:
+    """The balanced body of the `$( … )` that starts at `at`.
+
+    §17.1367b — a fixed character window is wrong in both directions: too short
+    and it misses a `json.dumps` several lines down inside a `python3 -c '…'`;
+    long enough to catch that and it runs past the substitution into the NEXT
+    command, where a bare `curl` makes every extracted id look like a document.
+    Counting parens is the only thing that answers "what produced this value".
+    """
+    depth, out = 1, []
+    for ch in text[at:at + cap]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        out.append(ch)
+    return "".join(out)
 #: that name interpolated inside the quoted word of a request BODY:
 #: `-d '$VAR'`, `--data \"$VAR\"`, `--json '$VAR'`. A HEADER is deliberately not
 #: here -- `-H \"X-Api-Key: $KEY\"` carries a short controlled value the engine
@@ -998,6 +1063,15 @@ _FROM_A_MACHINE_RE = re.compile(
 _IN_A_BODY_RE = (
     r"(?<![\w-])(?:-d|--data|--data-raw|--json)(?![\w-])\s*"
     r"(?:'[^'\n]*\$(?:\{{)?{name}\b[^'\n]*'|\\?\"[^\"\n]*\$(?:\{{)?{name}\b[^\"\n]*\\?\")")
+#: §17.1367b — the substitution produces a WHOLE DOCUMENT, not an extracted
+#: scalar. That distinction is the rule's whole point: the live failure was a
+#: 6,182-byte JSON object in a shell word, and an id pulled out of it with
+#: `clients[0]['id']` is not that. Live, 2026-10-05, this gate refused a correct
+#: draft for `{"id":$RADARR_ID,…}` -- a bare numeric JSON position holding a value
+#: the block had just extracted.
+_WHOLE_DOCUMENT_RE = re.compile(
+    r"json\.dumps|\bjq\s+-\w*\s*\.\s*(?:\||$)|(?<![\w-])cat\s+[\"']?/(?![^\n]*\|)|"
+    r"(?<![\w-])curl\b(?![^\n]*\|)|(?<![\w-])(?:pct|qm)\s+(?:exec|guest\s+exec)\b(?![^\n]*\|)")
 #: the channels that have no quoting at all
 _NO_QUOTING_RE = re.compile(r"@-|--data-binary\s+@|-d\s+@|<<<|\|\s*(?:curl|python3|sh|bash)\b|"
                             r"--data\s+@|-T\s|--upload-file", re.I)
@@ -1042,7 +1116,8 @@ def a_machine_value_in_a_shell_word(commands: list[str],
     from_machine: dict = {}
     for t in texts:
         for m in _FROM_A_MACHINE_RE.finditer(t):
-            from_machine.setdefault(m.group("name"), m.group("how").strip()[:70])
+            from_machine.setdefault(m.group("name"),
+                                    _substitution_body(t, m.end()).strip())
     if not from_machine:
         return []
     for t in texts:
@@ -1053,13 +1128,15 @@ def a_machine_value_in_a_shell_word(commands: list[str],
             for name, how in from_machine.items():
                 if name in seen:
                     continue
+                if not _WHOLE_DOCUMENT_RE.search(how):
+                    continue                  # an extracted scalar, not a document
                 if not re.search(_IN_A_BODY_RE.format(name=re.escape(name)), ln):
                     continue
                 if _NO_QUOTING_RE.search(ln):
                     continue                      # already passed without quoting
                 seen.add(name)
                 out.append({"command": s[:200], "why": (
-                    f"`${name}` holds whatever `{how}` returned -- a value from the machine, not one this "
+                    f"`${name}` holds whatever `{how.splitlines()[0][:70] if how else how}` returned -- a value from the machine, not one this "
                     f"block wrote -- and it is pasted inside a quoted shell word here. The block cannot "
                     f"know what characters are in it, and one wrong character ends the quote. Live "
                     f"(§17.1367), this exact shape died with `sh: 1: Syntax error: \"(\" unexpected`: "

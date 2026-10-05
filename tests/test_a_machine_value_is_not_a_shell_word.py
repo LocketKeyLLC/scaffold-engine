@@ -162,3 +162,47 @@ def test_the_fixture_holds_no_secret():
     assert by.get("password") == "********"
     assert by.get("username") == "admin"
     assert not re.search(r"@ByteArray\(", CLIENT)
+
+
+# ---------------------------- §17.1367b — an extracted scalar is not a document
+
+
+ID_DRAFT = [
+    'RADARR_ID=$(echo "$RADARR_CLIENT" | python3 -c "import sys,json; '
+    'clients=json.load(sys.stdin); print(clients[0][\'id\'] if clients else 1)")',
+    'pct exec 103 -- sh -c "curl -s --fail-with-body -X PUT -H \'X-Api-Key: $RADARR_KEY\' '
+    '-d \'{\\"id\\":$RADARR_ID,\\"name\\":\\"qBittorrent\\"}\' '
+    'http://127.0.0.1:7878/api/v3/downloadclient/$RADARR_ID"',
+]
+
+
+def test_an_extracted_id_is_not_a_document():
+    r"""Live, 2026-10-05: this gate refused a CORRECT draft. `$RADARR_ID` is one
+    integer the block pulled out with `clients[0]['id']` and wrote at a bare JSON
+    numeric position — not the 6,182-byte object the rule exists for. The
+    discriminator is what the substitution PRODUCES: `json.dumps`, a bare `curl`,
+    a `cat` of a file with nothing piped after it."""
+    assert a_machine_value_in_a_shell_word(ID_DRAFT) == []
+
+
+def test_the_document_producers_are_the_ones_that_count():
+    from app.modules.supervised_runs import _WHOLE_DOCUMENT_RE as W
+    for producer in ("echo x | python3 -c 'print(json.dumps(c))'",
+                     "curl -s http://127.0.0.1:7878/api/v3/downloadclient",
+                     "cat /var/lib/radarr/body.json"):
+        assert W.search(producer), producer
+    for extraction in ("cat /var/lib/radarr/config.xml | sed -n 's:x:y:p' | head -n 1",
+                       "python3 -c \"print(clients[0]['id'])\"",
+                       "pct exec 103 -- sh -c 'cat /x | sed -n 1p'"):
+        assert not W.search(extraction), extraction
+
+
+def test_the_substitution_body_stops_at_its_own_paren():
+    r"""A fixed window is wrong both ways: too short misses a `json.dumps` several
+    lines down inside `python3 -c '…'`; long enough to catch it runs into the NEXT
+    command, where a bare `curl` makes every extracted id look like a document."""
+    from app.modules.supervised_runs import _substitution_body
+    text = "V=$(echo a | python3 -c 'print(json.dumps(x))')\ncurl -s http://h:1/x\n"
+    body = _substitution_body(text, text.index("$(") + 2)
+    assert "json.dumps" in body
+    assert "curl" not in body
