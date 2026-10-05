@@ -72,6 +72,7 @@ class ServiceTruth:
     #: a gate that knows only the first misses the file the step actually edits.
     configs: tuple[str, ...] = ()
     config_stat: dict = field(default_factory=dict)   # path -> (owner:group, mode)
+    address: str = ""                                # §17.1368 — the guest's own IPv4
     ports: tuple[str, ...] = ()
     reads: dict = field(default_factory=dict)
 
@@ -117,7 +118,8 @@ class ServiceTruth:
 
     def says(self) -> str:
         """One line for the drafter: the facts, not prose."""
-        bits = [f"{self.name} on guest {self.guest}"]
+        bits = [f"{self.name} on guest {self.guest}"
+                + (f" (at {self.address})" if self.address else "")]
         if self.ports:
             bits.append("port " + "/".join(self.ports))
         if self.user:
@@ -373,6 +375,17 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                         else "`ss -tlnp` in it answered nothing")
         return []
     procs = listeners_in(ss_text)      # §17.1356 — one parser, used by the guest lookup too
+    # §17.1368 — and the guest's own address, because a service's port means nothing
+    # without the machine it is on. Live, a draft running ON THE HOST called
+    # `http://127.0.0.1:7878` for Radarr, which is in container 103: measured,
+    # `host->127.0.0.1:7878 = 000`, the host listens on none of those ports, and
+    # 103 is 192.168.1.22. The facts said "port 7878 on guest 103" and never said
+    # where guest 103 is, so the only address the drafter had was loopback.
+    _ok_addr, _addr_text = await _probe(spec, f"pct exec {gid} -- hostname -I")
+    _addr = ""
+    if _ok_addr:
+        _addr = next((w for w in str(_addr_text or "").split()
+                      if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", w)), "")
     # §17.1356 — a name is a CANDIDATE for a unit name, never a unit name. Three
     # sources disagree on purpose: `ss` reports the PROCESS (`Radarr`,
     # `qbittorrent-nox`), the step uses an English word (`qbittorrent`), and the
@@ -419,7 +432,10 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         s = ServiceTruth(guest=str(gid), unit=unit, name=re.sub(r"\.service$", "", unit),
                          state=sh.get("ActiveState") or "", user=user, group=sh.get("Group") or "",
                          argv=sh.get("argv") or "", fragment=sh.get("FragmentPath") or "")
+        s.address = _addr
         s.reads["systemctl show"] = unit
+        if _addr:
+            s.reads["hostname -I"] = _addr
         s.data_dir = data_dir_of(s.argv)
         s.ports = ports_of(ss_text, s.name) or ports_of(ss_text, (s.argv.split("/")[-1].split()[0] if s.argv else ""))
         if user:
@@ -576,6 +592,94 @@ def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
                     f"-- the call can only fail. Address {s.name} in ITS guest: "
                     f"`pct exec {s.guest} -- sh -c '…'`, one command per machine.")})
                 break
+    return out
+
+
+#: §17.1368 — a loopback target: `http://127.0.0.1:7878`, `localhost:8989`.
+_LOOPBACK_PORT_RE = re.compile(
+    r"(?:https?://)?(?P<host>127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)[:/](?P<port>\d{2,5})\b"
+    r"|(?:https?://)?(?P<h2>127(?:\.\d{1,3}){3}|localhost)\b[^\n]{0,40}?[\"']?(?P<p2>\d{2,5})\b")
+#: a line the HOST runs: not wrapped in `pct exec` / `qm guest exec`
+_WRAPPED_RE = re.compile(r"(?<![\w-])(?:pct\s+exec|qm\s+guest\s+exec|lxc-attach)\b", re.I)
+#: §17.1368 — a shell PROMPT: these lines are a record of a session, not a draft
+_PROMPT_RE = re.compile(r"^[a-z_][\w.-]*@[\w.-]+:[^\n]*[#$]\s", re.M | re.I)
+
+
+def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
+                         services: list) -> list[dict]:
+    r"""§17.1368 — a block running ON THE HOST reaching a guest's port on loopback.
+
+    §17.1358 judges the same mistake the other way round: a guest's port used
+    INSIDE a different guest. It finds the guest from `pct exec N --` on the line,
+    so a call with no such wrapper — a `curl` in a host-side script, or
+    `urllib.request.urlopen` in a Python file the host runs — is invisible to it.
+    Gate one end and the other stays open ([[feedback_structural_fix_gate_both_ends]]).
+
+    Live, 2026-10-04: ADD132's ninth draft moved to Python and `urllib` (which
+    correctly solved §17.1367's quoting problem) and called
+    `http://127.0.0.1:7878/api/v3/downloadclient` from a script the runner executes
+    on the Proxmox host. Measured:
+
+        host -> 127.0.0.1:7878 = 000      host -> 127.0.0.1:8989 = 000
+        the host listens on none of those ports
+        container 103 = 192.168.1.22      container 104 = 192.168.1.23
+
+    The frame carried `suggested: run` and no refusals.
+    """
+    if not services:
+        return []
+    by_port: dict = {}
+    for s in services:
+        for p in (getattr(s, "ports", ()) or ()):
+            by_port.setdefault(str(p), s)
+    if not by_port:
+        return []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    # §17.1368 — judged over the whole BLOCK, because the loopback and the port are
+    # usually on different lines. Live, the draft built
+    # `url = f"http://127.0.0.1:{port}/api/v3/downloadclient"` and passed the
+    # literal from elsewhere: `get_download_client(103, radarr_key, 7878)`. A
+    # line-at-a-time rule saw a loopback with no port and a port with no loopback,
+    # and refused nothing.
+    named = [p for p in by_port if re.search(rf"(?<![\w.]){re.escape(p)}(?![\w.])",
+                                             "\n".join(texts))]
+    out: list[dict] = []
+    seen: set = set()
+    for t in texts:
+        # §17.1368 — a TRANSCRIPT is not a block. T20's record is a session inside
+        # container 105 (`root@download-client:~# … curl -I http://localhost:8080`)
+        # where that line was right; judged as a host-side draft it reads wrong.
+        # A prompt marker says the lines already ran somewhere, and where.
+        if _PROMPT_RE.search(t):
+            continue
+        for ln in t.split("\n"):
+            s_line = ln.strip()
+            if s_line.startswith("#") or _WRAPPED_RE.search(ln):
+                continue                       # the guest runs this line, not the host
+            hits = [(m.group("port") or m.group("p2") or "")
+                    for m in _LOOPBACK_PORT_RE.finditer(ln)]
+            if not hits and re.search(r"(?:https?://)?(?:127(?:\.\d{1,3}){3}|localhost|\[::1\])", ln):
+                hits = [""]                    # a loopback whose port is a variable
+            for port in hits:
+                for cand in ([port] if port else named):
+                    svc = by_port.get(cand)
+                    if not svc or cand in seen:
+                        continue
+                    seen.add(cand)
+                    port = cand
+                    where = getattr(svc, "address", "") or ""
+                    out.append({"command": s_line[:200], "why": (
+                        f"this line runs on the HOST and reaches port {port} on loopback, and {port} belongs "
+                        f"to {getattr(svc, 'name', 'a service')} in guest {getattr(svc, 'guest', '?')} "
+                        f"(measured: " + (svc.says() if hasattr(svc, "says") else "") + f"). The host does not "
+                        f"listen on it -- live (§17.1368), `host->127.0.0.1:{port}` answered `000` and the "
+                        f"host's own `ss -tlnp` has nothing on that port. "
+                        + (f"Reach it at {where}:{port}, which is guest "
+                       f"{getattr(svc, 'guest', '?')}'s measured address, "
+                       if where else "Reach it at that guest's own address, ")
+                        + f"or run the call inside the guest with "
+                      f"`pct exec {getattr(svc, 'guest', 'N')} -- …`.")})
     return out
 
 
