@@ -206,3 +206,52 @@ def test_the_substitution_body_stops_at_its_own_paren():
     body = _substitution_body(text, text.index("$(") + 2)
     assert "json.dumps" in body
     assert "curl" not in body
+
+
+# ------------------- §17.1374 — the body is whatever sits between -d and the URL
+
+
+JUGGLED = json.loads((pathlib.Path(__file__).parent / "fixtures"
+                      / "add132_quote_juggled_body_2026_10_05.json").read_text())
+
+
+def test_the_quote_juggled_body_is_still_a_body():
+    r"""Live, 2026-10-05. The draft fetched the whole download-client object —
+    correct, it carries `configContract` along — and then wrote:
+
+        -d '"'"''"$RADARR_UPDATED"''"'"' http://127.0.0.1:7878/api/v3/downloadclient/1
+
+    which resolves, for the inner shell, to `-d '<the whole JSON>'`. That is
+    §17.1367's failure exactly, and a pattern demanding the variable sit inside
+    ONE quoted word saw nothing: the quote juggling splits it across four.
+
+    The body is simply whatever lies between the `-d` flag and the URL.
+    """
+    out = a_machine_value_in_a_shell_word(JUGGLED["commands"], JUGGLED["files"])
+    assert len(out) == 2, [r["why"][:70] for r in out]
+    names = " ".join(r["why"] for r in out)
+    assert "$RADARR_UPDATED" in names and "$SONARR_UPDATED" in names
+
+
+def test_the_body_span_stops_at_the_url():
+    """An id in the URL is not in the body — that is the §17.1367b exemption, and
+    a span that ran to the end of the line would swallow it."""
+    from app.modules.supervised_runs import _BODY_SPAN_RE
+    line = "curl -X PUT -d '{\"a\":1}' http://127.0.0.1:7878/api/v3/downloadclient/$RADARR_ID"
+    spans = [m.group("body") for m in _BODY_SPAN_RE.finditer(line)]
+    assert spans and "$RADARR_ID" not in spans[0], spans
+
+
+def test_a_continued_curl_is_read_as_one_command_here_too():
+    """§17.1373 — the scan reads logical lines, so a body on a continuation line
+    still belongs to the `-d` above it."""
+    lines = ["V=$(curl -s http://h:1/x)",
+             "curl -X PUT \\\n    -d \"$V\" \\\n    http://127.0.0.1:7878/api/v3/x"]
+    assert a_machine_value_in_a_shell_word(lines)
+
+
+def test_the_id_draft_is_still_accepted_after_the_widening():
+    """The whole point of §17.1367b: an extracted scalar is not a document."""
+    earlier = json.loads((pathlib.Path(__file__).parent / "fixtures"
+                          / "add132_multiline_curl_2026_10_05.json").read_text())
+    assert a_machine_value_in_a_shell_word(earlier["commands"], earlier["files"]) == []

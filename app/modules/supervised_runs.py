@@ -1095,9 +1095,15 @@ def _substitution_body(text: str, at: int, cap: int = 1200) -> str:
 #: here -- `-H \"X-Api-Key: $KEY\"` carries a short controlled value the engine
 #: reads off a config file, and flagging it would refuse the shape every correct
 #: draft uses. A BODY is an arbitrary document from a machine.
-_IN_A_BODY_RE = (
-    r"(?<![\w-])(?:-d|--data|--data-raw|--json)(?![\w-])\s*"
-    r"(?:'[^'\n]*\$(?:\{{)?{name}\b[^'\n]*'|\\?\"[^\"\n]*\$(?:\{{)?{name}\b[^\"\n]*\\?\")")
+#: §17.1374 — the BODY argument is whatever sits between the `-d` flag and the
+#: URL. Demanding the variable be inside one quoted word misses the quote
+#: juggling a draft really writes:
+#:     -d '"'"''"$RADARR_UPDATED"''"'"' http://127.0.0.1:7878/api/v3/x
+#: which resolves to `-d '<the whole JSON>'` for the inner shell — §17.1367's
+#: failure exactly, and invisible to a single-quoted-word pattern.
+_BODY_SPAN_RE = re.compile(
+    r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])"
+    r"(?P<body>.*?)(?=(?:https?://)|$)", re.S)
 #: §17.1367b — the substitution produces a WHOLE DOCUMENT, not an extracted
 #: scalar. That distinction is the rule's whole point: the live failure was a
 #: 6,182-byte JSON object in a shell word, and an id pulled out of it with
@@ -1156,7 +1162,7 @@ def a_machine_value_in_a_shell_word(commands: list[str],
     if not from_machine:
         return []
     for t in texts:
-        for ln in t.split("\n"):
+        for ln in logical_lines(t):        # §17.1373 — a continued `curl` is one command
             s = ln.strip()
             if s.startswith("#"):
                 continue
@@ -1165,7 +1171,8 @@ def a_machine_value_in_a_shell_word(commands: list[str],
                     continue
                 if not _WHOLE_DOCUMENT_RE.search(how):
                     continue                  # an extracted scalar, not a document
-                if not re.search(_IN_A_BODY_RE.format(name=re.escape(name)), ln):
+                if not any(re.search(rf"\${{?{re.escape(name)}\b", m.group("body") or "")
+                           for m in _BODY_SPAN_RE.finditer(ln)):
                     continue
                 if _NO_QUOTING_RE.search(ln):
                     continue                      # already passed without quoting
