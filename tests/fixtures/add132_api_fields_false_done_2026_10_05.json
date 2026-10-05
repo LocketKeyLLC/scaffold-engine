@@ -1,0 +1,15 @@
+{
+ "node_key": "ADD132",
+ "commands": [
+  "cat -n /tmp/fix_qbit_auth.sh",
+  "pct exec 103 -- sh -c 'curl -s -X GET -H \"X-Api-Key: $(cat /var/lib/radarr/config.xml 2>/dev/null | sed -n \"s:.*<ApiKey>\\\\(.*\\\\)</ApiKey>.*:\\\\1:p\" | head -n 1)\" http://127.0.0.1:7878/api/v3/downloadclient'",
+  "pct exec 104 -- sh -c 'curl -s -X GET -H \"X-Api-Key: $(cat /var/lib/sonarr/config.xml 2>/dev/null | sed -n \"s:.*<ApiKey>\\\\(.*\\\\)</ApiKey>.*:\\\\1:p\" | head -n 1)\" http://127.0.0.1:8989/api/v3/downloadclient'"
+ ],
+ "verify": [],
+ "files": [
+  {
+   "path": "/tmp/fix_arr_auth.sh",
+   "content": "#!/bin/bash\nset -e\n\n# Radarr: update download client 1 with credentials\nRADARR_KEY=$(pct exec 103 -- sh -c 'cat /var/lib/radarr/config.xml 2>/dev/null | sed -n \"s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p\" | head -n 1')\npct exec 103 -- sh -c \"curl -s --fail-with-body -X PUT -H 'X-Api-Key: $RADARR_KEY' -H 'Content-Type: application/json' -d '{\\\"id\\\":1,\\\"name\\\":\\\"qBittorrent\\\",\\\"implementation\\\":\\\"QBittorrent\\\",\\\"enable\\\":true,\\\"host\\\":\\\"192.168.1.24\\\",\\\"port\\\":8080,\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"$MASS_PASSWORD\\\",\\\"movieCategory\\\":\\\"radarr\\\"}' http://127.0.0.1:7878/api/v3/downloadclient/1\"\n\n# Sonarr: update download client 1 with credentials\nSONARR_KEY=$(pct exec 104 -- sh -c 'cat /var/lib/sonarr/config.xml 2>/dev/null | sed -n \"s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p\" | head -n 1')\npct exec 104 -- sh -c \"curl -s --fail-with-body -X PUT -H 'X-Api-Key: $SONARR_KEY' -H 'Content-Type: application/json' -d '{\\\"id\\\":1,\\\"name\\\":\\\"qBittorrent\\\",\\\"implementation\\\":\\\"QBittorrent\\\",\\\"enable\\\":true,\\\"host\\\":\\\"192.168.1.24\\\",\\\"port\\\":8080,\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"$MASS_PASSWORD\\\",\\\"tvCategory\\\":\\\"tv-sonarr\\\"}' http://127.0.0.1:8989/api/v3/downloadclient/1\"\n\n# Test Radarr download client\npct exec 103 -- sh -c \"curl -s --fail-with-body -X POST -H 'X-Api-Key: $RADARR_KEY' -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:7878/api/v3/downloadclient/test/1\"\n\n# Test Sonarr download client\npct exec 104 -- sh -c \"curl -s --fail-with-body -X POST -H 'X-Api-Key: $SONARR_KEY' -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8989/api/v3/downloadclient/test/1\"\n"
+  }
+ ]
+}

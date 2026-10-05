@@ -5239,12 +5239,63 @@ _NOT_A_SETTING = frozenset({
     "mac", "order"})
 
 
+#: §17.1370 — a field the block SENDS to an API: `"username": "admin"`,
+#: `\"password\":\"$MASS_PASSWORD\"`, escaped through any number of quoting
+#: layers. A value changed through an API is as written as one put in a file, and
+#: §17.1365's question — can a check witness it? — is the same question.
+_SENT_FIELD_RE = re.compile(r"\\{0,2}[\"'](?P<field>[A-Za-z][A-Za-z0-9_]{2,40})\\{0,2}[\"']\s*:\s*"
+                            r"(?=\\{0,2}[\"']|\$|\d|true|false)")
+#: the fields every *arr object carries as structure, which name no setting
+_NOT_A_SENT_SETTING = frozenset({
+    "name", "implementation", "implementationName", "configContract", "protocol",
+    "fields", "value", "label", "type", "order", "advanced", "privacy", "hint",
+    "helpText", "id", "tags", "presets", "selectOptions", "isFloat", "unit",
+    "errorMessage", "propertyName", "severity", "errorCode", "message"})
+
+
+def fields_sent_to_an_api(commands: list[str], files: Optional[list[dict]] = None) -> list[str]:
+    """Every settings FIELD this block sends in a request body, by name.
+
+    §17.1370 — live, 2026-10-05: ADD132 was recorded
+
+        already met: 2 verify check(s) read off pve-runner before the run confirm the goal
+
+    for the SECOND time, by a route §17.1365 does not cover. That draft writes no
+    config key — it changes Radarr's and Sonarr's download client through their
+    APIs — so `keys_the_block_writes` was empty, the guard did not engage, and the
+    checks (`GET …/api/v3/downloadclient`, a list that has held a `qBittorrent`
+    entry all along) "confirmed" the goal.
+
+    qBittorrent's own log says what was true:
+
+        11:42:34  WebAPI login failure. Reason: IP has been banned, IP: 192.168.1.22, username: admin
+        12:42:30  WebAPI login failure. Reason: invalid credentials, attempt count: 1, IP: 192.168.1.23
+    """
+    out: list[str] = []
+    for t in [str(c) for c in commands or []] + \
+             [str((f or {}).get("content") or "") for f in files or []]:
+        for ln in t.split("\n"):
+            s = ln.strip()
+            if s.startswith("#") or not _HTTP_BODY_RE.search(s):
+                continue
+            if _HTTP_GET_RE.search(s):
+                continue
+            for m in _SENT_FIELD_RE.finditer(s):
+                field = m.group("field")
+                if field in _NOT_A_SENT_SETTING or field in out:
+                    continue
+                out.append(field)
+    return out
+
+
 def keys_the_block_writes(commands: list[str], files: Optional[list[dict]] = None) -> list[str]:
     """Every settings KEY this block would write, by name.
 
     §17.1365 — what a check has to read back for a pre-pass to mean anything.
+    §17.1370 — a field sent to an API counts: the surface differs, the question
+    does not.
     """
-    out: list[str] = []
+    out: list[str] = list(fields_sent_to_an_api(commands, files))
     for t in [str(c) for c in commands or []] + \
              [str((f or {}).get("content") or "") for f in files or []]:
         # §17.1365 — a heredoc BODY is part of the write that opened it:
