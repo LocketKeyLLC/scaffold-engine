@@ -77,40 +77,88 @@ def what_failed(report: str) -> str:
 
 
 async def previous_attempt(db, job_id: str, node_key: str) -> str:
-    """What this step produced last time, or ``""``.
+    """What this step produced last time, or ``""``."""
+    reports = await every_attempt(db, job_id, node_key, limit=1)
+    return reports[0] if reports else ""
 
-    The node's own `output_text` when it is still there (a `failed` step keeps
-    it), else the newest reset pre-image — `reset` NULLs the column but audits
-    the old value first, so the report survives a rerun.
+
+async def every_attempt(db, job_id: str, node_key: str, limit: int = 6) -> list:
+    """This step's reports, newest first — the row's own, then the reset pre-images.
+
+    §17.1371 — carrying only the LATEST one is why ADD132 oscillated. Live,
+    2026-10-05, two consecutive runs of the same step:
+
+        run A  'Config Contract' must not be empty.   (it had `priority`)
+        run B  'Priority' must be between 1 and 50. You entered 0.   (it had `configContract`)
+
+    Each draft read one failure, fixed exactly that, and dropped the field the
+    previous draft had got right. A fix loop that trades one defect for another is
+    not converging, and the engine had every attempt on disk the whole time:
+    `reset` NULLs `output_text` after auditing it, so each failure survives in
+    `dag_node_edits.before`.
     """
+    out: list = []
     try:
         row = (await db.execute(
             text("SELECT output_text FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
             {"j": job_id, "k": node_key})).scalar()
         if str(row or "").strip():
-            return str(row)
-        pre = (await db.execute(
+            out.append(str(row))
+        pres = (await db.execute(
             text("SELECT before->>'output_text' FROM dag_node_edits "
                  " WHERE job_id = :j AND node_key = :k AND op = 'reset' "
                  "   AND length(coalesce(before->>'output_text','')) > 200 "
-                 " ORDER BY created_at DESC LIMIT 1"),
-            {"j": job_id, "k": node_key})).scalar()
-        return str(pre or "")
+                 " ORDER BY created_at DESC LIMIT :n"),
+            {"j": job_id, "k": node_key, "n": max(1, limit)})).scalars().all()
+        for pre in pres:
+            if str(pre or "").strip():
+                out.append(str(pre))
     except Exception as exc:
         logger.warning("previous_attempt_failed job=%s node=%s err=%r", job_id, node_key, exc)
-        return ""
+    return out[:max(1, limit)]
+
+
+#: §17.1371 — the machine's own words for why an attempt failed. Two different
+#: ones mean two different defects, and a draft must fix BOTH.
+_ERROR_LINE_RE = re.compile(
+    r"^.*(?:\\u0027|['\"])(?P<what>[A-Z][A-Za-z ]{2,40})(?:\\u0027|['\"])\s*(?P<says>"
+    r"must not be empty|must be between[^\n\"]{0,40}|is required|is invalid)", re.M)
+
+
+def failures_in(reports: list) -> list:
+    """Every DISTINCT complaint the machine made, across every attempt."""
+    seen: dict = {}
+    for rep in reports or []:
+        for m in _ERROR_LINE_RE.finditer(str(rep or "")):
+            key = m.group("what").strip()
+            if key not in seen:
+                seen[key] = f"`{key}` {m.group('says').strip()}"
+    return list(seen.values())
 
 
 async def carry_forward(db, job_id: str, node_key: str, reading=None) -> str:
-    """The block the drafter gets about this step's last attempt, or ``""``."""
-    body = what_failed(await previous_attempt(db, job_id, node_key))
-    if not body:
+    """The block the drafter gets about this step's attempts, or ``""``."""
+    reports = await every_attempt(db, job_id, node_key)
+    body = what_failed(reports[0] if reports else "")
+    # §17.1371 — EVERY distinct complaint, not just the latest report's. ADD132
+    # fixed `configContract` and dropped `priority`, because the draft before it
+    # had failed on `priority` and that report was no longer in front of it.
+    every = failures_in(reports)
+    if not body and not every:
         return ""
     if reading is not None:
-        reading.note(f"{node_key}'s previous attempt",
-                     f"{len(body)} characters of what ran, what failed and the engine's diagnosis")
-    return ("THIS STEP HAS BEEN TRIED BEFORE AND FAILED. What ran, what the machine answered, and the "
+        reading.note(f"{node_key}'s previous attempts",
+                     f"{len(reports)} report(s), {len(every)} distinct complaint(s) from the machine")
+    head = ("THIS STEP HAS BEEN TRIED BEFORE AND FAILED. What ran, what the machine answered, and the "
             "engine's own reading of it are below. Do not repeat the attempt that failed: the draft you "
             "write now must differ in the way the diagnosis says, and anything the last attempt got "
             "RIGHT (a value written, a service restarted, a login proved) is already done and must not "
-            "be undone.\n\n" + body)
+            "be undone.")
+    if len(every) > 1:
+        head += ("\n\nEVERY COMPLAINT THE MACHINE HAS MADE ABOUT THIS STEP, ACROSS ALL ATTEMPTS — your "
+                 "draft must satisfy ALL of them at once. Fixing the newest one and dropping what an "
+                 "earlier draft already got right is how this step has been failing:\n"
+                 + "\n".join(f"  - {e}" for e in every))
+    elif every:
+        head += "\n\nWhat the machine complained about: " + every[0]
+    return head + "\n\n" + body

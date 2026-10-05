@@ -82,23 +82,35 @@ def test_each_section_and_the_whole_are_capped():
 
 
 class _Res:
-    def __init__(self, v):
-        self._v = v
+    """§17.1371 — the pre-image query reads MANY now (`.scalars().all()`), because
+    carrying only the latest failure is what made ADD132 oscillate."""
+
+    def __init__(self, one=None, many=None):
+        self._one, self._many = one, many
 
     def scalar(self):
-        return self._v
+        return self._one
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._many or []
 
 
 class _DB:
-    """The node row first, then the newest reset pre-image."""
+    """The node row first, then the reset pre-images."""
 
     def __init__(self, row=None, pre=None):
         self.row, self.pre, self.asked = row, pre, []
 
     async def execute(self, stmt, params=None):
         sql = str(stmt)
-        self.asked.append("dag_node_edits" if "dag_node_edits" in sql else "dag_nodes")
-        return _Res(self.pre if "dag_node_edits" in sql else self.row)
+        if "dag_node_edits" in sql:
+            self.asked.append("dag_node_edits")
+            return _Res(many=[self.pre] if self.pre else [])
+        self.asked.append("dag_nodes")
+        return _Res(one=self.row)
 
 
 @pytest.mark.asyncio
@@ -106,7 +118,9 @@ async def test_a_failed_step_still_holding_its_report_is_read_from_the_row():
     db = _DB(row=REPORT)
     got = await carry_forward(db, "j", "ADD132")
     assert "Config Contract" in got.replace("\\u0027", "'")
-    assert db.asked == ["dag_nodes"], "no need to go to the audit table"
+    # §17.1371 — the audit table is read as well now, always: the row holds the
+    # LATEST failure and the earlier ones are what stopped ADD132 converging.
+    assert db.asked == ["dag_nodes", "dag_node_edits"], db.asked
 
 
 @pytest.mark.asyncio
