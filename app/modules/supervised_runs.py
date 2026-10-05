@@ -149,6 +149,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is expanded by GUEST",                          # §17.1364
                    "never imports or assigns",                      # §17.1377
                    "different filesystems",                         # §17.1377
+                   "keep a setting in the object's `fields` array",  # §17.1378
+                   "VALIDATES the whole resource",                   # §17.1378b
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
@@ -751,6 +753,31 @@ curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: applicati
 A HEREDOC IS A WHOLE PROGRAM: every name it uses it must import. `python3 - <<'EOF'` that says
 `import json` and then reaches for `os.environ[...]` raises NameError on the first line that runs,
 and under `set -e` the block ends there having changed nothing.
+
+A SETTING GOES WHERE THE API KEEPS IT, AND A READ RETURNS A SECRET MASKED. Radarr, Sonarr and
+Prowlarr keep a download client's settings in the object's `fields` array, as
+`{"name": "username", "value": "admin"}` -- NOT as keys of the object. MEASURED on this host, after a
+block set `c["username"]` and `c["password"]` on the object and PUT it back: both came back ABSENT,
+`fields.username` was untouched, and `fields.password` held the literal asterisks the GET had masked
+it with, so `downloadclient/test` answered `Authentication Failure` and the stored password was left
+WORSE than before the run. Set it in place, and never PUT back a secret you only read:
+
+```python
+obj = json.load(sys.stdin)            # GET -- obj["fields"] password is "********"
+for f in obj["fields"]:
+    if f["name"] == "username":
+        f["value"] = "admin"
+    elif f["name"] == "password":
+        f["value"] = os.environ["MASS_PASSWORD"]      # the real one, never the mask
+obj["priority"] = 1                   # `priority` IS a key of the object; `fields` names are not
+print(json.dumps(obj))
+```
+
+A `/test` ENDPOINT VALIDATES THE WHOLE RESOURCE. `-d '{}'` to `…/api/v3/downloadclient/test` answers
+`'Name' must not be empty`, `'Implementation' must not be empty`, `'Config Contract' must not be
+empty` and `'Priority' must be between 1 and 50. You entered 0` -- measured. GET the object and POST
+that same document to `/test`. And put the check where a failure means something: a malformed test
+after a correct PUT reports the whole step `failed` while its work is already done.
 """
 
 
@@ -4705,6 +4732,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1377 — a body in a file is only a body if the reader's machine can see
     # the file; and an inline program that never imports what it uses cannot run.
     refused = refused + a_program_that_uses_a_name_it_never_defines(cmds, shape_files)
+    # §17.1378 — a secret set on the object instead of in the `fields` array the API
+    # keeps it in, and a `/test` endpoint handed a body it validates and rejects.
+    refused = refused + a_credential_set_where_the_api_does_not_keep_it(cmds, shape_files)
+    refused = refused + a_validating_endpoint_sent_an_empty_body(cmds, shape_files)
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
@@ -5577,6 +5608,149 @@ _NOT_A_SENT_SETTING = frozenset({
     "fields", "value", "label", "type", "order", "advanced", "privacy", "hint",
     "helpText", "id", "tags", "presets", "selectOptions", "isFloat", "unit",
     "errorMessage", "propertyName", "severity", "errorCode", "message"})
+
+
+#: §17.1378 — the *arr family keeps a download client's settings in a `fields`
+#: array, not as keys of the object, and masks secrets on read.
+_VERSIONED_API_RE = re.compile(r"/api/v\d+/")
+_CREDENTIAL_KEYS = ("password", "username", "apikey", "api_key", "token", "secret")
+#: `c["password"] = …`, `obj['username'] = …`, `client.get("password")` is not one.
+_TOP_LEVEL_SET_RE = re.compile(
+    r"(?P<var>[A-Za-z_]\w*)\s*\[\s*[\"'](?P<key>\w+)[\"']\s*\]\s*=(?!=)")
+#: the correct place: `{"name": "password", "value": …}` or `f["name"] == "password"`.
+_FIELD_ENTRY_RE = re.compile(
+    r"[\"']name[\"']\s*[:=]=?\s*[\"'](?P<field>\w+)[\"']")
+
+
+def a_credential_set_where_the_api_does_not_keep_it(
+        commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1378 — a secret assigned to a key the API drops, and a mask written back.
+
+    Live, 2026-10-05. ADD132 finally RAN: the body reached the guest, every heredoc
+    imported what it used, and the block exited 22 only on its own malformed test
+    call. Then the machines were read:
+
+        fields.username : 'admin'
+        fields.password : MASKED - the literal asterisks
+        top-level username/password the draft set : ABSENT
+
+    The draft did this:
+
+        c = json.load(sys.stdin)[0]        # GET -- password comes back "********"
+        c["username"] = "admin"            # DROPPED: the API keeps settings in `fields`
+        c["password"] = os.environ[...]     # DROPPED
+        … PUT c back                        # STORES THE MASK as the password
+
+    So `downloadclient/test` answered `Authentication Failure` on Username, and the
+    stored password was left WORSE than before the run -- the asterisks, not the old
+    value. §17.1370 already measured that these settings live in the `fields` array
+    as `{"name":"username","value":"admin"}`; this is a block round-tripping an
+    object from such an API and setting the credential on the object itself.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        if not _VERSIONED_API_RE.search(t):
+            continue                       # not one of these APIs
+        if not re.search(r"(?:-X\s*(?:PUT|POST)|method\s*=\s*[\"'](?:PUT|POST))", t):
+            continue                       # nothing is sent back
+        in_fields = {m.group("field").lower() for m in _FIELD_ENTRY_RE.finditer(t)}
+        seen: set = set()
+        for ln in logical_lines(t):
+            if ln.strip().startswith("#"):
+                continue
+            for m in _TOP_LEVEL_SET_RE.finditer(ln):
+                key = m.group("key")
+                low = key.lower()
+                if low not in _CREDENTIAL_KEYS or low in in_fields or low in seen:
+                    continue
+                seen.add(low)
+                out.append({"command": ln.strip()[:200], "why": (
+                    f"`{m.group('var')}[\"{key}\"] = …` sets `{key}` as a key of the object, "
+                    f"and these APIs keep a setting in the object's `fields` array -- so the "
+                    f"API DROPS it and the value that gets stored is whatever the GET "
+                    f"returned. MEASURED on this host (§17.1378) after exactly this block "
+                    f"ran: `fields.username` was still 'admin', the top-level `username` and "
+                    f"`password` the draft set came back ABSENT, and `fields.password` held "
+                    f"the literal asterisks the GET had masked it with -- so "
+                    f"`downloadclient/test` answered `Authentication Failure` and the stored "
+                    f"password was left worse than before. Set it where the API keeps it: "
+                    f"`for f in obj[\"fields\"]:` / `if f[\"name\"] == \"{key}\": "
+                    f"f[\"value\"] = …`, adding the entry when it is absent. Never PUT back a "
+                    f"secret field you only read -- a read returns it masked.")})
+    return out
+
+
+#: §17.1378b — `…/api/v3/downloadclient/test`, `…/notification/test`: endpoints that
+#: VALIDATE the whole resource rather than accepting a bare trigger.
+_VALIDATING_TEST_RE = re.compile(r"/api/v\d+/\w+/test\b")
+#: §17.1378b — only a curl-shaped call can be judged: a body passed as a function
+#: ARGUMENT (`api(ct, key, port, 'POST', path, client)`) is invisible here, and
+#: `-d @-` / `-d @/path` take the body from stdin or a file. Measured: treating
+#: "no -d flag" as "no body" produced 158 flags, nearly all of them false.
+_DATA_FLAG_RE = re.compile(
+    r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])")
+
+
+def _body_carries_nothing(line: str) -> bool:
+    """§17.1378b — the inline body is `{}`, empty, or only an id."""
+    if not _DATA_FLAG_RE.search(line):
+        return False                       # not a shape this gate can read
+    m = _BODY_SPAN_RE.search(line)
+    if not m:
+        return False
+    body = (m.group("body") or "").strip().strip("'\"").strip()
+    if body.startswith("@"):
+        return False                       # stdin or a file -- §17.1377's shape
+    if body in ("", "{}", "''", '""'):
+        return True
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return False                       # unparseable: not our judgment
+    return isinstance(obj, dict) and set(k.lower() for k in obj) <= {"id"}
+
+
+def a_validating_endpoint_sent_an_empty_body(
+        commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1378b — a `/test` endpoint called with `{}` when it validates the object.
+
+    Live, 2026-10-05: the block that finally ran exited 22 on its own last step --
+
+        pct exec 103 -- sh -c "curl … -d '{}' http://127.0.0.1:7878/api/v3/downloadclient/test"
+
+    and Radarr answered with four validation errors at once:
+
+        'Name' must not be empty.          'Implementation' must not be empty.
+        'Config Contract' must not be empty.
+        'Priority' must be between 1 and 50. You entered 0.
+
+    The PUTs before it had already landed, so the run reported `failed` for a
+    malformed CHECK while its work was done -- the worst kind of outcome to read.
+    These endpoints validate the resource: send the object, not a trigger.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for ln in logical_lines(t):
+            s_line = ln.strip()
+            if s_line.startswith("#") or not _VALIDATING_TEST_RE.search(s_line):
+                continue
+            if not _body_carries_nothing(s_line):
+                continue
+            out.append({"command": s_line[:200], "why": (
+                "this posts an empty or near-empty body to a `/test` endpoint that "
+                "VALIDATES the whole resource, so it fails on the resource's own required "
+                "fields rather than testing anything. MEASURED live (§17.1378b): `-d '{}'` "
+                "to `…/api/v3/downloadclient/test` answered `'Name' must not be empty`, "
+                "`'Implementation' must not be empty`, `'Config Contract' must not be "
+                "empty` and `'Priority' must be between 1 and 50. You entered 0` -- four "
+                "errors about the empty body, and because the PUTs before it had already "
+                "landed the run reported `failed` for a malformed CHECK while its work was "
+                "done. Send the object: GET it, then POST that same document to `/test`.")})
+    return out
 
 
 def fields_sent_to_an_api(commands: list[str], files: Optional[list[dict]] = None) -> list[str]:
