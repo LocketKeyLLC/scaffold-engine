@@ -151,6 +151,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "different filesystems",                         # §17.1377
                    "keep a setting in the object's `fields` array",  # §17.1378
                    "VALIDATES the whole resource",                   # §17.1378b
+                   "does not accept",                               # §17.1379
+                   "definition in this program takes fewer",        # §17.1379
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
@@ -750,9 +752,14 @@ JSON
 curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @/tmp/body.json http://127.0.0.1:7878/api/v3/downloadclient/1'
 ```
 
-A HEREDOC IS A WHOLE PROGRAM: every name it uses it must import. `python3 - <<'EOF'` that says
-`import json` and then reaches for `os.environ[...]` raises NameError on the first line that runs,
-and under `set -e` the block ends there having changed nothing.
+A PROGRAM IS A WHOLE PROGRAM, in a heredoc or in a `.py` file: every name it uses it must import,
+and every call must match the signature it wrote. `python3 - <<'EOF'` that says `import json` and
+then reaches for `os.environ[...]` raises NameError on the first line that runs; and MEASURED live,
+`def pct_exec(ctid, cmd)` called as `pct_exec(ctid, cmd, input=body)` gave
+`TypeError: pct_exec() got an unexpected keyword argument 'input'` at both call sites, after that
+draft had everything else right. If a helper has to forward stdin, give it the parameter and pass it
+on: `def pct_exec(ctid, cmd, input=None): subprocess.run([...], input=input, ...)`. Under `set -e`
+either one ends the block having changed nothing.
 
 A SETTING GOES WHERE THE API KEEPS IT, AND A READ RETURNS A SECRET MASKED. Radarr, Sonarr and
 Prowlarr keep a download client's settings in the object's `fields` array, as
@@ -4734,6 +4741,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_program_that_uses_a_name_it_never_defines(cmds, shape_files)
     # §17.1378 — a secret set on the object instead of in the `fields` array the API
     # keeps it in, and a `/test` endpoint handed a body it validates and rejects.
+    # §17.1379 — and a call its own function rejects at call time.
+    refused = refused + a_call_its_own_function_cannot_accept(cmds, shape_files)
     refused = refused + a_credential_set_where_the_api_does_not_keep_it(cmds, shape_files)
     refused = refused + a_validating_endpoint_sent_an_empty_body(cmds, shape_files)
     try:
@@ -5346,6 +5355,123 @@ _HEREDOC_PY_RE = re.compile(
     re.S)
 
 
+def _inline_programs(commands: list[str],
+                     files: Optional[list[dict]] = None) -> list[tuple]:
+    r"""§17.1379 — every Python program this block runs, as (label, source).
+
+    §17.1377 judged only `python3 - <<'EOF'` heredocs, so the same defect in a
+    `.py` file went unjudged -- and a file is the shape FILE_RULES RECOMMENDS.
+    Live, 2026-10-05: ADD132's next draft was `/tmp/fix_download_clients.py`,
+    4,169 bytes, and the undefined-name gate looked straight past it. One
+    extractor now, so a program-level judgment cannot see one shape and miss the
+    other ([[feedback_sibling_call_sites_drift]]).
+    """
+    import ast
+    out: list[tuple] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for m in _HEREDOC_PY_RE.finditer(t):
+            out.append((f"python3 <<{m.group('tag')}", m.group("body")))
+    run_text = "\n".join(texts)
+    for f in files or []:
+        path = str((f or {}).get("path") or "")
+        body = str((f or {}).get("content") or "")
+        if not body.strip():
+            continue
+        runs = path.endswith(".py") or (
+            path and re.search(rf"python3?\s+{re.escape(path)}(?![\w/])", run_text))
+        if not runs:
+            continue
+        try:
+            ast.parse(body)
+        except SyntaxError:
+            continue                           # not ours to judge
+        out.append((path or "the program", body))
+    return out
+
+
+def a_call_its_own_function_cannot_accept(
+        commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1379 — a call the program's OWN function rejects at call time.
+
+    Live, 2026-10-05. §17.1378's rules worked: ADD132's next draft set the
+    password inside the `fields` entry and POSTed the whole object to `/test`.
+    Then it did this:
+
+        def pct_exec(ctid, cmd):
+            return run(["pct", "exec", str(ctid), "--", "sh", "-c", cmd])
+        …
+        def api_put(ctid, port, key, path, body):
+            r = pct_exec(ctid, "curl … -d @- …", input=body)
+
+    `pct_exec` takes two arguments. Measured by running it:
+
+        TypeError: pct_exec() got an unexpected keyword argument 'input'
+
+    at BOTH call sites, so the block dies at the first Radarr PUT having changed
+    nothing. Only the program's own functions are judged -- an imported or builtin
+    callable has a signature this gate does not know -- and a `**kwargs` or a
+    `*args` in the definition, or a `*`/`**` at the call, makes it say nothing.
+    """
+    out: list[dict] = []
+    for label, src in _inline_programs(commands, files):
+        for name, detail, line, kind in _calls_the_signature_rejects(src):
+            out.append({"command": f"{label}: line {line}, {name}(…)", "why": (
+                (f"`{name}()` is called with a keyword argument `{detail}` that its own "
+                 f"definition in this program does not accept"
+                 if kind == "keyword" else
+                 f"`{name}()` is called with {detail} positional arguments and its own "
+                 f"definition in this program takes fewer")
+                + ", so Python raises TypeError the moment that line runs and the block "
+                  "stops there having changed nothing. MEASURED live (§17.1379) on exactly "
+                  "this shape: `def pct_exec(ctid, cmd)` called as "
+                  "`pct_exec(ctid, cmd, input=body)` gave `TypeError: pct_exec() got an "
+                  "unexpected keyword argument 'input'` at both call sites, after the draft "
+                  "had everything else right. Either give the function the parameter and "
+                  "pass it on to `subprocess.run`, or stop passing it.")})
+    return out
+
+
+def _calls_the_signature_rejects(src: str) -> list[tuple]:
+    """§17.1379 — (name, detail, line, kind) for each call a local def rejects."""
+    import ast
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []
+    sigs: dict = {}
+    for n in ast.walk(tree):
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        a = n.args
+        if n.name in sigs:
+            sigs[n.name] = None                # redefined: do not judge
+            continue
+        sigs[n.name] = {
+            "pos": [x.arg for x in list(getattr(a, "posonlyargs", [])) + list(a.args)],
+            "kwonly": [x.arg for x in a.kwonlyargs],
+            "vararg": a.vararg is not None,
+            "kwarg": a.kwarg is not None,
+        }
+    out: list[tuple] = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)):
+            continue
+        sig = sigs.get(n.func.id)
+        if not sig:
+            continue
+        if any(isinstance(x, ast.Starred) for x in n.args) or \
+                any(k.arg is None for k in n.keywords):
+            continue                           # splatted: the shape is unknowable
+        for kw in n.keywords:
+            if not sig["kwarg"] and kw.arg not in sig["pos"] + sig["kwonly"]:
+                out.append((n.func.id, kw.arg, n.lineno, "keyword"))
+        if not sig["vararg"] and len(n.args) > len(sig["pos"]):
+            out.append((n.func.id, str(len(n.args)), n.lineno, "positional"))
+    return out
+
+
 def a_program_that_uses_a_name_it_never_defines(commands: list[str],
                                                 files: list[dict] | None) -> list[dict]:
     r"""§17.1377 — an inline Python program referencing a name it never imports.
@@ -5368,16 +5494,14 @@ def a_program_that_uses_a_name_it_never_defines(commands: list[str],
     targets, and arguments all count as defined.
     """
     out: list[dict] = []
-    texts = [str(c) for c in commands or []] + \
-            [str((f or {}).get("content") or "") for f in files or []]
-    for t in texts:
-        for m in _HEREDOC_PY_RE.finditer(t):
-            body = m.group("body")
+    # §17.1379 — a program is a program wherever it lives: a heredoc, or a `.py`
+    # file in the channel, which is the shape FILE_RULES recommends.
+    for label, body in _inline_programs(commands, files):
             missing = _undefined_names(body)
             if not missing:
                 continue
             first = body.strip().split("\n")[0][:60]
-            out.append({"command": f"python3 <<{m.group('tag')} … ({first} …)",
+            out.append({"command": f"{label} … ({first} …)",
                         "why": (
                 f"this inline Python program uses {', '.join('`' + n + '`' for n in missing)} "
                 f"and never imports or assigns {'them' if len(missing) > 1 else 'it'}, so it "
