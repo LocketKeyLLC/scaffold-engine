@@ -221,8 +221,12 @@ def test_the_rules_no_longer_show_the_host_writing_what_a_guest_reads():
     assert "python3 /tmp/body.py | pct exec" in FILE_RULES
 
 
-def test_the_rules_teach_the_heredoc_import_rule():
-    assert "A HEREDOC IS A WHOLE PROGRAM" in FILE_RULES
+def test_the_rules_teach_the_import_rule_for_every_program_shape():
+    """§17.1379 widened this from "A HEREDOC IS A WHOLE PROGRAM": the same rule
+    has to cover a `.py` file, because that is the shape these rules recommend."""
+    assert "A PROGRAM IS A WHOLE PROGRAM" in FILE_RULES
+    assert "in a heredoc or in a `.py` file" in FILE_RULES
+    assert "every name it uses it must import" in FILE_RULES
 
 
 def test_the_rules_own_recommended_shapes_pass_their_own_gate():
