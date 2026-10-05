@@ -693,6 +693,39 @@ python3 /tmp/add_indexers.py 10 20
 
 Ten per batch when each item waits on a remote service. A loop over batches INSIDE one script is still one
 command and is refused.
+
+A REQUEST BODY IS A FILE, NEVER A SHELL WORD. When you send JSON you did not write yourself -- an object
+you fetched and changed, anything a machine gave you -- do NOT put it in the command. One apostrophe in
+that value ends the quote and the shell dies on the next bracket. MEASURED on this host: Radarr's
+download-client object is 6,182 bytes and holds three apostrophes, because qBittorrent's own help text
+says "See Options -> Web UI -> 'Use HTTPS instead of HTTP' in qBittorrent" -- and
+`-d '{...that object...}'` died with `sh: 1: Syntax error: "(" unexpected`. Three drafts in a row died
+that way, each with different quoting.
+
+Write the body to a file and point curl at the file:
+
+## Write these files
+
+### /tmp/body.py
+```python
+import json, subprocess
+cur = json.loads(subprocess.run(["pct","exec","103","--","sh","-c",
+      "curl -s -H 'X-Api-Key: KEY' http://127.0.0.1:7878/api/v3/downloadclient/1"],
+      capture_output=True, text=True).stdout)
+cur["priority"] = 1
+open("/tmp/body.json","w").write(json.dumps(cur))
+```
+
+## Run this
+
+```bash
+python3 /tmp/body.py
+pct exec 103 -- sh -c 'curl -s --fail-with-body -X PUT -H "X-Api-Key: $KEY" -H "Content-Type: application/json" -d @/tmp/body.json http://127.0.0.1:7878/api/v3/downloadclient/1'
+```
+
+`-d @/path` and `-d @-` (with the body piped in) are the only two shapes that carry a value whose
+characters you do not control. Better still, do the whole call in Python with `urllib.request` and
+`data=json.dumps(obj).encode()`: then no shell sees the body at all.
 """
 
 
@@ -1095,9 +1128,15 @@ def _substitution_body(text: str, at: int, cap: int = 1200) -> str:
 #: here -- `-H \"X-Api-Key: $KEY\"` carries a short controlled value the engine
 #: reads off a config file, and flagging it would refuse the shape every correct
 #: draft uses. A BODY is an arbitrary document from a machine.
-_IN_A_BODY_RE = (
-    r"(?<![\w-])(?:-d|--data|--data-raw|--json)(?![\w-])\s*"
-    r"(?:'[^'\n]*\$(?:\{{)?{name}\b[^'\n]*'|\\?\"[^\"\n]*\$(?:\{{)?{name}\b[^\"\n]*\\?\")")
+#: §17.1374 — the BODY argument is whatever sits between the `-d` flag and the
+#: URL. Demanding the variable be inside one quoted word misses the quote
+#: juggling a draft really writes:
+#:     -d '"'"''"$RADARR_UPDATED"''"'"' http://127.0.0.1:7878/api/v3/x
+#: which resolves to `-d '<the whole JSON>'` for the inner shell — §17.1367's
+#: failure exactly, and invisible to a single-quoted-word pattern.
+_BODY_SPAN_RE = re.compile(
+    r"(?<![\w-])(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])"
+    r"(?P<body>.*?)(?=(?:https?://)|$)", re.S)
 #: §17.1367b — the substitution produces a WHOLE DOCUMENT, not an extracted
 #: scalar. That distinction is the rule's whole point: the live failure was a
 #: 6,182-byte JSON object in a shell word, and an id pulled out of it with
@@ -1156,7 +1195,7 @@ def a_machine_value_in_a_shell_word(commands: list[str],
     if not from_machine:
         return []
     for t in texts:
-        for ln in t.split("\n"):
+        for ln in logical_lines(t):        # §17.1373 — a continued `curl` is one command
             s = ln.strip()
             if s.startswith("#"):
                 continue
@@ -1165,7 +1204,8 @@ def a_machine_value_in_a_shell_word(commands: list[str],
                     continue
                 if not _WHOLE_DOCUMENT_RE.search(how):
                     continue                  # an extracted scalar, not a document
-                if not re.search(_IN_A_BODY_RE.format(name=re.escape(name)), ln):
+                if not any(re.search(rf"\${{?{re.escape(name)}\b", m.group("body") or "")
+                           for m in _BODY_SPAN_RE.finditer(ln)):
                     continue
                 if _NO_QUOTING_RE.search(ln):
                     continue                      # already passed without quoting
