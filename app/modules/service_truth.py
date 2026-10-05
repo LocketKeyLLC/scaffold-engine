@@ -561,11 +561,15 @@ def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
     texts = [str(c) for c in commands or []] + \
             [str((f or {}).get("content") or "") for f in files or []]
     for t in texts:
-        for seg in t.split("\n"):
-            m = _IN_GUEST_RE.search(seg)
-            if not m:
+        # §17.1376 — the mirrored question, through the same resolver. Asked with
+        # its own `pct exec N` line regex this gate was BLIND to a helper-dispatched
+        # block: no refusal rather than a wrong one. Only a line whose guest is
+        # KNOWN can be judged -- SOME_GUEST means the text does not say which.
+        where = where_each_line_runs(t)
+        for i, seg in enumerate(t.split("\n"), 1):
+            here = where.get(i, THE_HOST)
+            if here in (THE_HOST, SOME_GUEST):
                 continue
-            here = m.group("gid")
             mine = by_guest.get(here) or []
             for s in services:
                 if s.guest == here or not (s.ports or s.data_dir):
@@ -603,6 +607,309 @@ _LOOPBACK_PORT_RE = re.compile(
 _WRAPPED_RE = re.compile(r"(?<![\w-])(?:pct\s+exec|qm\s+guest\s+exec|lxc-attach)\b", re.I)
 #: §17.1368 — a shell PROMPT: these lines are a record of a session, not a draft
 _PROMPT_RE = re.compile(r"^[a-z_][\w.-]*@[\w.-]+:[^\n]*[#$]\s", re.M | re.I)
+
+#: §17.1376 — a guest wrapper spelled as an ARGV list rather than a shell word:
+#: `["pct", "exec", str(ctid), "--", "sh", "-c", cmd]`, `["lxc-attach","-n",…]`.
+_ARGV_EXEC_RE = re.compile(
+    r"""["']pct["']\s*,\s*["']exec["']"""
+    r"""|["']lxc-attach["']\s*,\s*["']-n["']"""
+    r"""|["']qm["']\s*,\s*["']guest["']\s*,\s*["']exec["']""")
+#: §17.1376 — a shell function head: `in_guest() {`, `function in_guest {`.
+_SH_FUNC_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[A-Za-z_]\w*)\s*(?:\(\)\s*)?\{\s*$")
+#: §17.1376 — the HOST runs a line unless something puts it inside a guest.
+THE_HOST = ""
+#: §17.1376 — inside a guest, but which one is not decidable from the text.
+SOME_GUEST = "?"
+
+
+def _dispatchers_in_python(src: str) -> dict:
+    """§17.1376 — functions in a PYTHON block that run their argument in a guest.
+
+    `pct_exec` carries the literal argv; `api_get`/`api_put`/`read_api_key` reach
+    the guest only by calling it, so membership is a FIXPOINT, not a scan. Returns
+    {name: index of the parameter that names the guest, or None}.
+    """
+    import ast
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return _dispatchers_in_text(src)       # §17.1376b — fenced or mixed text
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef,
+                                                                 ast.AsyncFunctionDef))}
+    found: dict = {}
+    for name, node in funcs.items():
+        seg = ast.get_source_segment(src, node) or ""
+        if _ARGV_EXEC_RE.search(seg) or _WRAPPED_RE.search(seg):
+            found[name] = _guest_param_index(node, seg)
+    changed = True
+    while changed:                      # a caller of a dispatcher is a dispatcher
+        changed = False
+        for name, node in funcs.items():
+            if name in found:
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id in found):
+                    found[name] = _guest_param_index(node,
+                                                     ast.get_source_segment(src, node) or "")
+                    changed = True
+                    break
+    return found
+
+
+def _py_funcs_in_text(text: str) -> dict:
+    """§17.1376b — `def name(args):` and its indented body, without parsing.
+
+    A model's answer is markdown around code, and a shell block can carry a Python
+    heredoc, so `ast.parse` fails on most real text. The question "which machine
+    runs this line" must still have an answer there: measured on the 318-trace
+    corpus, the AST-only resolver left 10 traces of this same false positive
+    standing, every one of them a helper-shaped draft inside a fence.
+    """
+    lines = text.split("\n")
+    out: dict = {}
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(?P<ind>\s*)(?:async\s+)?def\s+(?P<name>\w+)\s*\((?P<args>[^)]*)\)",
+                     ln)
+        if not m:
+            continue
+        ind = len(m.group("ind"))
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= ind:
+                break
+            j += 1
+        args = [a.split(":")[0].split("=")[0].strip()
+                for a in m.group("args").split(",") if a.strip()]
+        args = [a for a in args if a not in ("self", "cls") and not a.startswith("*")]
+        out[m.group("name")] = {"args": args, "span": (i + 1, j),
+                                "body": "\n".join(lines[i:j])}
+    return out
+
+
+def _dispatchers_in_text(text: str) -> dict:
+    """§17.1376b — the same fixpoint as the AST path, over text-found functions."""
+    funcs = _py_funcs_in_text(text)
+    found: dict = {}
+    for name, f in funcs.items():
+        if _ARGV_EXEC_RE.search(f["body"]) or _WRAPPED_RE.search(f["body"]):
+            found[name] = _guest_arg_index(f["args"])
+    changed = True
+    while changed:
+        changed = False
+        for name, f in funcs.items():
+            if name in found:
+                continue
+            if any(re.search(rf"(?<![\w.]){re.escape(d)}\s*\(", f["body"])
+                   for d in list(found)):
+                found[name] = _guest_arg_index(f["args"])
+                changed = True
+    return found
+
+
+def _guest_arg_index(args: list):
+    """§17.1376 — which argument names the guest: by NAME first, position as fallback."""
+    for i, a in enumerate(args):
+        if re.search(r"(?:^|_)(?:ct|ctid|cid|vmid|gid|guest|container|vm)(?:id)?$", a, re.I):
+            return i
+    return 0 if args else None
+
+
+def _guest_param_index(node, seg: str):
+    """Which parameter of this function names the guest — by NAME, not by position.
+
+    `pct_exec(ctid, cmd)` and `api_get(ctid, port, key, path)` both carry it first,
+    but nothing guarantees that, so the parameter whose name reads like a guest id
+    wins and position is only the fallback.
+    """
+    return _guest_arg_index([a.arg for a in getattr(node.args, "args", [])])
+
+
+def where_each_line_runs(text: str) -> dict:
+    """§17.1376 — for each 1-based line of a block: which machine runs it.
+
+    `THE_HOST` (""), a guest id ("103"), or `SOME_GUEST` ("?") when the text says
+    a guest but not which. Every gate that needs the answer asks HERE, because
+    each one that asked with its own line regex got a different answer.
+
+    Live, 2026-10-05: §17.1375 taught the drafter to send a request body through a
+    file, and ADD132's next draft did the whole job in Python — one `pct_exec`
+    helper wrapping `subprocess.run(["pct","exec",str(ctid),…])`, and
+    `api_get`/`api_put` on top of it. §17.1368 read the source line by line, saw
+    `http://127.0.0.1:{port}` with no `pct exec` beside it, and refused three
+    correct calls; §17.1358, asking the mirrored question the same way, went blind.
+    The machine a line runs on is a property of the BLOCK, not of the line.
+    """
+    lines = text.split("\n")
+    where: dict = {}
+    for i, ln in enumerate(lines, 1):
+        m = _IN_GUEST_RE.search(ln)
+        if m:
+            where[i] = m.group("gid")
+        elif _WRAPPED_RE.search(ln) or _ARGV_EXEC_RE.search(ln):
+            where[i] = SOME_GUEST
+    for name, span, gid in _dispatch_calls(text):
+        for i in range(span[0], span[1] + 1):
+            if where.get(i) in (None, SOME_GUEST):
+                where[i] = gid
+    for i, gid in _lines_feeding_dispatch(text, _dispatchers_in_python(text)):
+        if where.get(i) in (None, SOME_GUEST):
+            where[i] = gid
+    return where
+
+
+def _dispatch_calls(text: str) -> list:
+    """§17.1376 — every call to a guest-dispatching helper: (name, (first, last), guest)."""
+    out: list = []
+    py = _dispatchers_in_python(text)
+    if py:
+        import ast
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            tree = None
+            out.extend(_dispatch_calls_in_text(text, py))
+        for node in ast.walk(tree) if tree else []:
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            idx = py.get(node.func.id, False)
+            if idx is False:
+                continue
+            gid = SOME_GUEST
+            if idx is not None and len(node.args) > idx:
+                a = node.args[idx]
+                if isinstance(a, ast.Constant) and isinstance(a.value, (int, str)):
+                    gid = str(a.value)
+            out.append((node.func.id, (node.lineno, node.end_lineno or node.lineno), gid))
+    for name, span in _sh_functions(text):
+        body = "\n".join(text.split("\n")[span[0] - 1:span[1]])
+        if not (_WRAPPED_RE.search(body) or _ARGV_EXEC_RE.search(body)):
+            continue
+        for i, ln in enumerate(text.split("\n"), 1):
+            if span[0] <= i <= span[1]:
+                continue                       # the definition, not a call
+            m = re.match(rf"^\s*{re.escape(name)}\s+(?P<a>\S+)", ln)
+            if not m:
+                continue
+            a = m.group("a").strip("\"'")
+            out.append((name, (i, i), a if a.isdigit() else SOME_GUEST))
+    return out
+
+
+def _dispatch_calls_in_text(text: str, dispatchers: dict) -> list:
+    """§17.1376b — a call to a dispatcher and the lines it spans, without an AST.
+
+    A call's arguments carry the text sent into the guest, and in real drafts the
+    call spans several lines, so the span is read by balancing the parentheses from
+    the opening one -- the same job `end_lineno` does on the AST path.
+    """
+    lines = text.split("\n")
+    defs = _py_funcs_in_text(text)
+    out: list = []
+    for name, idx in dispatchers.items():
+        own = (defs.get(name) or {}).get("span")
+        for m in re.finditer(rf"(?<![\w.]){re.escape(name)}\s*\(", text):
+            first = text.count("\n", 0, m.start()) + 1
+            if own and own[0] <= first <= own[1] and text[m.end() - 1:m.end()] == "(" \
+                    and re.match(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b",
+                                 lines[first - 1]):
+                continue                       # the definition, not a call
+            depth, k = 0, m.end() - 1
+            while k < len(text):
+                if text[k] == "(":
+                    depth += 1
+                elif text[k] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            last = text.count("\n", 0, min(k, len(text) - 1)) + 1
+            gid = SOME_GUEST
+            if idx is not None:
+                arg = text[m.end():k].split(",")[idx] if \
+                    len(text[m.end():k].split(",")) > idx else ""
+                a = arg.strip().strip("\"'")
+                if a.isdigit():
+                    gid = a
+            out.append((name, (first, last), gid))
+    return out
+
+
+def _lines_feeding_dispatch(text: str, dispatchers: dict) -> list:
+    """§17.1376c — lines whose TEXT flows into a guest, not lines sitting inside one.
+
+    Measured on the corpus: the drafts build the command into a variable and pass
+    it to the dispatcher on the NEXT line --
+
+        cmd = f"curl -s -H 'X-Api-Key: {key}' http://127.0.0.1:{port}/api/v3/…"
+        out = run_pct(ct, cmd)
+
+    so no call span covers the loopback and a span-only resolver still reads line 1
+    as the host's. What makes that line guest-side is that its value reaches
+    `run_pct`. The same shape in shell is `CMD=…` consumed by `pct exec N -- "$CMD"`.
+    Returns [(line number, guest)].
+    """
+    out: list = []
+    lines = text.split("\n")
+    scopes = [(f["span"], f["body"]) for f in _py_funcs_in_text(text).values()]
+    scopes.append(((1, len(lines)), text))      # module level, and shell
+    for (lo, hi), body in scopes:
+        fed: dict = {}
+        for name in dispatchers:
+            for m in re.finditer(rf"(?<![\w.]){re.escape(name)}\s*\(", body):
+                depth, k = 0, m.end() - 1
+                while k < len(body):
+                    if body[k] == "(":
+                        depth += 1
+                    elif body[k] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k += 1
+                for ident in re.findall(r"(?<![\w.])([A-Za-z_]\w*)(?!\s*[\w(])",
+                                        body[m.end():k]):
+                    fed.setdefault(ident, SOME_GUEST)
+        for i, ln in enumerate(lines[lo - 1:hi], lo):
+            # §17.1376c — a shell wrapper consumes `"$CMD"`; a Python one a bare name
+            m = re.match(r"^\s*(?:export\s+|local\s+)?(?P<v>[A-Za-z_]\w*)\s*(?:\+)?=",
+                         ln)
+            if not m:
+                continue
+            v = m.group("v")
+            if v in fed:
+                out.append((i, fed[v]))
+                continue
+            # §17.1376c — or consumed by the WRAPPER itself: `pct exec N -- "$CMD"`
+            # in shell, and `['pct','exec',str(ct),'--','sh','-c', curl_cmd]` in
+            # Python, where the variable never passes through a call's parens.
+            wrappers = "\n".join(l for l in lines[lo - 1:hi]
+                                  if _WRAPPED_RE.search(l) or _ARGV_EXEC_RE.search(l))
+            if re.search(rf"\$\{{?{re.escape(v)}\b", wrappers) or \
+                    re.search(rf"(?<![\w.$]){re.escape(v)}(?![\w(])", wrappers):
+                out.append((i, SOME_GUEST))
+    return out
+
+
+def _sh_functions(text: str) -> list:
+    """§17.1376 — shell function definitions as (name, (first line, last line))."""
+    lines = text.split("\n")
+    out: list = []
+    i = 0
+    while i < len(lines):
+        m = _SH_FUNC_RE.match(lines[i])
+        if m:
+            depth = lines[i].count("{") - lines[i].count("}")
+            j = i + 1
+            while j < len(lines) and depth > 0:
+                depth += lines[j].count("{") - lines[j].count("}")
+                j += 1
+            out.append((m.group("name"), (i + 1, min(j, len(lines)))))
+            i = j
+            continue
+        i += 1
+    return out
+
 
 
 def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
@@ -653,9 +960,14 @@ def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
         # A prompt marker says the lines already ran somewhere, and where.
         if _PROMPT_RE.search(t):
             continue
-        for ln in t.split("\n"):
+        # §17.1376 — ONE resolver answers "which machine runs this line", and it
+        # resolves the block's own helpers. A line regex could only see a literal
+        # `pct exec` beside the URL, so a Python block that wraps `pct exec` in a
+        # function had every call read as the host's.
+        runs_on = where_each_line_runs(t)
+        for i, ln in enumerate(t.split("\n"), 1):
             s_line = ln.strip()
-            if s_line.startswith("#") or _WRAPPED_RE.search(ln):
+            if s_line.startswith("#") or runs_on.get(i, THE_HOST) != THE_HOST:
                 continue                       # the guest runs this line, not the host
             hits = [(m.group("port") or m.group("p2") or "")
                     for m in _LOOPBACK_PORT_RE.finditer(ln)]
