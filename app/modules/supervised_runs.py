@@ -196,6 +196,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is already taken on this host",                # §17.1243
                    "there is no guest",                            # §17.1213
                    "has never been written",                       # §17.1288p
+                   "is not an interface on this host",             # §17.1395
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -270,6 +271,7 @@ _WHOSE_GAP: dict[str, str] = {
     "cannot resolve names": "machine",
     "nothing has put this host's key on guest": "machine",
     "has never been written": "machine",
+    "is not an interface on this host": "machine",   # §17.1395 — the NIC the step names does not exist
     "the call can only fail": "machine",
     "rewrites the whole file when it stops": "machine",
     "reaches port": "machine",

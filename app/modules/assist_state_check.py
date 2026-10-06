@@ -919,6 +919,18 @@ def render_probe_message(probes: list[dict], *, checked: int, unchecked: int,
 _NEG_HTTP_RE = re.compile(r"Cannot (?:GET|POST) /|<title>Error</title>|Connection refused|Could not resolve host|"
                           r"HTTP/[12](?:\.[01])? (?:404|500|502|503)\b|\b(?:404 Not Found|502 Bad Gateway|503 Service Unavailable)\b", re.I)
 _NEG_FS_RE = re.compile(r"No such file or directory|command not found|not installed|cannot access", re.I)
+#: §17.1393 — answers that mean ssh did NOT get in. Live, 2026-10-06, ADD137
+#: ("give the control panel an ssh key it can USE on VM 106") ran its check
+#: `pct exec 111 -- ssh … aedefruscio@192.168.1.106 true` and got
+#: `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!` -- ssh refused, exit 255 --
+#: and the model judge called it `unknown`, so §17.1233's asymmetry let the step
+#: stand as done. None of these is ambiguous: each is ssh saying the connection
+#: the step exists to prove did not happen.
+_NEG_SSH_RE = re.compile(
+    r"REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|"
+    r"Permission denied \((?:publickey|password|keyboard-interactive)|"
+    r"Connection (?:refused|timed out|closed by remote host)|No route to host|"
+    r"Could not resolve hostname|Too many authentication failures", re.I)
 
 
 def negative_evidence(command: str, output: str) -> str:
@@ -938,6 +950,13 @@ def negative_evidence(command: str, output: str) -> str:
         return f"systemctl is-active says {out.strip()!r}"
     if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and _NEG_FS_RE.search(out):
         return f"the path or command is not there: {_NEG_FS_RE.search(out).group(0)!r}"
+    # §17.1393 — ssh that did not get in. Judged only when the check IS an ssh
+    # (inside `pct exec N --` too), so a curl that mentions "Connection refused"
+    # keeps going through the curl branch above.
+    # the COMMAND must be ssh, not a word in it: `grep -c ssh /etc/services` names
+    # ssh as an argument, and the first cut of this branch read it as a connection.
+    if re.match(r"\s*(?:sudo\s+(?:-\S+\s+)*)?ssh(?![\w-])", head) and _NEG_SSH_RE.search(out):
+        return f"ssh did not get in: {_NEG_SSH_RE.search(out).group(0)!r}"
     return ""
 
 
