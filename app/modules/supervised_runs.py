@@ -1486,7 +1486,12 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
 
 
 #: §17.1257 — where a command hands source to another interpreter.
-_PY_DASH_C = re.compile(r"python[0-9.]*\s+-c\s+('[^']*'|\"[^\"]*\")")
+#: §17.1387 — a single-quoted payload may carry `'\''` (close, a literal quote,
+#: reopen), which is how a single quote gets into a single-quoted shell word and
+#: how §17.1386 pastes a read that is itself a `python3 -c '…'` program. The
+#: first cut stopped at the first `'` and handed `ast.parse` a lone backslash,
+#: so the engine refused its own correct command as "not valid Python".
+_PY_DASH_C = re.compile(r"""python[0-9.]*\s+-c\s+('[^']*'|"[^"]*")""")
 _PY_FILE_WRITE = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.py)\b", re.I)
 
 
@@ -1502,6 +1507,46 @@ def _printf_lines(cmd: str) -> Optional[list[str]]:
     return args[1:] if len(args) > 1 else []
 
 
+def _dash_c_payload(cmd: str) -> Optional[str]:
+    """§17.1387 — the source a `python -c` in ``cmd`` hands the interpreter.
+
+    A regex over the RAW text cannot read this. `'\''` is not a unit inside a
+    quoted word -- it is close-quote, escaped-quote, reopen -- and it belongs to
+    the OUTER word, so it only resolves once that word is unquoted. A pattern
+    that scans the raw command stops at the first `'` and comes back with a lone
+    backslash, which is exactly what happened: §17.1386 began pasting a read
+    that is itself a `python3 -c '…'` program, and §17.1257 refused the engine's
+    own correct command as "not valid Python ... unexpected EOF".
+
+    So the outer word is unquoted the way a shell unquotes it, and only then is
+    the payload read -- at that level the quoting is simple, because the escape
+    has already done its job. Nested shells are followed first, since the python
+    nearly always sits inside a `sh -c '…'` payload bound for a guest.
+
+    ``None`` when nothing is found or the quoting cannot be split at all; the
+    caller owns that finding.
+    """
+    import shlex
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        return None
+    for i, w in enumerate(words):
+        if w != "-c" or not i or i + 1 >= len(words):
+            continue
+        prev = words[i - 1].rsplit("/", 1)[-1]
+        if prev in ("sh", "bash", "ash", "dash"):
+            inner = _dash_c_payload(words[i + 1])
+            if inner is not None:
+                return inner
+        elif re.fullmatch(r"python[0-9.]*", prev):
+            return words[i + 1]
+    # not split into words at this level (a `$( … )` keeps the call inside one
+    # quoted word): the quoting here is already simple, so the pattern holds.
+    m = _PY_DASH_C.search(cmd)
+    return m.group(1)[1:-1] if m else None
+
+
 def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
     """``[(what it is, the Python source)]`` this command hands to an interpreter.
 
@@ -1509,9 +1554,8 @@ def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
     finding in itself.
     """
     out: list[tuple[str, Optional[str]]] = []
-    m = _PY_DASH_C.search(cmd)
-    if m:
-        out.append(("the `python -c` payload", m.group(1)[1:-1]))
+    if _PY_DASH_C.search(cmd):
+        out.append(("the `python -c` payload", _dash_c_payload(cmd)))
     target = _PY_FILE_WRITE.search(cmd)
     if target:
         lines = _printf_lines(cmd)

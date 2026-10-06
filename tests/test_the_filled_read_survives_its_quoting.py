@@ -101,3 +101,60 @@ def test_the_escaped_value_round_trips_through_a_real_shell(value):
     out = subprocess.run(["bash", "-c", filled], text=True, capture_output=True)
     assert out.returncode == 0, out.stderr
     assert out.stdout == value
+
+
+# ── §17.1387 — and the compile gate must read what the shell delivers ────────
+
+def test_the_compile_gate_accepts_the_engine_filled_command():
+    """The second half of the same live failure. §17.1386's escaping made the
+    command correct, and `payload_will_not_compile` then refused it:
+
+        the `python -c` payload is not valid Python … unexpected EOF while
+        parsing (line 1) -- '\\\\'
+
+    It had scanned the RAW text, stopped at the first `'` of `'\\''`, and
+    compiled a lone backslash. The engine refusing its own correct command is
+    worse than the original bug, because the remedy it printed was wrong too."""
+    from app.modules.supervised_runs import payload_will_not_compile
+    cmds, _v, _n = read_on_the_machine([LIVE], [], INV)
+    assert payload_will_not_compile(cmds) == []
+
+
+def test_the_payload_extracted_is_what_the_shell_delivers():
+    """Not 'it compiles' — the exact source, matching what a real shell hands
+    over (asserted against `bash` in the round-trip test above)."""
+    import ast
+    from app.modules.supervised_runs import python_payloads
+    cmds, _v, _n = read_on_the_machine([LIVE], [], INV)
+    what, src = python_payloads(cmds[0])[0]
+    assert src and src.startswith("import sqlite3")
+    assert "\\" not in src, "the escape belongs to the outer word, not the payload"
+    ast.parse(src)
+
+
+@pytest.mark.parametrize("cmd,why", [
+    ("""python3 -c 'import json; x = \\"a\\"'""", "an escaped quote inside a single-quoted payload"),
+    ("""python3 -c 'import os; print('""", "an unterminated call"),
+    ("""pct exec 103 -- sh -c 'python3 -c "import os; print("'""", "the same, one shell down"),
+])
+def test_a_real_broken_payload_is_still_refused(cmd, why):
+    """The fix must not blunt the gate: §17.1257 exists because three drafts in
+    a row shipped exactly these."""
+    from app.modules.supervised_runs import payload_will_not_compile
+    assert len(payload_will_not_compile([cmd])) == 1, why
+
+
+def test_a_valid_plain_payload_is_still_accepted():
+    from app.modules.supervised_runs import payload_will_not_compile
+    assert payload_will_not_compile(["python3 -c 'import os; print(os.getcwd())'"]) == []
+
+
+def test_an_unterminated_payload_is_not_this_gates_finding():
+    """Checked, not assumed: `python3 -c 'import os` with no closing quote
+    matches no `-c` payload at all — before this change either, since the
+    pattern has always required the closing quote. The shell parse owns an
+    unbalanced command, and a test that claimed this gate caught it would be
+    asserting a guarantee nothing provides."""
+    from app.modules.supervised_runs import payload_will_not_compile, python_payloads
+    assert python_payloads("""python3 -c 'import os""") == []
+    assert payload_will_not_compile(["""python3 -c 'import os"""]) == []
