@@ -153,6 +153,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "VALIDATES the whole resource",                   # §17.1378b
                    "does not accept",                               # §17.1379
                    "definition in this program takes fewer",        # §17.1379
+                   "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
@@ -679,15 +680,18 @@ Quotes inside quotes are fine there, because there is no shell to confuse. That 
 exists: a script built with `printf '%s\n' '…'` has to escape its own quotes, and an escaped quote inside a
 single-quoted shell word is a literal backslash the interpreter then refuses. Use the section, and the
 problem cannot happen. Files are written before the commands run, in the order you list them, and the
-engine compiles a `.py` file before offering it -- so a syntax error is caught before the operator is asked.
+engine TYPE-CHECKS every program you write here -- in a `.py` file or in a heredoc -- before the operator
+is asked, so a name nothing imports, a call its own `def` rejects, and a syntax error are all caught here
+and come back to you as a refusal rather than reaching the machine.
 
 BATCHING ON THIS CHANNEL (one command is one 180-second budget): a script that works through a list a
 service returned MUST take its slice bounds as arguments and be run once per batch -- write it ONCE, then
 list one command per batch:
 
 ```python
-import sys
+import json, sys
 start, end = int(sys.argv[1]), int(sys.argv[2])
+items = json.load(open("/tmp/indexers.json"))     # the list the service returned
 for item in items[start:end]:
     ...   # one item, with (urllib.error.URLError, TimeoutError, OSError) caught and recorded as unreachable
 ```
@@ -770,6 +774,8 @@ it with, so `downloadclient/test` answered `Authentication Failure` and the stor
 WORSE than before the run. Set it in place, and never PUT back a secret you only read:
 
 ```python
+import json, os, sys                  # a program is whole: import every name it uses
+
 obj = json.load(sys.stdin)            # GET -- obj["fields"] password is "********"
 for f in obj["fields"]:
     if f["name"] == "username":
@@ -4745,6 +4751,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_call_its_own_function_cannot_accept(cmds, shape_files)
     refused = refused + a_credential_set_where_the_api_does_not_keep_it(cmds, shape_files)
     refused = refused + a_validating_endpoint_sent_an_empty_body(cmds, shape_files)
+    # §17.1380 — and the GENERAL check behind those two specific ones: the type
+    # checker the engine already runs on its own source, run on the program the
+    # engine writes for the operator's machines. Fed from the one extractor
+    # (§17.1379) so it cannot see a shape the others miss.
+    from app.modules.program_check import a_program_the_type_checker_says_will_raise
+    refused = refused + a_program_the_type_checker_says_will_raise(
+        _inline_programs(cmds, shape_files))
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
