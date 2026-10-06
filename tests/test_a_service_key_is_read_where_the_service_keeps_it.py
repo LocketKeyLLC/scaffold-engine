@@ -109,7 +109,10 @@ def test_the_jellyfin_read_fails_loudly_when_there_is_no_key():
     and comes back 401, which reads as a WRONG key rather than a missing one."""
     body = readable_for("JELLYFIN_API_KEY").read(None)
     assert "sys.exit(" in body
-    assert "ApiKeys is empty" in body
+    # §17.1392 — the read is scoped to the engine's OWN key now, so "empty"
+    # became "has no scaffold-engine key": on this host the first row belonged
+    # to RADARR, and returning it is what leaked a service's credential.
+    assert "no scaffold-engine key" in body
 
 
 def test_the_arr_read_is_unchanged():

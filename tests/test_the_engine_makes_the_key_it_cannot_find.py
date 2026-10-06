@@ -119,14 +119,18 @@ def test_the_create_stops_the_service_and_starts_it_again():
     assert body.index("INSERT") < body.index('"start"')
 
 
-def test_the_create_prints_an_existing_key_and_changes_nothing():
-    """Idempotent, because approving it twice must not make two keys. MEASURED
-    against a real table: the second run printed the same token and left one
-    row."""
+def test_the_create_is_idempotent_and_prints_no_token():
+    """Idempotent, because approving it twice must not make two keys. §17.1392
+    changed two things: it looks for the engine's OWN key (a create that
+    returned early because SOME key existed would hand back another service's),
+    and it prints no token at all — printing one is how the value reached a run
+    output, then §17.1366's carry-forward, then the model."""
     body = mv._JELLYFIN_CREATE
-    assert "SELECT AccessToken FROM ApiKeys" in body
-    assert body.index("SELECT AccessToken") < body.index("INSERT")
+    assert "SELECT 1 FROM ApiKeys WHERE Name=?" in body
+    assert body.index("SELECT 1 FROM ApiKeys") < body.index("INSERT")
     assert "sys.exit(0) if have else None" in body
+    assert "print(tok)" not in body
+    assert "scaffold-engine key created" in body
 
 
 def test_the_create_is_work_not_a_check():

@@ -59,8 +59,8 @@ _JELLYFIN_DB = "/var/lib/jellyfin/data/jellyfin.db"
 _JELLYFIN_READ = (
     "python3 -c 'import sqlite3,sys;"
     f"r=sqlite3.connect(\"file:{_JELLYFIN_DB}?mode=ro\",uri=True)"
-    ".execute(\"SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1\").fetchone();"
-    "print(r[0]) if r else sys.exit(\"jellyfin holds no API key: ApiKeys is empty\")'"
+    ".execute(\"SELECT AccessToken FROM ApiKeys WHERE Name=? ORDER BY rowid DESC LIMIT 1\",(\"scaffold-engine\",)).fetchone();"
+    "print(r[0]) if r else sys.exit(\"jellyfin has no scaffold-engine key: create one, and never read a key belonging to another service\")'"
 )
 
 
@@ -519,8 +519,8 @@ _JELLYFIN_CREATE = (
     f"p=\"{_JELLYFIN_DB}\";"
     "c=sqlite3.connect(p);"
     "cols=[r[1] for r in c.execute(\"PRAGMA table_info(ApiKeys)\")];"
-    "have=c.execute(\"SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1\").fetchone();"
-    "print(have[0]) if have else None;"
+    "have=c.execute(\"SELECT 1 FROM ApiKeys WHERE Name=? LIMIT 1\",(\"scaffold-engine\",)).fetchone();"
+    "print(\"jellyfin already has a scaffold-engine key\") if have else None;"
     "sys.exit(0) if have else None;"
     "tok=secrets.token_hex(16);"
     "vals={\"AccessToken\":tok,\"Name\":\"scaffold-engine\",\"AppName\":\"scaffold-engine\","
@@ -536,7 +536,7 @@ _JELLYFIN_CREATE = (
     "[vals[x] for x in use]);"
     "c.commit();"
     "subprocess.run([\"systemctl\",\"start\",\"jellyfin\"],check=True);"
-    "print(tok)'"
+    "print(\"jellyfin: scaffold-engine key created\")'"
 )
 
 

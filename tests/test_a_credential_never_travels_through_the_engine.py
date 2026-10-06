@@ -133,3 +133,49 @@ def test_it_is_wired_and_classified():
 def test_the_refusal_drives_a_redraft():
     refused = a_credential_written_as_a_literal([LIVE])
     assert refused and sr.shape_retry_note({"kind": "run", "refused": refused})
+
+
+# ── §17.1392 — and the engine reads its OWN key, never a service's ──────────
+
+def test_the_read_is_scoped_to_the_engines_own_key():
+    """The root cause of the leak, found by rotating it. The read was
+    `ORDER BY rowid LIMIT 1` — the FIRST row — and on this host row 1 was
+    Radarr's key, created 2026-08-31 for Radarr's post-import Jellyfin rescan.
+    So the engine read, printed and circulated a credential belonging to a
+    service it was only talking to. After the rotation the first row became
+    SONARR's, so the next read would have taken that one."""
+    from app.modules.machine_values import readable_for
+    body = readable_for("JELLYFIN_API_KEY").read(None)
+    # bound as a PARAMETER, not quoted: a single quote inside this payload closes
+    # the `sh -c '…'` around it, which is §17.1386 — and the first spelling of
+    # this fix reintroduced exactly that, caught by §17.1386's own tests.
+    assert "WHERE Name=?" in body and '"scaffold-engine"' in body
+    assert "'" not in body.split("python3 -c ", 1)[1][1:-1], "no single quote survives the shell"
+    assert "ORDER BY rowid LIMIT 1" not in body, "the first row is whatever service got there first"
+
+
+def test_the_read_refuses_rather_than_borrowing_another_services_key():
+    """MEASURED against a real table holding only a `radarr` key: the read exits
+    1 with the remedy, where it used to return that key. Failing is correct —
+    succeeding by borrowing another service's credential is the defect."""
+    from app.modules.machine_values import readable_for
+    body = readable_for("JELLYFIN_API_KEY").read(None)
+    assert "another service" in body and "no scaffold-engine key" in body
+    assert "sys.exit" in body
+
+
+def test_the_create_is_idempotent_on_its_own_key_not_any_key():
+    """Coupled to the read: a create that returns early because SOME key exists
+    would hand back another service's, which is the same leak one call over."""
+    from app.modules.machine_values import _JELLYFIN_CREATE
+    assert "SELECT 1 FROM ApiKeys WHERE Name=?" in _JELLYFIN_CREATE
+    assert "SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1" not in _JELLYFIN_CREATE
+
+
+def test_the_create_prints_no_token():
+    """§17.1391's masker catches a token after a credential HEADER; a bare token
+    on its own line is not masked, and the create printing one is how the value
+    reached a run output, then §17.1366's carry-forward, then the model."""
+    from app.modules.machine_values import _JELLYFIN_CREATE
+    assert "print(tok)" not in _JELLYFIN_CREATE
+    assert "scaffold-engine key created" in _JELLYFIN_CREATE
