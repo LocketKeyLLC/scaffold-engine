@@ -244,6 +244,26 @@ def test_the_refusal_drives_a_redraft():
     assert sr.shape_retry_note({"kind": "run", "refused": refused})
 
 
+def test_the_unit_lane_decides_deps_against_the_merge_base():
+    """§17.1380c — a new runtime dependency only reaches the unit lane if that
+    lane notices the deps changed. On a push event it compared against the
+    BRANCH's previous commit, so a dep added in commit 1 read as unchanged on
+    commit 2 and the lane pulled the image built from main's deps. Measured: the
+    push run failed eight tests over a dependency the branch had declared, while
+    the pull_request run for the same SHA passed."""
+    wf = pathlib.Path(__file__).parents[1] / ".github" / "workflows" / "test.yml"
+    if not wf.exists():
+        pytest.skip("workflows not available inside the container lane")
+    body = wf.read_text()
+    assert "git merge-base FETCH_HEAD HEAD" in body
+    # the ASSIGNMENT, not the words: the comment above the fix names the old
+    # expression on purpose, and a gate that matches prose instead of code is
+    # §17.1040's defect.
+    assert "base='${{ github.event.before }}'" not in body, (
+        "the push-event baseline is the branch's previous commit, which cannot "
+        "answer whether THIS BRANCH's deps differ from the prebuilt image")
+
+
 def test_mypy_is_pinned_as_a_runtime_dependency():
     """Host-only: the test images carry app/, tests/ and the Makefile, not the
     requirements files (the same reason `test_infra_scaffolding` skips its

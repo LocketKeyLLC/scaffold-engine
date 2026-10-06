@@ -112,7 +112,20 @@ jobs:
         id: deps
         run: |
           base='${{ github.event.pull_request.base.sha }}'
-          [ -z "$base" ] && base='${{ github.event.before }}'
+          # §17.1380c — on a PUSH event `github.event.before` is the BRANCH's
+          # previous commit, not the base. A dependency added in commit 1 of a
+          # branch therefore reads as "deps unchanged" on commit 2, and the run
+          # pulls the prebuilt image built from MAIN's deps. MEASURED: §17.1380
+          # pinned mypy in commit 1; the push run for commit 2 (a .dockerignore
+          # and test-only change) pulled the prebuilt image and failed eight
+          # tests for a dependency the branch had already declared, while the
+          # pull_request run for the same SHA built locally and passed. The
+          # merge base with the default branch is the only baseline that answers
+          # "do THIS BRANCH's deps differ from what the prebuilt image holds".
+          if [ -z "$base" ]; then
+            git fetch --no-tags origin "${{ github.event.repository.default_branch }}" || true
+            base=$(git merge-base FETCH_HEAD HEAD 2>/dev/null || echo '')
+          fi
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"   # dispatch / first push → build to be safe
           elif git diff --name-only "$base" HEAD -- requirements.txt requirements-ci.txt requirements-dev.txt Dockerfile | grep -q .; then
