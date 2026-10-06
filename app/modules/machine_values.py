@@ -143,6 +143,33 @@ def guest_for(app: str, inventory: Optional[dict]) -> Optional[str]:
     return hits[0] if len(hits) == 1 else None
 
 
+def _for_context(value: str, command: str, placeholder: str) -> str:
+    """§17.1386 — ``value``, safe to paste where ``placeholder`` sits in ``command``.
+
+    Live, 2026-10-06: the engine filled a Jellyfin key into
+
+        pct exec 101 -- sh -c 'curl … -H "X-Emby-Token: <JELLYFIN_API_KEY>" …'
+
+    and the read it pasted was `$(python3 -c 'import sqlite3,…')`. The read's
+    first single quote CLOSED the payload, and the runner answered
+
+        bash: -c: line 1: syntax error near unexpected token `('
+
+    having changed nothing. §17.1342 dodged this by writing the *arr extract
+    with double quotes only, and that discipline does not survive a read that is
+    a program with its own string literals. So the quoting is settled HERE,
+    once, for every service: inside a single-quoted word, each `'` becomes
+    `'\''` — close, a literal quote, reopen — which is what `_sq` does for a
+    whole word.
+    """
+    before = command.split(placeholder)[0]
+    # an ODD number of single quotes before the placeholder means it sits inside
+    # a single-quoted word.
+    if before.count("'") % 2 == 0:
+        return value
+    return value.replace("'", "'\\''")
+
+
 def read_on_the_machine(commands: list[str], verify: list[str],
                         inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
     """Substitute every machine-readable placeholder in the COMMANDS and the
@@ -186,7 +213,14 @@ def read_on_the_machine(commands: list[str], verify: list[str],
         for seq in (out_cmds, out_verify):
             for i, c in enumerate(seq):
                 if ph in c and addresses_guest(c, gid):
-                    seq[i] = c.replace(ph, inside)
+                    # §17.1386 — the read is inserted into a payload that is
+                    # usually `sh -c '…'`, and a single quote in the read closes
+                    # that payload. §17.1342 avoided it by writing the *arr
+                    # extract with double quotes only; Jellyfin's read is a
+                    # python program whose own strings need quotes, so the
+                    # SUBSTITUTION escapes for the context instead of every
+                    # future read having to dodge it.
+                    seq[i] = c.replace(ph, _for_context(inside, c, ph))
                     hit = True
         if not hit:
             logger.info("machine_values: %s needs the call to run inside guest %s -- left as an input",
