@@ -155,6 +155,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "definition in this program takes fewer",        # §17.1379
                    "cannot witness the work",                       # §17.1382
                    "identifies nothing",                            # §17.1382b
+                   "which does not hold one",                       # §17.1383
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
@@ -816,6 +817,41 @@ for f in obj["fields"]:
 obj["priority"] = 1                   # `priority` IS a key of the object; `fields` names are not
 print(json.dumps(obj))
 ```
+
+A SERVICE'S API KEY IS READ WHERE THAT SERVICE KEEPS IT, and the engine will fill it in for you:
+write `<RADARR_API_KEY>`, `<SONARR_API_KEY>`, `<PROWLARR_API_KEY>` or `<JELLYFIN_API_KEY>` in a
+command or a check that already runs inside that guest and the read is substituted before you are
+asked for anything. In a FILE the engine leaves alone, so write the read yourself -- and the two
+families are NOT the same shape:
+
+```python
+import subprocess
+
+# radarr / sonarr / prowlarr / lidarr / readarr / whisparr -- an element in config.xml
+ARR_KEY_CMD = r"sed -n 's:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p' /var/lib/radarr/config.xml | head -1"
+
+# jellyfin -- a ROW in its own SQLite database, and there is no <ApiKey> element
+# anywhere under /etc/jellyfin (measured: database.xml encoding.xml
+# logging.default.json logging.json network.xml system.xml). The guest's own
+# python3 reads it with nothing installed.
+JF_KEY_CMD = (
+    "python3 -c 'import sqlite3;"
+    'print(sqlite3.connect("file:/var/lib/jellyfin/data/jellyfin.db?mode=ro",uri=True)'
+    '.execute("SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1").fetchone()[0])'
+    "'"
+)
+
+def guest_key(ctid, cmd):
+    r = subprocess.run(["pct", "exec", str(ctid), "--", "sh", "-c", cmd],
+                       capture_output=True, text=True)
+    key = r.stdout.strip()
+    if not key:
+        raise SystemExit(f"no API key from {ctid}: {r.stderr.strip()}")
+    return key
+```
+
+Never grep `<ApiKey>` out of a Jellyfin file: it returns nothing, the header goes out empty, and the
+answer is a 401 that reads like a wrong key rather than one that was never there.
 
 A `/test` ENDPOINT VALIDATES THE WHOLE RESOURCE. `-d '{}'` to `…/api/v3/downloadclient/test` answers
 `'Name' must not be empty`, `'Implementation' must not be empty`, `'Config Contract' must not be
@@ -4181,6 +4217,14 @@ _VAR_BIND_RE = re.compile(
     r"|\bselect\s+(?P<sel>[A-Za-z_][A-Za-z0-9_]*)\s+in\b"
     r"|\bread\b(?:\s+-\S+)*\s+(?P<read>[A-Za-z_][A-Za-z0-9_]*)"
     r"|\b(?:local|declare|typeset)\s+(?P<loc>[A-Za-z_][A-Za-z0-9_]*)")
+#: §17.1383 — `TITLE="$TITLE"`, `TITLE=$TITLE`, `TITLE="${TITLE}"`: an assignment
+#: whose whole value is a reference to the SAME name. It sets the name to
+#: whatever the name already was, which for a name nothing else provides is the
+#: empty string — so the gate that asks "does anything set this?" must not count
+#: it. Anchored at the name, so it is matched against the tail from `name`.
+_SELF_ASSIGN_RE = re.compile(
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<q>[\"']?)\$\{?(?P=name)\}?(?P=q)(?:$|[\s;&|)])")
+
 #: names the shell or the runner always provides
 _SHELL_VARS = frozenset({
     "HOME", "PATH", "USER", "LOGNAME", "PWD", "OLDPWD", "SHELL", "TERM", "LANG", "LC_ALL", "TMPDIR",
@@ -4246,7 +4290,18 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
     file_by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
     out: list[dict] = []
     def _assigned_in(blobs: list) -> set:
-        out_set = {m.group("name") for b in blobs for m in _VAR_SET_RE.finditer(b)}
+        out_set = {m.group("name") for b in blobs for m in _VAR_SET_RE.finditer(b)
+                   # §17.1383 — `TITLE="$TITLE"` assigns the name FROM ITSELF, so
+                   # it satisfies this gate while passing nothing in. Live,
+                   # 2026-10-06: ADD134's command opened
+                   # `TITLE="$TITLE" RADARR_API_KEY="$RADARR_API_KEY" … python3
+                   # /tmp/chain_proof.py` with `inputs: []`, and the program's
+                   # first line is `os.environ["TITLE"]` -- so it would have
+                   # searched Radarr for the empty string. A secret the RUNNER
+                   # resolves is the §17.1191 contract and is covered by `have`
+                   # below, which is why only the self-reference is discounted
+                   # here and not the shape.
+                   if not _SELF_ASSIGN_RE.match(b[m.start("name"):])}
         out_set |= {g for b in blobs for m in _VAR_BIND_RE.finditer(b)
                     for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
         return out_set
@@ -4793,6 +4848,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # identifying field sent as 0 by a draft that had nowhere to get it.
     refused = refused + a_check_that_proves_nothing(verify)
     refused = refused + an_id_sent_as_zero(cmds, shape_files)
+    # §17.1383 — and the block must read a service's key where that service
+    # keeps it: the substitution leaves a written file alone, so a draft that
+    # rolls its own read can roll the wrong one.
+    refused = refused + _mv.reads_a_key_where_the_service_does_not_keep_it(cmds, shape_files)
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
