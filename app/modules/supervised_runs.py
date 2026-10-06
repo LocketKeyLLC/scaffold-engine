@@ -4860,6 +4860,15 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # check looked at the file and not at the section. A block with none is recorded
     # done on exit codes alone, which is how a step "succeeds" having changed
     # nothing that matters. Live, ADD131 was drafted with `verify: []`.
+    # §17.1388 — before refusing a block for having no check, see whether the
+    # engine can WRITE one. It knows the service, the key and the read; until
+    # now it could only describe the check in a refusal and ask a drafter that
+    # would not take it. Never silent: it lands in `engine_fixed` like every
+    # other correction (§17.1270).
+    if cmds and not verify:
+        for _chk, _why in _mv.a_check_the_engine_can_write(cmds, inventory):
+            verify = list(verify) + [_chk]
+            _repairs = list(_repairs) + [{"why": _why}]
     if cmds and not verify:
         refused = refused + [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "

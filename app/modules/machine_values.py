@@ -617,3 +617,54 @@ def a_host_program_needs_a_key_only_the_guest_can_read(
                 f"## Run this (it changes the machine, so it is work, not a check):\n\n    "
                 f"{create_key_on_the_machine(app, '<gid>')}")})
     return out
+
+
+# ── §17.1388: the engine writes the check it already knows ───────────────────
+
+#: §17.1388 — how to read a service's own state back, for a service whose key
+#: the engine can read. One entry per service, like everything else in the
+#: registry: the engine knows the service, the key and the read, so the check is
+#: the one thing it was still only DESCRIBING.
+_CONFIRM: dict[str, tuple[str, str]] = {
+    # (the inner payload, with {key} where the key read goes; what it shows)
+    "jellyfin": (
+        'curl -s --fail-with-body -H "X-Emby-Token: $({key})" '
+        '"http://127.0.0.1:8096/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Path"',
+        "the movies Jellyfin's own API lists, with their paths",
+    ),
+}
+
+
+def a_check_the_engine_can_write(commands: list[str], inventory: Optional[dict] = None
+                                 ) -> list[tuple[str, str]]:
+    """§17.1388 — ``[(check, why)]`` the engine can compose for this block.
+
+    Live, 2026-10-06, after nine entries of getting everything else right: the
+    drafter would mint Jellyfin's key, place the call correctly and then write no
+    check, and §17.1345 refused the block five drafts running for proving
+    nothing. The engine was not short of knowledge -- it had already COMPOSED the
+    exact check inside §17.1385's refusal text, down to the key read. It simply
+    had no way to put it in the Verify section itself, and kept asking a drafter
+    that would not take it.
+
+    So it writes it. Only for a service the registry knows, only when that
+    service's guest is one this block addresses, and the composed check is a
+    pure READ -- the operator still approves it, and `engine_fixed` says what was
+    added, because a silent repair is not a repair (§17.1270).
+    """
+    out: list[tuple[str, str]] = []
+    for app, (payload, shows) in _CONFIRM.items():
+        r = _SERVICES.get(app)
+        gid = guest_for(app, inventory)
+        if r is None or gid is None:
+            continue
+        if not any(addresses_guest(str(c), gid) for c in commands or []):
+            continue
+        inner = payload.format(key=r.read(None))
+        out.append((f"pct exec {gid} -- sh -c {_sq(inner)}",
+                    f"the block changes {app} on guest {gid} and named no check, so the engine wrote "
+                    f"one: it reads {shows}, with {app}'s key read where {app} keeps it. A step "
+                    f"recorded done on exit codes alone is how a change that did nothing passes "
+                    f"(§17.1345); the engine had already composed this read and could only describe "
+                    f"it until now."))
+    return out
