@@ -156,6 +156,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "cannot witness the work",                       # §17.1382
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
+                   "is a value the engine READS",                   # §17.1384
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
@@ -852,6 +853,11 @@ def guest_key(ctid, cmd):
 
 Never grep `<ApiKey>` out of a Jellyfin file: it returns nothing, the header goes out empty, and the
 answer is a 401 that reads like a wrong key rather than one that was never there.
+And never LOG IN to a service whose key is on the disk. A drafted `POST /Users/AuthenticateByName`
+with a guessed username and the mass password answers **HTTP 400** on this server (that endpoint
+also wants an `X-Emby-Authorization` header), and `GET /Users/Public` answers `[]` -- there is no
+such user. qBittorrent is the opposite case: it has no readable key, so `POST /api/v2/auth/login`
+with `admin` and `$MASS_PASSWORD` is exactly right there.
 
 A `/test` ENDPOINT VALIDATES THE WHOLE RESOURCE. `-d '{}'` to `…/api/v3/downloadclient/test` answers
 `'Name' must not be empty`, `'Implementation' must not be empty`, `'Config Contract' must not be
@@ -4852,6 +4858,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
     refused = refused + _mv.reads_a_key_where_the_service_does_not_keep_it(cmds, shape_files)
+    # §17.1384 — and a block that stops reading altogether and invents a login
+    # for a service whose key the engine holds.
+    refused = refused + _mv.authenticates_instead_of_reading_the_key(cmds, shape_files)
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)

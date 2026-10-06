@@ -409,3 +409,63 @@ def reads_a_key_where_the_service_does_not_keep_it(
                     f"rather than one that was never there. Read it where it lives:\n\n    "
                     f"{r.read(None)}")})
     return out
+
+
+#: §17.1384 — the auth endpoints of services whose key the engine can READ. Only
+#: a service with a `Readable` belongs here: qBittorrent's `/api/v2/auth/login`
+#: is NOT in this table, because qBittorrent genuinely has no readable key and
+#: a username/password login is the right call there.
+_AUTH_ENDPOINTS: dict[str, tuple[str, ...]] = {
+    "jellyfin": ("/users/authenticatebyname", "/users/authenticate"),
+}
+
+
+def authenticates_instead_of_reading_the_key(
+        commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1384 — the block logs in to a service whose key the engine can read.
+
+    Live, 2026-10-06. §17.1382 put Jellyfin's key in the registry and §17.1383
+    taught the read in `FILE_RULES`. The next draft did not read the wrong file
+    -- it stopped reading altogether and invented a credential::
+
+        def jellyfin_login():
+            url = f"http://{JELLYFIN_IP}:{JELLYFIN_PORT}/Users/AuthenticateByName"
+            data = {"Username": "jellyfin", "Pw": MASS_PASSWORD}
+            return http_json(url, method="POST", data=data)["AccessToken"]
+
+    A guessed username, the operator's mass password, and no
+    `X-Emby-Authorization` header, which that endpoint requires -- measured, it
+    answers **HTTP 400**, and `GET /Users/Public` on this server answers `[]`, so
+    there is no user of that name to authenticate as in the first place. The step
+    had already proved five of its six hops and died on the one the engine could
+    have answered from a dict.
+
+    §17.1383 judges a key read from the wrong PATH; this judges not reading at
+    all. Only a service with a `Readable` is judged, so qBittorrent's own
+    username/password login -- which is the correct call for a service with no
+    readable key -- is left alone.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    seen: set[str] = set()
+    for t in texts:
+        low = t.lower()
+        for app, endpoints in _AUTH_ENDPOINTS.items():
+            r = _SERVICES.get(app)
+            if r is None or app in seen:
+                continue
+            if not any(e in low for e in endpoints):
+                continue
+            seen.add(app)
+            out.append({"command": next(
+                (l.strip()[:120] for l in t.splitlines()
+                 if any(e in l.lower() for e in endpoints)), app), "why": (
+                f"this logs in to {app} to get a token, and {app}'s key is a value the engine READS: "
+                f"{r.where}. MEASURED live (§17.1384) on exactly this shape -- a drafted "
+                f"`/Users/AuthenticateByName` with an invented username and the operator's mass "
+                f"password answered **HTTP 400** (that endpoint also requires an "
+                f"`X-Emby-Authorization` header), and `GET /Users/Public` on this server answers "
+                f"`[]`, so there is no such user to authenticate as. Do not guess a credential for a "
+                f"service whose key is on the disk. Read it:\n\n    {r.read(None)}")})
+    return out
