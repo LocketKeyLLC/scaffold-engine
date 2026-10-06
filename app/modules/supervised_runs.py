@@ -153,6 +153,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "VALIDATES the whole resource",                   # §17.1378b
                    "does not accept",                               # §17.1379
                    "definition in this program takes fewer",        # §17.1379
+                   "cannot witness the work",                       # §17.1382
+                   "identifies nothing",                            # §17.1382b
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
@@ -4787,6 +4789,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     from app.modules.program_check import a_program_the_type_checker_says_will_raise
     refused = refused + a_program_the_type_checker_says_will_raise(
         _inline_programs(cmds, shape_files))
+    # §17.1382 — a check that answers the same thing on every machine, and an
+    # identifying field sent as 0 by a draft that had nowhere to get it.
+    refused = refused + a_check_that_proves_nothing(verify)
+    refused = refused + an_id_sent_as_zero(cmds, shape_files)
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
@@ -5430,6 +5436,89 @@ def _inline_programs(commands: list[str],
         except SyntaxError:
             continue                           # not ours to judge
         out.append((path or "the program", body))
+    return out
+
+
+#: §17.1382 — commands that answer the same thing on every machine, before and
+#: after any step. `id` reached a live frame as a whole verify entry.
+_PROVES_NOTHING = {"id", "true", ":", "pwd", "whoami", "hostname", "date", "uptime",
+                   "env", "printenv", "uname", "echo"}
+
+
+def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
+    r"""§17.1382 — a check whose answer cannot depend on the step.
+
+    Live, 2026-10-06: ADD134's frame carried four checks and the second was the
+    bare word
+
+        id
+
+    -- a real command, so every shape gate passed it and it exits 0 on any
+    machine at any time. §17.1345 requires a check to EXIST and §17.1362 that an
+    API change be read back; nothing asked whether a check could answer
+    differently before and after the work. A step recorded done on checks like
+    this is §17.1343's defect with a check in front of it.
+
+    Only the commands whose whole output is a property of the machine are named,
+    and only when the check is JUST that command: `id -u jellyfin` reads
+    something about the step's subject, and `echo "$(curl …)"` is a read.
+    """
+    out: list[dict] = []
+    for v in verify or []:
+        words = str(v or "").strip().split()
+        if not words or len(words) > 1:
+            continue
+        if words[0] not in _PROVES_NOTHING:
+            continue
+        out.append({"command": str(v), "why": (
+            f"`{words[0]}` answers the same thing on every machine, before this step and after it, so "
+            f"it cannot witness the work -- and a step is recorded done from its checks. MEASURED live "
+            f"(§17.1382): this arrived as a whole verify entry, and because it is a real command that "
+            f"exits 0, every other gate passed it. Name a command that READS what the step is supposed "
+            f"to leave: the value back out of the API, the file at its path, the title the library now "
+            f"lists.")})
+    return out
+
+
+#: §17.1382 — `"tmdbId": 0` in a body being POSTed. The quotes may be ESCAPED:
+#: live, the body reached the gate as `-d "{\"tmdbId\":0}"`, and the first cut of
+#: this pattern required a bare quote and saw nothing (§17.1048 — a gate matches
+#: modulo formatting, or it does not match the thing that happens).
+_ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
+
+
+def an_id_sent_as_zero(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1382 — an identifying field sent as 0, which identifies nothing.
+
+    Live, 2026-10-06: ADD134's draft added a film to Radarr with
+
+        -d '{"title":"<TITLE>", …, "tmdbId":0, "year":0, "images":[], "tags":[]}'
+
+    and asked the OPERATOR to type `TITLE_SLUG`. Both values -- the TMDB id and
+    the slug -- are what `GET /api/v3/movie/lookup?term=…` returns; Radarr
+    rejects a create with `tmdbId: 0`, so the step could not have worked. This is
+    the §17.1332 lesson one layer further out: a value another CALL holds is no
+    more an operator's to type than one a file holds, and a literal zero in its
+    place is the shape that says the drafter had nowhere to get it.
+
+    Only a body being SENT is judged (a `-d` payload or a file the block writes),
+    never a response being read, and only a field whose name ends in `id`.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        if not re.search(r"-d\s|--data|json\.dump|json\.dumps", t):
+            continue
+        for m in _ZERO_ID_RE.finditer(t):
+            field = m.group(1)
+            out.append({"command": t[:120], "why": (
+                f"`{field}` is sent as 0, and 0 identifies nothing -- the service rejects a create "
+                f"whose id is zero. MEASURED live (§17.1382): a draft added a film to Radarr with "
+                f"`\"tmdbId\":0` while asking the operator to type the title slug, and both of those "
+                f"are fields `GET /api/v3/movie/lookup?term=<TITLE>` returns. Call the lookup first, "
+                f"take `{field}` (and the slug, the year, the images) from its answer, and send that "
+                f"object. A value another call holds is not a value to invent or to ask for.")})
     return out
 
 

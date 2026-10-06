@@ -1,0 +1,11 @@
+{
+ "commands": [
+  "pct exec 103 -- bash -c 'curl -s --fail-with-body -X POST \"http://127.0.0.1:7878/api/v3/movie\" -H \"X-Api-Key: $RADARR_API_KEY\" -H \"Content-Type: application/json\" -d \"{\\\"title\\\":\\\"<TITLE>\\\",\\\"qualityProfileId\\\":1,\\\"titleSlug\\\":\\\"<TITLE_SLUG>\\\",\\\"monitored\\\":true,\\\"rootFolderPath\\\":\\\"/media/movies\\\",\\\"addOptions\\\":{\\\"searchForMovie\\\":true},\\\"tmdbId\\\":0,\\\"year\\\":0,\\\"images\\\":[],\\\"tags\\\":[]}\"'"
+ ],
+ "verify": [
+  "pct exec 103 -- bash -c 'curl -s -H \"X-Api-Key: $RADARR_API_KEY\" \"http://127.0.0.1:7878/api/v3/movie?term=<TITLE>\"'",
+  "id",
+  "pct exec 103 -- bash -c 'curl -s -H \"X-Api-Key: $RADARR_API_KEY\" \"http://127.0.0.1:7878/api/v3/queue\"'",
+  "pct exec 105 -- bash -c 'ls -la /media/downloads/'"
+ ]
+}

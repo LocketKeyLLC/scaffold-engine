@@ -49,10 +49,19 @@ _ARR_APPS = ("prowlarr", "radarr", "sonarr", "lidarr", "readarr", "whisparr")
 #: `pct exec <gid> -- sh -c '…'` whose own quotes are single.
 _ARR_EXTRACT = (r'sed -n "s:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p" | head -n 1')
 
-#: `<RADARR_API_KEY>`, `<SONARR_APIKEY>`, `<PROWLARR_KEY>` — the shapes the
-#: drafter actually writes (live: all three of ADD115's were `<APP_API_KEY>`).
-_NAME_RE = re.compile(
-    r"^(" + "|".join(a.upper() for a in _ARR_APPS) + r")[_-]?(?:API[_-]?)?KEY$")
+#: §17.1382 — Jellyfin keeps no config.xml key: its API keys are rows in its own
+#: SQLite database. The guest already has `/bin/python3`, whose `sqlite3` is in
+#: the standard library, so this needs nothing installed. Read-only (`mode=ro`)
+#: so a live server is never locked, and LOUD when there is no key: an empty
+#: value here would go out as an empty header and come back 401, which reads as
+#: a wrong key rather than a missing one (§17.1342's measured failure).
+_JELLYFIN_DB = "/var/lib/jellyfin/data/jellyfin.db"
+_JELLYFIN_READ = (
+    "python3 -c 'import sqlite3,sys;"
+    f"r=sqlite3.connect(\"file:{_JELLYFIN_DB}?mode=ro\",uri=True)"
+    ".execute(\"SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1\").fetchone();"
+    "print(r[0]) if r else sys.exit(\"jellyfin holds no API key: ApiKeys is empty\")'"
+)
 
 
 @dataclass(frozen=True)
@@ -60,7 +69,11 @@ class Readable:
     """A value the engine can read off a machine, and where from."""
     app: str
     paths: tuple[str, ...]
-    extract: str
+    extract: str = ""
+    #: §17.1382 — a whole command that PRINTS the value, for a service whose key
+    #: is not a line in a file. Unlike `extract`, this runs entirely inside the
+    #: guest, because a database has to be opened where it lives.
+    command: str = ""
 
     @property
     def where(self) -> str:
@@ -76,6 +89,9 @@ class Readable:
         comes back EMPTY and the request goes out with an empty header — a 401 that
         looks like a wrong key. Measured on pve-runner, 2026-10-04.
         """
+        if self.command:
+            # §17.1382 — opened where it lives, so the whole read goes into the guest.
+            return f"pct exec {gid} -- sh -c {_sq(self.command)}" if gid else self.command
         cat = "cat " + " ".join(self.paths) + " 2>/dev/null"
         if gid:
             cat = f"pct exec {gid} -- sh -c {_sq(cat)}"
@@ -87,14 +103,31 @@ def _sq(s: str) -> str:
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+#: §17.1382 — every service whose API key the engine can read, by name. §17.1332
+#: built this as a FAMILY (`_ARR_APPS`, one file, one element) and the next
+#: service with a different shape fell straight through it back onto the
+#: operator. A registry is the shape that generalises: adding a service is an
+#: entry, and `read_on_the_machine` / `still_asked` need no change at all.
+_SERVICES: dict[str, Readable] = {
+    **{app: Readable(app=app, paths=(f"/var/lib/{app}/config.xml", "/config/config.xml"),
+                     extract=_ARR_EXTRACT)
+       for app in _ARR_APPS},
+    "jellyfin": Readable(app="jellyfin", paths=(_JELLYFIN_DB,), command=_JELLYFIN_READ),
+}
+
+#: `<RADARR_API_KEY>`, `<SONARR_APIKEY>`, `<PROWLARR_KEY>`, `<JELLYFIN_API_KEY>` —
+#: the shapes the drafter actually writes (live: all three of ADD115's were
+#: `<APP_API_KEY>`; ADD134's was `<JELLYFIN_API_KEY>`).
+_NAME_RE = re.compile(
+    r"^(" + "|".join(a.upper() for a in sorted(_SERVICES)) + r")[_-]?(?:API[_-]?)?(?:KEY|TOKEN)$")
+
+
 def readable_for(name: str) -> Optional[Readable]:
     """The `Readable` that answers input `name`, or None."""
     m = _NAME_RE.match(str(name or "").strip().upper())
     if not m:
         return None
-    app = m.group(1).lower()
-    return Readable(app=app, paths=(f"/var/lib/{app}/config.xml", "/config/config.xml"),
-                    extract=_ARR_EXTRACT)
+    return _SERVICES.get(m.group(1).lower())
 
 
 def guest_for(app: str, inventory: Optional[dict]) -> Optional[str]:
