@@ -197,6 +197,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "there is no guest",                            # §17.1213
                    "has never been written",                       # §17.1288p
                    "is not an interface on this host",             # §17.1395
+                   "is fed input here without `--pass-stdin 1`",   # §17.1397
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -286,6 +287,7 @@ _WHOSE_GAP: dict[str, str] = {
     "which does not hold one": "engine",          # §17.1383
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
+    "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5096,6 +5098,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1391 — and a credential typed in as a literal where the engine reads it.
     refused = refused + a_credential_written_as_a_literal(cmds, shape_files, verify)
     refused = refused + an_id_sent_as_zero(cmds, shape_files)
+    # §17.1397 — input piped to the guest agent that it never reads.
+    refused = refused + a_pipe_the_guest_agent_never_reads(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
@@ -5959,6 +5963,52 @@ def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
 #: this pattern required a bare quote and saw nothing (§17.1048 — a gate matches
 #: modulo formatting, or it does not match the thing that happens).
 _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
+
+
+#: §17.1397 — `qm guest exec` given input: piped into, redirected from, or a heredoc
+_QGE_RE = re.compile(r"\bqm\s+guest\s+exec\b")
+_PASS_STDIN_RE = re.compile(r"--pass-stdin(?:\s+|=)(?:1|true|yes|on)\b")
+
+
+def a_pipe_the_guest_agent_never_reads(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1397 — input fed to `qm guest exec` without `--pass-stdin 1` never arrives.
+
+    Live, 2026-10-06, ADD137's redraft installed the panel's key on VM 106 with
+
+        pct exec 111 -- sh -c 'cat /root/.ssh/id_ed25519.pub' |
+            qm guest exec 106 -- sh -c 'cat >> /home/aedefruscio/.ssh/authorized_keys'
+
+    `qm guest exec` reads STDIN only with `--pass-stdin 1` (default 0): the guest's
+    `cat` gets EOF, appends nothing, and the line exits 0. The engine's own
+    `run_in_vm_via_agent` template has always written `--pass-stdin 1`; nothing
+    held a drafted block to the same rule.
+    """
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    out: list[dict] = []
+    for t in texts:
+        for line in t.split("\n"):
+            if line.lstrip().startswith("#"):
+                continue
+            for m in _QGE_RE.finditer(line):
+                # where this `qm guest exec` invocation ends: the next pipe or list operator after it
+                rest = line[m.start():]
+                end = re.search(r"\s(?:\|\|?|&&|;)\s", rest)
+                own = rest[:end.start()] if end else rest
+                before = line[:m.start()]
+                piped = bool(re.search(r"(?<!\|)\|\s*$", before))
+                # a `<` / `<<` that belongs to THIS invocation, not one quoted inside its guest command
+                bare = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", own)
+                redirected = bool(re.search(r"(?<![<\d])<(?!\()", bare))
+                if not (piped or redirected) or _PASS_STDIN_RE.search(own):
+                    continue
+                out.append({"command": line.strip()[:200], "why": (
+                    "`qm guest exec` is fed input here without `--pass-stdin 1`, so the input never arrives: "
+                    "the agent forwards STDIN only when told to (the default is 0), the command inside the "
+                    "guest reads EOF, and the line exits 0 having done nothing. Write `qm guest exec <id> "
+                    "--pass-stdin 1 -- …` -- the engine's own guest-agent template does -- or put the value in "
+                    "the command itself.")})
+                break
+    return out
 
 
 def an_id_sent_as_zero(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
