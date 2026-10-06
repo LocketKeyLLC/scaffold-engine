@@ -88,10 +88,17 @@ def test_every_filler_exists_and_is_callable():
 
 # ── the verifier: a fill is believed only once the rule agrees ──────────────
 
-def test_a_fill_that_closes_the_rule_drops_the_refusal():
+def test_a_fill_that_closes_the_rule_drops_the_refusal(monkeypatch):
+    """§17.1390 — the fill must be a check the CHANNEL will run, so this uses a
+    runnable composer. The Jellyfin read-back composed by §17.1388 carries
+    `python3`, which the read-only channel refuses, and the filler now declines
+    it (see `test_the_filler_will_not_emit_a_check_the_channel_refuses`)."""
+    monkeypatch.setattr(mv, "a_check_the_engine_can_write",
+                        lambda cmds, inventory=None: [
+                            ("pct exec 101 -- find /media/movies -type f", "the engine wrote it")])
     kept, verify, fills = fill_what_the_engine_holds(NO_CHECK, MINTS, [], INV)
-    assert kept == [], "the engine composed the check, so the refusal is gone"
-    assert len(verify) == 1 and "X-Emby-Token" in verify[0]
+    assert kept == [], "the engine composed a runnable check, so the refusal is gone"
+    assert len(verify) == 1 and "find /media/movies" in verify[0]
     assert fills and "the engine wrote" in fills[0]["why"]
 
 

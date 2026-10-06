@@ -154,6 +154,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "does not accept",                               # §17.1379
                    "definition in this program takes fewer",        # §17.1379
                    "cannot witness the work",                       # §17.1382
+                   "the verify channel will refuse this check",      # §17.1390
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -280,6 +281,7 @@ _WHOSE_GAP: dict[str, str] = {
     "nothing can give it the key": "engine",      # §17.1385 — read it, or mint it
     "is a value the engine READS": "engine",      # §17.1384
     "which does not hold one": "engine",          # §17.1383
+    "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -321,6 +323,22 @@ _FILLERS: dict[str, str] = {
 }
 
 
+def _channel_would_run(check: str) -> bool:
+    """§17.1390 — would the read-only verify channel actually run this check?
+
+    The engine must not fill a gap with something the channel refuses: that is
+    how a frame came back `refused: 0, verify: 1` and the step was recorded done
+    on exit codes with an empty verify. The channel's own predicate answers it.
+    """
+    if not str(check or "").strip():
+        return False
+    try:
+        from app.modules.assist_state_check import read_only_command
+    except Exception:                          # pragma: no cover - defensive
+        return True                            # unknown: do not silently drop a check
+    return bool(read_only_command(str(check)))
+
+
 def fill_what_the_engine_holds(refused: list[dict], cmds: list[str],
                                verify: list[str], inventory: Optional[dict] = None
                                ) -> tuple[list[dict], list[str], list[dict]]:
@@ -351,7 +369,7 @@ def fill_what_the_engine_holds(refused: list[dict], cmds: list[str],
         if not produced:
             kept.append(r)                     # nothing to give: the refusal stands
             continue
-        usable = [(w, n) for w, n in produced if str(w or "").strip()]
+        usable = [(w, n) for w, n in produced if _channel_would_run(w)]
         if not usable:
             kept.append(r)                     # a filler that produced nothing usable
             continue
@@ -5069,6 +5087,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1382 — a check that answers the same thing on every machine, and an
     # identifying field sent as 0 by a draft that had nowhere to get it.
     refused = refused + a_check_that_proves_nothing(verify)
+    # §17.1390 — and a check the read-only channel will refuse to run.
+    refused = refused + a_check_the_channel_will_refuse(verify)
     refused = refused + an_id_sent_as_zero(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
@@ -5452,6 +5472,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                  if not e["ok"] and not e.get("informational") and not e.get("unreachable")]
     indeterminate = bool(dropped) and not hard_fail
     verify_out = ""
+    _unverified = ""                           # §17.1390
     confirmed_after_drop = False
     unreadable = False
     refuted: list[dict] = []
@@ -5481,6 +5502,28 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                     confirmed_after_drop = await _goal_confirmed(
                         str(waiting.get("title") or node_key), verify_cmds, pasted)
             elif ok:
+                # §17.1390 — before judging the ANSWERS, ask whether the checks
+                # ran at all. A refused check is not an ambiguous check: §17.1233
+                # deliberately lets an unclear answer leave the outcome alone,
+                # and a check the runner never executed reads identically to one
+                # that answered unclearly. Live, 2026-10-06: every check was
+                # refused (`python3` on a read-only channel), the verify came
+                # back empty, and the step was recorded done on one exit code --
+                # §17.1343's hollow success, through the one door still open.
+                # `is False` on purpose: a missing key is UNKNOWN, not a
+                # claim that the check never ran. The looser form flipped a
+                # unit test whose probe dicts carry no `ran` at all.
+                _never_ran = [x for x in (ran or []) if x.get("ran") is False]
+                if verify_cmds and len(_never_ran) == len(verify_cmds):
+                    _unverified = (
+                        f"the {len(verify_cmds)} check(s) this step offered were all refused by "
+                        f"{spec.name} and never ran, so nothing confirmed the work: "
+                        f"{str((_never_ran[0].get('why') or '')).strip()[:160]}. The commands exited 0, "
+                        f"which is exactly the evidence §17.1345 says is not enough. Write a check the "
+                        f"read-only channel takes -- a plain `curl`, `cat`, `find` or `systemctl "
+                        f"is-active` inside the guest.")
+                    logger.warning("supervised_run_no_check_ran job=%s node=%s checks=%d",
+                                   job_id, node_key, len(verify_cmds))
                 # §17.1233 — and judge them when the commands "succeeded" too.
                 #
                 # Live, ADD96: nine `curl -s -X POST` calls to Prowlarr's API,
@@ -5529,6 +5572,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ok = False
         repeated_reason = _cut
         logger.warning("supervised_run_script_cut job=%s node=%s", job_id, node_key)
+    # §17.1390 — applied after the other downgrades so it cannot be clobbered by
+    # the `repeated_reason` assignment above: a step nothing checked is not done.
+    if _unverified and ok:
+        ok = False
+        repeated_reason = _unverified
+        logger.warning("supervised_run_unverified job=%s node=%s", job_id, node_key)
     if confirmed_after_drop:
         output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
                    f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
@@ -5731,6 +5780,57 @@ def _inline_programs(commands: list[str],
 #: after any step. `id` reached a live frame as a whole verify entry.
 _PROVES_NOTHING = {"id", "true", ":", "pwd", "whoami", "hostname", "date", "uptime",
                    "env", "printenv", "uname", "echo"}
+
+
+def a_check_the_channel_will_refuse(verify: list[str]) -> list[dict]:
+    r"""§17.1390 — a check the verify channel will not run is not a check.
+
+    Live, 2026-10-06, and this one was mine the whole way down. §17.1382 gave the
+    engine a Jellyfin key read that uses `python3`; §17.1332 fills that read into
+    checks; the verify channel is READ-ONLY and its judge refuses `python3`. So
+    the frame was perfect -- `refused: 0`, `verify: 1` -- the check was refused
+    at run time, dropped, and the step was recorded **done on one command's exit
+    code**:
+
+        supervised_run_done ... commands=1 confirmed_after_drop=False
+        verify: (empty)
+        last_verification_reason: "1 command(s) ran, all exited 0"
+
+    which is §17.1343's hollow success with a check in front of it. §17.1265 asks
+    whether a check SURVIVED parsing; nothing asked whether the channel would
+    agree to run it.
+
+    The same predicate the channel itself uses answers it, so this cannot drift
+    from the real decision. Measured over every check in the real fixtures: 15 of
+    15 read-only-runnable, so the gate costs nothing where checks already work.
+    """
+    out: list[dict] = []
+    try:
+        from app.modules.assist_state_check import read_only_command
+    except Exception as exc:                   # pragma: no cover - defensive
+        logger.warning("read_only_predicate_unavailable err=%r", exc)
+        return []
+    for v in verify or []:
+        if not str(v or "").strip():
+            continue
+        # §17.1187 — judge the SHAPE: an unfilled `<PLACEHOLDER>` is not a reason
+        # the channel would refuse this, and the first cut of this gate flagged
+        # 12 of 38 checks across the fixtures for exactly that. The predicate
+        # accepts the same checks once the values are in place (measured: an
+        # `ssh … "systemctl is-active …"` is fine, the same line with
+        # `<PALWORLD_USER>@<GUEST_IP>` is not).
+        shape = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(v))   # `<IP>` is two chars
+        if read_only_command(shape):
+            continue
+        out.append({"command": str(v)[:120], "why": (
+            "the verify channel will refuse this check, so it would prove nothing and the step "
+            "would be recorded done on exit codes alone (§17.1343). That channel is READ-ONLY and "
+            "its judge is the same one used here -- MEASURED live (§17.1390): a check carrying "
+            "`python3 -c` to read a key was refused at run time, dropped, and the step went `done` "
+            "with an empty verify. Write a check the read channel takes: `pct exec <gid> -- curl -s "
+            "<url>`, `pct exec <gid> -- find <path> -type f`, `pct exec <gid> -- cat <file>` -- a "
+            "plain read, with no interpreter and no command substitution in it.")})
+    return out
 
 
 def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:

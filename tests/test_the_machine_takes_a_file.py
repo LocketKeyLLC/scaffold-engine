@@ -1748,7 +1748,7 @@ def test_the_live_1160_runbook_is_refused_for_asking_the_address_alone():
     env = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
                                                     "106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
     frame = sr.frame_run(ADD82, rb, spec, POLICY_MASS, env=env)
-    assert sr.refusal_kinds(frame) == {"reads the address itself and asks the operator for it"}, \
+    assert "reads the address itself and asks the operator for it" in sr.refusal_kinds(frame), \
         [r["why"][:90] for r in frame["refused"]]
     assert sr.reads_the_neighbour_table_cold(["nmap -sn 192.168.1.0/24 >/dev/null 2>&1 || true",
                                               "ip neigh show | grep -i 'bc:24:11:e8:9f:7a'"]) == []
