@@ -146,6 +146,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "and nothing sets it",                           # §17.1348
+                   "but set in a DIFFERENT command",               # §17.1398
                    "is expanded by GUEST",                          # §17.1364
                    "never imports or assigns",                      # §17.1377
                    "different filesystems",                         # §17.1377
@@ -299,7 +300,7 @@ _WHOSE_GAP: dict[str, str] = {
         "a secret cannot be written into a file",
         "elevates only the first command of a line",
         "runs in the runner's own shell on the Proxmox HOST",
-        "and nothing sets it", "is expanded by GUEST", "never imports or assigns",
+        "and nothing sets it", "but set in a DIFFERENT command", "is expanded by GUEST", "never imports or assigns",
         "different filesystems", "keep a setting in the object's `fields` array",
         "VALIDATES the whole resource", "does not accept",
         "definition in this program takes fewer", "cannot witness the work",
@@ -2163,6 +2164,17 @@ def writing_segments(cmd: str) -> list[str]:
             continue
         if seg.startswith("do ") or seg.startswith("then "):
             seg = seg.split(" ", 1)[1].strip()
+        # §17.1398 — a brace group's `{` and `}` are the shell's grouping, not a
+        # program, and `[ … ]` / `[[ … ]]` IS `test`, which already reads as
+        # read-only. Live, ADD137's guard `[ -n "$KEY" ] || { echo 'FAILED: …';
+        # exit 1; }` came back as two writes, and §17.1285 refused it as host
+        # work that "would change the HOST instead of guest 106" -- a test and an
+        # echo that change nothing anywhere.
+        seg = re.sub(r"^\{\s+", "", seg)
+        seg = re.sub(r"\s*\}$", "", seg).strip()
+        _t = re.fullmatch(r"\[\[?\s+(.*?)\s+\]\]?", seg)
+        if _t:
+            seg = "test " + _t.group(1)
         if seg and not read_only_command(seg):
             out.append(seg)
     return out
@@ -4594,6 +4606,21 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                 name = m.group("brace") or m.group("bare")
                 if name in have or name in assigned or name.isdigit():
                     continue
+                # §17.1398 — set in ANOTHER command of the block. Each command is its own
+                # runner call (`run_block` sends them one by one), so its own shell: the
+                # assignment is gone before this line runs. Live, ADD137 put
+                # `KEY="$(pct exec 111 -- cat …pub)"` and `[ -n "$KEY" ]` on separate lines,
+                # was told "the block never assigns it" -- false -- and the remedy this
+                # refusal gave ("assign it in the block before use") was the shape it had.
+                elsewhere = [c for c in texts if c is not cmd and name in _assigned_in([c])]
+                if elsewhere:
+                    out.append({"command": cmd.strip()[:200], "why": (
+                        f"`${name}` is read here but set in a DIFFERENT command "
+                        f"(`{elsewhere[0].strip()[:70]}`). Each command in a block runs as its own runner "
+                        f"call, in its own shell, so that assignment is gone before this line runs and "
+                        f"`${name}` expands to NOTHING. Keep the assignment and every use of it in ONE "
+                        f"command (join them with `&&`), or write a script file that does both and run it.")})
+                    break
                 out.append({"command": cmd.strip()[:200], "why": (
                     f"`${name}` is read here and nothing sets it: the block never assigns it, and the "
                     f"values the engine and the runner have between them are "
@@ -4602,8 +4629,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                     + ". A guest's environment does not carry it either, so it expands to NOTHING and the "
                       "command runs with an empty value -- live (§17.1348), an empty `X-Api-Key` header made "
                       "an app answer 401, which reads like a wrong key rather than a value that was never "
-                      "there. Either read the value in the same command (a command substitution) or assign "
-                      "it in the block before use.")})
+                      "there. Read the value in the same command (a command substitution) -- each command runs "
+                      "in its own shell, so an assignment on another line does not reach this one.")})
                 break
         if out and out[-1]["command"] == cmd.strip()[:200]:
             continue
