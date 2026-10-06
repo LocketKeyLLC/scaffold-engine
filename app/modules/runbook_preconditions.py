@@ -123,6 +123,81 @@ def parse_lvs(text_out: str) -> dict[str, list[dict]]:
     return out
 
 
+#: §17.1395 — `ip -br link`: `nic3   UP   00:25:90:c3:f0:7b <BROADCAST,MULTICAST,UP,LOWER_UP>`
+_IP_LINK_RE = re.compile(r"^(\S+?)(?:@\S+)?\s+(\S+)\s+(?:\S+\s+)?<([^>]*)>", re.M)
+#: `bridge link`: `5: nic3: <…> mtu 1500 master vmbr0 state forwarding …`
+_BRIDGE_LINK_RE = re.compile(r"^\d+:\s+(\S+?)(?:@\S+)?:\s.*?\bmaster\s+(\S+)", re.M)
+#: a guest's own end of the bridge, not a port anyone writes into /etc/network/interfaces
+_GUEST_PORT_RE = re.compile(r"^(?:veth|tap|fwpr|fwln|fwbr)\d")
+_BRIDGE_PORTS_RE = re.compile(r"\bbridge[-_]ports\s+([^\n'\"/\\;|&]+)")
+_DEFINES_IFACE_RE = re.compile(r"\b(?:iface|auto|allow-hotplug)\s+([A-Za-z][\w.:-]*)|\bip\s+link\s+add\s+(?:name\s+)?([A-Za-z][\w.:-]*)")
+
+
+def parse_ip_link(out: str) -> dict[str, bool]:
+    """``{interface: carrier}`` from ``ip -br link`` — carrier is LOWER_UP."""
+    return {m.group(1): "LOWER_UP" in m.group(3).split(",") for m in _IP_LINK_RE.finditer(out or "")}
+
+
+def parse_bridge_ports(out: str) -> dict[str, list[str]]:
+    """``{bridge: [ports]}`` from ``bridge link``, without the guests' own taps and veths."""
+    ports: dict[str, list[str]] = {}
+    for m in _BRIDGE_LINK_RE.finditer(out or ""):
+        if not _GUEST_PORT_RE.match(m.group(1)):
+            ports.setdefault(m.group(2), []).append(m.group(1))
+    return ports
+
+
+def a_bridge_port_the_machine_does_not_have(texts: list[str], links: Optional[dict],
+                                            bridges: Optional[dict] = None) -> list[dict]:
+    """§17.1395 — a `bridge-ports` member this host has no interface for.
+
+    Live, 2026-10-06, ADD91: "Set vmbr0 bridge-ports to enp5s0f3 ... replacing the
+    stale nic3 reference". Measured before anything ran: there is no `enp5s0f3`.
+    Proxmox pins NIC names (`/usr/local/lib/systemd/network/50-pmx-nic3.link`
+    binds the MAC to `nic3`); `nic3` is UP with carrier and is vmbr0's one port,
+    carrying 192.168.1.156. The step had the stale name backwards, and an earlier
+    draft wrote `sed -i 's/bridge-ports .*/bridge-ports enp5s0f3/'` then
+    `ifreload -a` -- a bridge with no port, and the host off its own network
+    until someone reached its console.
+
+    Fail-soft: no link list means nothing is refused.
+    """
+    if not links:
+        return []
+    defined: set[str] = set()
+    for t in texts:
+        for m in _DEFINES_IFACE_RE.finditer(t or ""):
+            defined.add(m.group(1) or m.group(2))
+    out: list[dict] = []
+    seen: set[str] = set()
+    for t in texts:
+        for line in (t or "").split("\n"):
+            if line.lstrip().startswith("#"):
+                continue
+            for m in _BRIDGE_PORTS_RE.finditer(line):
+                for name in m.group(1).split():
+                    if not re.fullmatch(r"[A-Za-z][\w.:-]*", name) or name in ("none",) or name in seen:
+                        continue
+                    if name in links or name in defined:
+                        continue
+                    seen.add(name)
+                    up = [n for n, carrier in links.items() if carrier and n != "lo"
+                          and not _GUEST_PORT_RE.match(n) and n not in (bridges or {})
+                          and not n.startswith(("vmbr", "tailscale", "wg", "tun"))]
+                    now = "; ".join(f"{b}'s port today is `{' '.join(p)}`" for b, p in sorted((bridges or {}).items()) if p)
+                    out.append({"command": line.strip()[:200], "why": (
+                        f"`{name}` is not an interface on this host: `ip -br link` (read just now) lists no such "
+                        f"name. The physical interfaces with carrier are {', '.join(f'`{n}`' for n in up) or 'none'}"
+                        + (f", and {now}" if now else "") + ". A bridge pointed at an interface that does not exist "
+                        "has no port, and `ifreload -a` then takes the host's own address down with it -- off the "
+                        "network until someone reaches its console. Proxmox pins NIC names "
+                        "(`/usr/local/lib/systemd/network/50-pmx-*.link`), so a predictable name like `enp5s0f3` "
+                        "may never appear. If the bridge already uses the interface that carries the link, the "
+                        "step's goal is met: change nothing, and check it with a read of `bridge link` and "
+                        "`ip -br addr show` for the bridge.")})
+    return out
+
+
 async def read_inventory(spec) -> Optional[dict]:
     """§17.1288f — the two listings, read ONCE per pause and handed to every
     draft's `unmet`. ``None`` when the host cannot be read (then nothing is
@@ -141,6 +216,9 @@ async def read_inventory(spec) -> Optional[dict]:
     inv["disks"] = parse_lvs(lvs_out)
     isos = await _read(spec, "ls /var/lib/vz/template/iso")
     inv["isos"] = [ln.strip() for ln in (isos or "").split("\n") if ln.strip().endswith(".iso")]
+    # §17.1395 — and the host's own interfaces, so a network config never names one it does not have
+    inv["links"] = parse_ip_link(await _read(spec, "ip -br link"))
+    inv["bridges"] = parse_bridge_ports(await _read(spec, "bridge link"))
     return inv
 
 
@@ -725,6 +803,9 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # changes.
     from app.modules.machine_truth import known_guest
     subjects = [g for g in subjects if known_guest(g, inv, subject + "\n" + "\n".join(texts))]
+    # §17.1395 — a bridge port the host has no interface for. Before every guest
+    # rule, because a host network step names no guest and would return early.
+    out.extend(a_bridge_port_the_machine_does_not_have(texts, (inv or {}).get("links"), (inv or {}).get("bridges")))
     # §17.1288g — an ssh into the step's guest with no key of ours on it and
     # none copied in this block. Judged from the plan (the engine's own record
     # of what it finished), so it needs no host read.
