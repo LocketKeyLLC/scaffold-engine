@@ -384,9 +384,23 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
     # guest: the subject became 999, and the host-side `chown` was refused for "not
     # reaching guest 999". When the inventory is readable, an id it does not list is
     # not a subject -- unless this very block creates it.
-    for m in [_SUBJECT_RE.search(str((node or {}).get("title") or "")), *_SUBJECT_RE.finditer(text)]:
-        if m and known_guest(m.group(1), inventory, text):
-            return m.group(1)
+    _t = _SUBJECT_RE.search(str((node or {}).get("title") or ""))
+    if _t and known_guest(_t.group(1), inventory, text):
+        return _t.group(1)
+    # §17.1394 — a step that NAMES several guests and acts on none of them has no
+    # single subject, the rule the two paths around this one already keep
+    # (acted_on > 1 → None above; a name hit must be unique below). Live, ADD135
+    # ("make the machines that serve the operator's goals start on boot") listed
+    # the measured onboot state of ten guests, VM 106 first: the subject came back
+    # 106, the draft became a script run INSIDE palworld-server through its guest
+    # agent, and the stopped-guest rule then told it to START gpu-vm -- the VM the
+    # operator had just said must not run. The title still decides when it names one.
+    named = list(dict.fromkeys(m.group(1) for m in _SUBJECT_RE.finditer(text)
+                               if known_guest(m.group(1), inventory, text)))
+    if len(named) == 1:
+        return named[0]
+    if len(named) > 1:
+        return None
     names = (inventory or {}).get("names") or {}
     hits = [gid for gid, name in names.items() if name and _mentions_guest(text, gid, str(name))]
     return hits[0] if len(hits) == 1 else None
