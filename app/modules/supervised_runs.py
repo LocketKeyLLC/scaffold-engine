@@ -155,6 +155,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "definition in this program takes fewer",        # §17.1379
                    "cannot witness the work",                       # §17.1382
                    "the verify channel will refuse this check",      # §17.1390
+                   "a credential into the block as a literal value",  # §17.1391
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -282,6 +283,7 @@ _WHOSE_GAP: dict[str, str] = {
     "is a value the engine READS": "engine",      # §17.1384
     "which does not hold one": "engine",          # §17.1383
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
+    "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5089,6 +5091,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_check_that_proves_nothing(verify)
     # §17.1390 — and a check the read-only channel will refuse to run.
     refused = refused + a_check_the_channel_will_refuse(verify)
+    # §17.1391 — and a credential typed in as a literal where the engine reads it.
+    refused = refused + a_credential_written_as_a_literal(cmds, shape_files, verify)
     refused = refused + an_id_sent_as_zero(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
@@ -5782,6 +5786,51 @@ _PROVES_NOTHING = {"id", "true", ":", "pwd", "whoami", "hostname", "date", "upti
                    "env", "printenv", "uname", "echo"}
 
 
+def a_credential_written_as_a_literal(commands: list[str], files: Optional[list[dict]] = None,
+                                      verify: Optional[list[str]] = None) -> list[dict]:
+    r"""§17.1391 — a credential typed into the block instead of read.
+
+    Live, 2026-10-06, and this is the capability from §17.1382 turning on its
+    author. The read it added PRINTS the key it finds; §17.1366 carries a
+    previous attempt's output into the next draft's context; so the key reached
+    the model, and the model wrote it into its own check:
+
+        pct exec 101 -- sh -c 'curl -s -H "X-Emby-Token: c9044034…" …'
+
+    Measured afterwards: **4 model requests and 2 model responses** carried that
+    value, and one `dag_nodes.output_text` held it in the clear. §17.1191 says a
+    secret is resolved by the runner or not at all and never travels through the
+    engine; the engine's own key-reading broke it, because `scrub_run_output`
+    masks what the engine SENT and this was read off a machine.
+
+    The masker (§17.1391) keeps it out of the record. This keeps it out of the
+    BLOCK, which is the thing that would send it: a literal where the engine has
+    a read is refused, with the read as the remedy. A `$( … )` is exactly right
+    and says nothing.
+    """
+    out: list[dict] = []
+    texts = ([str(c) for c in commands or []]
+             + [str(v) for v in verify or []]
+             + [str((f or {}).get("content") or "") for f in files or []])
+    seen: set[str] = set()
+    for t in texts:
+        for m in _CREDENTIAL_LITERAL_RE.finditer(t):
+            token = m.group(2)
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append({"command": (m.group(1) + token[:4] + "…")[:120], "why": (
+                "this writes a credential into the block as a literal value. The engine READS these: "
+                "write `<RADARR_API_KEY>`, `<SONARR_API_KEY>`, `<PROWLARR_API_KEY>` or "
+                "`<JELLYFIN_API_KEY>` in a command or check that runs inside that guest and the read "
+                "is substituted before anyone is asked for anything (§17.1332/1382), or read it "
+                "inline with `$( … )`. MEASURED live (§17.1391): a key the engine had printed came "
+                "back through a previous attempt's report into 4 model requests and 2 model "
+                "responses, and into the step's record in the clear -- §17.1191's contract is that a "
+                "secret never travels through the engine at all.")})
+    return out
+
+
 def a_check_the_channel_will_refuse(verify: list[str]) -> list[dict]:
     r"""§17.1390 — a check the verify channel will not run is not a check.
 
@@ -6148,6 +6197,36 @@ async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]
     return pasted, ran
 
 
+#: §17.1391 — a credential carried in the clear by the thing that asks for it:
+#: `X-Api-Key: <token>`, `X-Emby-Token: <token>`, `?api_key=<token>`,
+#: `Authorization: Bearer <token>`. The header NAME is kept so a reader can see
+#: what was sent; the value never survives.
+_CREDENTIAL_LITERAL_RE = re.compile(
+    r"((?:X-(?:Api-Key|Emby-Token|MediaBrowser-Token|Plex-Token)|Authorization)\s*:\s*"
+    r"(?:Bearer\s+)?|(?:api_?key|access_?token)\s*=\s*)"
+    r"(?!\$)([A-Za-z0-9_-]{16,128})", re.I)
+
+
+def mask_credential_literals(text_out: str) -> str:
+    """§17.1391 — mask a credential that a command carried in the clear.
+
+    Live, 2026-10-06. §17.1385's read PRINTS the key it finds, §17.1366 carries a
+    previous attempt's output into the next draft's context, and the drafter then
+    wrote the literal into its own check. Measured afterwards: the Jellyfin key
+    reached **4 model requests and 2 model responses**, and one `dag_nodes`
+    record held it in the clear. §17.1191's contract -- a secret is resolved by
+    the runner or not at all, and never travels through the engine -- was broken
+    by the engine's own key-reading capability, which `scrub_run_output` had no
+    way to know about: it masks values the engine SENT, and this one was read off
+    the machine.
+
+    Shape, not a list of known values, because the engine cannot enumerate the
+    credentials its machines hold. A `$(…)` read is left alone: that is the form
+    the engine WANTS in a record.
+    """
+    return _CREDENTIAL_LITERAL_RE.sub(lambda m: m.group(1) + "***", str(text_out or ""))
+
+
 def scrub_run_output(text_out: str, held: Optional[dict[str, str]]) -> str:
     """§17.1281 — what a run printed, with every engine-held value and every
     secret-shaped token masked before it is stored, returned or logged. The
@@ -6157,6 +6236,10 @@ def scrub_run_output(text_out: str, held: Optional[dict[str, str]]) -> str:
     out = str(text_out or "")
     for v in sorted((v for v in (held or {}).values() if v and len(v) >= 6), key=len, reverse=True):
         out = out.replace(v, "***")
+    # §17.1391 — and a credential the engine never SENT but a command printed or
+    # carried: the engine reads service keys off the machine now, so the value
+    # can be one no store here has ever seen.
+    out = mask_credential_literals(out)
     try:
         from app.modules.redaction import redact_secrets
         out, _kinds = redact_secrets(out)
