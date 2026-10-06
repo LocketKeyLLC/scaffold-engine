@@ -240,6 +240,35 @@ def refusal_kinds(frame: dict) -> set[str]:
             for s in _SHAPE_REFUSALS if s in str(r.get("why") or "")}
 
 
+def redraft_again(first: dict, second: dict) -> bool:
+    """§17.1381 — is a THIRD draft worth asking for, given these two?
+
+    The chain used to continue only when the redraft made NO progress: a draft
+    with fewer refusals became the frame and the chain stopped there, so the
+    drafter was cut off exactly when it was improving. MEASURED over every
+    retained log (1,794 `supervised_run_*` events, 91 redrafts): 29 came back
+    clean, 40 were rejected and could try again, and 22 went straight to park on
+    the progress branch -- SEVEN of them ADD132, half of that step's fourteen
+    drafts. Each was a draft the engine knew how to correct, parked for an
+    operator cycle instead.
+
+    True when the second draft has work to show, was refused for a SHAPE the
+    drafter can act on, and either made progress, or was refused for kinds
+    entirely different from the first (it fixed one thing and broke another), or
+    for exactly the same kinds (§17.1288e: it followed the step text over the
+    note). Partial overlap with no progress is the one shape that stops, because
+    that is a draft going round in circles.
+    """
+    if not (second or {}).get("commands") and not (second or {}).get("files"):
+        return False
+    k1, k2 = refusal_kinds(first), refusal_kinds(second)
+    if not k2:
+        return False                           # nothing a redraft could fix
+    closer = bool((second or {}).get("commands")) and \
+        len(second.get("refused") or []) < len((first or {}).get("refused") or [])
+    return closer or not (k1 & k2) or k2 == k1
+
+
 def shape_retry_note(frame: dict, previous: Optional[dict] = None, repeated: bool = False) -> str:
     """§17.1196 — the correction to feed back when the engine's own gate refused
     the engine's own block for its SHAPE, or ``""`` when there is nothing to fix.

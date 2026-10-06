@@ -2809,26 +2809,51 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
                                    job_id, run_node.get("node_key"), len(second["commands"]))
                     frame = second
-                elif len(second["refused"]) < len(frame["refused"]) and second["commands"]:
-                    frame = second                            # closer; show the better of the two
                 else:
-                    # §17.1277 — the rejected redraft's reasons, in full: they are
-                    # otherwise invisible (the frame keeps the first draft).
-                    logger.warning("supervised_run_redraft_rejected job=%s node=%s refusals=%s", job_id,
-                                   run_node.get("node_key"),
-                                   "; ".join(r["why"] for r in second.get("refused") or [])[:800])
+                    # §17.1381 — PROGRESS IS NOT A REASON TO STOP. This branch
+                    # used to split: a redraft with FEWER refusals became the
+                    # frame and the chain ended there, while one with no progress
+                    # went on to a third and fourth draft. So the drafter was cut
+                    # off exactly when it was improving. MEASURED over every
+                    # retained log (1,794 `supervised_run_*` events, 91
+                    # redrafts): 29 came back clean, 40 were rejected and could
+                    # try again, and 22 went straight to park on this branch --
+                    # SEVEN of them ADD132, half of that step's fourteen drafts,
+                    # each one a draft the engine knew how to correct and an
+                    # operator cycle spent instead. Live, the seventh: the draft
+                    # had every lesson of §17.1343-1379 right and carried no
+                    # Verify section, which is a refusal the drafter can act on.
+                    # The better draft is still the frame; it is just no longer
+                    # the end of the chain, which stays bounded at four drafts.
+                    # The first draft is kept by name: once `frame` becomes the
+                    # better draft below, "what came before" is no longer `frame`,
+                    # and the retry note needs the draft this one IMPROVED ON.
+                    _first = frame
+                    _closer = bool(second["commands"]) and len(second["refused"]) < len(frame["refused"])
+                    k1, k2 = supervised_runs.refusal_kinds(_first), supervised_runs.refusal_kinds(second)
+                    if _closer:
+                        logger.warning("supervised_run_redraft_closer job=%s node=%s was=%d now=%d refusals=%s",
+                                       job_id, run_node.get("node_key"), len(frame["refused"]),
+                                       len(second["refused"]),
+                                       "; ".join(r["why"] for r in second.get("refused") or [])[:800])
+                        frame = second                        # the better of the two, and we go on
+                    else:
+                        # §17.1277 — the rejected redraft's reasons, in full: they are
+                        # otherwise invisible (the frame keeps the first draft).
+                        logger.warning("supervised_run_redraft_rejected job=%s node=%s refusals=%s", job_id,
+                                       run_node.get("node_key"),
+                                       "; ".join(r["why"] for r in second.get("refused") or [])[:800])
                     # A redraft refused for something DIFFERENT fixed what it was
                     # shown and broke what the first draft had right (live: draft 1
                     # hang-safe + unbatched, draft 2 batched + not hang-safe). That
                     # is progress, not a loop -- one more try, told both. Bounded
                     # here: a third refusal parks on the best frame we have.
-                    k1, k2 = supervised_runs.refusal_kinds(frame), supervised_runs.refusal_kinds(second)
                     # §17.1288e — and a redraft refused for EXACTLY the same kinds
                     # followed the step text over the refusal (live: "done at the
                     # console" twice). One more, told the note outranks the text.
                     # Still bounded: the third draft is the last either way.
-                    if (second["commands"] or second.get("files")) and k2 and (not (k1 & k2) or k2 == k1):
-                        fix2 = supervised_runs.shape_retry_note(second, previous=frame, repeated=(k2 == k1))
+                    if supervised_runs.redraft_again(_first, second):
+                        fix2 = supervised_runs.shape_retry_note(second, previous=_first, repeated=(k2 == k1))
                         if fix2:
                             logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s same=%s",
                                            job_id, run_node.get("node_key"), sorted(k1), sorted(k2), k2 == k1)
