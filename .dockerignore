@@ -6,3 +6,8 @@ postgres-data
 *.egg-info
 .pytest_cache
 .mypy_cache
+# §17.1380 — hypothesis' unicode cache is written by the test lanes, sometimes
+# by a container running as another uid, and an unreadable file in the build
+# context fails the whole build (`error checking context: no permission to read
+# from '.hypothesis/unicode_data/...'`) before a single layer is evaluated.
+.hypothesis

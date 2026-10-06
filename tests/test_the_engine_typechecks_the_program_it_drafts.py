@@ -245,8 +245,14 @@ def test_the_refusal_drives_a_redraft():
 
 
 def test_mypy_is_pinned_as_a_runtime_dependency():
-    reqs = (pathlib.Path(__file__).parents[1] / "requirements.txt").read_text()
-    assert re.search(r"^mypy==\d+\.\d+\.\d+$", reqs, re.M), (
+    """Host-only: the test images carry app/, tests/ and the Makefile, not the
+    requirements files (the same reason `test_infra_scaffolding` skips its
+    Dockerfile cases). The guarantee that actually bites in every lane is
+    `test_mypy_is_installed_in_this_image` above — this one reads the pin."""
+    reqs_path = pathlib.Path(__file__).parents[1] / "requirements.txt"
+    if not reqs_path.exists():
+        pytest.skip("requirements.txt not available inside the container lane")
+    assert re.search(r"^mypy==\d+\.\d+\.\d+$", reqs_path.read_text(), re.M), (
         "the gate runs inside the orchestrator, so mypy belongs in "
         "requirements.txt — not requirements-dev.txt")
 
