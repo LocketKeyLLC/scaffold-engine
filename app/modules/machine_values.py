@@ -317,3 +317,95 @@ def still_asked(inputs: Optional[list[dict]], inventory: Optional[dict] = None) 
             f"http://127.0.0.1:<port>/api/...'`. §17.1342: a `pct exec` inside `$( … )` on the host runs "
             f"unprivileged and returns nothing, so the header goes out empty and the app answers 401.")})
     return out
+
+
+# ── §17.1383: and the block must read it where the service keeps it ──────────
+
+#: an `<ApiKey>`-shaped extraction: the *arr family's element, however it is cut
+#: (`sed -n 's:.*<ApiKey>…'`, `grep -oP '(?<=<ApiKey>)…'`, `xmllint --xpath`).
+_APIKEY_READ_RE = re.compile(r"ApiKey\s*>|ApiKey</|<ApiKey", re.I)
+
+#: `/etc/jellyfin/database.xml`, `/var/lib/radarr/config.xml` — a path that
+#: belongs to a service the registry knows.
+_SERVICE_PATH_RE = re.compile(r"/(?:etc|var/lib|config)/(?P<app>[a-z][a-z0-9]{2,20})\b[\w./-]*")
+
+
+def _strip_comment(line: str) -> str:
+    """`line` with a trailing `#` comment removed, quotes respected.
+
+    §17.1383 — both shells and Python comment with `#`, and a `#` inside a
+    quoted string is not a comment (`"#!/bin/sh"`, a URL fragment). Walking the
+    quotes is cheap and keeps the gate off its own documentation.
+    """
+    q = ""
+    for i, ch in enumerate(line):
+        if q:
+            if ch == q:
+                q = ""
+            continue
+        if ch in "\"'":
+            q = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+def reads_a_key_where_the_service_does_not_keep_it(
+        commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1383 — the block reads a service's API key from a path that has none.
+
+    Live, 2026-10-06. §17.1382 put Jellyfin in the registry, so the engine knows
+    its key is a row in `jellyfin.db`. The substitution only fills a
+    `<PLACEHOLDER>` in a command or a check, and a written FILE is deliberately
+    left alone (see `read_on_the_machine`) -- so ADD134's next draft wrote its
+    own read inside `/tmp/chain_proof.py`, and wrote the *arr shape::
+
+        # Jellyfin API key -- read from the guest's config
+        # Actually Jellyfin requires an API key. We'll read it from the guest.
+        "grep -oP '(?<=<ApiKey>)[^<]+' /etc/jellyfin/database.xml | head -1"
+
+    `/etc/jellyfin/database.xml` holds no `<ApiKey>`; measured, that directory is
+    `database.xml encoding.xml logging.default.json logging.json network.xml
+    system.xml` and the key is in the SQLite database. The grep returns nothing,
+    the header goes out empty, and Jellyfin answers 401 -- §17.1342's failure
+    again, one service further along. The engine held the right read the whole
+    time and nothing put it in front of the drafter.
+
+    Judged only when the path names a service the registry knows AND that
+    service's own paths do not include it AND the read is `<ApiKey>`-shaped. A
+    correct read (`/var/lib/radarr/config.xml`) says nothing, and a service the
+    registry does not know says nothing.
+    """
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    seen: set[str] = set()
+    for t in texts:
+        for raw in t.splitlines():
+            # §17.1040/§17.1377 — judge the CODE, not the prose about it. The
+            # first cut of this gate refused FILE_RULES' own worked example,
+            # whose comment says "/etc/jellyfin holds NO <ApiKey>" -- the gate
+            # matched the sentence warning against the defect.
+            line = _strip_comment(raw)
+            if not _APIKEY_READ_RE.search(line):
+                continue
+            for m in _SERVICE_PATH_RE.finditer(line):
+                app = m.group("app").lower()
+                r = _SERVICES.get(app)
+                if r is None or app in seen:
+                    continue
+                path = m.group(0)
+                if any(path.startswith(p) or p.startswith(path) for p in r.paths):
+                    continue                   # reading it where it is kept
+                if not r.command:
+                    continue                   # same family, a different file: not this gate's call
+                seen.add(app)
+                out.append({"command": line.strip()[:120], "why": (
+                    f"this reads {app}'s API key out of `{path}`, which does not hold one: {app} keeps it "
+                    f"in {r.where}. MEASURED on this host (§17.1383) -- `/etc/jellyfin` is "
+                    f"`database.xml encoding.xml logging.default.json logging.json network.xml "
+                    f"system.xml`, no `<ApiKey>` in any of them -- so the grep returns nothing, the "
+                    f"header goes out EMPTY and the service answers 401, which reads as a wrong key "
+                    f"rather than one that was never there. Read it where it lives:\n\n    "
+                    f"{r.read(None)}")})
+    return out
