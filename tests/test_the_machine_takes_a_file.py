@@ -697,8 +697,17 @@ def test_the_pause_tries_a_third_time_when_the_kinds_differ():
     j = body.index("\nasync def ", 10) if "\nasync def " in body[10:] else len(body)
     body = body[:j]
     assert "supervised_run_redraft_rejected" in body, "a rejected redraft's reasons must be logged in full"
-    assert "refusal_kinds(frame)" in body and "refusal_kinds(second)" in body
-    assert "not (k1 & k2)" in body, "the third attempt is only for DISJOINT kinds -- a loop is not progress"
+    # §17.1381 — the first draft is kept by name (`_first`) because `frame`
+    # becomes the better draft before the third attempt is decided.
+    assert "refusal_kinds(_first)" in body and "refusal_kinds(second)" in body
+    # §17.1381 — the disjoint-kinds rule moved into `supervised_runs.redraft_again`,
+    # a pure predicate over two frames, so that it could be tested on its own
+    # (tests/test_progress_is_not_a_reason_to_stop.py). The chain asks it; it no
+    # longer decides inline. Progress now ALSO earns another draft -- the branch
+    # that used to park on progress is gone.
+    assert "supervised_runs.redraft_again(_first, second)" in body
+    assert "not (k1 & k2)" in inspect.getsource(sr.redraft_again), \
+        "a loop is not progress: partial overlap with no progress still stops"
     tree = ast.parse(src)
     calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
     assert any(any(k.arg == "previous" for k in c.keywords) for c in calls), "the second note must carry the first attempt"
@@ -1456,7 +1465,10 @@ def test_the_pause_tries_a_third_time_on_a_repeated_kind_too():
     body = src[i:]
     j = body.index("\nasync def ", 10) if "\nasync def " in body[10:] else len(body)
     body = body[:j]
-    assert "or k2 == k1" in body, "a redraft refused for exactly the same kinds gets one more, told so"
+    # §17.1381 — the rule itself lives in `redraft_again` now; the chain asks it.
+    assert "or k2 == k1" in inspect.getsource(sr.redraft_again), \
+        "a redraft refused for exactly the same kinds gets one more, told so"
+    assert "supervised_runs.redraft_again(_first, second)" in body
     assert "same=%s" in body, "the log says whether the third draft is for a repeat"
     tree = ast.parse(src)
     calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
@@ -1628,7 +1640,12 @@ def test_the_chain_goes_on_from_a_draft_that_has_files_but_no_command():
     src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert '(second["commands"] or second.get("files")) and k2' in body
+    # §17.1381 — for the SECOND draft this moved into `redraft_again`, which
+    # reads both `commands` and `files` for the same reason: a written file is
+    # work the block does (§17.1288k), so a draft that has one is worth
+    # correcting. The third draft still decides it inline.
+    _ra = inspect.getsource(sr.redraft_again)
+    assert '.get("commands")' in _ra and '.get("files")' in _ra
     assert '(third["commands"] or third.get("files")) and k3' in body
 
 
