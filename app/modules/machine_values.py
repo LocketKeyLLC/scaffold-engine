@@ -469,3 +469,117 @@ def authenticates_instead_of_reading_the_key(
                 f"`[]`, so there is no such user to authenticate as. Do not guess a credential for a "
                 f"service whose key is on the disk. Read it:\n\n    {r.read(None)}")})
     return out
+
+
+# ── §17.1385: and if the service has no key yet, the engine makes one ────────
+
+#: §17.1385 — read-or-create, for a service whose credential the engine can
+#: read. The columns are INTROSPECTED rather than assumed: this engine has one
+#: Jellyfin to measure and `PRAGMA table_info` costs nothing, so a schema that
+#: differs fails by NAME instead of on a guessed INSERT. The new row is written
+#: with the service stopped and the service restarted after, because a running
+#: Jellyfin need not re-read the table.
+_JELLYFIN_CREATE = (
+    "python3 -c '"
+    "import secrets,sqlite3,subprocess,sys;"
+    f"p=\"{_JELLYFIN_DB}\";"
+    "c=sqlite3.connect(p);"
+    "cols=[r[1] for r in c.execute(\"PRAGMA table_info(ApiKeys)\")];"
+    "have=c.execute(\"SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1\").fetchone();"
+    "print(have[0]) if have else None;"
+    "sys.exit(0) if have else None;"
+    "tok=secrets.token_hex(16);"
+    "vals={\"AccessToken\":tok,\"Name\":\"scaffold-engine\",\"AppName\":\"scaffold-engine\","
+    "\"DateCreated\":\"now\",\"DateLastActivity\":\"now\"};"
+    "unknown=[x for x in cols if x.lower() not in (\"id\",\"rowid\") "
+    "and x not in vals];"
+    "sys.exit(\"jellyfin ApiKeys has columns this engine does not know: \"+repr(unknown)"
+    "+\" (all: \"+repr(cols)+\")\") if unknown else None;"
+    "use=[x for x in cols if x in vals];"
+    "subprocess.run([\"systemctl\",\"stop\",\"jellyfin\"],check=True);"
+    "c.execute(\"INSERT INTO ApiKeys (\"+\",\".join(use)+\") VALUES (\""
+    "+\",\".join(\"datetime(?)\" if vals[x]==\"now\" else \"?\" for x in use)+\")\","
+    "[vals[x] for x in use]);"
+    "c.commit();"
+    "subprocess.run([\"systemctl\",\"start\",\"jellyfin\"],check=True);"
+    "print(tok)'"
+)
+
+
+def create_key_on_the_machine(app: str, gid: Optional[str] = None) -> str:
+    """§17.1385 — the command that makes a credential for ``app``, or ``""``.
+
+    The operator approves it like any other machine change: it is work, not a
+    check. The operator asked for exactly this -- *"Can't it just create one
+    with my permission"* -- and the engine's own approval flow IS that
+    permission, so nothing here is handed back to them to do by hand.
+
+    Idempotent: it prints the existing key and exits 0 when there already is
+    one, so approving it twice creates nothing twice.
+    """
+    if app != "jellyfin":
+        return ""                              # the *arr family writes its own at install
+    return f"pct exec {gid} -- sh -c {_sq(_JELLYFIN_CREATE)}" if gid else _JELLYFIN_CREATE
+
+
+#: §17.1385 — the auth headers each readable service's HTTP API takes. A
+#: host-side program using one of these needs a key the runner cannot inject.
+_AUTH_HEADERS: dict[str, tuple[str, ...]] = {
+    "jellyfin": ("x-emby-token", "x-mediabrowser-token", "api_key="),
+}
+
+
+def a_host_program_needs_a_key_only_the_guest_can_read(
+        commands: list[str], files: Optional[list[dict]] = None,
+        policy: Optional[dict] = None) -> list[dict]:
+    r"""§17.1385 — a host-side program calling a service whose key it cannot get.
+
+    Live, 2026-10-06. ADD134's proof calls Jellyfin's API from a Python program
+    that runs on the HOST. The engine fills `<JELLYFIN_API_KEY>` in a command or
+    a check that runs inside the guest, and `read_on_the_machine` deliberately
+    leaves a written file alone; the runner injects only names its stores hold,
+    and Jellyfin's key is in neither. So the program has no way to obtain the
+    token -- which is why four drafts in a row reached for a login instead
+    (§17.1384). The engine kept refusing the symptom without ever saying where
+    the value comes from for code in that position.
+
+    The remedy is the Verify section, or a `pct exec` command: the step's own
+    done-condition -- *"Jellyfin's API lists the title"* -- is a READ, and a read
+    that runs inside the guest is filled before the operator is asked.
+
+    Judged only for a service with a `Readable`, only when the name is in
+    NEITHER runner store (an *arr key the runner holds is fine in a host
+    program), and only for a file the block runs from the host.
+    """
+    held = ({str(x) for x in ((policy or {}).get("secrets") or [])}
+            | {str(x) for x in ((policy or {}).get("held") or [])})
+    run_text = "\n".join(str(c) for c in commands or [])
+    out: list[dict] = []
+    for f in files or []:
+        path = str((f or {}).get("path") or "")
+        body = str((f or {}).get("content") or "")
+        if not path or path not in run_text:
+            continue                           # not a file this block runs
+        if "pct exec" in run_text.split(path)[0].rsplit("\n", 1)[-1]:
+            continue                           # the program itself runs in a guest
+        low = body.lower()
+        for app, headers in _AUTH_HEADERS.items():
+            r = _SERVICES.get(app)
+            if r is None or not any(h in low for h in headers):
+                continue
+            if any(n in held for n in (f"{app.upper()}_API_KEY", f"{app.upper()}_KEY")):
+                continue                       # the runner can inject it
+            out.append({"command": f"the file {path}", "why": (
+                f"{path} runs on the HOST and calls {app}'s API, and nothing can give it the key "
+                f"there: the engine fills `<{app.upper()}_API_KEY>` only in a command or a check that "
+                f"runs INSIDE the guest (a written file is left alone on purpose), and the runner "
+                f"injects only the names its stores hold -- {app} is not one of them. MEASURED live "
+                f"(§17.1385): four drafts in a row reached for a login instead, because this was the "
+                f"one position with no answer. Put that call where the key can be read -- the Verify "
+                f"section is the natural home, since the step's done-condition is a READ:\n\n    "
+                f"pct exec <gid> -- sh -c 'curl -s -H \"X-Emby-Token: $({r.read(None)})\" "
+                f"\"http://127.0.0.1:8096/Items?Recursive=true&SearchTerm=<TITLE>\"'\n\n"
+                f"If that read says `ApiKeys is empty`, {app} has no key yet -- create one ONCE under "
+                f"## Run this (it changes the machine, so it is work, not a check):\n\n    "
+                f"{create_key_on_the_machine(app, '<gid>')}")})
+    return out

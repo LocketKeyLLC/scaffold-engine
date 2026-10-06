@@ -157,6 +157,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
+                   "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "the call can only fail",                        # §17.1346
@@ -858,6 +859,19 @@ with a guessed username and the mass password answers **HTTP 400** on this serve
 also wants an `X-Emby-Authorization` header), and `GET /Users/Public` answers `[]` -- there is no
 such user. qBittorrent is the opposite case: it has no readable key, so `POST /api/v2/auth/login`
 with `admin` and `$MASS_PASSWORD` is exactly right there.
+
+A CALL THAT NEEDS A READABLE KEY RUNS INSIDE THE GUEST. A program running on the HOST cannot get
+Jellyfin's key: the engine fills `<JELLYFIN_API_KEY>` only in a command or a check that runs inside
+that guest, and the runner injects only the names its own stores hold. The Verify section is the
+natural home for it, because *"the library lists the title"* is a READ:
+
+```bash
+pct exec 101 -- sh -c 'curl -s -H "X-Emby-Token: $(python3 -c '"'"'import sqlite3;print(sqlite3.connect("file:/var/lib/jellyfin/data/jellyfin.db?mode=ro",uri=True).execute("SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1").fetchone()[0])'"'"')" "http://127.0.0.1:8096/Items?Recursive=true&IncludeItemTypes=Movie&SearchTerm=<TITLE>"'
+```
+
+If that read says `ApiKeys is empty`, the service has no key yet and the engine makes one -- the
+operator approves it like any other change, so put it ONCE under `## Run this`, never in Verify (it
+restarts the service). It prints the existing key and changes nothing when there already is one.
 
 A `/test` ENDPOINT VALIDATES THE WHOLE RESOURCE. `-d '{}'` to `…/api/v3/downloadclient/test` answers
 `'Name' must not be empty`, `'Implementation' must not be empty`, `'Config Contract' must not be
@@ -4861,6 +4875,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1384 — and a block that stops reading altogether and invents a login
     # for a service whose key the engine holds.
     refused = refused + _mv.authenticates_instead_of_reading_the_key(cmds, shape_files)
+    # §17.1385 — and a host-side program calling a service whose key nothing
+    # can give it there: the one position the earlier refusals left with no answer.
+    refused = refused + _mv.a_host_program_needs_a_key_only_the_guest_can_read(
+        cmds, shape_files, policy)
     try:
         from app.modules import service_truth as _st2
         refused = refused + _st2.a_file_read_on_another_machine(cmds, shape_files)
