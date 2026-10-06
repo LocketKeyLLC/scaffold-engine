@@ -100,3 +100,7 @@ alembic==1.20.0
 # §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
 procrastinate==3.9.0
 psycopg[binary,pool]==3.3.6
+# §17.1380 — the engine type-checks the program it DRAFTS before offering Run.
+# A runtime gate, not a dev tool: it runs inside the orchestrator, pure Python
+# (no node runtime), offline (--ignore-missing-imports), 0.16 s warm.
+mypy==2.4.0
