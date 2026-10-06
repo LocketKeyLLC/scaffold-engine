@@ -5506,7 +5506,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                         logger.warning("verify_recheck_still_blank job=%s node=%s", job_id, node_key)
                 if not unreadable:
                     confirmed_after_drop = await _goal_confirmed(
-                        str(waiting.get("title") or node_key), verify_cmds, pasted)
+                        goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted)
             elif ok:
                 # §17.1390 — before judging the ANSWERS, ask whether the checks
                 # ran at all. A refused check is not an ambiguous check: §17.1233
@@ -5545,7 +5545,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 # a step. An ambiguous check must never fail work that really
                 # happened, so `unknown` leaves the outcome alone.
                 _against = contradicted(await _verify_verdicts(
-                    str(waiting.get("title") or node_key), verify_cmds, pasted))
+                    goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted))
                 if _against:
                     ok = False
                     refuted = _against
@@ -5677,6 +5677,41 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                    job_id, node_key, bool(diagnosis), reason[:200])
     return {"outcome": "failed", "node_status": "failed", "executed": executed, "reason": reason,
             "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
+
+
+def goal_claim(title: str, description: str = "") -> str:
+    """§17.1396 — the claim the step's checks are judged against: its title AND its
+    description, where the done-condition lives.
+
+    Live, 2026-10-06, ADD135 — "Make the machines that serve the operator's goals
+    start on boot", whose description carries the operator's decision: "onboot on
+    VM 110 ai-vm ONLY ... Done when 110.conf carries onboot: 1 and 100.conf still
+    has no onboot line." `qm set 110 --onboot 1` ran, and the check on VM 100
+    answered "no onboot line (correct)". The judge saw only the title, read that
+    as a machine that does not start on boot, and CONTRADICTED it: the step that
+    did exactly what the operator chose was recorded failed.
+
+    The already-met path had built `title — description` since §17.1302; the
+    post-run contradiction (§17.1233) and confirm-after-drop (§17.1225) passed
+    the title alone. Three judges of the same checks, two of them blind to the
+    condition that settles them.
+    """
+    # The cap that stood here (400) cut ADD135 off at "OPERATOR DECISION 2026-10-06:
+    # s" -- the decision and the done-condition were both past it, so even the
+    # already-met path never saw them. Wider, and the done-condition is carried
+    # whole when the middle has to go: it is the sentence that settles a check.
+    desc = " ".join(str(description or "").split())
+    if not desc:
+        return str(title or "")
+    if len(desc) > _CLAIM_CAP:
+        done = re.search(r"(?:^|(?<=[.!?]\s))(?:Done|Complete|Finished) when\b[^\n]*", desc, re.I)
+        tail = done.group(0)[:_CLAIM_CAP // 2] if done else ""
+        desc = desc[:_CLAIM_CAP - len(tail)].rstrip() + (" … " + tail if tail else "")
+    return f"{title} — {desc}"
+
+
+#: how much of a step's description the judge reads (§17.1396)
+_CLAIM_CAP = 1200
 
 
 async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
@@ -6659,8 +6694,7 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
                     [f"{r.get('id')}: {str(r.get('why') or 'no marker')[:60]}" for r in ran or [] if not r.get("ran")] or "all")
         return None
     title = str((node or {}).get("title") or (frame or {}).get("node_key") or "")
-    desc = " ".join(str((node or {}).get("description") or "").split())[:400]
-    claim = f"{title} — {desc}" if desc else title
+    claim = goal_claim(title, str((node or {}).get("description") or ""))
     verdicts = await _verify_verdicts(claim, verify_cmds, pasted,
                                       expects=verify_expectations(str((frame or {}).get("runbook") or "")))
     if not verdicts or len(verdicts) != len(verify_cmds):

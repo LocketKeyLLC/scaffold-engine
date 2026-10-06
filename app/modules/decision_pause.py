@@ -189,6 +189,9 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
     return the SSE payload. The node stays ``pending`` — nothing was claimed."""
     asked = {
         "node_key": node["node_key"], "title": node.get("title") or "",
+        # §17.1396 — the done-condition travels with the question, so the judge
+        # that reads the run's checks sees what the operator decided
+        "description": node.get("description") or "",
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,
     }
     await db.execute(
