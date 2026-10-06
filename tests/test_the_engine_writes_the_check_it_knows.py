@@ -97,19 +97,25 @@ def test_no_commands_is_no_work():
 
 # ── wired, and only as a last resort ────────────────────────────────────────
 
-def test_it_runs_before_the_no_check_refusal():
+def test_it_runs_before_the_refusal_is_returned():
+    """§17.1389 moved this from an inline special case to the one filler
+    mechanism: the refusal is composed, handed to `fill_what_the_engine_holds`,
+    and only reaches `refused` if the fill did not close it."""
     src = inspect.getsource(sr.frame_run)
-    i = src.index("_mv.a_check_the_engine_can_write(cmds, inventory)")
-    j = src.index("this block has no check at all")
-    assert i < j, "the engine must try to WRITE a check before refusing for its absence"
+    i = src.index("this block has no check at all")
+    j = src.index("fill_what_the_engine_holds(")
+    k = src.index("refused = refused + _no_check")
+    assert i < j < k, "compose the refusal, try the fill, then return what stands"
+    assert "a_check_the_engine_can_write" in inspect.getsource(sr.fill_what_the_engine_holds) \
+        or "a_check_the_engine_can_write" in str(sr._FILLERS)
 
 
 def test_it_only_fires_when_the_draft_named_none():
     """A draft's own checks are never replaced: this is a last resort, not an
     opinion about checks the drafter did write."""
     src = inspect.getsource(sr.frame_run)
-    i = src.index("_mv.a_check_the_engine_can_write(cmds, inventory)")
-    guard = src[max(0, i - 400):i]
+    i = src.index("fill_what_the_engine_holds(")
+    guard = src[max(0, i - 900):i]
     assert "if cmds and not verify:" in guard
 
 
@@ -117,8 +123,8 @@ def test_the_addition_is_announced_not_silent():
     """§17.1270 — the operator approves what they are shown, so an added check
     is a correction on the frame like any other."""
     src = inspect.getsource(sr.frame_run)
-    i = src.index("_mv.a_check_the_engine_can_write(cmds, inventory)")
-    assert "_repairs = list(_repairs) + [{\"why\": _why}]" in src[i:i + 400]
+    i = src.index("fill_what_the_engine_holds(")
+    assert "_repairs = list(_repairs) + _engine_fills" in src[i:i + 300]
 
 
 def test_the_check_satisfies_the_gate_that_was_refusing():

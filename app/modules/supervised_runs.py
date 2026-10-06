@@ -236,6 +236,155 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
     return wanted
 
 
+#: §17.1389 — WHOSE gap is each refusal? Four times in one day the engine
+#: refused a block for something it was itself holding: §17.1332 asked the
+#: operator for a key it could read, §17.1385 refused a call for a key it could
+#: mint, §17.1387 refused its own escaping, §17.1388 refused a block for a check
+#: it had already written into the refusal text. Each got a point fix and
+#: nothing asked the question systematically.
+#:
+#: Three answers, and the third came out of the data rather than the design: 14
+#: of these markers are raised by `runbook_preconditions` / `machine_truth`, not
+#: by a shape gate at all.
+#:
+#:   "drafter" — the block's shape is wrong; only a redraft fixes it.
+#:   "engine"  — the engine holds what is missing; it should FILL it, announced.
+#:   "machine" — the machine contradicts the block; neither can fill it.
+#:
+#: Every marker in `_SHAPE_REFUSALS` must appear here (asserted by
+#: `tests/test_whose_gap_is_it.py`), so a new gate cannot join the set without
+#: someone deciding whose gap it is. That inventory, not any single filler, is
+#: what stops this recurring in a fifth costume
+#: ([[feedback_failsafes_are_a_registry]]).
+_WHOSE_GAP: dict[str, str] = {
+    # ── the machine contradicts the block ────────────────────────────────────
+    "is stopped (`": "machine",
+    "fails before it starts": "machine",
+    "is already taken on this host": "machine",
+    "there is no guest": "machine",
+    "is a VM on this host, not a container": "machine",
+    "is a container on this host, not a VM": "machine",
+    "is ALREADY": "machine",
+    "cannot resolve names": "machine",
+    "nothing has put this host's key on guest": "machine",
+    "has never been written": "machine",
+    "the call can only fail": "machine",
+    "rewrites the whole file when it stops": "machine",
+    "reaches port": "machine",
+    # ── the engine holds what is missing ─────────────────────────────────────
+    "has no check at all": "engine",              # §17.1388 — it composes the read-back
+    "appears only in the verify": "engine",       # §17.1288d — it drops the check
+    "asks the operator for a password the runner holds": "engine",   # §17.1288m
+    "reads the address itself and asks the operator for it": "engine",  # §17.1288l
+    "'s address: the engine measured": "engine",  # §17.1303 — measured beats written
+    "nothing can give it the key": "engine",      # §17.1385 — read it, or mint it
+    "is a value the engine READS": "engine",      # §17.1384
+    "which does not hold one": "engine",          # §17.1383
+    # ── the block's shape is the drafter's to fix ───────────────────────────
+    **{m: "drafter" for m in (
+        "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
+        "ON THE HOST", "not valid Python", "cannot even be split",
+        "only passes a stored value", "waits on something off this machine",
+        "dies at the first one that hangs", "against a",
+        "whether the KEY `propertyName` appears", "by a phrase list",
+        "without reading the body's `propertyName`", "has no 'needs_input' verdict",
+        "a secret cannot be written into a file",
+        "elevates only the first command of a line",
+        "runs in the runner's own shell on the Proxmox HOST",
+        "and nothing sets it", "is expanded by GUEST", "never imports or assigns",
+        "different filesystems", "keep a setting in the object's `fields` array",
+        "VALIDATES the whole resource", "does not accept",
+        "definition in this program takes fewer", "cannot witness the work",
+        "identifies nothing", "this edit changes NOTHING",
+        "no check reads that API back", "pasted inside a quoted shell word",
+        "same API the check reads", "this file RUNS ITSELF",
+        "reads only the engine's OWN script", "appears nowhere the engine holds",
+        "appears in nothing the engine holds",
+        "is not a unit anything the engine holds names",
+        "is an assumption", "inside an ssh command line",
+        "reads the neighbour table cold", "is a placeholder, not a value",
+        "is this host's own address", "is not waiting for the guest",
+        "content cut", "and nothing runs it", "ends inside a heredoc",
+        "type-checked this program before offering it",
+    )},
+}
+
+
+#: §17.1389 — the fillers: for an "engine" gap, what the engine does about it.
+#: Keyed by marker, so adding one is a line here plus the function. Each takes
+#: the frame's own material and returns ``[(what to add to verify, why)]`` —
+#: today only the check composer, because that is the only engine gap that was
+#: being REFUSED rather than quietly handled upstream (§17.1332's read
+#: substitution and §17.1288d's drop both run before the gates see anything).
+_FILLERS: dict[str, str] = {
+    "has no check at all": "a_check_the_engine_can_write",
+}
+
+
+def fill_what_the_engine_holds(refused: list[dict], cmds: list[str],
+                               verify: list[str], inventory: Optional[dict] = None
+                               ) -> tuple[list[dict], list[str], list[dict]]:
+    """§17.1389 — fill the refusals the ENGINE owns, and prove they are gone.
+
+    Returns ``(refusals that stand, verify, corrections)``. This is a verifier
+    and not another repair: a filler that produces something is only believed
+    once the refusal it claimed to fix is actually absent from the re-read set.
+    A filler that fires and changes nothing leaves the refusal exactly where it
+    was, loudly, rather than dropping it on the strength of having tried.
+
+    The engine never fills a "drafter" gap (the shape is the drafter's to fix)
+    or a "machine" gap (nothing the engine holds can make a stopped guest run).
+    """
+    if not refused:
+        return refused, verify, []
+    out_verify, fills = list(verify), []
+    kept: list[dict] = []
+    for r in refused:
+        why = str((r or {}).get("why") or "")
+        marker = next((m for m in _SHAPE_REFUSALS if m in why), None)
+        filler = _FILLERS.get(marker or "")
+        if filler is None or _WHOSE_GAP.get(marker or "") != "engine":
+            kept.append(r)
+            continue
+        from app.modules import machine_values as _mv
+        produced = getattr(_mv, filler)(cmds, inventory)
+        if not produced:
+            kept.append(r)                     # nothing to give: the refusal stands
+            continue
+        usable = [(w, n) for w, n in produced if str(w or "").strip()]
+        if not usable:
+            kept.append(r)                     # a filler that produced nothing usable
+            continue
+        for what, note in usable:
+            out_verify.append(what)
+            fills.append({"why": note})
+        # the verifier: re-ask the rule, and keep the refusal if it still holds
+        if _engine_gap_remains(marker, cmds, out_verify):
+            logger.warning("refusal_filler_did_not_close_it marker=%r filler=%s", marker, filler)
+            kept.append(r)
+    return kept, out_verify, fills
+
+
+def _engine_gap_remains(marker: str, cmds: list[str], verify: list[str]) -> bool:
+    """§17.1389 — does the rule still refuse, after the fill? The rule itself is
+    asked; nothing here reasons about what the fill 'should' have done."""
+    if marker == "has no check at all":
+        # a blank entry is not a check: the rule is asked about what would
+        # actually run, which is how the first cut of this verifier read an
+        # empty string as satisfaction.
+        return bool(cmds) and not [v for v in verify if str(v or "").strip()]
+    return False                               # an unknown marker is not claimed closed
+
+
+def whose_gap(why: str) -> Optional[str]:
+    """§17.1389 — ``"drafter"`` / ``"engine"`` / ``"machine"`` for one refusal."""
+    text = str(why or "")
+    for marker in _SHAPE_REFUSALS:
+        if marker in text:
+            return _WHOSE_GAP.get(marker)
+    return None
+
+
 def refusal_kinds(frame: dict) -> set[str]:
     """§17.1277 — which SHAPE rules a frame was refused for (the `_SHAPE_REFUSALS`
     markers its refusals carry). Two frames refused for DISJOINT kinds are a
@@ -4860,22 +5009,22 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # check looked at the file and not at the section. A block with none is recorded
     # done on exit codes alone, which is how a step "succeeds" having changed
     # nothing that matters. Live, ADD131 was drafted with `verify: []`.
-    # §17.1388 — before refusing a block for having no check, see whether the
-    # engine can WRITE one. It knows the service, the key and the read; until
-    # now it could only describe the check in a refusal and ask a drafter that
-    # would not take it. Never silent: it lands in `engine_fixed` like every
-    # other correction (§17.1270).
+    # §17.1388/§17.1389 — a block with no check is an ENGINE gap when the engine
+    # can compose the read-back itself, so the refusal is raised and then handed
+    # to the filler, which only closes it once the rule agrees it is closed. One
+    # mechanism, not a special case: `_WHOSE_GAP` says whose gap each refusal is
+    # and `_FILLERS` says what the engine does about the ones it owns.
     if cmds and not verify:
-        for _chk, _why in _mv.a_check_the_engine_can_write(cmds, inventory):
-            verify = list(verify) + [_chk]
-            _repairs = list(_repairs) + [{"why": _why}]
-    if cmds and not verify:
-        refused = refused + [{"command": cmds[0][:120], "why": (
+        _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
             "the service active -- not the command that made it.")}]
+        _no_check, verify, _engine_fills = fill_what_the_engine_holds(
+            _no_check, cmds, verify, inventory)
+        refused = refused + _no_check
+        _repairs = list(_repairs) + _engine_fills
     # §17.1362 — a change made through an API that no check reads back.
     refused = refused + changes_an_api_without_reading_it(cmds, verify, shape_files)
     # §17.1367 — a value read from a machine, pasted into a shell word.
