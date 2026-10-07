@@ -141,3 +141,21 @@ def test_a_plain_curl_post_is_still_refused():
 def test_a_script_the_block_runs_is_still_judged():
     files = [{"path": "/tmp/fix.sh", "content": "curl -s -X PUT -d '{}' http://192.168.1.22:7878/api/v3/x"}]
     assert sr.changes_an_api_without_reading_it(["bash /tmp/fix.sh"], [], files)
+
+
+# ── §17.1415b — the engine's own key-read line is not a Jellyfin call ───────
+
+def test_the_delivery_is_not_read_as_a_jellyfin_call():
+    """Live: `V_RADARR_API_KEY=$(…)` lowercases to contain `api_key=`, and §17.1385 refused ADD123's
+    delivery for "calling jellyfin's API" -- a call nothing in the block makes."""
+    from app.modules import machine_values as mv
+    rb = _delivery(dv.credentials_for([RADARR, SONARR]))
+    files = sr.file_writes(rb)
+    assert mv.a_host_program_needs_a_key_only_the_guest_can_read(sr.runbook_commands(rb), files, {}) == []
+
+
+def test_a_real_jellyfin_query_key_is_still_judged():
+    """Vacuity guard: Jellyfin's `?api_key=` from a host program is still the §17.1385 case."""
+    from app.modules import machine_values as mv
+    f = [{"path": "/tmp/prove.py", "content": "requests.get('http://192.168.1.30:8096/Items?api_key=' + k)"}]
+    assert mv.a_host_program_needs_a_key_only_the_guest_can_read(["python3 /tmp/prove.py"], f, {})
