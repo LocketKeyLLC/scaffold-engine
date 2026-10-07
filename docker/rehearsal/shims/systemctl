@@ -1,0 +1,19 @@
+#!/bin/bash
+# §17.1409 — systemctl in rehearsal: a control-panel restart (re)starts the backend; the rest is logged.
+echo "systemctl $*" >> /rehearsal/log
+verb="$1"; unit="${2:-}"
+case "$verb" in
+  restart|start)
+    if [[ "$unit" == control-panel* ]]; then
+      if [ ! -f "/etc/systemd/system/${unit%.service}.service" ] && [ ! -f "/etc/systemd/system/$unit" ]; then
+        echo "Failed to $verb $unit: Unit $unit not found." >&2; exit 5
+      fi
+      [ -f /rehearsal/server.pid ] && kill "$(cat /rehearsal/server.pid)" 2>/dev/null; sleep 0.3
+      # detached from every inherited descriptor, or the caller waits on its pipe forever
+      ( cd /opt/control-panel-backend && setsid node server.js </dev/null >/rehearsal/server.log 2>&1 & echo $! > /rehearsal/server.pid ) </dev/null >/dev/null 2>&1
+      sleep 1.5
+    fi;;
+  is-active) echo active;;
+  is-enabled) echo enabled;;
+esac
+exit 0

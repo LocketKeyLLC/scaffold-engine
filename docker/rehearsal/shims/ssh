@@ -1,0 +1,15 @@
+#!/bin/bash
+# §17.1409 — ssh in rehearsal: drop options and the target, run the remote command HERE,
+# where the target's files have been copied to their own paths. Logged for the report.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|-i|-p|-l|-F|-J) shift 2;;
+    -[46AaCfGgKkMNnqsTtVvXxYy]*) shift;;
+    *@*|[0-9]*.[0-9]*.[0-9]*.[0-9]*) shift; break;;
+    *) shift; break;;
+  esac
+done
+echo "ssh $*" >> /rehearsal/log
+[ $# -eq 0 ] && exec bash
+exec bash -c "$*"

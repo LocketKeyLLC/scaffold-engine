@@ -1,0 +1,12 @@
+#!/bin/bash
+# §17.1409 — qm in rehearsal: `qm guest exec` runs here and answers the agent's JSON shape.
+echo "qm $*" >> /rehearsal/log
+if [ "$1" = "guest" ] && [ "$2" = "exec" ]; then
+  shift 3; stdin=0
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do [ "$1" = "--pass-stdin" ] && stdin="$2" && shift; shift; done
+  shift
+  if [ "$stdin" = "1" ]; then out=$("$@" 2>/tmp/qe.err); rc=$?; else out=$("$@" </dev/null 2>/tmp/qe.err); rc=$?; fi
+  python3 -c 'import json,sys; print(json.dumps({"exitcode": int(sys.argv[1]), "exited": 1, "out-data": sys.argv[2] + ("\n" if sys.argv[2] else ""), "err-data": open("/tmp/qe.err").read()}, indent=3).replace("\": ", "\" : "))' "$rc" "$out"
+  exit 0
+fi
+exit 0

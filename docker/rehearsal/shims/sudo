@@ -1,0 +1,11 @@
+#!/bin/bash
+# §17.1409 — sudo in rehearsal: the sandbox is root already; flags dropped, the command run.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u|-g|-p|-C|-h|-r|-t|-U) shift 2;;
+    -*) shift;;
+    *) break;;
+  esac
+done
+echo "sudo $*" >> /rehearsal/log
+exec "$@"
