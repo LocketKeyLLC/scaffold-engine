@@ -149,9 +149,6 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
         if rt.get("put_status") != 200:
             bits.append(f"PUT of the settings GET returned answered {rt.get('put_status')}: "
                         f"{' '.join(str(rt.get('put_body') or '').split())[:160]}")
-            # §17.1411c — the PUT carried exactly the GET's JSON, as application/json
-            bits.append(f"(the PUT carried exactly the body the GET returned, as `Content-Type: application/json`: "
-                        f"`{' '.join(str(rt.get('get_body') or '').split())[:120]}`)")
             if report.get("parses_json_body") is False:
                 bits.append("NO file of the backend parses a JSON body -- there is no `app.use(express.json())` "
                             "(or bodyParser) anywhere, so `req.body` is undefined in every PUT. The route must "
@@ -170,6 +167,13 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
             bits.append(f"keys that were never there: {', '.join(map(str, rt['extra'][:4]))}")
         if rt.get("file_after") is not None:
             bits.append(f"the file after the save begins `{' '.join(str(rt['file_after']).split())[:160]}`")
+    # §17.1413b — on any failed round trip with a GET, show what went in and what came back:
+    # live, six rounds could not see that the PUT was sent `{"settings": {...}}` because this line
+    # only appeared when the PUT itself failed
+    if rt.get("get_status") == 200:
+        bits.append(f"what the test sent: GET answered `{' '.join(str(rt.get('get_body') or '').split())[:160]}` "
+                    f"and the PUT carried exactly that, as `Content-Type: application/json`; the PUT answered "
+                    f"{rt.get('put_status')} `{' '.join(str(rt.get('put_body') or '').split())[:120]}`")
     # §17.1411b — and WHY, whatever the status: what the block did to the backend's own
     # files. Live: five repairs kept a `sed` that matched no line in server.js; GET answered
     # 404 (or the EARLIER run's leftover route answered), and nothing said the draft's own

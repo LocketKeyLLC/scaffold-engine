@@ -247,12 +247,30 @@ SYSTEM = (
 )
 
 
+def test_contract(target: Optional[dict]) -> str:
+    """§17.1413b — the acceptance test, stated up front. Live: six rounds stalled at one contract
+    mismatch (GET answered `{"settings": {...}}`, PUT took the body as the map itself) because the
+    model was never told the test is "GET, then PUT exactly that body back"."""
+    if not target:
+        return ""
+    return (f"THE TEST THE ENGINE RUNS ON EVERY VERSION (in a sandbox, on copies of the real files):\n"
+            f"1. GET {target['get']}  -> body B (JSON)\n"
+            f"2. PUT {target['put']}  with body B EXACTLY, `Content-Type: application/json` -- a save that "
+            f"changes nothing\n"
+            f"3. {target['config']} must then say the same thing as before: the same `[section]` header, the "
+            f"same keys, the same values (while that file has no settings line, the server runs on "
+            f"{target.get('baseline') or 'its template'} -- that is \"before\").\n"
+            f"So the PUT must accept exactly the shape the GET returns. A real client reads, edits one value "
+            f"and sends the whole thing back the same way.")
+
+
 def build_prompt(node: dict, host: Host, facts: str, workspace: dict[str, str],
-                 current: Optional[dict[str, str]], evidence: str, round_no: int, kit: str = "") -> str:
+                 current: Optional[dict[str, str]], evidence: str, round_no: int, kit: str = "",
+                 test: str = "") -> str:
     parts = [f"STEP {node.get('node_key')}: {node.get('title')}", str(node.get("description") or ""), "",
              f"THE SERVICE: {host.name or host.unit} on guest {host.guest} ({'VM' if host.vm else 'container'}), "
              f"directory {host.workdir}, unit {host.unit}" + (f", runs as {host.user}" if host.user else ", runs as root"),
-             "", facts.strip(), "", kit.strip(), "", "=== THE SERVICE'S CURRENT FILES (on the machine now) ==="]
+             "", facts.strip(), "", kit.strip(), "", test.strip(), "", "=== THE SERVICE'S CURRENT FILES (on the machine now) ==="]
     for p, c in workspace.items():
         parts += [f"--- {p} ---", c]
     if current:

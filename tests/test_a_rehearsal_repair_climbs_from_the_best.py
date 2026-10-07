@@ -164,7 +164,7 @@ def test_a_backend_that_parses_no_json_body_is_named():
     assert NOJSON["parses_json_body"] is False
     why = rh.refusal_from(NOJSON)[0]["why"]
     assert "app.use(express.json())" in why and "`req.body` is undefined in every PUT" in why
-    assert "the PUT carried exactly the body the GET returned" in why
+    assert "what the test sent: GET answered" in why and "the PUT carried exactly that" in why
 
 
 def test_a_backend_that_parses_json_is_not_told_it_does_not():
