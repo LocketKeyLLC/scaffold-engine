@@ -49,6 +49,14 @@ def roundtrip_target(node: Optional[dict], services: Optional[list]) -> Optional
     m = _ROUTE_RE.search(text)
     if not m:
         return None
+    # §17.1414 — the step's OWN check decides the test. A settings round trip needs a resource the
+    # step READS back (a GET). ADD123's check is a POST that asks Radarr for a film: it was rehearsed
+    # as a GET/PUT round trip on Radarr's config, 404'd eight rounds running on a GET that never
+    # existed, and could not have passed. A step whose check of its route is a write is not this test.
+    route_checks = [c for c in re.findall(r"`([^`]*" + re.escape(m.group(0)) + r"[^`]*)`", text)]
+    if route_checks and all(re.search(r"\s-X\s*(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-\w+)?)\s", c)
+                            for c in route_checks):
+        return None
     url = f"http://127.0.0.1:{m.group(1)}{m.group(2).rstrip('.')}"
     low = text.lower()
     for svc in services or []:

@@ -126,15 +126,43 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
     return out
 
 
+def _is_read(cmd: str) -> bool:
+    from app.modules.assist_state_check import read_only_command
+    try:
+        return bool(read_only_command(cmd))
+    except Exception:
+        return False
+
+
 def done_checks(node: Optional[dict], host: Host) -> list[str]:
-    """The step's own checks (backticked `pct exec N -- …` in its text), then the unit is active."""
-    checks = [c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or ""))]
+    """The step's own READ checks (backticked `pct exec N -- …` in its text), then the unit is active.
+
+    §17.1414 — only reads: the verify channel carries nothing else, and silently dropped ADD123's
+    POST. A check that WRITES is the run's own acceptance step (`acceptance_checks`)."""
+    checks = [c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or "")) if _is_read(c.strip())]
     tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
     checks.append(f"{tool} systemctl is-active {host.unit}")
     return list(dict.fromkeys(checks))
 
 
-def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], checks: list[str]) -> str:
+def acceptance_checks(node: Optional[dict]) -> list[str]:
+    """§17.1414 — the step's own checks that WRITE (ADD123: a POST that asks Radarr for a film). They
+    cannot be verified read-only, and the sandbox cannot reach another machine's API, so they run as
+    the approved block's LAST step -- visible to the operator before approval -- with `curl -f`, so
+    an HTTP error fails the run instead of printing an error page and exiting 0."""
+    out: list[str] = []
+    for c in _CHECK_RE.findall(str((node or {}).get("description") or "")):
+        c = c.strip()
+        if _is_read(c):
+            continue
+        if re.search(r"\bcurl\b", c) and not re.search(r"\bcurl\b[^|;&]*\s-(?:[a-zA-Z]*f[a-zA-Z]*)\b|--fail\b", c):
+            c = re.sub(r"\bcurl\b", "curl -f", c, count=1)
+        out.append(c)
+    return list(dict.fromkeys(out))
+
+
+def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], checks: list[str],
+                    acceptance: Optional[list[str]] = None) -> str:
     """The delivery runbook -- a shape the engine owns: stage, back up, push, restart, check."""
     nk = re.sub(r"[^A-Za-z0-9_-]", "", str((node or {}).get("node_key") or "step")) or "step"
     # §17.1413c — staged FLAT, directly in /tmp: the runner's write_file creates no directory
@@ -191,7 +219,8 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
     if carried:
         out += [f"({len(carried)} file(s) carried inside deliver.sh base64-encoded, because their text holds "
                 f"a fence or a heading line: {', '.join(carried)})", ""]
-    out += ["## Run this", "", "```bash", f"bash {stage}--deliver.sh", "```", "",
+    run = [f"bash {stage}--deliver.sh", *(acceptance or [])]      # §17.1414 — the step's own write check, last
+    out += ["## Run this", "", "```bash", "\n".join(run), "```", "",
             "## Verify", "", "```bash", "\n".join(checks), "```", ""]
     return "\n".join(out)
 
