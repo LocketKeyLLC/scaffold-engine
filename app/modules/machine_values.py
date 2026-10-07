@@ -559,7 +559,9 @@ def create_key_on_the_machine(app: str, gid: Optional[str] = None) -> str:
 #: §17.1385 — the auth headers each readable service's HTTP API takes. A
 #: host-side program using one of these needs a key the runner cannot inject.
 _AUTH_HEADERS: dict[str, tuple[str, ...]] = {
-    "jellyfin": ("x-emby-token", "x-mediabrowser-token", "api_key="),
+    # §17.1415b — `api_key=` only as Jellyfin's URL QUERY parameter. As a bare substring it matched the
+    # engine's own delivery line `V_RADARR_API_KEY=$(…)` and refused ADD123 for "calling jellyfin's API".
+    "jellyfin": ("x-emby-token", "x-mediabrowser-token", "?api_key=", "&api_key="),
 }
 
 
