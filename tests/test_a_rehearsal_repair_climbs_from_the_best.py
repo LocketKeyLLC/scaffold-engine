@@ -150,3 +150,28 @@ def test_a_changed_backend_shows_its_diff_not_the_no_op_note():
     why = rh.refusal_from(rep)[0]["why"]
     assert "EXACTLY as before" not in why
     assert "`/opt/x/server.js` changed: +app.use('/api/a'" in why
+
+
+# ── §17.1411c — a PUT the backend cannot read ────────────────────────────────
+
+NOJSON = json.loads((FIX / "report_put_without_json_parsing.json").read_text())
+
+
+def test_a_backend_that_parses_no_json_body_is_named():
+    """Live: CT 111's server.js never calls express.json(); every repair's PUT got
+    req.body undefined and answered 400 -- and the evidence never said why."""
+    assert NOJSON["roundtrip"]["get_status"] == 200 and NOJSON["roundtrip"]["put_status"] == 400
+    assert NOJSON["parses_json_body"] is False
+    why = rh.refusal_from(NOJSON)[0]["why"]
+    assert "app.use(express.json())" in why and "`req.body` is undefined in every PUT" in why
+    assert "the PUT carried exactly the body the GET returned" in why
+
+
+def test_a_backend_that_parses_json_is_not_told_it_does_not():
+    rep = {**NOJSON, "parses_json_body": True}
+    assert "NO file of the backend parses a JSON body" not in rh.refusal_from(rep)[0]["why"]
+
+
+def test_a_passing_round_trip_says_nothing_about_parsing():
+    assert GOOD_DIFF.get("roundtrip", {}).get("ok") is True
+    assert rh.refusal_from(GOOD_DIFF) == []

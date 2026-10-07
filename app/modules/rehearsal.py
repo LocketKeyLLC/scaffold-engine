@@ -147,6 +147,14 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
         if rt.get("put_status") != 200:
             bits.append(f"PUT of the settings GET returned answered {rt.get('put_status')}: "
                         f"{' '.join(str(rt.get('put_body') or '').split())[:160]}")
+            # §17.1411c — the PUT carried exactly the GET's JSON, as application/json
+            bits.append(f"(the PUT carried exactly the body the GET returned, as `Content-Type: application/json`: "
+                        f"`{' '.join(str(rt.get('get_body') or '').split())[:120]}`)")
+            if report.get("parses_json_body") is False:
+                bits.append("NO file of the backend parses a JSON body -- there is no `app.use(express.json())` "
+                            "(or bodyParser) anywhere, so `req.body` is undefined in every PUT. The route must "
+                            "turn it on (`app.use(express.json())` before the routes, or `express.json()` as the "
+                            "PUT route's own middleware)")
         if rt.get("header_kept") is False:
             bits.append("the file lost its `[section]` header")
         if rt.get("expected_keys") is not None:
