@@ -160,7 +160,11 @@ def test_the_chain_is_still_bounded_at_four_drafts():
     body = _chain()
     # Read, not guessed: the eight calls are the first draft, the three shape
     # redrafts (fix / fix2 / fix3) and four single-shot recovery drafts.
-    assert body.count("supervised_runs.draft_runbook(") == 8
+    # §17.1411 — nine: the rehearsal repair loop drafts too, and it is bounded by its own
+    # constant (asserted below), never by "until it works"
+    assert body.count("supervised_runs.draft_runbook(") == 9
+    assert "for _attempt in range(rehearsal.REPAIRS):" in body
+    assert "while" not in body.split("for _attempt in range(rehearsal.REPAIRS):", 1)[1].split("rehearsal.remember_best(", 1)[0]
     for note in ("retry_note=fix,", "retry_note=fix2,", "retry_note=fix3,"):
         assert note in body.replace("\n", " ").replace("  ", " ") or note[:-1] in body, note
     assert "retry_note=fix3" in body and "retry_note=fix4" not in body, (
