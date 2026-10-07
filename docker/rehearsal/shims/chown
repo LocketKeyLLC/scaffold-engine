@@ -1,0 +1,16 @@
+#!/bin/bash
+# §17.1413 — chown in rehearsal. The sandbox runs without CAP_CHOWN (hardened), so a real
+# chown is "Operation not permitted" here and fine on the machine. What matters is kept: an
+# owner that does not exist is refused exactly as the machine would ("invalid user"); a valid
+# one is checked against the users the engine measured, logged, and accepted.
+echo "chown $*" >> /rehearsal/log
+args=(); for a in "$@"; do case "$a" in -*) ;; *) args+=("$a");; esac; done
+owner="${args[0]:-}"; user="${owner%%:*}"; group=""; [[ "$owner" == *:* ]] && group="${owner#*:}"
+if [ -n "$user" ] && ! grep -q "^${user}:" /etc/passwd; then
+  echo "chown: invalid user: ‘${owner}’" >&2; exit 1
+fi
+if [ -n "$group" ] && ! grep -q "^${group}:" /etc/group; then
+  echo "chown: invalid group: ‘${owner}’" >&2; exit 1
+fi
+for f in "${args[@]:1}"; do [ -e "$f" ] || { echo "chown: cannot access '$f': No such file or directory" >&2; exit 1; }; done
+exit 0

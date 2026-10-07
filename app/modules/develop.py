@@ -192,6 +192,38 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
     return "\n".join(out)
 
 
+# ── §17.1413: engine-owned building blocks, delivered with every developed version ──
+
+_KIT_DIR = os.path.join(os.path.dirname(__file__), "develop_kit")
+KIT_SUBDIR = "scaffold-kit"
+KIT_DOC = """THE ENGINE'S KIT (installed for you at {kit}/ on every delivery -- use it, do not write your own):
+- `const remote = require('{kit}/remote');` -- for ANYTHING on another machine. `host = {{address, user}}`.
+  `remote.readFile(host, path)` -> text (sudo cat). `remote.writeFile(host, path, text, {{owner: 'user:group'}})`
+  (sudo tee, the text travels on stdin). `remote.exists(host, path)`. `remote.unit(host, 'stop'|'start'|'restart'|'is-active', unit)`.
+  Never build an ssh command line yourself; never quote content into one.
+- `const ue = require('{kit}/ue_settings');` -- Unreal-engine settings files (one `[/Script/...]` header and one
+  `OptionSettings=(k=v,...)` line; a value can itself be `(A,B,C)`). `ue.parse(text)` -> `{{header, settings}}`
+  or null when the file has no OptionSettings line; `ue.serialize(doc)` -> the file text. parse(serialize(doc)) equals doc.
+"""
+
+
+def kit_for(host: Host, workspace: dict[str, str]) -> dict[str, str]:
+    """The kit files for this service's runtime, at their delivered paths (Node services today)."""
+    unit = workspace.get(f"/etc/systemd/system/{host.unit}", "")
+    if "node" not in unit.lower():
+        return {}
+    base = f"{host.workdir}/{KIT_SUBDIR}"
+    out: dict[str, str] = {}
+    for name in ("remote.js", "ue_settings.js"):
+        with open(os.path.join(_KIT_DIR, "node", name), encoding="utf-8") as fh:
+            out[f"{base}/{name}"] = fh.read()
+    return out
+
+
+def kit_doc(host: Host, kit: dict[str, str]) -> str:
+    return KIT_DOC.format(kit=f"{host.workdir}/{KIT_SUBDIR}") if kit else ""
+
+
 FILES_SCHEMA = {
     "type": "object",
     "properties": {
@@ -216,11 +248,11 @@ SYSTEM = (
 
 
 def build_prompt(node: dict, host: Host, facts: str, workspace: dict[str, str],
-                 current: Optional[dict[str, str]], evidence: str, round_no: int) -> str:
+                 current: Optional[dict[str, str]], evidence: str, round_no: int, kit: str = "") -> str:
     parts = [f"STEP {node.get('node_key')}: {node.get('title')}", str(node.get("description") or ""), "",
              f"THE SERVICE: {host.name or host.unit} on guest {host.guest} ({'VM' if host.vm else 'container'}), "
              f"directory {host.workdir}, unit {host.unit}" + (f", runs as {host.user}" if host.user else ", runs as root"),
-             "", facts.strip(), "", "=== THE SERVICE'S CURRENT FILES (on the machine now) ==="]
+             "", facts.strip(), "", kit.strip(), "", "=== THE SERVICE'S CURRENT FILES (on the machine now) ==="]
     for p, c in workspace.items():
         parts += [f"--- {p} ---", c]
     if current:

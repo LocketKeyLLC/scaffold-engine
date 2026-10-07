@@ -81,6 +81,19 @@ def main() -> None:
     job = json.load(sys.stdin)
     os.makedirs("/rehearsal", exist_ok=True)
     open("/rehearsal/log", "w").close()
+    # §17.1413 — the service users the engine measured (steam, uid 1001 on VM 106) exist here too,
+    # with their real ids, or a chown to them is "invalid user" in rehearsal and fine on the machine
+    for usr in job.get("users") or []:
+        name, uid = str(usr.get("user") or ""), str(usr.get("uid") or "")
+        group, gid = str(usr.get("group") or name), str(usr.get("gid") or uid)
+        if not name or not uid.isdigit() or not gid.isdigit():
+            continue
+        if not any(l.split(":")[0] == group for l in open("/etc/group").read().splitlines()):
+            with open("/etc/group", "a") as fh:
+                fh.write(f"{group}:x:{gid}:\n")
+        if not any(l.split(":")[0] == name for l in open("/etc/passwd").read().splitlines()):
+            with open("/etc/passwd", "a") as fh:
+                fh.write(f"{name}:x:{uid}:{gid}::/nonexistent:/usr/sbin/nologin\n")
     # §17.1412 — the units the engine measured on any machine: real there, logged here
     with open("/rehearsal/known_units", "w") as fh:
         fh.write("\n".join(str(u) if str(u).endswith(".service") else f"{u}.service"

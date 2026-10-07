@@ -109,10 +109,12 @@ async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:
 
 
 async def rehearse(commands: list[str], files: list[dict], target: dict, seeds: list[dict],
-                   url: Optional[str] = None, known_units: Optional[list[str]] = None) -> Optional[dict]:
+                   url: Optional[str] = None, known_units: Optional[list[str]] = None,
+                   users: Optional[list[dict]] = None) -> Optional[dict]:
     """POST the job to the rehearsal service; the report, or None when it cannot run."""
     job = {"seeds": seeds, "files": [{"path": f.get("path"), "content": f.get("content")} for f in files or []],
            "commands": list(commands or []), "known_units": list(known_units or []),
+           "users": list(users or []),
            "roundtrip": {k: target[k] for k in ("get", "put", "config", "baseline")}}
     try:
         import httpx

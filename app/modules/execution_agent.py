@@ -2756,7 +2756,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
                 report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds,
                                                   known_units=[str(getattr(s, "unit", "")) for s in _services or []
-                                                               if getattr(s, "unit", "")])
+                                                               if getattr(s, "unit", "")],
+                                                  users=[{"user": s.user, "uid": s.uid, "group": s.group or s.user,
+                                                          "gid": s.gid} for s in _services or []
+                                                         if getattr(s, "user", "") and getattr(s, "uid", "")])
                 _rh_reports[rb] = report
                 refused = rehearsal.refusal_from(report)
                 _ran = bool(report) and not report.get("error")
@@ -2777,13 +2780,15 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _nk_dev = str(run_node.get("node_key") or "")
             workspace = await develop.read_workspace(spec, host)
             checks = develop.done_checks(run_node, host)
+            kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
+            kit_text = develop.kit_doc(host, kit)
             facts = _st_dev.table(_services, _reading)
             best = None                            # (score, frame, files)
             current: dict | None = None
             evidence = ""
             for round_no in range(1, develop.ROUNDS + 1):
                 files, summary = await develop.propose(
-                    develop.build_prompt(run_node, host, facts, workspace, current, evidence, round_no))
+                    develop.build_prompt(run_node, host, facts, workspace, current, evidence, round_no, kit_text))
                 if not files:
                     evidence = f"- {summary}"
                     logger.warning("develop_no_files job=%s node=%s round=%d why=%s", job_id, _nk_dev, round_no, summary)
@@ -2794,14 +2799,17 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                 f"step names, so the engine will not write them: {', '.join(outside)}")
                     logger.warning("develop_paths_refused job=%s node=%s round=%d paths=%s", job_id, _nk_dev, round_no, outside)
                     continue
-                rb = develop.render_delivery(run_node, host, files, checks)
+                # the kit is the engine's: delivered with every version, never the model's to rewrite
+                files = {p: c for p, c in files.items() if p not in kit}
+                rb = develop.render_delivery(run_node, host, {**files, **kit}, checks)
                 fr = supervised_runs.frame_run(run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
                 sc = develop.score(fr, _rh_reports.get(rb))
-                logger.warning("develop_round job=%s node=%s round=%d files=%d score=%s best=%s",
-                               job_id, _nk_dev, round_no, len(files), sc, best[0] if best else None)
+                logger.warning("develop_round job=%s node=%s round=%d files=%d score=%s best=%s why=%r",
+                               job_id, _nk_dev, round_no, len(files), sc, best[0] if best else None,
+                               develop.evidence_of(fr)[:400])
                 if best is None or sc <= best[0]:          # a tie goes to the newer version
                     best = (sc, fr, files)
                 if sc == 0:
