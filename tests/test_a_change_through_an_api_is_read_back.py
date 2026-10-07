@@ -126,7 +126,7 @@ def test_the_framer_runs_it():
 
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr.frame_run)
-    assert "changes_an_api_without_reading_it(cmds, verify, shape_files)" in src
+    assert "changes_an_api_without_reading_it(cmds, verify, shape_files," in src
 
 
 # ------------------------------- §17.1362b — a login changes no configuration

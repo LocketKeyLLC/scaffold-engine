@@ -1565,7 +1565,8 @@ def a_machine_value_in_a_shell_word(commands: list[str],
 
 
 def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
-                                      files: Optional[list[dict]] = None) -> list[dict]:
+                                      files: Optional[list[dict]] = None,
+                                      acceptance: Optional[list[str]] = None) -> list[dict]:
     r"""§17.1362 — the block changed something through an API no check reads back.
 
     Measured over every recorded step of the live job: **4** make a state-changing
@@ -1585,8 +1586,19 @@ def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
     runs either way. Its own previous draft had read both back, which is the shape
     this asks for.
     """
-    changed = api_ports_changed([str(c) for c in commands or []]
-                                + [str((f or {}).get("content") or "") for f in files or []])
+    # §17.1415 — the BLOCK's changes: its commands and the files it RUNS. A file it only writes and
+    # delivers (a service's own code, whose HTTP calls a user triggers later) changes nothing when
+    # the block runs. Live, every developed API feature would otherwise trip this on its own source.
+    # and the step's OWN acceptance check (§17.1414: its POST, run last with `curl -f`) is the check, not
+    # a change to read back -- exempt by identity, not by `--fail`: ADD132's `curl --fail-with-body -X PUT`
+    # fails on a 400 yet proves nothing about the value the PUT left, which is this gate's case.
+    accepted = {str(a).strip() for a in acceptance or []}
+    cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted]
+    ran = [str((f or {}).get("content") or "") for f in files or []
+           if (f or {}).get("path") and any(re.search(
+               rf"(?:^|[;&|]\s*|\b(?:ba|da|z)?sh\s+|\bpython3?\s+|\bnode\s+|\bperl\s+){re.escape(str(f['path']))}(?![\w./-])", c)
+               for c in cmd_texts)]
+    changed = api_ports_changed(cmd_texts + ran)
     if not changed:
         return []
     read = {m.group("port") for c in (verify or []) for m in _URL_PORT_RE.finditer(str(c or ""))}
@@ -5163,7 +5175,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         refused = refused + _no_check
         _repairs = list(_repairs) + _engine_fills
     # §17.1362 — a change made through an API that no check reads back.
-    refused = refused + changes_an_api_without_reading_it(cmds, verify, shape_files)
+    from app.modules import develop as _develop          # §17.1415 — the step's own acceptance check
+    refused = refused + changes_an_api_without_reading_it(cmds, verify, shape_files,
+                                                          _develop.acceptance_checks(node))
     # §17.1367 — a value read from a machine, pasted into a shell word.
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
