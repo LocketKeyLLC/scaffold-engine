@@ -175,3 +175,20 @@ def test_a_backend_that_parses_json_is_not_told_it_does_not():
 def test_a_passing_round_trip_says_nothing_about_parsing():
     assert GOOD_DIFF.get("roundtrip", {}).get("ok") is True
     assert rh.refusal_from(GOOD_DIFF) == []
+
+
+# ── §17.1411d — the evidence a repair is shown is current ────────────────────
+
+def test_a_tie_goes_to_the_newer_attempt():
+    """Live: five repairs tied at 3330 while the kept best carried pre-§17.1411c evidence;
+    with `<`, none replaced it, so the express.json() note was never shown."""
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert 'if _sc <= _best["score"]:' in src and 'if _sc < _best["score"]:' not in src
+
+
+def test_a_resumed_best_is_rehearsed_again_before_it_is_shown():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    i_resume = src.index('_best.update({"frame": None, "runbook": _kept["runbook"]')
+    i_fresh = src.index("_fresh = await _rehearse_or_nothing(_best[\"runbook\"]")
+    i_loop = src.index("for _attempt in range(rehearsal.REPAIRS):")
+    assert i_resume < i_fresh < i_loop

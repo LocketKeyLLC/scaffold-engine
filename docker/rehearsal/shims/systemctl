@@ -1,19 +1,38 @@
 #!/bin/bash
-# §17.1409 — systemctl in rehearsal: a control-panel restart (re)starts the backend; the rest is logged.
+# §17.1409/§17.1412 — systemctl in rehearsal. `restart`/`start` of a unit whose unit file was
+# copied in runs that unit's own ExecStart in its own WorkingDirectory (detached, pid kept);
+# a unit with no unit file is "not found", which is how a guessed unit name is caught.
 echo "systemctl $*" >> /rehearsal/log
-verb="$1"; unit="${2:-}"
+verb="$1"; unit="${2:-}"; unit="${unit%.service}.service"
+file="/etc/systemd/system/$unit"
+pidf="/rehearsal/${unit}.pid"
 case "$verb" in
   restart|start)
-    if [[ "$unit" == control-panel* ]]; then
-      if [ ! -f "/etc/systemd/system/${unit%.service}.service" ] && [ ! -f "/etc/systemd/system/$unit" ]; then
-        echo "Failed to $verb $unit: Unit $unit not found." >&2; exit 5
-      fi
-      [ -f /rehearsal/server.pid ] && kill "$(cat /rehearsal/server.pid)" 2>/dev/null; sleep 0.3
-      # detached from every inherited descriptor, or the caller waits on its pipe forever
-      ( cd /opt/control-panel-backend && setsid node server.js </dev/null >/rehearsal/server.log 2>&1 & echo $! > /rehearsal/server.pid ) </dev/null >/dev/null 2>&1
-      sleep 1.5
-    fi;;
-  is-active) echo active;;
+    if [ ! -f "$file" ]; then
+      # a unit the engine MEASURED on some machine exists there; here it is only logged
+      grep -qxF "$unit" /rehearsal/known_units 2>/dev/null && exit 0
+      echo "Failed to $verb $unit: Unit $unit not found." >&2; exit 5
+    fi
+    [ -f "$pidf" ] && kill "$(cat "$pidf")" 2>/dev/null; sleep 0.3
+    wd=$(sed -n 's/^WorkingDirectory=-\{0,1\}//p' "$file" | tail -1); wd=${wd:-/}
+    exe=$(sed -n 's/^ExecStart=[-@+!]*//p' "$file" | tail -1)
+    [ -n "$exe" ] || { echo "Failed to $verb $unit: no ExecStart" >&2; exit 1; }
+    ( cd "$wd" && setsid bash -c "exec $exe" </dev/null >"/rehearsal/server.log" 2>&1 & echo $! > "$pidf" ) </dev/null >/dev/null 2>&1
+    cp "$pidf" /rehearsal/server.pid 2>/dev/null || true
+    sleep 1.5;;
+  stop) if [ ! -f "$file" ] && ! grep -qxF "$unit" /rehearsal/known_units 2>/dev/null; then
+          echo "Failed to stop $unit: Unit $unit not loaded." >&2; exit 5
+        fi
+        [ -f "$pidf" ] && kill "$(cat "$pidf")" 2>/dev/null; true;;
+  is-active) shift; quiet=0; u=""
+             for a in "$@"; do case "$a" in --quiet|-q) quiet=1;; --*) ;; *) u="${a%.service}.service";; esac; done
+             # active only while the unit's own process is alive -- a backend that crashed on start
+             # must read as inactive, or the evidence hides the crash
+             if [ -n "$u" ] && [ -f "/rehearsal/${u}.pid" ] && kill -0 "$(cat "/rehearsal/${u}.pid")" 2>/dev/null; then
+               [ "$quiet" = 1 ] || echo active; exit 0
+             fi
+             [ "$quiet" = 1 ] || echo inactive; exit 3;;
   is-enabled) echo enabled;;
+  daemon-reload) ;;
 esac
 exit 0

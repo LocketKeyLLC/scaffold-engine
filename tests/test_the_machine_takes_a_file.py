@@ -1559,7 +1559,10 @@ def test_the_pause_climbs_one_more_rung_when_every_draft_made_progress():
         "the latest draft must come first so it wins a tie on refusals"
     assert "len(third[\"refused\"]) <= len(frame[\"refused\"]) and not (k3 & k1)" in body, \
         "a third draft that fixed what the first was refused for wins a tie with it"
-    assert body.count("supervised_runs.draft_runbook(") == body.count("preconditions=await _pre_for("), \
+    # §17.1412 — and the develop loop frames each version against its preconditions too, with no shell
+    # draft: every draft AND every developed version is judged by _pre_for
+    assert "develop.render_delivery(" in body
+    assert body.count("supervised_runs.draft_runbook(") + body.count("rb = develop.render_delivery(") == body.count("preconditions=await _pre_for("), \
         "every draft is framed against its own preconditions"
 
 

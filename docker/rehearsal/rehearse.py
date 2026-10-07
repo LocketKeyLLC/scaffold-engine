@@ -81,6 +81,10 @@ def main() -> None:
     job = json.load(sys.stdin)
     os.makedirs("/rehearsal", exist_ok=True)
     open("/rehearsal/log", "w").close()
+    # §17.1412 — the units the engine measured on any machine: real there, logged here
+    with open("/rehearsal/known_units", "w") as fh:
+        fh.write("\n".join(str(u) if str(u).endswith(".service") else f"{u}.service"
+                            for u in job.get("known_units") or []) + "\n")
     report: dict = {"commands": [], "probes": [], "roundtrip": None}
     report["skipped"] = []
     for f in job.get("seeds", []) + job.get("files", []):

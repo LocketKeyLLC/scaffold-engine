@@ -84,7 +84,7 @@ def test_the_channel_rules_forbid_describing_a_ui():
 def test_the_executor_redrafts_when_there_is_nothing_to_run():
     import inspect
     src = inspect.getsource(ea._pause_for_decision)
-    assert 'if not frame.get("commands"):' in src
+    assert 'if not frame.get("commands") and not _developed:' in src
     assert "no_commands_retry_note(" in src
     # only ever trade up
     assert 'if _apif.get("commands"):' in src
