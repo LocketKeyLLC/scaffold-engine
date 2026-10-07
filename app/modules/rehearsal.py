@@ -53,7 +53,7 @@ def roundtrip_target(node: Optional[dict], services: Optional[list]) -> Optional
     low = text.lower()
     for svc in services or []:
         name = str(getattr(svc, "name", "") or "")
-        configs = tuple(getattr(svc, "configs", ()) or ())
+        configs = [str(c) for c in (getattr(svc, "configs", None) or [])]
         if not name or not configs or name.lower() not in low:
             continue
         live = configs[0]
