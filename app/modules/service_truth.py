@@ -75,6 +75,7 @@ class ServiceTruth:
     address: str = ""                                # §17.1368 — the guest's own IPv4
     vm: bool = False                                 # §17.1402 — a VM is reached through its agent
     workdir: str = ""                                # §17.1402 — the unit's WorkingDirectory
+    empty_beside: str = ""                           # §17.1404 — live config empty; the template it should hold
     ports: tuple[str, ...] = ()
     reads: dict = field(default_factory=dict)
 
@@ -138,6 +139,10 @@ class ServiceTruth:
             own = self.rewrites_its_own_config
             bits.append(f"config {self.config}" + (" (the service rewrites it: stop it before editing)"
                                                    if own else " (not writable by the service)" if own is False else ""))
+            if self.empty_beside:
+                bits.append(f"{self.config.rsplit('/', 1)[-1]} is EMPTY, so the server runs on the defaults in "
+                            f"{self.empty_beside}: there is no setting line to edit until that template's "
+                            f"contents are copied into it")
         return " · ".join(bits)
 
 
@@ -544,6 +549,16 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                 s.configs = tuple(paths[:8])
                 s.config_stat = {p: (o, m) for o, m, p in parse_stats(st_text)}
                 s.reads["stat"] = f"{len(s.config_stat)} config file(s)"
+                # §17.1404 — a live settings file that is EMPTY beside a template means the
+                # server runs on the template's defaults, and there is no line to edit yet.
+                # Live, Palworld's PalWorldSettings.ini is 1 byte; ADD122's draft replaced an
+                # `OptionSettings=(…)` that was not there and reported success.
+                _tpls = [q for q in s.configs if _is_template(q)]
+                if s.configs and not _is_template(s.configs[0]) and _tpls:
+                    ok6, size = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'wc -c < {s.configs[0]}'")
+                    if ok6 and str(size or "").strip().isdigit() and int(str(size).strip()) <= 1:
+                        s.empty_beside = _tpls[0]
+                        s.reads["wc -c"] = f"{s.configs[0].rsplit('/', 1)[-1]} is empty"
         out.append(s)
     # §17.1363 — the provenance each ServiceTruth already recorded now travels
     # with the facts instead of only into the log, and a name this guest does not
