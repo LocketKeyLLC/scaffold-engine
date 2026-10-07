@@ -105,3 +105,52 @@ def test_wired_registered_and_the_drafters_gap():
         assert sr.shape_retry_note({"kind": "run", "refused": refused})
     assert sr._WHOSE_GAP["and JSON is not shell quoting"] == "drafter"
     assert sr._WHOSE_GAP["is done by the calling shell, not by sudo"] == "drafter"
+
+
+# ── §17.1405b — ssh as a user who neither owns the file nor is root ──────────
+
+ROUTE = (FIX / "add122_route_ssh_as_aedefruscio_2026_10_06.js").read_text()
+PAL_AT = st.ServiceTruth(guest="106", vm=True, name="palworld", address="192.168.1.106", configs=(LIVE_INI,),
+                         config_stat={LIVE_INI: ("steam:steam", "644")})
+
+
+def test_the_run_draft_is_refused_with_no_sudo_anywhere():
+    """The draft that ran and was recorded done, with GET answering {"settings":{}}."""
+    assert "sudo" not in ROUTE
+    out = st.a_redirect_sudo_does_not_cover([], [{"path": "/tmp/r.js", "content": ROUTE}], [PAL_AT])
+    assert len(out) == 1
+    why = out[0]["why"]
+    assert "over ssh as `aedefruscio`" in why and "`steam:steam 644`" in why
+    assert "sudo tee" in why
+
+
+def test_ssh_as_the_owner_is_fine():
+    ok = ROUTE.replace("const PALWORLD_USER = 'aedefruscio';", "const PALWORLD_USER = 'steam';")
+    out = st.a_redirect_sudo_does_not_cover([], [{"path": "/tmp/r.js", "content": ok}], [PAL_AT])
+    assert not [r for r in out if "this writes" in r["why"]], "the owner may write its own file"
+    # (its unprivileged `systemctl stop` is still refused -- steam is not root either)
+    assert [r for r in out if "Interactive authentication required" in r["why"]]
+
+
+def test_an_unprivileged_systemctl_is_refused():
+    src = "const PAL_USER = 'aedefruscio';\nexecSync(`ssh ${PAL_USER}@192.168.1.106 'systemctl restart palworld.service'`);"
+    other = st.ServiceTruth(guest="106", name="palworld", address="192.168.1.106",
+                            config_stat={"/x.ini": ("steam:steam", "644")})
+    out = st.a_redirect_sudo_does_not_cover([], [{"path": "/r.js", "content": src}], [other])
+    assert out and "Interactive authentication required" in out[0]["why"]
+
+
+def test_sudo_systemctl_and_sudo_tee_pass():
+    src = ("const PAL_USER = 'aedefruscio';\n"
+           "execSync(`ssh ${PAL_USER}@192.168.1.106 'sudo systemctl stop palworld.service'`);\n"
+           f"execFileSync('ssh', [`${{PAL_USER}}@192.168.1.106`, 'sudo tee {LIVE_INI} >/dev/null'], {{input}});\n")
+    assert st.a_redirect_sudo_does_not_cover([], [{"path": "/r.js", "content": src}], [PAL_AT]) == []
+
+
+# ── §17.1405c — how empty "empty" is ─────────────────────────────────────────
+
+def test_a_one_byte_file_names_the_size_trap():
+    s = st.ServiceTruth(guest="106", name="palworld", configs=(LIVE_INI, "/opt/palworld/DefaultPalWorldSettings.ini"),
+                        empty_beside="/opt/palworld/DefaultPalWorldSettings.ini", empty_bytes=1)
+    says = s.says()
+    assert "1 byte, a lone newline" in says and "`[ -s FILE ]` is TRUE for it" in says

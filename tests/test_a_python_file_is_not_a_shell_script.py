@@ -87,4 +87,4 @@ def test_an_empty_live_file_beside_a_template_is_said(monkeypatch, size, empty):
     s = asyncio.run(st.read_services(object(), "106", mentioned=["palworld"], vm=True))[0]
     assert (s.empty_beside == _TPL) is empty
     says = s.says()
-    assert ("is EMPTY, so the server runs on the defaults in" in says) is empty
+    assert ("so the server runs on the defaults in" in says) is empty
