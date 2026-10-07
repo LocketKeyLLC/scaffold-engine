@@ -349,6 +349,37 @@ def ssh_target_in(line: str) -> tuple[str, str]:
     return ((str(m.group(1) or "").rstrip("@"), str(m.group(2) or ""))) if m else ("", "")
 
 
+def addresses_the_engine_holds(substitutions: Optional[dict], names: Optional[dict]) -> dict[str, list[str]]:
+    """§17.1401 — ``{gid: [address]}`` from the engine's own `<NAME>_IP` bindings.
+
+    `_guest_for_target` maps a literal address to a guest through
+    ``inventory["addresses"]`` -- and `read_inventory` never filled it. So every
+    runtime ssh a written file aims at a literal IP resolved to NO guest, and the
+    "a finished step put a key there" skip (`if target and key_known_for(...)`)
+    could not fire. Live, 2026-10-06: ADD137 put the control panel's key on VM 106
+    (proven: `pct exec 111 -- ssh … 192.168.1.106 hostname` → `palworld-server`),
+    and the very next step, ADD122 -- a backend in CT 111 that ssh's to
+    192.168.1.106 -- was refused with "Nothing has given that service a credential
+    there". The engine held `PALWORLD_IP = 192.168.1.106` all along: it is what
+    the draft itself wrote.
+
+    Matched to a guest by the same rule `_guest_for_target` uses for a
+    `<PALWORLD_IP>` placeholder: the name's first six letters.
+    """
+    out: dict[str, list[str]] = {}
+    for key, val in (substitutions or {}).items():
+        m = re.fullmatch(r"([A-Z][A-Z0-9_]*?)_IP", str(key))
+        addr = str(val or "").strip()
+        if not m or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", addr):
+            continue
+        word = re.sub(r"[^a-z0-9]", "", m.group(1).lower())
+        hits = [gid for gid, nm in (names or {}).items()
+                if word[:6] and word[:6] in re.sub(r"[^a-z0-9]", "", str(nm or "").lower())]
+        if len(hits) == 1:                       # an ambiguous word names no guest
+            out.setdefault(str(hits[0]), []).append(addr)
+    return out
+
+
 def _guest_for_target(host: str, inv: Optional[dict], subjects: list[str]) -> str:
     """The guest id `host` names: by measured address, by a `<NAME_IP>` style
     placeholder against the inventory's names, else ''. Never the subject by

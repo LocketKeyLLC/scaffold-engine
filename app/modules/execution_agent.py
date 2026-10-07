@@ -2570,6 +2570,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                         {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)
+            # §17.1401 — the addresses the engine already holds, so a literal IP maps to its guest
+            if _inv is not None:
+                from app.modules.runbook_preconditions import addresses_the_engine_holds
+                _inv["addresses"] = addresses_the_engine_holds(
+                    (_env or {}).get("substitutions"), _inv.get("names"))
         except Exception as exc:
             logger.warning("preconditions_failed job=%s node=%s err=%r",
                            job_id, run_node.get("node_key"), exc)

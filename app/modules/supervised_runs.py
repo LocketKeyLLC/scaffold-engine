@@ -4513,6 +4513,47 @@ def guest_payloads(text: str) -> list[tuple[str, str, str]]:
             for m in _GUEST_PAYLOAD_RE.finditer(str(text or ""))]
 
 
+#: §17.1401b — a heredoc opener with a QUOTED delimiter, and the file it writes (if any)
+_QUOTED_HEREDOC_OPEN_RE = re.compile(
+    r"<<-?\s*(?:'(?P<q1>[A-Za-z_]\w*)'|\"(?P<q2>[A-Za-z_]\w*)\"|\\(?P<q3>[A-Za-z_]\w*))")
+_HEREDOC_TARGET_RE = re.compile(r">\s*(?P<path>[^\s<>|;&'\"]+)|\btee\s+(?:-a\s+)?(?P<tee>[^\s<>|;&'\"]+)")
+#: a file that a shell will run later: its references are expanded THEN, so they stay judged
+_SHELL_FILE_RE = re.compile(r"\.(?:sh|bash)$|/bin/|/sbin/")
+
+
+def without_quoted_data_heredocs(text: str) -> str:
+    """The text with the bodies of quoted heredocs that write DATA files removed.
+
+    A quoted heredoc (`<<'EOF'`) is never expanded by the shell that writes it, so
+    a `${NAME}` inside it is the file's own syntax -- a JavaScript template literal,
+    a systemd `${MAINPID}`, a Python f-string -- not a shell reference. Live,
+    2026-10-06, ADD122 wrote `routes/palworld-settings.js` with
+    `` `${PALWORLD_USER}@${PALWORLD_IP}` `` inside `<<'EOF'`, and §17.1348 refused
+    `$PALWORLD_USER` as "read here and nothing sets it". A quoted heredoc into a
+    SHELL script (the guest template's `<<'REMOTE'`) keeps its body: that script
+    runs later and expands its references then.
+    """
+    lines = str(text or "").split("\n")
+    out: list[str] = []
+    stack: list[tuple[str, bool]] = []          # (delimiter, keep its body?)
+    for ln in lines:
+        if stack:
+            delim, keep = stack[-1]
+            if ln.strip() == delim:
+                stack.pop()
+                out.append(ln)
+                continue
+            if not all(k for _, k in stack):
+                continue                         # inside a data heredoc: not the shell's text
+        out.append(ln)
+        m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
+        if m:
+            tgt = _HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():])
+            path = (tgt.group("path") or tgt.group("tee")) if tgt else ""
+            stack.append((m.group("q1") or m.group("q2") or m.group("q3"), bool(_SHELL_FILE_RE.search(path or ""))))
+    return "\n".join(out)
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -4562,6 +4603,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
     for cmd in texts:
         # a command that RUNS a written file carries that file's references too
         bodies = [cmd] + [body for path, body in file_by_path.items() if path and path in cmd]
+        # §17.1401b — a quoted heredoc's body is the written file's syntax, not the shell's
+        bodies = [without_quoted_data_heredocs(b) for b in bodies]
         # §17.1364 — a variable is judged in the shell that EXPANDS it. A
         # single-quoted payload handed to `pct exec N -- sh -c '…'` reaches the
         # guest verbatim, and the guest expands it against the GUEST's environment:
