@@ -335,6 +335,15 @@ def listeners_in(ss_text: str) -> list[str]:
     return out
 
 
+def pids_in(ss_text: str) -> dict[str, str]:
+    """``{process name: pid}`` for every LISTENing process in `ss -tlnp`."""
+    out: dict[str, str] = {}
+    for m in _LISTEN_RE.finditer(str(ss_text or "")):
+        for p in _PROC_RE.finditer(m.group("users") or ""):
+            out.setdefault(p.group("proc"), p.group("pid"))
+    return out
+
+
 def _same_service(a: str, b: str) -> bool:
     """Is `a` the name of the thing `b` is? `qbittorrent` IS `qbittorrent-nox`."""
     x, y = _norm(a), _norm(b)
@@ -470,8 +479,22 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         clean = [c for c in dict.fromkeys(cands) if c]
         if clean and not any(set(clean) & set(w) for w in wanted):
             wanted.append(clean)
+    # §17.1410 — a listener's PROCESS name need not be its unit's: CT 111's panel
+    # listens as `node`, its unit is `control-panel.service`, and `systemctl show node`
+    # finds nothing. Live, ADD122's step text stopped naming the panel once its
+    # done-condition was rewritten, so nothing else led to the unit -- and every draft
+    # guessed `control-panel-backend`, which the rehearsal then refused ("Unit not
+    # found"). The pid in `ss -tlnp` names the owning unit: `ps -o unit= -p PID`.
+    _pids = pids_in(ss_text)
     for p_name in procs:
-        _add([p_name, p_name.lower()])
+        _cands = [p_name, p_name.lower()]
+        _pid = _pids.get(p_name)
+        if _pid:
+            _okp, _unit = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'ps -o unit= -p {_pid}'")
+            _u = str(_unit or "").strip().split("\n")[0].strip()
+            if _okp and _u.endswith(".service") and _u not in ("-", ""):
+                _cands = [_u[: -len(".service")]] + _cands
+        _add(_cands)
     for name in mentioned or []:
         hit = next((p for p in procs if _same_service(name, p)), "")
         _add([hit, hit.lower(), name] if hit else [name])
