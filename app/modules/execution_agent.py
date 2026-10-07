@@ -2788,7 +2788,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             evidence = ""
             for round_no in range(1, develop.ROUNDS + 1):
                 files, summary = await develop.propose(
-                    develop.build_prompt(run_node, host, facts, workspace, current, evidence, round_no, kit_text))
+                    develop.build_prompt(run_node, host, facts, workspace, current, evidence, round_no, kit_text,
+                                         develop.test_contract(_rh_target)))
                 if not files:
                     evidence = f"- {summary}"
                     logger.warning("develop_no_files job=%s node=%s round=%d why=%s", job_id, _nk_dev, round_no, summary)

@@ -210,3 +210,38 @@ def test_every_round_logs_its_evidence():
 def test_the_rehearsal_gets_the_measured_units_and_users():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "known_units=[" in src and 'users=[{"user": s.user, "uid": s.uid' in src
+
+
+# ── §17.1413b — the acceptance test is stated, and the exchange is always shown ──
+
+TARGET = {"get": "http://127.0.0.1:3001/api/palworld-settings", "put": "http://127.0.0.1:3001/api/palworld-settings",
+          "config": "/opt/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini",
+          "baseline": "/opt/palworld/DefaultPalWorldSettings.ini"}
+
+
+def test_the_test_is_stated_up_front():
+    """Live: six rounds stalled on GET `{"settings": {...}}` vs a PUT that took the body as the map
+    itself -- the model was never told the test is GET, then PUT exactly that body."""
+    t = dv.test_contract(TARGET)
+    assert "GET http://127.0.0.1:3001/api/palworld-settings" in t
+    assert "with body B EXACTLY" in t and "must accept exactly the shape the GET returns" in t
+    assert "DefaultPalWorldSettings.ini" in t
+    assert dv.test_contract(None) == ""
+    assert "THE TEST THE ENGINE RUNS" in dv.build_prompt(ADD122, HOST, "f", {}, None, "", 1, "", t)
+
+
+def test_the_pause_hands_the_test_to_every_round():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "develop.test_contract(_rh_target)" in src
+
+
+def test_a_put_that_succeeded_but_mangled_the_file_shows_the_exchange():
+    from app.modules import rehearsal as rh
+    rep = {"commands": [], "roundtrip": {
+        "ok": False, "get_status": 200, "get_body": '{"settings":{"Difficulty":"None"}}',
+        "put_status": 200, "put_body": '{"ok":true}', "header_kept": True, "expected_keys": 122, "got_keys": 1,
+        "extra": ["settings"], "file_after": "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(settings=[object Object])"}}
+    why = rh.refusal_from(rep)[0]["why"]
+    assert 'what the test sent: GET answered `{"settings":{"Difficulty":"None"}}`' in why
+    assert "the PUT answered 200" in why
+    assert "settings=[object Object]" in why
