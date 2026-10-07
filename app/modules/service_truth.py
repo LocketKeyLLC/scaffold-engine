@@ -76,6 +76,7 @@ class ServiceTruth:
     vm: bool = False                                 # §17.1402 — a VM is reached through its agent
     workdir: str = ""                                # §17.1402 — the unit's WorkingDirectory
     empty_beside: str = ""                           # §17.1404 — live config empty; the template it should hold
+    empty_bytes: int = 0                             # §17.1405c — how empty: 1 byte is a lone newline
     ports: tuple[str, ...] = ()
     reads: dict = field(default_factory=dict)
 
@@ -140,9 +141,12 @@ class ServiceTruth:
             bits.append(f"config {self.config}" + (" (the service rewrites it: stop it before editing)"
                                                    if own else " (not writable by the service)" if own is False else ""))
             if self.empty_beside:
-                bits.append(f"{self.config.rsplit('/', 1)[-1]} is EMPTY, so the server runs on the defaults in "
-                            f"{self.empty_beside}: there is no setting line to edit until that template's "
-                            f"contents are copied into it")
+                bits.append(f"{self.config.rsplit('/', 1)[-1]} is EMPTY ({self.empty_bytes} byte"
+                            + ("" if self.empty_bytes == 1 else "s")
+                            + (", a lone newline -- `[ -s FILE ]` is TRUE for it, so test for the setting line, "
+                               "not the size" if self.empty_bytes == 1 else "")
+                            + f"), so the server runs on the defaults in {self.empty_beside}: there is no setting "
+                              f"line to edit until that template's contents are copied into it")
         return " · ".join(bits)
 
 
@@ -558,7 +562,8 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                     ok6, size = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'wc -c < {s.configs[0]}'")
                     if ok6 and str(size or "").strip().isdigit() and int(str(size).strip()) <= 1:
                         s.empty_beside = _tpls[0]
-                        s.reads["wc -c"] = f"{s.configs[0].rsplit('/', 1)[-1]} is empty"
+                        s.empty_bytes = int(str(size).strip())
+                        s.reads["wc -c"] = f"{s.configs[0].rsplit('/', 1)[-1]} is {s.empty_bytes} byte(s)"
         out.append(s)
     # §17.1363 — the provenance each ServiceTruth already recorded now travels
     # with the facts instead of only into the log, and a name this guest does not
@@ -1364,6 +1369,42 @@ def a_redirect_sudo_does_not_cover(commands: list[str], files: Optional[list[dic
         return []
     out: list[dict] = []
     texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    # §17.1405b — a program that ssh's to the service's guest as a user who neither
+    # owns the config nor is root. Live, ADD122's next draft dropped sudo altogether:
+    # `ssh aedefruscio@192.168.1.106 'printf … > PalWorldSettings.ini'`, `cp DEFAULT
+    # CONFIG`, `systemctl stop palworld.service` -- every one refused on VM 106, and
+    # the gate above (which needs a `sudo` somewhere to fire) said nothing.
+    addrs = {str(getattr(svc, "address", "") or ""): svc for svc in services or [] if getattr(svc, "address", "")}
+    for t in texts:
+        rt = with_constants(t)
+        users = {m.group(1) for a in addrs for m in re.finditer(r"\b([a-z_][a-z0-9_.-]*)@" + re.escape(a) + r"\b", rt)}
+        users = {u for u in users if u != "root"}
+        if not users:
+            continue
+        for line in rt.split("\n"):
+            if line.lstrip().startswith(("#", "//")) or _SUDO_WRITES_RE.search(line):
+                continue
+            for path, (owner, mode, name) in owned.items():
+                o_user = owner.split(":", 1)[0]
+                strangers = sorted(u for u in users if u != o_user)
+                if not strangers:
+                    continue
+                writes = re.search(r"(?<![<>&\d])>>?\s*['\"]?" + re.escape(path) + r"(?![\w./-])", line) or \
+                    re.search(r"(?<!sudo )\b(?:cp|mv|tee|install)\b[^\n;&|]*\s['\"]?" + re.escape(path) + r"(?![\w./-])", line)
+                if writes:
+                    out.append({"command": line.strip()[:200], "why": (
+                        f"this writes {path} over ssh as `{strangers[0]}`, and the file is `{owner} {mode}` "
+                        f"(measured, {name}): `{strangers[0]}` is neither its owner nor root, so the write is "
+                        f"refused (Permission denied) while the program reports what it meant to write. Put the "
+                        f"WRITE under sudo with the content on stdin -- `sudo tee {path} >/dev/null` (or "
+                        f"`sudo -u {o_user} tee {path}`) -- or ssh as `{o_user}`.")})
+                    return out
+            m = re.search(r"(?<!sudo )\bsystemctl\s+(start|stop|restart|reload|enable|disable)\s+(\S+)", line)
+            if m:
+                out.append({"command": line.strip()[:200], "why": (
+                    f"`systemctl {m.group(1)} {m.group(2)}` runs over ssh as `{sorted(users)[0]}`, who is not root: "
+                    f"systemd refuses it (Interactive authentication required). Prefix it with `sudo`.")})
+                return out
     for t in texts:
         if "sudo" not in t:
             continue
