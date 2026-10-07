@@ -222,6 +222,27 @@ async def read_inventory(spec) -> Optional[dict]:
     return inv
 
 
+#: §17.1399 — an ssh that runs INSIDE a guest leaves from that guest: `pct exec 111 --
+#: ssh … 192.168.1.106` is the control panel reaching VM 106 with the panel's own key,
+#: not this host reaching into 111. Live, ADD137 -- whose whole job is to put the
+#: panel's key on 106, in the same block -- was refused with "nothing has put this
+#: host's key on guest 111".
+_GUEST_EXEC_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+\S+[^|;&\n]*?\s--\s")
+
+
+def ssh_runs_inside_a_guest(line: str) -> bool:
+    """Does the ssh on this line run INSIDE a `pct exec N --` / `qm guest exec N --`?
+
+    Quoted text is blanked (same length, so positions hold) before looking for the
+    end of the guest command: a `;` inside `sh -c '…; ssh …'` belongs to the payload,
+    one outside it ends the command, and an ssh after that runs on the host."""
+    bare = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", lambda m: m.group(0)[0] + "x" * (len(m.group(0)) - 2) + m.group(0)[-1], line)
+    for m in _GUEST_EXEC_RE.finditer(bare):
+        end = re.search(r"\s(?:\|\|?|&&|;)\s|;", bare[m.end():])
+        stop = m.end() + end.start() if end else len(line)
+        if _SSH_RE.search(line[m.end():stop]):
+            return True
+    return False
 #: §17.1288f — `VM 106`, `container 111`, `CT 120`: the guest a step is ABOUT.
 _SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 #: a bare `ssh` (not `ssh-copy-id`, not a path)
@@ -818,7 +839,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
         def _bare(t: str) -> list[str]:
             return [ln for ln in executed_lines(t)
                     if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln
-                    and not ln.lstrip().startswith("#")]
+                    and not ln.lstrip().startswith("#") and not ssh_runs_inside_a_guest(ln)]
         cmd_bare = [ln for t in texts for ln in _bare(str(t))]
         if cmd_bare and not copies:
             names = (inv or {}).get("names") or {}

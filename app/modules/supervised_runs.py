@@ -199,6 +199,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "has never been written",                       # §17.1288p
                    "is not an interface on this host",             # §17.1395
                    "is fed input here without `--pass-stdin 1`",   # §17.1397
+                   "forgets a host key and pins nothing",          # §17.1399
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -289,6 +290,7 @@ _WHOSE_GAP: dict[str, str] = {
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
+    "forgets a host key and pins nothing": "drafter",              # §17.1399
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5127,6 +5129,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + an_id_sent_as_zero(cmds, shape_files)
     # §17.1397 — input piped to the guest agent that it never reads.
     refused = refused + a_pipe_the_guest_agent_never_reads(cmds, shape_files)
+    # §17.1399 — a host key forgotten and nothing pinned in its place.
+    refused = refused + a_host_key_forgotten_not_pinned(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
@@ -5990,6 +5994,44 @@ def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
 #: this pattern required a bare quote and saw nothing (§17.1048 — a gate matches
 #: modulo formatting, or it does not match the thing that happens).
 _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
+
+
+#: §17.1399 — a known_hosts entry removed: `ssh-keygen -R`, a sed/grep -v rewrite, an rm or truncate
+_FORGETS_HOST_KEY_RE = re.compile(
+    r"ssh-keygen\b[^\n|;&]*\s-R\b|\bsed\b[^\n]*-i[^\n]*known_hosts|\brm\b[^\n]*known_hosts|"
+    r"(?<![<>])>(?!>)\s*\S*known_hosts\b|\bgrep\s+-v\b[^\n]*known_hosts", re.I)
+#: the target's own host key, read through a channel that is not the network being doubted
+_READS_HOST_KEY_RE = re.compile(r"\b(?:qm\s+guest\s+exec|pct\s+exec)\b[^\n]*ssh_host_\w*key\.pub")
+
+
+def a_host_key_forgotten_not_pinned(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1399 — a block that removes a known_hosts entry must pin the real key, not trust the next answer.
+
+    Live, 2026-10-06, ADD137: the panel's ssh to VM 106 failed with `REMOTE HOST
+    IDENTIFICATION HAS CHANGED` (§17.1393 judged it). The redraft that learned
+    from that failure ran `ssh-keygen -R 192.168.1.106`, then
+    `ssh -o StrictHostKeyChecking=accept-new` -- deleting the warning and
+    trusting whatever answers at that address next. That is the reflex a
+    man-in-the-middle relies on, and the engine had no need of it: VM 106 is a
+    guest on this host, and its guest agent is a channel that is not the network
+    being doubted. Reading `/etc/ssh/ssh_host_ed25519_key.pub` through it and
+    writing exactly that key is deterministic AND safe.
+    """
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    lines = [ln for t in texts for ln in t.split("\n") if not ln.lstrip().startswith("#")]
+    forgets = next((ln for ln in lines if _FORGETS_HOST_KEY_RE.search(ln)), None)
+    if not forgets or any(_READS_HOST_KEY_RE.search(ln) for ln in lines):
+        return []
+    return [{"command": forgets.strip()[:200], "why": (
+        "this forgets a host key and pins nothing in its place, so the next ssh trusts whatever answers at "
+        "that address -- `StrictHostKeyChecking=accept-new` records a stranger as gladly as the real "
+        "machine. A changed key is exactly what a man-in-the-middle looks like, and deleting the warning is "
+        "the reflex it relies on. The engine does not need to guess: when the target is a guest on this "
+        "host, read its key through the guest's own channel, which is not the network being doubted -- "
+        "`qm guest exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub` (the agent answers JSON; take "
+        "`out-data`) or `pct exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub` -- then replace the old "
+        "line with `<address> <that key>` in the client's known_hosts, and ssh with "
+        "`StrictHostKeyChecking=yes`.")}]
 
 
 #: §17.1397 — `qm guest exec` given input: piped into, redirected from, or a heredoc
