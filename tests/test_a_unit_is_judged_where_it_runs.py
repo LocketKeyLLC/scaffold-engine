@@ -102,7 +102,9 @@ def test_the_pause_computes_the_union_once_and_passes_it_everywhere():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
     assert "_st3.measured_units_by_guest(_services)" in src
-    assert src.count("units=_units, units_by_guest=_units_by_guest") == 8
+    # §17.1411 — nine: the rehearsal repair loop's frame is the ninth call site
+    assert src.count("units=_units, units_by_guest=_units_by_guest") == 9
+    assert src.count("units=_units, units_by_guest=_units_by_guest") == src.count("supervised_runs.frame_run(")
     assert "units=(_truth.units if _truth is not None else None)" not in src
     # the union is built after the truth is read, so it can include it
     assert (src.index("_truth = await machine_truth.read_guest_truth")
