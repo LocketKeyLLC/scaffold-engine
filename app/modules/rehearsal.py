@@ -65,10 +65,19 @@ def roundtrip_target(node: Optional[dict], services: Optional[list]) -> Optional
     return None
 
 
+#: `cat`'s own complaint, which the read channel returns as output (live: a seed `/opt/`
+#: whose "content" was `cat: /opt/: Is a directory`, and the job crashed writing it)
+_CAT_ERROR_RE = re.compile(r"^cat: .*(?:Is a directory|No such file or directory|Permission denied)\s*$")
+
+
 async def _cat(spec, gid: str, vm: bool, path: str) -> Optional[str]:
     from app.modules import service_truth as st
+    if not path or path.endswith("/"):
+        return None
     ok, out = await st._probe(spec, f"{st.in_guest(gid, vm)} cat {path}")
-    return out if ok else None
+    if not ok or _CAT_ERROR_RE.match(str(out or "").strip()):
+        return None
+    return out
 
 
 async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:
@@ -85,7 +94,8 @@ async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:
     if host is not None and getattr(host, "workdir", ""):
         gid, vm, wd = str(host.guest), bool(getattr(host, "vm", False)), str(host.workdir)
         ok, listing = await st._probe(spec, f"{st.in_guest(gid, vm)} find {wd} -maxdepth 3 -type f -size -256k")
-        paths = [p.strip() for p in (listing or "").split("\n") if p.strip().startswith("/")] if ok else []
+        paths = [p.strip() for p in (listing or "").split("\n")
+                 if p.strip().startswith(wd.rstrip("/") + "/") and not p.strip().endswith("/")] if ok else []
         for p in [p for p in paths if not _SKIP_RE.search(p)][:MAX_SEED_FILES]:
             body = await _cat(spec, gid, vm, p)
             if body is not None and len(body) <= MAX_SEED_BYTES:
@@ -119,7 +129,8 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
     """`[{command, why}]` when the rehearsal shows the draft does not do its job; else []."""
     if not report or report.get("error"):
         if report and report.get("error"):
-            logger.warning("rehearsal_could_not_run err=%s", report.get("error"))
+            logger.warning("rehearsal_could_not_run err=%s stderr=%r", report.get("error"),
+                           str(report.get("stderr") or "")[-400:])
         return []
     rt = report.get("roundtrip") or {}
     if rt.get("ok"):

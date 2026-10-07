@@ -2746,8 +2746,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
                 report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds)
                 refused = rehearsal.refusal_from(report)
-                logger.warning("rehearsal_done job=%s node=%s ok=%s seeds=%d secs=%s",
-                               job_id, run_node.get("node_key"), not refused if report else None,
+                _ran = bool(report) and not report.get("error")
+                logger.warning("rehearsal_done job=%s node=%s outcome=%s seeds=%d secs=%s",
+                               job_id, run_node.get("node_key"),
+                               ("refused" if refused else "passed") if _ran else "could_not_run",
                                len(_rh_seeds), (report or {}).get("seconds"))
                 return refused
             except Exception as exc:

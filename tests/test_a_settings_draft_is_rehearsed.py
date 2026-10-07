@@ -124,3 +124,37 @@ def test_it_runs_where_every_draft_is_judged():
     from app.modules import execution_agent
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "rehearsal.refusal_from(" in src and "rehearsal.roundtrip_target(" in src
+
+
+# ── §17.1409b — a seed is a file, and an error message is not its content ────
+
+@pytest.mark.asyncio
+async def test_cats_complaint_is_not_a_files_content(monkeypatch):
+    """Live: the first engine-built job carried a seed `/opt/` whose content was
+    `cat: /opt/: Is a directory`; writing it crashed the sandbox ("produced no report")."""
+    async def probe(spec, c):
+        return True, "cat: /opt/x: Is a directory\n" if c.endswith("/opt/x") else "real content"
+    monkeypatch.setattr(st, "_probe", probe)
+    assert await rh._cat(object(), "111", False, "/opt/x") is None
+    assert await rh._cat(object(), "111", False, "/opt/") is None              # a directory path, not asked
+    assert await rh._cat(object(), "111", False, "/opt/y.js") == "real content"
+
+
+@pytest.mark.asyncio
+async def test_only_files_under_the_workdir_are_seeded(monkeypatch):
+    async def probe(spec, c):
+        if " find " in c:
+            return True, "/opt/\n/opt/control-panel-backend/\n/opt/control-panel-backend/server.js\n/etc/passwd\n"
+        return True, "x"
+    monkeypatch.setattr(st, "_probe", probe)
+    t = rh.roundtrip_target(ADD122, [PANEL, PAL])
+    paths = [s["path"] for s in await rh.seeds_for(object(), t, [PANEL, PAL])]
+    assert "/opt/" not in paths and "/opt/control-panel-backend/" not in paths and "/etc/passwd" not in paths
+    assert "/opt/control-panel-backend/server.js" in paths
+
+
+def test_the_log_says_could_not_run_instead_of_ok():
+    """The first live run logged `ok=True` for a rehearsal that never ran."""
+    from app.modules import execution_agent
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert '"could_not_run"' in src and "ok=%s seeds" not in src
