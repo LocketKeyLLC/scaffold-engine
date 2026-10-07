@@ -102,7 +102,7 @@ SPLIT_TOOL = Tool(
                     "properties": {
                         "title": {"type": "string", "description": "one line, names the machine and the one thing this step does"},
                         "description": {"type": "string", "description": "what to do, concretely, in this one step only"},
-                        "check": {"type": "string", "description": "ONE read-only command whose output shows this step's goal is met"},
+                        "check": {"type": "string", "description": "ONE read-only command whose output shows this step's goal WORKS -- call it and read a real value back; never a grep/ls/cat that only shows the code exists"},
                     },
                     "required": ["title", "description", "check"],
                 },
@@ -117,7 +117,9 @@ SPLIT_SYSTEM = (
     "exactly one approved block of shell commands per step, on one machine, with a time budget — so a step that "
     "writes a whole application does not fit, and a step that writes one file, installs one package set, or wires "
     "one service does. Rules: between 2 and 8 steps; each one does ONE thing and says which machine it is on; each "
-    "has ONE read-only command that shows its own goal is met (not a later step's); together they do everything the "
+    "has ONE read-only command that shows its own goal WORKS (not a later step's) -- for a route or a page, call it "
+    "and check the answer carries the real data; a grep for the code's name only shows the code exists, which is not "
+    "done; together they do everything the "
     "original step asked for and nothing more; order them so each can run when the one before it is done. Do not "
     "invent addresses, ports, unit names or credentials — use what the step and the facts give you, or say the value "
     "is the operator's to supply."
@@ -150,6 +152,28 @@ def _next_keys(plan: Optional[list[dict]], count: int) -> list[str]:
     return [f"ADD{start + i}" for i in range(count)]
 
 
+#: §17.1408 — the engine's own count correction, so the counter never reads it back as a claim
+_ENGINE_NOTE_RE = re.compile(r"ENGINE MEASURED: the plan holds \d+ capability steps \([^)]*\); this step says [^.]*\. Cover all \w+\.")
+#: a check that only shows code or a unit EXISTS: grep/ls/test/cat/stat, or is-active/is-enabled alone
+_PRESENCE_RE = re.compile(
+    r"^\s*(?:(?:pct\s+exec|qm\s+guest\s+exec)\s+\d+\s+--\s+(?:(?:ba)?sh\s+-c\s+['\"])?)?"
+    r"(?:grep\b|ls\b|test\b|\[\s|cat\b|stat\b|head\b|wc\b|systemctl\s+is-(?:active|enabled)\b)")
+#: a step that builds something that DOES something: a route, an API, a page, a capability
+_CAPABILITY_BUILD_RE = re.compile(r"\b(?:route|endpoint|api\b|capabilit|proxy|page|frontend|backend|authentication|reverse proxy)", re.I)
+
+
+def presence_only(check: str) -> bool:
+    """§17.1408 — does this check only show that something EXISTS (not that it works)?"""
+    c = str(check or "")
+    if re.search(r"\bcurl\b|\bwget\b|\bhttp\b", c):
+        return False                         # it calls something
+    return bool(_PRESENCE_RE.match(c))
+
+
+def builds_a_capability(text: str) -> bool:
+    return bool(_CAPABILITY_BUILD_RE.search(str(text or "")))
+
+
 def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str], keys: list[str],
                   machine: str = "") -> list[dict]:
     """The `insert_node` specs for a split: chained, stamped, each with its check."""
@@ -163,7 +187,16 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
         descr = body
         if machine and machine.lower() not in (title + " " + body).lower():
             descr += f" On {machine}."
-        if check:
+        if check and presence_only(check) and builds_a_capability(title + " " + body):
+            # §17.1408 — `grep -n palworld server.js` shows the code is THERE, not that
+            # it works. Live, ADD122 was recorded done twice on that check while its GET
+            # answered `{"settings":{}}` and its PUT could not write. The operator:
+            # behaviour checks. The step says so, and the presence check is named for
+            # what it is, so neither the drafter nor the judge mistakes it for done.
+            descr += (f" Done when it WORKS: exercise it and read a real value back (call the route and check "
+                      f"the answer carries the real data; for a write, write a value and read it back). "
+                      f"`{check}` only shows the code is there, which is not done.")
+        elif check:
             descr += f" Done when `{check}` shows it."
         descr += f"\n\n{SPLIT_MARK.format(key=parent_key)} — {i + 1} of {len(steps)}]"
         out.append({"node_key": key, "title": title, "description": descr, "tool": "LLM",
@@ -261,7 +294,10 @@ def count_edits(plan: Optional[list[dict]], parent_key: str) -> list[dict]:
             continue                   # a capability step counts no siblings
         said = raw = kind = ""
         for field in ("title", "description"):
-            m = _COUNT_RE.search(str(k.get(field) or ""))
+            # §17.1408 — the engine's own correction says "this step says three
+            # capabilities", and the counter read that back as the step's claim:
+            # every pass appended another copy (live, ADD126 carried TWELVE).
+            m = _COUNT_RE.search(_ENGINE_NOTE_RE.sub("", str(k.get(field) or "")))
             if not m:
                 continue
             raw, kind = m.group("num"), m.group("kind")
@@ -278,6 +314,8 @@ def count_edits(plan: Optional[list[dict]], parent_key: str) -> list[dict]:
                       f"{raw} {kind}. Cover all {word}.")
         if str(k.get("status") or "pending") != "pending":
             hit["note"] = correction          # a finished step's record is not rewritten
+        elif correction in str(k.get("description") or ""):
+            continue                          # §17.1408 — said once is said
         else:
             hit["description"] = str(k.get("description") or "").rstrip() + "\n\n" + correction
         out.append(hit)
