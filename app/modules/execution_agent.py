@@ -2737,6 +2737,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             logger.warning("rehearsal_target_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
             _rh_target = None
         _rh_seeds: list = []
+        _rh_reports: dict = {}             # §17.1411 — runbook -> its rehearsal report, for scoring
 
         async def _rehearse_or_nothing(rb: str, files: list) -> list[dict]:
             if not _rh_target:
@@ -2745,6 +2746,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if not _rh_seeds:
                     _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
                 report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds)
+                _rh_reports[rb] = report
                 refused = rehearsal.refusal_from(report)
                 _ran = bool(report) and not report.get("error")
                 logger.warning("rehearsal_done job=%s node=%s outcome=%s seeds=%d secs=%s",
@@ -2956,6 +2958,71 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                     frame = min(cands, key=lambda f: len(f.get("refused") or []))
                                     elif third["commands"] and len(third["refused"]) <= len(frame["refused"]) and not (k3 & k1):
                                         frame = third             # a tie, but it fixed what the first was refused for
+        # §17.1411 — a draft refused ONLY by the rehearsal climbs from its best attempt.
+        # Live, 2026-10-07: three reask rounds of ADD122 went "122 -> 122, only the
+        # header lost", then a missing directory, then a Python crash. The chain above
+        # ranks by refusal COUNT (always one here), stops once the refusal KIND repeats
+        # (always the rehearsal's), and never shows a draft its predecessor -- so the
+        # near-miss was discarded every round. Here each repair is shown the best draft
+        # so far VERBATIM with its evidence, ranked by the evidence itself, and the best
+        # is kept on the job so the next pause resumes from it.
+        def _rehearsal_only(fr: dict) -> bool:
+            refs = fr.get("refused") or []
+            return bool(refs) and all(rehearsal.MARK in str(r.get("why") or "") for r in refs)
+
+        def _full_runbook(fr: dict) -> str:
+            # `frame["runbook"]` is DISPLAY text (cut at 12 000 chars with a note); the
+            # rehearsed drafts are kept whole -- find the one this frame was rendered from
+            for _rb0 in _rh_reports:
+                if supervised_runs._runbook_for_display(_rb0, fr.get("commands") or []) == fr.get("runbook"):
+                    return _rb0
+            return str(fr.get("runbook") or "")
+
+        if _rh_target and _rehearsal_only(frame):
+            _nk = str(run_node.get("node_key") or "")
+            _rb_full = _full_runbook(frame)
+            _best = {"frame": frame, "runbook": _rb_full, "score": rehearsal.score(_rh_reports.get(_rb_full)),
+                     "why": "; ".join(str(r.get("why") or "") for r in frame["refused"])}
+            try:
+                async with async_session() as _db:
+                    _kept = await rehearsal.best_so_far(_db, job_id, _nk)
+                if _kept and int(_kept.get("score", 10_000)) < _best["score"]:
+                    _best.update({"frame": None, "runbook": _kept["runbook"], "score": int(_kept["score"]),
+                                  "why": str(_kept.get("why") or "")})
+                    logger.warning("rehearsal_resume job=%s node=%s score=%s", job_id, _nk, _best["score"])
+            except Exception as exc:
+                logger.warning("rehearsal_best_unreadable job=%s node=%s err=%r", job_id, _nk, exc)
+            for _attempt in range(rehearsal.REPAIRS):
+                _rb = await supervised_runs.draft_runbook(
+                    run_node, _brief, up_block, retry_note=rehearsal.repair_note(_best["runbook"], _best["why"]),
+                    spec=spec, environment=_env, truth=_truth, services=_services)
+                if not _rb:
+                    continue
+                _fr = supervised_runs.frame_run(run_node, _rb, spec, policy, env=_env,
+                                                preconditions=await _pre_for(_rb), upstream=up_block,
+                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
+                                                inventory=_inv, engine_address=_eaddr, services=_services)
+                if _fr["commands"] and not _fr["refused"]:
+                    logger.warning("rehearsal_repair_clean job=%s node=%s attempt=%d", job_id, _nk, _attempt + 1)
+                    frame, _best = _fr, None
+                    break
+                _sc = rehearsal.score(_rh_reports.get(_rb)) if _rehearsal_only(_fr) else 20_000
+                logger.warning("rehearsal_repair job=%s node=%s attempt=%d score=%s best=%s",
+                               job_id, _nk, _attempt + 1, _sc, _best["score"])
+                if _sc < _best["score"]:
+                    _best = {"frame": _fr, "runbook": _rb, "score": _sc,
+                             "why": "; ".join(str(r.get("why") or "") for r in _fr["refused"])}
+            try:
+                async with async_session() as _db:
+                    await rehearsal.remember_best(
+                        _db, job_id, _nk,
+                        None if _best is None else {"runbook": _best["runbook"], "score": _best["score"],
+                                                    "why": _best["why"][:3000]})
+            except Exception as exc:
+                logger.warning("rehearsal_best_unwritable job=%s node=%s err=%r", job_id, _nk, exc)
+            if _best is not None and _best.get("frame") is not None:
+                frame = _best["frame"]        # the closest attempt is what the operator is shown
+
         # §17.1227 — a draft with NOTHING to run is the worst outcome of all, and
         # neither trigger above catches it: the shape pass needs a refusal (there
         # is none — there is nothing to refuse) and the coverage pass only

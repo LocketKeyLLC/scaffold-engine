@@ -166,3 +166,84 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
         f"The file must still say the same thing. It did not: " + "; ".join(bits or ["the round trip failed"])
         + ". Parse the settings with their nesting in mind (a value can itself be `(A,B,C)`), keep the "
           "section header, write what the PUT body asks for, and restart the unit the facts name.")}]
+
+
+# ── §17.1411: repair from the best attempt, and remember it ─────────────────────
+
+#: extra drafts a rehearsal-only refusal gets, each shown the best draft so far
+REPAIRS = int(os.environ.get("REHEARSAL_REPAIRS", "5"))
+_BEST_KEY = "rehearsal_best"
+
+
+def score(report: Optional[dict]) -> int:
+    """How far a rehearsal report is from a passing round trip: 0 is a pass, lower is closer.
+
+    Live, 2026-10-07: three reask rounds of ADD122 went 122->122-but-no-header, then a
+    missing directory, then a Python crash -- each round started from nothing, so the
+    near-miss was thrown away. Refusal COUNTS cannot rank these (each is one refusal);
+    the evidence can.
+    """
+    if not report or report.get("error"):
+        return 10_000
+    rt = report.get("roundtrip") or {}
+    if rt.get("ok"):
+        return 0
+    s = 0
+    s += 1000 * sum(1 for c in report.get("commands") or [] if c.get("exit"))
+    if rt.get("get_status") != 200:
+        return s + 5000
+    if rt.get("put_status") != 200:
+        s += 2000
+    if rt.get("header_kept") is False:
+        s += 50
+    exp, got = rt.get("expected_keys") or 0, rt.get("got_keys") or 0
+    s += abs(int(exp) - int(got)) * 10
+    s += 5 * (len(rt.get("missing") or []) + len(rt.get("changed") or []) + len(rt.get("extra") or []))
+    return max(s, 1)
+
+
+def repair_note(previous_runbook: str, previous_why: str) -> str:
+    """The retry note for a repair draft: the best draft so far, verbatim, and what failed."""
+    body = str(previous_runbook or "")
+    if len(body) > 14_000:
+        body = body[:14_000] + "\n… (truncated)"
+    return (
+        "REHEARSAL REPAIR (§17.1411). Your closest draft so far is below, VERBATIM, followed by what the "
+        "rehearsal showed when it ran that exact draft against copies of the real files. Start FROM that draft: "
+        "keep everything the evidence does not point at -- those parts worked -- and change only what it "
+        "names. Do not rewrite it from scratch.\n\n=== YOUR CLOSEST DRAFT ===\n" + body
+        + "\n=== WHAT THE REHEARSAL SHOWED ===\n" + " ".join(str(previous_why or "").split())[:2400])
+
+
+async def _all_best(db, job_id: str) -> dict:
+    from sqlalchemy import text
+    raw = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {}
+    best = (raw or {}).get(_BEST_KEY) if isinstance(raw, dict) else None
+    return dict(best) if isinstance(best, dict) else {}
+
+
+async def best_so_far(db, job_id: str, node_key: str) -> Optional[dict]:
+    """The best rehearsed attempt a previous pause kept for this step, or None."""
+    entry = (await _all_best(db, job_id)).get(node_key)
+    return entry if isinstance(entry, dict) and entry.get("runbook") else None
+
+
+async def remember_best(db, job_id: str, node_key: str, entry: Optional[dict]) -> None:
+    """Keep (or, with None, forget) the best rehearsed attempt for this step on the job.
+
+    One whole-key patch (`|| CAST(:patch AS jsonb)`), never a bound parameter as a
+    jsonb key or array element -- asyncpg cannot type those (see the memory note)."""
+    from sqlalchemy import text
+    best = await _all_best(db, job_id)
+    if entry is None:
+        best.pop(node_key, None)
+    else:
+        best[node_key] = entry
+    await db.execute(text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb) "
+                          "WHERE id = :jid"), {"patch": json.dumps({_BEST_KEY: best}), "jid": job_id})
+    await db.commit()
