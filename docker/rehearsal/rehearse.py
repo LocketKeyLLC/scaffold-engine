@@ -147,6 +147,14 @@ def main() -> None:
             diff = "".join(list(difflib.unified_diff(before.splitlines(True), (after or "").splitlines(True),
                                                      "before", "after", n=1))[2:40])
             report["changed_files"].append({"path": path, "diff": diff[:1200] if after is not None else "(deleted)"})
+    # §17.1411c — does the backend parse a JSON body at all? Live: CT 111's server.js never
+    # calls express.json(), so every PUT reached the handler with req.body undefined.
+    js_after = [p for p in _seed_before if p.endswith(".js") and os.path.isfile(p)]
+    js_after += [f["path"] for f in job.get("files", []) if str(f.get("path", "")).endswith(".js")
+                 and os.path.isfile(str(f.get("path")))]
+    report["parses_json_body"] = any(
+        re.search(r"express\.json\(|bodyParser\.json\(|express\.urlencoded\(", open(p).read())
+        for p in dict.fromkeys(js_after)) if js_after else None
     report["log"] = open("/rehearsal/log").read()[-1500:]
     report["server_log"] = open("/rehearsal/server.log").read()[-800:] if os.path.exists("/rehearsal/server.log") else ""
     print(json.dumps(report))
