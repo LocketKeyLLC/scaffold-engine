@@ -2802,7 +2802,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     continue
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
-                rb = develop.render_delivery(run_node, host, {**files, **kit}, checks)
+                rb = develop.render_delivery(run_node, host, {**files, **kit}, checks,
+                                             develop.acceptance_checks(run_node))
                 fr = supervised_runs.frame_run(run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,

@@ -207,7 +207,7 @@ def test_the_prompt_documents_the_kit_at_its_real_path():
 def test_the_kit_is_delivered_with_every_version_and_the_model_cannot_overwrite_it():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "files = {p: c for p, c in files.items() if p not in kit}" in src
-    assert "develop.render_delivery(run_node, host, {**files, **kit}, checks)" in src
+    assert "develop.render_delivery(run_node, host, {**files, **kit}, checks," in src
     rb = dv.render_delivery(ADD122, HOST, {**FILES, **dv.kit_for(HOST, WS)}, ["true"])
     staged = {f["path"] for f in sr.file_writes(rb)}
     assert _staged("/opt/control-panel-backend/scaffold-kit/remote.js") in staged
@@ -256,3 +256,51 @@ def test_a_put_that_succeeded_but_mangled_the_file_shows_the_exchange():
     assert 'what the test sent: GET answered `{"settings":{"Difficulty":"None"}}`' in why
     assert "the PUT answered 200" in why
     assert "settings=[object Object]" in why
+
+
+# ── §17.1414 — the step's own check decides the test ─────────────────────────
+
+ADD123 = json.loads((FIX / "add123_node_2026_10_07.json").read_text())
+RADARR = st.ServiceTruth(guest="103", name="radarr", configs=("/var/lib/radarr/config.xml",))
+PAL_CFG = st.ServiceTruth(guest="106", vm=True, name="palworld",
+                          configs=("/opt/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini",
+                                   "/opt/palworld/DefaultPalWorldSettings.ini"))
+
+
+def test_a_post_check_is_not_rehearsed_as_a_settings_round_trip():
+    """Live: ADD123 (a POST that asks Radarr for a film) was rehearsed as a GET/PUT round trip on
+    Radarr's config and 404'd eight rounds running on a GET that never existed."""
+    from app.modules import rehearsal as rh
+    assert rh.roundtrip_target(ADD123, [PANEL, RADARR]) is None
+    assert rh.roundtrip_target(ADD122, [PANEL, PAL_CFG]) is not None
+
+
+def test_a_write_check_is_the_runs_last_step_with_curl_fail():
+    """The verify channel carries reads only (it silently dropped the POST); the sandbox cannot reach
+    Radarr. So the step's own POST runs last in the approved block, and an HTTP error fails the run."""
+    host = dv.host_for(ADD123, [PANEL, RADARR]) or HOST
+    assert dv.done_checks(ADD123, host) == ["pct exec 111 -- systemctl is-active control-panel.service"]
+    acc = dv.acceptance_checks(ADD123)
+    assert len(acc) == 1 and "curl -f -s -X POST" in acc[0] and "/api/media-request" in acc[0]
+    rb = dv.render_delivery(ADD123, host, FILES, dv.done_checks(ADD123, host), acc)
+    assert sr.runbook_commands(rb)[-1] == acc[0]
+    assert sr.runbook_commands(rb)[0].startswith("bash /tmp/scaffold-dev-ADD123--deliver.sh")
+
+
+def test_a_read_check_stays_in_verify_and_adds_no_acceptance():
+    assert dv.acceptance_checks(ADD122) == []
+    assert any("curl -s http://127.0.0.1:3001/api/palworld-settings" in c for c in dv.done_checks(ADD122, HOST))
+
+
+@pytest.mark.parametrize("cmd,expect", [
+    ("pct exec 111 -- curl -s -X POST -d '{}' http://127.0.0.1:3001/a", "curl -f -s -X POST"),
+    ("pct exec 111 -- curl -fsS -X POST -d '{}' http://127.0.0.1:3001/a", "curl -fsS -X POST"),   # already -f
+    ("pct exec 111 -- curl --fail -X POST -d '{}' http://127.0.0.1:3001/a", "curl --fail -X POST"),
+])
+def test_curl_gets_fail_once(cmd, expect):
+    assert dv.acceptance_checks({"description": f"Done when `{cmd}` answers."}) == [cmd.replace(cmd[cmd.index("curl"):cmd.index(" -X")], expect.rsplit(" -X", 1)[0])]
+
+
+def test_the_pause_passes_the_acceptance_checks_to_the_delivery():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "develop.acceptance_checks(run_node)" in src
