@@ -201,6 +201,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is fed input here without `--pass-stdin 1`",   # §17.1397
                    "forgets a host key and pins nothing",          # §17.1399
                    "answers JSON, and this hands that JSON to a text tool",   # §17.1400
+                   "the engine writes a block's files on the Proxmox",   # §17.1403
+                   "a Proxmox HOST tool",                          # §17.1403
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -293,6 +295,8 @@ _WHOSE_GAP: dict[str, str] = {
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
+    "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
+    "a Proxmox HOST tool": "drafter",                                # §17.1403
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5178,6 +5182,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_host_key_forgotten_not_pinned(cmds, shape_files)
     # §17.1400 — the agent's JSON answer read by a text tool.
     refused = refused + the_agents_json_read_as_text(cmds, shape_files)
+    # §17.1403 — a host-written file, or a host tool, run inside a guest.
+    refused = refused + a_host_file_run_inside_a_guest(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
@@ -6041,6 +6047,61 @@ def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
 #: this pattern required a bare quote and saw nothing (§17.1048 — a gate matches
 #: modulo formatting, or it does not match the thing that happens).
 _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
+
+
+#: §17.1403 — a guest exec and what runs after its `--`
+_GUEST_RUN_RE = re.compile(r"\b(?P<tool>pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>\d{3,5})\b[^\n]*?\s--\s(?P<rest>[^\n]*)")
+#: the Proxmox host's own tools: they do not exist inside a guest
+_HOST_TOOL_RE = re.compile(r"(?:^|[;&|(\s'\"])(?P<tool>qm|pct|pvesm|pvesh|pveam|vzdump)\s+[a-z]")
+
+
+def a_host_file_run_inside_a_guest(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1403 — the engine writes a block's files on the HOST; inside a guest they are not there.
+
+    Live, 2026-10-06, ADD122's draft (after §17.1402 told it where Palworld lives):
+    the block wrote `/tmp/add_palworld_settings.sh` and ran it as
+    `pct exec 111 -- bash /tmp/add_palworld_settings.sh`. The runner writes files
+    on the Proxmox host, so inside container 111 that path does not exist; and the
+    script itself called `qm guest exec 106 …`, a tool only the host has. The
+    engine's own templates run their script ON THE HOST and reach into the guest
+    from there (`run_in_container`, `run_in_vm_via_agent`).
+    """
+    paths = [str((f or {}).get("path") or "") for f in files or [] if (f or {}).get("path")]
+    content = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    lines = [ln for c in commands or [] for ln in str(c).split("\n") if not ln.lstrip().startswith("#")]
+    out: list[dict] = []
+    for i, ln in enumerate(lines):
+        for m in _GUEST_RUN_RE.finditer(ln):
+            gid, rest, tool = m.group("gid"), m.group("rest"), m.group("tool")
+            for p in paths:
+                if not re.search(rf"(?<![\w./-]){re.escape(p)}(?![\w./-])", rest):
+                    continue
+                pushed = any(re.search(rf"\bpct\s+push\s+{gid}\s+\S*{re.escape(p)}", x) for x in lines[:i] + [ln])
+                if pushed:
+                    continue
+                out.append({"command": ln.strip()[:200], "why": (
+                    f"`{p}` is a file this block writes, and the engine writes a block's files on the Proxmox "
+                    f"HOST -- inside guest {gid} that path does not exist, so `{tool.split()[0]} … -- {rest.strip()[:60]}` "
+                    f"runs nothing. Run the script on the host and reach into the guest from there, line by line "
+                    f"(`pct exec {gid} -- …` / `qm guest exec {gid} -- …`), the way the engine's own templates do"
+                    + (f" -- or `pct push {gid} {p} {p}` first" if tool.startswith("pct") else "")
+                    + ".")})
+                body = content.get(p, "")
+                hit = next((h for h in (_HOST_TOOL_RE.search(bl) for bl in body.split("\n")
+                                         if not bl.lstrip().startswith("#")) if h), None)
+                if hit:
+                    out.append({"command": ln.strip()[:200], "why": (
+                        f"and `{p}` calls `{hit.group('tool')}`, a Proxmox HOST tool, while running inside guest "
+                        f"{gid}: there is no `{hit.group('tool')}` in a guest. A step that needs a second machine "
+                        f"is run from the host, which can reach both.")})
+                break
+            # a host tool inside an inline guest payload
+            hit = _HOST_TOOL_RE.search(" " + rest)
+            if hit and not any(p in rest for p in paths):
+                out.append({"command": ln.strip()[:200], "why": (
+                    f"`{hit.group('tool')}` runs inside guest {gid} here, and it is a Proxmox HOST tool: there is "
+                    f"no `{hit.group('tool')}` in a guest. Run it on the host, outside the `{tool.split()[0]} … --`.")})
+    return out
 
 
 #: §17.1400 — text tools that cannot read the agent's JSON answer

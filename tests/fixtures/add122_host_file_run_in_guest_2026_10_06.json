@@ -1,0 +1,20 @@
+{
+ "node_key": "ADD122",
+ "title": "LXC 111: implement the Palworld settings capability (read/write the server's own settings file)",
+ "commands": [
+  "pct exec 111 -- bash /tmp/add_palworld_settings.sh"
+ ],
+ "verify": [
+  "pct exec 111 -- grep -n 'palworld' /opt/control-panel-backend/server.js",
+  "pct exec 111 -- systemctl is-active control-panel.service",
+  "pct exec 111 -- curl -s http://127.0.0.1:3001/api/palworld/settings | head -c 200"
+ ],
+ "files": [
+  {
+   "path": "/tmp/add_palworld_settings.sh",
+   "bytes": 2778,
+   "lines": 79,
+   "content": "#!/usr/bin/env bash\nset -euo pipefail\n\n# Back up the current server.js\ncp -a /opt/control-panel-backend/server.js /opt/control-panel-backend/server.js.bak.$(date +%Y%m%d%H%M%S)\n\n# Generate a dedicated SSH key for the control panel to reach the Palworld VM\nif [ ! -f /root/.ssh/palworld_ed25519 ]; then\n    ssh-keygen -t ed25519 -N '' -f /root/.ssh/palworld_ed25519 -C 'control-panel@111'\nfi\n\n# Install the public key on VM 106 (append-only, deduplicate)\nPUBKEY=$(cat /root/.ssh/palworld_ed25519.pub)\nqm guest exec 106 -- sh -c \"grep -qF '$PUBKEY' /home/aedefruscio/.ssh/authorized_keys || echo '$PUBKEY' >> /home/aedefruscio/.ssh/authorized_keys\"\n\n# Append the Palworld settings capability to server.js\ncat >> /opt/control-panel-backend/server.js <<'EOF'\n\n// ===== Palworld settings capability (ADD100) =====\nconst { execFileSync } = require('child_process');\nconst PALWORLD_IP = '192.168.1.106';\nconst PALWORLD_USER = 'aedefruscio';\nconst PALWORLD_KEY = '/root/.ssh/palworld_ed25519';\nconst PALWORLD_CONFIG = '/opt/palworld/DefaultPalWorldSettings.ini';\n\nfunction palworldSsh(args, input) {\n    return execFileSync('ssh', [\n        '-i', PALWORLD_KEY,\n        '-o', 'BatchMode=yes',\n        '-o', 'StrictHostKeyChecking=yes',\n        `${PALWORLD_USER}@${PALWORLD_IP}`,\n        ...args\n    ], { input, encoding: 'utf8', timeout: 15000 });\n}\n\nfunction palworldReadSettings() {\n    const raw = palworldSsh(['cat', PALWORLD_CONFIG]);\n    const settings = {};\n    for (const line of raw.split('\\n')) {\n        const m = line.match(/^([A-Za-z0-9_]+)=(.*)$/);\n        if (m) settings[m[1]] = m[2];\n    }\n    return settings;\n}\n\nfunction palworldWriteSettings(updates) {\n    const current = palworldReadSettings();\n    const merged = { ...current, ...updates };\n    const body = Object.entries(merged)\n        .map(([k, v]) => `${k}=${v}`)\n        .join('\\n') + '\\n';\n    palworldSsh(['sh', '-c', `cat > ${PALWORLD_CONFIG}`], body);\n    return merged;\n}\n\napp.get('/api/palworld/settings', (req, res) => {\n    try {\n        res.json(palworldReadSettings());\n    } catch (err) {\n        res.status(502).json({ error: 'palworld-unreachable', detail: String(err.message || err) });\n    }\n});\n\napp.put('/api/palworld/settings', (req, res) => {\n    try {\n        const updates = req.body;\n        if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {\n            return res.status(400).json({ error: 'body must be a JSON object of key/value pairs' });\n        }\n        res.json(palworldWriteSettings(updates));\n    } catch (err) {\n        res.status(502).json({ error: 'palworld-unreachable', detail: String(err.message || err) });\n    }\n});\n// ===== End Palworld settings capability =====\nEOF\n\n# Restart the control panel service\nsystemctl restart control-panel.service\n"
+  }
+ ]
+}
