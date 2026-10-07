@@ -200,6 +200,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is not an interface on this host",             # §17.1395
                    "is fed input here without `--pass-stdin 1`",   # §17.1397
                    "forgets a host key and pins nothing",          # §17.1399
+                   "answers JSON, and this hands that JSON to a text tool",   # §17.1400
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -291,6 +292,7 @@ _WHOSE_GAP: dict[str, str] = {
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
+    "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5131,6 +5133,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_pipe_the_guest_agent_never_reads(cmds, shape_files)
     # §17.1399 — a host key forgotten and nothing pinned in its place.
     refused = refused + a_host_key_forgotten_not_pinned(cmds, shape_files)
+    # §17.1400 — the agent's JSON answer read by a text tool.
+    refused = refused + the_agents_json_read_as_text(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
@@ -5996,6 +6000,56 @@ def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
 _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
 
 
+#: §17.1400 — text tools that cannot read the agent's JSON answer
+_TEXT_TOOL_RE = re.compile(r"^\s*(?:sed|grep|egrep|awk|cut|tr|head|tail|wc)\b")
+
+
+def the_agents_json_read_as_text(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1400 — `qm guest exec`'s answer is JSON; a text tool reading it reads the wrapper.
+
+    Live, 2026-10-06, ADD137 (the draft that finally pinned VM 106's real host
+    key, as §17.1399 asked) read it with
+
+        qm guest exec 106 -- cat /etc/ssh/ssh_host_ed25519_key.pub |
+            sed -n 's/.*"out-data":"\([^"]*\)".*/\1/p'
+
+    The agent answers PRETTY-PRINTED JSON -- `"out-data" : "ssh-ed25519 …\n"`,
+    spaces around the colon, the newline escaped -- as the same step's previous
+    run printed (`"exitcode" : 0`). The pattern matches nothing, the key comes back
+    empty, and the step stops. The run before it did the same with `| grep -o
+    '[0-9]*'` and reported "0 1 4 lines". §17.1319 is this defect in the engine's
+    own template; the template has parsed with `json` ever since.
+    """
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    out: list[dict] = []
+    for t in texts:
+        for line in t.split("\n"):
+            if line.lstrip().startswith("#") or not _QGE_RE.search(line):
+                continue
+            # blank quoted DATA (same length, so positions hold) -- but a double-quoted
+            # `"$( … )"` is code: live, the key read sat inside `HOSTKEY="$(qm guest exec … | sed …)"`
+            bare = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"",
+                          lambda m: m.group(0) if "$(" in m.group(0)
+                          else m.group(0)[0] + "x" * (len(m.group(0)) - 2) + m.group(0)[-1], line)
+            m = _QGE_RE.search(bare)
+            if not m:
+                continue
+            # the stages AFTER this invocation, split on top-level pipes only
+            stages = re.split(r"(?<!\|)\|(?!\|)", bare[m.end():])[1:]
+            if not stages:
+                continue
+            if _TEXT_TOOL_RE.match(stages[0]) and not re.search(r"\b(?:python3?|jq)\b", stages[0]):
+                out.append({"command": line.strip()[:200], "why": (
+                    "`qm guest exec` answers JSON, and this hands that JSON to a text tool: the agent "
+                    "pretty-prints it -- `\"out-data\" : \"…\\n\"`, spaces around the colon, newlines "
+                    "escaped -- so a pattern written for the raw text reads the wrapper and finds nothing "
+                    "(or the digits of `exitcode`). Parse it: `| python3 -c 'import json,sys; "
+                    "sys.stdout.write(json.load(sys.stdin).get(\"out-data\") or \"\")'` -- the engine's own "
+                    "guest-agent template does -- then filter the text that comes out.")})
+                break
+    return out
+
+
 #: §17.1399 — a known_hosts entry removed: `ssh-keygen -R`, a sed/grep -v rewrite, an rm or truncate
 _FORGETS_HOST_KEY_RE = re.compile(
     r"ssh-keygen\b[^\n|;&]*\s-R\b|\bsed\b[^\n]*-i[^\n]*known_hosts|\brm\b[^\n]*known_hosts|"
@@ -6028,8 +6082,9 @@ def a_host_key_forgotten_not_pinned(commands: list[str], files: Optional[list[di
         "machine. A changed key is exactly what a man-in-the-middle looks like, and deleting the warning is "
         "the reflex it relies on. The engine does not need to guess: when the target is a guest on this "
         "host, read its key through the guest's own channel, which is not the network being doubted -- "
-        "`qm guest exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub` (the agent answers JSON; take "
-        "`out-data`) or `pct exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub` -- then replace the old "
+        "`qm guest exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub | python3 -c 'import json,sys; "
+        "sys.stdout.write(json.load(sys.stdin).get(\"out-data\") or \"\")'` (the agent answers "
+        "pretty-printed JSON, so parse it -- never sed it) or `pct exec <id> -- cat /etc/ssh/ssh_host_ed25519_key.pub` -- then replace the old "
         "line with `<address> <that key>` in the client's known_hosts, and ssh with "
         "`StrictHostKeyChecking=yes`.")}]
 
