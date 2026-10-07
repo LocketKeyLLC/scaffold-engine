@@ -165,3 +165,48 @@ def test_the_pause_develops_instead_of_drafting_and_the_chain_stands_aside():
                   'if not frame.get("commands") and not _developed:', 'or _developed) else supervised_runs.verify_not_runnable',
                   '_ro = "" if _developed else', "_missing = [] if _developed else"):
         assert guard in src, guard
+
+
+# ── §17.1413 — engine-owned building blocks ──────────────────────────────────
+
+NODE_UNIT = "[Service]\nWorkingDirectory=/opt/control-panel-backend\nExecStart=/usr/bin/node server.js\n"
+WS = {"/etc/systemd/system/control-panel.service": NODE_UNIT, "/opt/control-panel-backend/server.js": "x"}
+
+
+def test_a_node_service_gets_the_kit_at_its_own_directory():
+    kit = dv.kit_for(HOST, WS)
+    assert sorted(kit) == ["/opt/control-panel-backend/scaffold-kit/remote.js",
+                           "/opt/control-panel-backend/scaffold-kit/ue_settings.js"]
+    assert "sudo', 'tee'" in kit["/opt/control-panel-backend/scaffold-kit/remote.js"]
+    assert "OptionSettings=(" in kit["/opt/control-panel-backend/scaffold-kit/ue_settings.js"]
+
+
+def test_a_service_that_is_not_node_gets_no_kit_yet():
+    assert dv.kit_for(HOST, {"/etc/systemd/system/control-panel.service": "ExecStart=/usr/bin/python3 app.py"}) == {}
+
+
+def test_the_prompt_documents_the_kit_at_its_real_path():
+    doc = dv.kit_doc(HOST, dv.kit_for(HOST, WS))
+    assert "require('/opt/control-panel-backend/scaffold-kit/remote')" in doc
+    assert "Never build an ssh command line yourself" in doc
+    p = dv.build_prompt(ADD122, HOST, "facts", WS, None, "", 1, doc)
+    assert "THE ENGINE'S KIT" in p
+
+
+def test_the_kit_is_delivered_with_every_version_and_the_model_cannot_overwrite_it():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "files = {p: c for p, c in files.items() if p not in kit}" in src
+    assert "develop.render_delivery(run_node, host, {**files, **kit}, checks)" in src
+    rb = dv.render_delivery(ADD122, HOST, {**FILES, **dv.kit_for(HOST, WS)}, ["true"])
+    staged = {f["path"] for f in sr.file_writes(rb)}
+    assert "/tmp/scaffold-dev/ADD122/opt/control-panel-backend/scaffold-kit/remote.js" in staged
+
+
+def test_every_round_logs_its_evidence():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "develop.evidence_of(fr)[:400]" in src
+
+
+def test_the_rehearsal_gets_the_measured_units_and_users():
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "known_units=[" in src and 'users=[{"user": s.user, "uid": s.uid' in src
