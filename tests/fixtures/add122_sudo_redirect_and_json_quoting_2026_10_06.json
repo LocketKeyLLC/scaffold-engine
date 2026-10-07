@@ -1,0 +1,21 @@
+{
+ "node_key": "ADD122",
+ "title": "LXC 111: implement the Palworld settings capability (read/write the server's own settings file)",
+ "commands": [
+  "bash /tmp/add_palworld_route.sh"
+ ],
+ "verify": [
+  "pct exec 111 -- grep -n 'palworld' /opt/control-panel-backend/server.js",
+  "pct exec 111 -- systemctl is-active control-panel.service",
+  "pct exec 111 -- curl -s http://127.0.0.1:3001/api/palworld/settings",
+  "pct exec 111 -- ssh -o BatchMode=yes aedefruscio@192.168.1.106 'cat /opt/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini'"
+ ],
+ "files": [
+  {
+   "path": "/tmp/add_palworld_route.sh",
+   "bytes": 2291,
+   "lines": 72,
+   "content": "#!/usr/bin/env bash\nset -euo pipefail\nGID=111\npct status \"$GID\" | grep -q running || pct start \"$GID\"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status \"$GID\" | grep -q running && break; sleep 5; done\ncat > /tmp/add_palworld_route_remote.sh <<'REMOTE'\nset -e\nBACKEND=/opt/control-panel-backend/server.js\nif grep -q 'palworld' \"$BACKEND\"; then\n  echo \"palworld route already present\"\n  exit 0\nfi\ncp -a \"$BACKEND\" \"$BACKEND.bak.$(date +%Y%m%d%H%M%S)\"\ncat >> \"$BACKEND\" <<'EOF'\n\n// Palworld settings capability: read/write the server's own settings file\nconst { execSync } = require('child_process');\nconst PALWORLD_IP = '192.168.1.106';\nconst PALWORLD_USER = 'aedefruscio';\nconst PALWORLD_CONFIG = '/opt/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini';\nconst PALWORLD_DEFAULT = '/opt/palworld/DefaultPalWorldSettings.ini';\n\nfunction palworldSsh(cmd) {\n  return execSync(\n    `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ${PALWORLD_USER}@${PALWORLD_IP} ${JSON.stringify(cmd)}`,\n    { encoding: 'utf8', timeout: 30000 }\n  );\n}\n\nfunction palworldReadSettings() {\n  const raw = palworldSsh(`cat ${PALWORLD_CONFIG}`);\n  if (!raw.trim()) {\n    return palworldSsh(`cat ${PALWORLD_DEFAULT}`).trim();\n  }\n  return raw.trim();\n}\n\nfunction palworldWriteSettings(content) {\n  const quoted = JSON.stringify(content);\n  palworldSsh(\n    `sudo systemctl stop palworld.service && ` +\n    `printf '%s' ${quoted} > ${PALWORLD_CONFIG} && ` +\n    `sudo systemctl start palworld.service`\n  );\n}\n\napp.get('/api/palworld/settings', (req, res) => {\n  try {\n    const content = palworldReadSettings();\n    res.json({ content });\n  } catch (err) {\n    res.status(500).json({ error: String(err) });\n  }\n});\n\napp.put('/api/palworld/settings', express.json(), (req, res) => {\n  try {\n    const content = req.body.content;\n    if (typeof content !== 'string' || !content.trim()) {\n      return res.status(400).json({ error: 'content must be a non-empty string' });\n    }\n    palworldWriteSettings(content);\n    res.json({ ok: true });\n  } catch (err) {\n    res.status(500).json({ error: String(err) });\n  }\n});\nEOF\nsystemctl restart control-panel.service\nREMOTE\npct push \"$GID\" /tmp/add_palworld_route_remote.sh /tmp/add_palworld_route_remote.sh\npct exec \"$GID\" -- bash /tmp/add_palworld_route_remote.sh\n"
+  }
+ ]
+}

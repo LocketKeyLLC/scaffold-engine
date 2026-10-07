@@ -1328,6 +1328,60 @@ def _machine_words(m: str) -> str:
             "a guest" if m == SOME_GUEST else f"guest {m}")
 
 
+#: `const PALWORLD_CONFIG = '/opt/…'`, `PALWORLD_CONFIG="/opt/…"`: a string constant a later line interpolates
+_CONST_RE = re.compile(r"(?:\b(?:const|let|var)\s+)?\b([A-Z][A-Z0-9_]{2,})\s*=\s*['\"]([^'\"\n]+)['\"]")
+#: sudo carrying the WRITE itself, not just a command beside it
+_SUDO_WRITES_RE = re.compile(r"\bsudo\s+(?:-\S+\s+)*(?:-u\s+\S+\s+)?(?:tee|dd|install|cp|mv|sh\s+-c|bash\s+-c)\b")
+
+
+def with_constants(text: str) -> str:
+    """`${NAME}` / `$NAME` replaced by the string constant the same text assigns to NAME."""
+    out = str(text or "")
+    for name, val in dict(_CONST_RE.findall(out)).items():
+        out = re.sub(r"\$\{" + name + r"\}|\$" + name + r"\b", val, out)
+    return out
+
+
+def a_redirect_sudo_does_not_cover(commands: list[str], files: Optional[list[dict]],
+                                   services: Optional[list]) -> list[dict]:
+    """§17.1405 — `sudo x && printf … > FILE`: the redirect is the calling shell's, not sudo's.
+
+    Live, 2026-10-06, ADD122's draft wrote the Palworld settings with
+    `sudo systemctl stop palworld.service && printf '%s' … > ${PALWORLD_CONFIG} &&
+    sudo systemctl start palworld.service`, over ssh as aedefruscio. Measured:
+    the file is `steam:steam 644`. sudo covers the two systemctl calls; the `>` is
+    done by aedefruscio's own shell, and is refused (Permission denied). The
+    block's author knew the work needed privilege -- it used sudo -- which is
+    exactly when this mistake is made.
+    """
+    owned = {}
+    for svc in services or []:
+        for path, (owner, mode) in (getattr(svc, "config_stat", None) or {}).items():
+            user = str(owner or "").split(":", 1)[0]
+            if user and user != "root":
+                owned[str(path)] = (str(owner), str(mode), getattr(svc, "name", ""))
+    if not owned:
+        return []
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        if "sudo" not in t:
+            continue
+        for line in with_constants(t).split("\n"):
+            if line.lstrip().startswith(("#", "//")) or _SUDO_WRITES_RE.search(line):
+                continue
+            for path, (owner, mode, name) in owned.items():
+                if re.search(r"(?<![<>&\d])>>?\s*['\"]?" + re.escape(path) + r"(?![\w./-])", line):
+                    out.append({"command": line.strip()[:200], "why": (
+                        f"`> {path}` is done by the calling shell, not by sudo: sudo in this block covers the "
+                        f"command it prefixes, and the redirect runs as whoever the shell is -- while {path} is "
+                        f"`{owner} {mode}` (measured, {name}). Permission denied, and the step reports what it "
+                        f"meant to write. Put the WRITE under sudo, with the content on stdin: "
+                        f"`… | sudo tee {path} >/dev/null` (or `sudo -u {owner.split(':')[0]} tee {path}`).")})
+                    return out
+    return out
+
+
 def edits_a_config_the_service_rewrites(commands: list[str], files: Optional[list[dict]],
                                         services: list[ServiceTruth]) -> list[dict]:
     """§17.1346 — editing a config the service itself writes, while it runs.
