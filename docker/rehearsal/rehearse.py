@@ -82,9 +82,15 @@ def main() -> None:
     os.makedirs("/rehearsal", exist_ok=True)
     open("/rehearsal/log", "w").close()
     report: dict = {"commands": [], "probes": [], "roundtrip": None}
+    report["skipped"] = []
     for f in job.get("seeds", []) + job.get("files", []):
-        os.makedirs(os.path.dirname(f["path"]) or "/", exist_ok=True)
-        with open(f["path"], "w") as fh:
+        path = str(f.get("path") or "")
+        # one unusable seed is recorded, never fatal: a directory, a relative path, nothing
+        if not path.startswith("/") or path.endswith("/") or os.path.isdir(path):
+            report["skipped"].append(path)
+            continue
+        os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
+        with open(path, "w") as fh:
             fh.write(f.get("content") or "")
     for cmd in job.get("commands", []):
         p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
