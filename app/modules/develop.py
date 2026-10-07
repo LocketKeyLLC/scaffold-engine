@@ -137,7 +137,13 @@ def done_checks(node: Optional[dict], host: Host) -> list[str]:
 def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], checks: list[str]) -> str:
     """The delivery runbook -- a shape the engine owns: stage, back up, push, restart, check."""
     nk = re.sub(r"[^A-Za-z0-9_-]", "", str((node or {}).get("node_key") or "step")) or "step"
-    stage = f"{STAGE_ROOT}/{nk}"
+    # §17.1413c — staged FLAT, directly in /tmp: the runner's write_file creates no directory
+    # (live: "'/tmp/scaffold-dev/ADD122/opt/…' is not a directory on this machine"), so a nested
+    # stage path is refused before anything runs. The target path is encoded in the name.
+    stage = f"{STAGE_ROOT}-{nk}"
+
+    def staged(path: str) -> str:
+        return stage + "--" + path.strip("/").replace("/", "--")
     wd_rel = host.workdir.lstrip("/")
     visible: dict[str, str] = {}
     carried: dict[str, str] = {}
@@ -145,12 +151,10 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
         (carried if _UNSAFE_RE.search(content or "") else visible)[path] = content or ""
     sh: list[str] = ["#!/usr/bin/env bash",
                      "# §17.1412 — delivered by the engine's own template: back up, push, restart, check.",
-                     "set -euo pipefail",
-                     f"STAGE={stage}"]
+                     "set -euo pipefail"]
     for path, content in carried.items():
         b64 = base64.b64encode(content.encode()).decode()
-        sh.append(f"mkdir -p {shlex.quote(os.path.dirname(stage + path))} && "
-                  f"echo {b64} | base64 -d > {shlex.quote(stage + path)}")
+        sh.append(f"echo {b64} | base64 -d > {shlex.quote(staged(path))}")
     if host.vm:
         g = f"qm guest exec {host.guest}"
         sh += [f"qm status {host.guest} | grep -q running || qm start {host.guest}",
@@ -159,7 +163,7 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
         for path in files:
             sh.append(f"{g} -- mkdir -p {shlex.quote(os.path.dirname(path))} >/dev/null")
             sh.append(f"{g} --pass-stdin 1 -- sh -c {shlex.quote('cat > ' + shlex.quote(path))} "
-                      f"< \"$STAGE{path}\" >/dev/null")
+                      f"< {shlex.quote(staged(path))} >/dev/null")
         own = f"{g} --"
     else:
         g = f"pct exec {host.guest} --"
@@ -168,7 +172,7 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
                f"{g} tar czf \"$BACKUP\" --exclude=node_modules -C / {shlex.quote(wd_rel)}"]
         for path in files:
             sh.append(f"{g} mkdir -p {shlex.quote(os.path.dirname(path))}")
-            sh.append(f"pct push {host.guest} \"$STAGE{path}\" {shlex.quote(path)}")
+            sh.append(f"pct push {host.guest} {shlex.quote(staged(path))} {shlex.quote(path)}")
         own = g
     if host.user and host.user != "root":
         owner = host.user + (f":{host.group}" if host.group else "")
@@ -182,12 +186,12 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
            'echo "backup: $BACKUP"']
     out = ["## Write these files", ""]
     for path, content in visible.items():
-        out += [f"### {stage}{path}", "```", content.rstrip("\n"), "```", ""]
-    out += [f"### {stage}/deliver.sh", "```bash", "\n".join(sh), "```", ""]
+        out += [f"### {staged(path)}", "```", content.rstrip("\n"), "```", ""]
+    out += [f"### {stage}--deliver.sh", "```bash", "\n".join(sh), "```", ""]
     if carried:
         out += [f"({len(carried)} file(s) carried inside deliver.sh base64-encoded, because their text holds "
                 f"a fence or a heading line: {', '.join(carried)})", ""]
-    out += ["## Run this", "", "```bash", f"bash {stage}/deliver.sh", "```", "",
+    out += ["## Run this", "", "```bash", f"bash {stage}--deliver.sh", "```", "",
             "## Verify", "", "```bash", "\n".join(checks), "```", ""]
     return "\n".join(out)
 

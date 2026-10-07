@@ -74,6 +74,18 @@ def test_a_directory_the_step_names_is_allowed():
 
 # ── the delivery is the engine's shape, and the engine's own parsers and gates accept it ──
 
+def _staged(path: str) -> str:
+    """§17.1413c — the flat staged name: the runner's write_file creates no directory."""
+    return "/tmp/scaffold-dev-ADD122--" + path.strip("/").replace("/", "--")
+
+
+def test_every_staged_file_sits_directly_in_tmp():
+    """Live: a nested stage (/tmp/scaffold-dev/ADD122/opt/...) was refused by the runner --
+    "'…' is not a directory on this machine" -- before anything ran."""
+    for f in sr.file_writes(_delivery()):
+        assert f["path"].rsplit("/", 1)[0] == "/tmp", f["path"]
+
+
 def _delivery(files=FILES, host=HOST):
     return dv.render_delivery(ADD122, host, files, dv.done_checks(ADD122, host))
 
@@ -87,20 +99,19 @@ def test_the_steps_own_checks_are_the_verify():
 def test_the_runbook_parses_into_files_one_command_and_the_checks():
     rb = _delivery()
     files = {f["path"]: f["content"] for f in sr.file_writes(rb)}
-    stage = "/tmp/scaffold-dev/ADD122"
     for p, c in FILES.items():
-        assert files[stage + p].strip() == c.strip(), p
-    assert stage + "/deliver.sh" in files
-    assert sr.runbook_commands(rb) == [f"bash {stage}/deliver.sh"]
+        assert files[_staged(p)].strip() == c.strip(), p
+    assert "/tmp/scaffold-dev-ADD122--deliver.sh" in files
+    assert sr.runbook_commands(rb) == ["bash /tmp/scaffold-dev-ADD122--deliver.sh"]
     assert sr.verify_commands(rb) == dv.done_checks(ADD122, HOST)
 
 
 def test_the_delivery_script_is_valid_bash_and_does_the_whole_job():
-    sh = {f["path"]: f["content"] for f in sr.file_writes(_delivery())}["/tmp/scaffold-dev/ADD122/deliver.sh"]
+    sh = {f["path"]: f["content"] for f in sr.file_writes(_delivery())}["/tmp/scaffold-dev-ADD122--deliver.sh"]
     assert subprocess.run(["bash", "-n"], input=sh, text=True).returncode == 0
     assert "tar czf \"$BACKUP\"" in sh, "backs up the directory first"
     for p in FILES:
-        assert f'pct push 111 "$STAGE{p}" {p}' in sh
+        assert f"pct push 111 {_staged(p)} {p}" in sh
     assert "pct exec 111 -- systemctl restart control-panel.service" in sh
     assert "systemctl is-active control-panel.service" in sh
 
@@ -118,19 +129,19 @@ def test_the_delivery_passes_the_engines_own_shape_gates():
 def test_a_vm_service_is_delivered_through_its_agent_with_stdin():
     vm = dv.Host(guest="106", vm=True, workdir="/opt/app", unit="app.service", user="steam", group="steam")
     sh = {f["path"]: f["content"] for f in sr.file_writes(dv.render_delivery(ADD122, vm, {"/opt/app/a.js": "x"}, ["true"]))}
-    sh = sh["/tmp/scaffold-dev/ADD122/deliver.sh"]
+    sh = sh["/tmp/scaffold-dev-ADD122--deliver.sh"]
     assert "qm guest exec 106 --pass-stdin 1 -- sh -c" in sh and "chown steam:steam /opt/app/a.js" in sh
     assert subprocess.run(["bash", "-n"], input=sh, text=True).returncode == 0
-    assert sr.a_pipe_the_guest_agent_never_reads(["bash /tmp/scaffold-dev/ADD122/deliver.sh"],
-                                                 [{"path": "/tmp/scaffold-dev/ADD122/deliver.sh", "content": sh}]) == []
+    assert sr.a_pipe_the_guest_agent_never_reads(["bash /tmp/scaffold-dev-ADD122--deliver.sh"],
+                                                 [{"path": "/tmp/scaffold-dev-ADD122--deliver.sh", "content": sh}]) == []
 
 
 def test_a_file_that_would_break_the_runbook_is_carried_base64_and_round_trips():
     tricky = "line one\n```\n## not a heading\n### nor this\n"
     rb = _delivery({"/opt/control-panel-backend/README.md": tricky})
     files = {f["path"]: f["content"] for f in sr.file_writes(rb)}
-    assert "/tmp/scaffold-dev/ADD122/opt/control-panel-backend/README.md" not in files
-    sh = files["/tmp/scaffold-dev/ADD122/deliver.sh"]
+    assert _staged("/opt/control-panel-backend/README.md") not in files
+    sh = files["/tmp/scaffold-dev-ADD122--deliver.sh"]
     b64 = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d", sh).group(1)
     assert base64.b64decode(b64).decode() == tricky
     assert "carried inside deliver.sh base64-encoded" in rb
@@ -199,7 +210,7 @@ def test_the_kit_is_delivered_with_every_version_and_the_model_cannot_overwrite_
     assert "develop.render_delivery(run_node, host, {**files, **kit}, checks)" in src
     rb = dv.render_delivery(ADD122, HOST, {**FILES, **dv.kit_for(HOST, WS)}, ["true"])
     staged = {f["path"] for f in sr.file_writes(rb)}
-    assert "/tmp/scaffold-dev/ADD122/opt/control-panel-backend/scaffold-kit/remote.js" in staged
+    assert _staged("/opt/control-panel-backend/scaffold-kit/remote.js") in staged
 
 
 def test_every_round_logs_its_evidence():

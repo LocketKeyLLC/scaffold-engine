@@ -100,7 +100,7 @@ def main() -> None:
                             for u in job.get("known_units") or []) + "\n")
     report: dict = {"commands": [], "probes": [], "roundtrip": None}
     report["skipped"] = []
-    for f in job.get("seeds", []) + job.get("files", []):
+    for f in job.get("seeds", []):
         path = str(f.get("path") or "")
         # one unusable seed is recorded, never fatal: a directory, a relative path, nothing
         if not path.startswith("/") or path.endswith("/") or os.path.isdir(path):
@@ -109,8 +109,23 @@ def main() -> None:
         os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
         with open(path, "w") as fh:
             fh.write(f.get("content") or "")
+    # §17.1413c — the draft's OWN files are written the way the runner writes them: into a directory
+    # that already exists, or refused -- and the block stops there, as it does on the machine. (Live:
+    # the first passing ADD122 version staged under /tmp/scaffold-dev/ADD122/opt/…, the runner refused
+    # it, and this sandbox, which created directories for every file, had said nothing.)
+    refused_write = False
+    for f in job.get("files", []):
+        path = str(f.get("path") or "")
+        parent = os.path.dirname(path) or "/"
+        if not os.path.isdir(parent):
+            report["commands"].append({"command": f"write {path}", "exit": 1,
+                                       "out": f"(refused by the local runner: '{parent}' is not a directory on this machine)"})
+            refused_write = True
+            break
+        with open(path, "w") as fh:
+            fh.write(f.get("content") or "")
     _seed_before = {f["path"]: f.get("content") or "" for f in job.get("seeds", []) if str(f.get("path") or "").startswith("/")}
-    for cmd in job.get("commands", []):
+    for cmd in ([] if refused_write else job.get("commands", [])):
         p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
         report["commands"].append({"command": cmd[:200], "exit": p.returncode,
                                    "out": (p.stdout + p.stderr)[-600:]})
