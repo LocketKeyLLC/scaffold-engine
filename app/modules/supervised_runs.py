@@ -4558,6 +4558,32 @@ def without_quoted_data_heredocs(text: str) -> str:
     return "\n".join(out)
 
 
+def a_shell_runs_it(cmd: str, path: str, body: str) -> bool:
+    """§17.1404 — is the written file at `path` run by a SHELL in `cmd`?
+
+    Live, 2026-10-06, ADD122's draft wrote `/tmp/add_palworld_route.py` and ran
+    `python3 /tmp/add_palworld_route.py`; its route code, a JavaScript template
+    literal inside a Python string, carries `${k}=${v}`, and §17.1348 refused `$k`
+    as "read here and nothing sets it". A Python program is not a shell script:
+    `$k` there is nobody's variable. Only a file a shell interprets has shell
+    references -- run by `bash`/`sh`/`dash`/`zsh`, `source`d or `.`'d, or executed
+    directly with a shell shebang or a `.sh` name.
+    """
+    p = re.escape(path)
+    if re.search(rf"\b(?:ba|da|z|k)?sh\s+(?:-\S+\s+)*{p}\b|(?:^|[;&|\s])(?:source|\.)\s+{p}\b", cmd):
+        return True
+    interp = re.search(rf"\b(python3?|node|perl|ruby|php|awk|jq)\b[^\n;&|]*?{p}\b", cmd)
+    if interp:
+        return False
+    first = (body or "").lstrip().split("\n", 1)[0]
+    if first.startswith("#!"):
+        return bool(re.search(r"\b(?:ba|da|z|k)?sh\b", first))
+    # run directly with no shebang: the kernel refuses it and the shell runs it as sh
+    if re.search(rf"(?:^|[;&|]\s*){p}\b", cmd.strip()):
+        return True
+    return path.endswith((".sh", ".bash"))
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -4606,7 +4632,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
 
     for cmd in texts:
         # a command that RUNS a written file carries that file's references too
-        bodies = [cmd] + [body for path, body in file_by_path.items() if path and path in cmd]
+        bodies = [cmd] + [body for path, body in file_by_path.items()
+                          if path and path in cmd and a_shell_runs_it(cmd, path, body)]
         # §17.1401b — a quoted heredoc's body is the written file's syntax, not the shell's
         bodies = [without_quoted_data_heredocs(b) for b in bodies]
         # §17.1364 — a variable is judged in the shell that EXPANDS it. A
