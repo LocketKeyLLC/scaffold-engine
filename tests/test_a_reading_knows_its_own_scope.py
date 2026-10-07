@@ -251,7 +251,7 @@ def test_the_pause_builds_one_reading_and_hands_it_everywhere():
     src = inspect.getsource(ea._pause_for_decision)
     assert "_reading = Reading()" in src
     assert src.count("reading=_reading") >= 10, src.count("reading=_reading")
-    assert "guests_of_the_named_services(spec, _named, _cts, reading=_reading)" in src
+    assert "guests_of_the_named_services(spec, _named, _cts, reading=_reading, vms=_vms" in src   # §17.1402
     assert "_st2.table(_services, _reading)" in src
     # the inventory, the step's own guest, and the precondition layer
     assert "the host's own inventory" in src

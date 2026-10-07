@@ -65,7 +65,7 @@ def test_the_live_script_is_refused_for_both_services():
     assert "radarr in guest 103" in whys and "sonarr in guest 104" in whys
     # the remedy names the measured address AND the in-guest alternative
     assert "Reach it at 192.168.1.22:7878" in whys
-    assert "pct exec 103 -- …" in whys
+    assert "pct exec 103 -- sh -c '…'" in whys       # §17.1402 — exec_hint, kind-aware
     assert "answered `000`" in whys
 
 
