@@ -2781,7 +2781,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             workspace = await develop.read_workspace(spec, host)
             checks = develop.done_checks(run_node, host)
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
-            kit_text = develop.kit_doc(host, kit)
+            creds = develop.credentials_for(_services)        # §17.1415 — keys read on the machine at delivery
+            kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             best = None                            # (score, frame, files)
             current: dict | None = None
@@ -2803,7 +2804,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
                 rb = develop.render_delivery(run_node, host, {**files, **kit}, checks,
-                                             develop.acceptance_checks(run_node))
+                                             develop.acceptance_checks(run_node), creds)
                 fr = supervised_runs.frame_run(run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,

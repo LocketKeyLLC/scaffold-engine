@@ -162,7 +162,7 @@ def acceptance_checks(node: Optional[dict]) -> list[str]:
 
 
 def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], checks: list[str],
-                    acceptance: Optional[list[str]] = None) -> str:
+                    acceptance: Optional[list[str]] = None, credentials: Optional[dict[str, str]] = None) -> str:
     """The delivery runbook -- a shape the engine owns: stage, back up, push, restart, check."""
     nk = re.sub(r"[^A-Za-z0-9_-]", "", str((node or {}).get("node_key") or "step")) or "step"
     # §17.1413c — staged FLAT, directly in /tmp: the runner's write_file creates no directory
@@ -183,6 +183,21 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
     for path, content in carried.items():
         b64 = base64.b64encode(content.encode()).decode()
         sh.append(f"echo {b64} | base64 -d > {shlex.quote(staged(path))}")
+    # §17.1415 — a file carrying a credential MARKER gets the real key on the host, read where the service
+    # keeps it; the staged copy (now holding the key) is removed on exit whatever happens.
+    secret_files = [p for p, c in files.items() if _MARK_RE.search(c or "")]
+    if secret_files:
+        sh.append("trap " + shlex.quote("rm -f " + " ".join(shlex.quote(staged(p)) for p in secret_files)) + " EXIT")
+        for name in sorted({n for p in secret_files for n in _MARK_RE.findall(files[p])}):
+            read = (credentials or {}).get(name)
+            if not read:
+                sh.append(f"echo 'the engine cannot read {name} on any machine' >&2; exit 1")
+                continue
+            sh.append(f"V_{name}=$({read})")
+            sh.append(f'[ -n "$V_{name}" ] || {{ echo "could not read {name} on the machine" >&2; exit 1; }}')
+            for p in secret_files:
+                if SECRET_MARK.format(name=name) in (files[p] or ""):
+                    sh.append(f'sed -i "s|{SECRET_MARK.format(name=name)}|$V_{name}|g" {shlex.quote(staged(p))}')
     if host.vm:
         g = f"qm guest exec {host.guest}"
         sh += [f"qm status {host.guest} | grep -q running || qm start {host.guest}",
@@ -255,6 +270,41 @@ def kit_for(host: Host, workspace: dict[str, str]) -> dict[str, str]:
 
 def kit_doc(host: Host, kit: dict[str, str]) -> str:
     return KIT_DOC.format(kit=f"{host.workdir}/{KIT_SUBDIR}") if kit else ""
+
+
+# ── §17.1415: credentials the engine reads on the machine, filled in at delivery ──
+
+SECRET_MARK = "@@SCAFFOLD:{name}@@"
+_MARK_RE = re.compile(r"@@SCAFFOLD:([A-Z][A-Z0-9_]{2,60})@@")
+
+
+def credentials_for(services: Optional[list]) -> dict[str, str]:
+    """`{NAME: read command}` for the API keys the engine can read ON THE MACHINE for the measured
+    services (Radarr's key from its own config.xml on its guest, …) -- the machine-values registry
+    (§17.1332), never a value the engine or the model holds."""
+    from app.modules import machine_values as mv
+    out: dict[str, str] = {}
+    for svc in services or []:
+        name, gid = str(getattr(svc, "name", "") or ""), str(getattr(svc, "guest", "") or "")
+        if not name or not gid:
+            continue
+        key = re.sub(r"[^A-Z0-9]", "_", name.upper()) + "_API_KEY"
+        r = mv.readable_for(key)
+        if r is not None and r.app == name.lower():
+            out[key] = r.read(gid)
+    return out
+
+
+def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
+    if not creds:
+        return ""
+    where = {re.sub(r"[^A-Z0-9]", "_", str(getattr(s, "name", "")).upper()) + "_API_KEY": getattr(s, "guest", "?")
+             for s in services or []}
+    lines = [f"- `{SECRET_MARK.format(name=n)}` -- {n.replace('_API_KEY', '').title()}'s API key (read on guest "
+             f"{where.get(n, '?')} at delivery)" for n in sorted(creds)]
+    return ("CREDENTIALS: where your code needs one of these, put the MARKER literally in a config file you deliver "
+            "(never in code, never a value you invent, never an empty string). The delivery replaces it on the machine "
+            "with the real key; the value never passes through you:\n" + "\n".join(lines))
 
 
 FILES_SCHEMA = {
