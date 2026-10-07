@@ -510,7 +510,7 @@ def test_the_verify_redraft_never_trades_a_runnable_block_for_a_refused_one():
     draft of invalid Python: two unrunnable frames, the second less informative."""
     src = (pathlib.Path(sr.__file__).parent / "execution_agent.py").read_text(encoding="utf-8")
     i = src.index("verify_not_runnable(runbook)")
-    assert 'frame.get("refused") else supervised_runs.verify_not_runnable' in src[i - 200:i + 60], \
+    assert 'frame.get("refused") or _developed) else supervised_runs.verify_not_runnable' in src[i - 200:i + 60], \
         "the verify redraft must not run on an already-refused frame"
     assert '_vf.get("verify") and not _vf.get("refused")' in src[i:i + 1600], \
         "and must not accept a replacement that is itself refused"

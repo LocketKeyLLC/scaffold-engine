@@ -11,6 +11,8 @@ WORKDIR /opt/node_global
 RUN npm init -y >/dev/null && npm install express@4 >/dev/null
 WORKDIR /
 ENV NODE_PATH=/opt/node_global/node_modules
+# units name /usr/bin/node (Debian's path); the node image keeps it in /usr/local/bin
+RUN ln -sf /usr/local/bin/node /usr/bin/node
 COPY shims/ /usr/local/shim/
 RUN chmod +x /usr/local/shim/* && mkdir -p /rehearsal
 ENV PATH=/usr/local/shim:$PATH

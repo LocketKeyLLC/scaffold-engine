@@ -2725,7 +2725,16 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2
             up_block = (up_block + "\n\n" + _st2.table(_services, _reading)).strip()
-        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
+        # §17.1412 — a step that writes SOFTWARE in a measured service's directory is
+        # DEVELOPED against the real files, not drafted as one blind shell block.
+        from app.modules import develop
+        try:
+            _dev_host = develop.host_for(run_node, _services)
+        except Exception as exc:
+            logger.warning("develop_host_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+            _dev_host = None
+        _developed = _dev_host is not None
+        runbook = "" if _developed else await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
         # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
         # runs against copies of the real files in the rehearsal sandbox before it is
@@ -2745,7 +2754,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             try:
                 if not _rh_seeds:
                     _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
-                report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds)
+                report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds,
+                                                  known_units=[str(getattr(s, "unit", "")) for s in _services or []
+                                                               if getattr(s, "unit", "")])
                 _rh_reports[rb] = report
                 refused = rehearsal.refusal_from(report)
                 _ran = bool(report) and not report.get("error")
@@ -2757,6 +2768,50 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             except Exception as exc:
                 logger.warning("rehearsal_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
                 return []
+
+        async def _develop_the_step(host, empty_frame: dict) -> dict:
+            """§17.1412 — rounds of: the model returns whole files -> the engine renders the
+            delivery -> every gate, the machine and the rehearsal judge it -> the evidence
+            and the best version go back to the model."""
+            from app.modules import service_truth as _st_dev
+            _nk_dev = str(run_node.get("node_key") or "")
+            workspace = await develop.read_workspace(spec, host)
+            checks = develop.done_checks(run_node, host)
+            facts = _st_dev.table(_services, _reading)
+            best = None                            # (score, frame, files)
+            current: dict | None = None
+            evidence = ""
+            for round_no in range(1, develop.ROUNDS + 1):
+                files, summary = await develop.propose(
+                    develop.build_prompt(run_node, host, facts, workspace, current, evidence, round_no))
+                if not files:
+                    evidence = f"- {summary}"
+                    logger.warning("develop_no_files job=%s node=%s round=%d why=%s", job_id, _nk_dev, round_no, summary)
+                    continue
+                outside = [p for p in files if not develop.allowed_path(p, host, run_node)]
+                if outside:
+                    current, evidence = files, (f"- these paths are outside {host.workdir} and every directory the "
+                                                f"step names, so the engine will not write them: {', '.join(outside)}")
+                    logger.warning("develop_paths_refused job=%s node=%s round=%d paths=%s", job_id, _nk_dev, round_no, outside)
+                    continue
+                rb = develop.render_delivery(run_node, host, files, checks)
+                fr = supervised_runs.frame_run(run_node, rb, spec, policy, env=_env,
+                                               preconditions=await _pre_for(rb), upstream=up_block,
+                                               units=_units, units_by_guest=_units_by_guest, reading=_reading,
+                                               inventory=_inv, engine_address=_eaddr, services=_services)
+                sc = develop.score(fr, _rh_reports.get(rb))
+                logger.warning("develop_round job=%s node=%s round=%d files=%d score=%s best=%s",
+                               job_id, _nk_dev, round_no, len(files), sc, best[0] if best else None)
+                if best is None or sc <= best[0]:          # a tie goes to the newer version
+                    best = (sc, fr, files)
+                if sc == 0:
+                    break
+                current, evidence = best[2], develop.evidence_of(best[1])
+            if best is None:
+                logger.warning("develop_gave_nothing job=%s node=%s", job_id, _nk_dev)
+                return empty_frame
+            logger.warning("develop_done job=%s node=%s score=%s", job_id, _nk_dev, best[0])
+            return best[1]
 
         async def _pre_for(rb: str) -> list[dict]:
             # §17.1359 — a TypeError here is a PROGRAMMING error, not a machine the
@@ -2798,6 +2853,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
+        if _developed and _dev_host is not None:
+            frame = await _develop_the_step(_dev_host, frame)
         # §17.1289 — reconcile the record from the measurement: a durable fact
         # about the machine goes to the ledger; a finished step whose effect
         # the machine does not show is reopened (no cascade) unless a pending
@@ -2850,7 +2907,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # the refusal quoted back, the way a compiler error feeds the next
         # attempt, and only ask when the second try is still not runnable.
         fix = supervised_runs.shape_retry_note(frame)
-        if fix:
+        if fix and not _developed:          # §17.1412 — a developed frame is not redrafted
             logger.warning("supervised_run_redraft job=%s node=%s refusals=%s", job_id,
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
             retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env, truth=_truth, services=_services)
@@ -2978,7 +3035,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     return _rb0
             return str(fr.get("runbook") or "")
 
-        if _rh_target and _rehearsal_only(frame):
+        if _rh_target and _rehearsal_only(frame) and not _developed:
             _nk = str(run_node.get("node_key") or "")
             _rb_full = _full_runbook(frame)
             _best = {"frame": frame, "runbook": _rb_full, "score": rehearsal.score(_rh_reports.get(_rb_full)),
@@ -2989,6 +3046,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if _kept and int(_kept.get("score", 10_000)) < _best["score"]:
                     _best.update({"frame": None, "runbook": _kept["runbook"], "score": int(_kept["score"]),
                                   "why": str(_kept.get("why") or "")})
+                    # §17.1411d — re-rehearse what was kept, so its evidence is TODAY's sandbox
+                    # speaking. Live: a best kept before §17.1411c carried no express.json() note,
+                    # and every repair was shown that stale evidence.
+                    _fresh = await _rehearse_or_nothing(_best["runbook"],
+                                                        supervised_runs.file_writes(_best["runbook"]))
+                    if _fresh:
+                        _best["why"] = "; ".join(str(r.get("why") or "") for r in _fresh)
+                        _best["score"] = rehearsal.score(_rh_reports.get(_best["runbook"]))
                     logger.warning("rehearsal_resume job=%s node=%s score=%s", job_id, _nk, _best["score"])
             except Exception as exc:
                 logger.warning("rehearsal_best_unreadable job=%s node=%s err=%r", job_id, _nk, exc)
@@ -3009,7 +3074,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _sc = rehearsal.score(_rh_reports.get(_rb)) if _rehearsal_only(_fr) else 20_000
                 logger.warning("rehearsal_repair job=%s node=%s attempt=%d score=%s best=%s",
                                job_id, _nk, _attempt + 1, _sc, _best["score"])
-                if _sc < _best["score"]:
+                # §17.1411d — a TIE goes to the newer attempt: it carries the newest evidence
+                # (live: five repairs tied at 3330 and the note never advanced past the stale one)
+                if _sc <= _best["score"]:
                     _best = {"frame": _fr, "runbook": _rb, "score": _sc,
                              "why": "; ".join(str(r.get("why") or "") for r in _fr["refused"])}
             try:
@@ -3028,7 +3095,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # is none — there is nothing to refuse) and the coverage pass only
         # replaces a draft with a complete one. Name the remedy — usually the
         # HTTP API the draft's own Verify section is already calling.
-        if not frame.get("commands"):
+        if not frame.get("commands") and not _developed:
             try:
                 _nc = supervised_runs.no_commands_retry_note(
                     " ".join(str(run_node.get(k) or "") for k in ("description", "prompt_template", "title")),
@@ -3062,7 +3129,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # redrafting for the checks swapped a correct budget refusal for a
             # draft of invalid Python: two unrunnable frames, the second one less
             # informative. The refusal path above owns that case.
-            _nv = "" if frame.get("refused") else supervised_runs.verify_not_runnable(runbook)
+            _nv = "" if (frame.get("refused") or _developed) else supervised_runs.verify_not_runnable(runbook)
             if _nv:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))
@@ -3087,7 +3154,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # for a step that must change something would be approved, run cleanly
         # and mark the step done having done nothing.
         try:
-            _ro = supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            _ro = "" if _developed else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
             if _ro:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
@@ -3114,7 +3181,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])
+            _missing = [] if _developed else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
