@@ -73,6 +73,8 @@ class ServiceTruth:
     configs: tuple[str, ...] = ()
     config_stat: dict = field(default_factory=dict)   # path -> (owner:group, mode)
     address: str = ""                                # §17.1368 — the guest's own IPv4
+    vm: bool = False                                 # §17.1402 — a VM is reached through its agent
+    workdir: str = ""                                # §17.1402 — the unit's WorkingDirectory
     ports: tuple[str, ...] = ()
     reads: dict = field(default_factory=dict)
 
@@ -126,6 +128,8 @@ class ServiceTruth:
             bits.append(f"runs as {self.user}" + (f" (uid {self.uid}, gid {self.gid})" if self.uid else ""))
         if self.unit:
             bits.append(f"unit {self.unit}" + (f" ({self.state})" if self.state else ""))
+        if self.workdir:
+            bits.append(f"installed in {self.workdir}")          # §17.1402
         if self.config:
             own = self.rewrites_its_own_config
             bits.append(f"config {self.config}" + (" (the service rewrites it: stop it before editing)"
@@ -194,12 +198,16 @@ def data_dir_of(argv: str) -> str:
     return m.group("path").rstrip("/") if m else ""
 
 
-def config_candidates(name: str, user: str, data_dir: str, home: str = "") -> list[str]:
+def config_candidates(name: str, user: str, data_dir: str, home: str = "", workdir: str = "") -> list[str]:
     """Paths worth a `stat`, most specific first. No invention: each is either the
     service's own data dir, or its home, or a name the unit itself gave."""
     out: list[str] = []
     if data_dir:
         out += [f"{data_dir}/config.xml", f"{data_dir}/{name}.conf", f"{data_dir}/settings.json"]
+    # §17.1402 — the unit's own WorkingDirectory is a name the unit gave: Palworld's
+    # `palworld.service` says `/opt/palworld`, where `DefaultPalWorldSettings.ini` is.
+    if workdir:
+        out += [f"{workdir}/config.xml", f"{workdir}/*.ini", f"{workdir}/*.conf"]
     base = (home or f"/var/lib/{name}").rstrip("/")
     # §17.1346b — the directory under `.config` is the APP's own spelling, not the
     # unit's: qBittorrent keeps its file at `.config/qBittorrent/qBittorrent.conf`
@@ -251,6 +259,25 @@ def table(services: list[ServiceTruth], reading=None) -> str:
     return "\n\n".join([t for t in (head, scope) if t])
 
 
+def in_guest(gid: str, vm: bool = False) -> str:
+    """§17.1402 — the prefix that runs a command INSIDE guest `gid`.
+
+    Every read here was `pct exec`, which reaches containers only. Live,
+    2026-10-06, ADD122 (a control-panel backend that edits the Palworld server's
+    settings) was drafted against `/home/aedefruscio/Steam/…/PalServer` and an ssh
+    as aedefruscio. Measured on VM 106: the install is `/opt/palworld`,
+    `palworld.service` runs as `User=steam`, and the directory is
+    `drwxr-xr-x steam` -- none of which the drafter was told, because the engine's
+    service read never reached a VM. `qm guest exec` answers JSON, which `_probe`
+    already unwraps (§17.1304)."""
+    return f"qm guest exec {gid} --" if vm else f"pct exec {gid} --"
+
+
+def exec_hint(svc) -> str:
+    """How the drafter should address this service's guest, in its own words."""
+    return f"{in_guest(getattr(svc, 'guest', 'N'), bool(getattr(svc, 'vm', False)))} sh -c '…'"
+
+
 async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
     """``(ok, output)`` — ``ok`` None when the runner could not be asked."""
     try:
@@ -295,7 +322,9 @@ def _same_service(a: str, b: str) -> bool:
 
 
 async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dict] = None,
-                                       limit: int = 10, reading=None) -> dict:
+                                       limit: int = 10, reading=None,
+                                       vms: Optional[dict] = None,
+                                       guest_names: Optional[dict] = None) -> dict:
     """``{service name: guest id}`` for the services a step NAMES, from what listens.
 
     §17.1356 — the pause measured services only in the step's SUBJECT guest, so a
@@ -318,9 +347,12 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
     if spec is None or not wanted:
         return {}
     running = [g for g, st in sorted((cts or {}).items()) if str(st) == "running"]
+    # §17.1402 — and the running VMs, through their agent: Palworld is in VM 106
+    _vm_ids = {g for g, st in (vms or {}).items() if str(st) == "running"}
+    running += sorted(_vm_ids)
     # §17.1363 — a guest that is not running is a GAP, not an absence of services
     if reading is not None:
-        for g, st in sorted((cts or {}).items()):
+        for g, st in sorted({**(vms or {}), **(cts or {})}.items()):
             if str(st) != "running":
                 reading.gap(f"guest {g}", f"{st} — nothing in it could be read")
     found: dict = {}
@@ -328,7 +360,7 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
     for gid in running[:limit]:
         if len(found) == len(wanted):
             break
-        ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
+        ok, ss_text = await _probe(spec, f"{in_guest(gid, gid in _vm_ids)} sh -c 'ss -tlnp'")
         if not ok:
             if reading is not None:
                 reading.gap(f"guest {gid}", "the runner could not read `ss -tlnp` in it"
@@ -341,6 +373,20 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
                 continue
             if any(_same_service(name, p) for p in procs):
                 found[name] = str(gid)
+    # §17.1402 — a process need not carry the service's name: Palworld listens as
+    # `PalServer-Linux-Shipping`, so the sweep above never places "palworld". The guest
+    # the inventory NAMES for it (`palworld-server`, VM 106) does -- one guest only, and
+    # only one that is running; an ambiguous name places nothing.
+    for name in wanted:
+        if name in found:
+            continue
+        hits = [str(g) for g, nm in (guest_names or {}).items()
+                if str(g) in running and _norm(name) and len(_norm(name)) >= 4
+                and _norm(name) in _norm(nm)]
+        if len(hits) == 1:
+            found[name] = hits[0]
+            if reading is not None:
+                reading.note(f"{name} is in guest {hits[0]}", "the guest's own name in `qm list`/`pct list`")
     if reading is not None:
         if swept:
             reading.note("what listens in guest(s) " + ", ".join(swept), "ss -tlnp")
@@ -360,12 +406,13 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
 
 
 async def read_services(spec, gid: str, units: Optional[list[str]] = None,
-                        mentioned: Optional[list[str]] = None, reading=None) -> list[ServiceTruth]:
+                        mentioned: Optional[list[str]] = None, reading=None,
+                        vm: bool = False) -> list[ServiceTruth]:
     """Measure the services on one running container: what listens, and what each
     listener is. Fail-soft per field; unreadable means empty, never a guess."""
     if spec is None or not gid:
         return []
-    ok, ss_text = await _probe(spec, f"pct exec {gid} -- sh -c 'ss -tlnp'")
+    ok, ss_text = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'ss -tlnp'")
     if not ok:
         # §17.1363 — an empty list here used to be indistinguishable from "this
         # guest runs nothing". It is a gap, and it is recorded as one.
@@ -381,7 +428,7 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
     # `host->127.0.0.1:7878 = 000`, the host listens on none of those ports, and
     # 103 is 192.168.1.22. The facts said "port 7878 on guest 103" and never said
     # where guest 103 is, so the only address the drafter had was loopback.
-    _ok_addr, _addr_text = await _probe(spec, f"pct exec {gid} -- hostname -I")
+    _ok_addr, _addr_text = await _probe(spec, f"{in_guest(gid, vm)} hostname -I")
     _addr = ""
     if _ok_addr:
         _addr = next((w for w in str(_addr_text or "").split()
@@ -410,8 +457,8 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
     for cands in wanted[:MAX_SERVICES]:
         base, sh = "", {}
         for cand in cands:
-            ok, show = await _probe(spec, f"pct exec {gid} -- sh -c 'systemctl show -p Id -p User -p Group "
-                                          f"-p ExecStart -p FragmentPath -p ActiveState -p LoadState {cand}'")
+            ok, show = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'systemctl show -p Id -p User -p Group "
+                                          f"-p ExecStart -p FragmentPath -p ActiveState -p LoadState -p WorkingDirectory {cand}'")
             if not ok or not show.strip():
                 continue
             # §17.1356 — systemctl answers for a unit it has never heard of:
@@ -429,7 +476,7 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
             continue
         unit = sh.get("Id") or f"{base}.service"
         user = sh.get("User") or ""
-        s = ServiceTruth(guest=str(gid), unit=unit, name=re.sub(r"\.service$", "", unit),
+        s = ServiceTruth(guest=str(gid), vm=vm, unit=unit, name=re.sub(r"\.service$", "", unit),
                          state=sh.get("ActiveState") or "", user=user, group=sh.get("Group") or "",
                          argv=sh.get("argv") or "", fragment=sh.get("FragmentPath") or "")
         s.address = _addr
@@ -437,13 +484,16 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         if _addr:
             s.reads["hostname -I"] = _addr
         s.data_dir = data_dir_of(s.argv)
+        # systemd writes `WorkingDirectory=-/opt/x` or `!/opt/x` for its modifiers; `~` is the user's home
+        _wd = str(sh.get("WorkingDirectory") or "").lstrip("-!+")
+        s.workdir = _wd if _wd.startswith("/") else ""
         s.ports = ports_of(ss_text, s.name) or ports_of(ss_text, (s.argv.split("/")[-1].split()[0] if s.argv else ""))
         if user:
-            ok2, id_text = await _probe(spec, f"pct exec {gid} -- sh -c 'id {user}'")
+            ok2, id_text = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'id {user}'")
             if ok2:
                 _u, s.uid, _g, s.gid = parse_id(id_text)
-        cands = config_candidates(s.name, user, s.data_dir)
-        ok3, found = await _probe(spec, f"pct exec {gid} -- sh -c 'ls -1d {' '.join(cands)} 2>/dev/null'")
+        cands = config_candidates(s.name, user, s.data_dir, workdir=s.workdir)
+        ok3, found = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'ls -1d {' '.join(cands)} 2>/dev/null'")
         paths = [ln.strip() for ln in (found or "").split("\n") if ln.strip().startswith("/")] if ok3 else []
         # §17.1361 — a service can have SEVERAL config files, and `ls` returns them
         # alphabetically. Live, qBittorrent keeps `qBittorrent.conf` (5 sections,
@@ -455,7 +505,7 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         # `[section]` headers and `key=` lines. All files are kept; the richest leads.
         if len(paths) > 1:
             ok5, counts = await _probe(
-                spec, f"pct exec {gid} -- sh -c 'grep -c -E \"^\\[|^[A-Za-z][A-Za-z0-9_.-]*=\" "
+                spec, f"{in_guest(gid, vm)} sh -c 'grep -c -E \"^\\[|^[A-Za-z][A-Za-z0-9_.-]*=\" "
                       + " ".join(paths[:8]) + " 2>/dev/null'")
             if ok5:
                 score = {}
@@ -468,7 +518,7 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                     s.reads["config settings"] = ", ".join(f"{q.rsplit('/', 1)[-1]}={score.get(q, 0)}"
                                                            for q in paths[:4])
         if paths:
-            ok4, st_text = await _probe(spec, f"pct exec {gid} -- sh -c 'stat -c \"%U:%G %a %n\" "
+            ok4, st_text = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'stat -c \"%U:%G %a %n\" "
                                               + " ".join(paths[:8]) + "'")
             if ok4:
                 s.configs = tuple(paths[:8])
@@ -594,7 +644,7 @@ def values_from_another_guest(commands: list[str], files: Optional[list[dict]],
                     f"this runs inside guest {here}, and {hit or path} belongs to {s.name} on guest "
                     f"{s.guest} (measured: " + s.says() + f"). Inside {here} there is nothing of {s.name}'s "
                     f"-- the call can only fail. Address {s.name} in ITS guest: "
-                    f"`pct exec {s.guest} -- sh -c '…'`, one command per machine.")})
+                    f"`{exec_hint(s)}`, one command per machine.")})
                 break
     return out
 
@@ -1062,7 +1112,7 @@ def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
                        f"{getattr(svc, 'guest', '?')}'s measured address, "
                        if where else "Reach it at that guest's own address, ")
                         + f"or run the call inside the guest with "
-                      f"`pct exec {getattr(svc, 'guest', 'N')} -- …`.")})
+                      f"`{exec_hint(svc)}`.")})
     return out
 
 

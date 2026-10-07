@@ -155,7 +155,7 @@ def test_the_pause_asks_where_the_named_services_are():
 
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
-    assert "guests_of_the_named_services(spec, _named, _cts, reading=_reading)" in src
+    assert "guests_of_the_named_services(spec, _named, _cts, reading=_reading, vms=_vms" in src   # §17.1402
     assert "_st.read_services(spec, _g, mentioned=_named,\n" in src \
         or "read_services(spec, _g, mentioned=_named," in src
     # the subject guest stays first, and more than one guest is measured

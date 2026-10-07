@@ -2605,6 +2605,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _touch = sorted(_rt.guests_the_host_is_told_to_touch(run_node))
             _subj = _mt0.subject_guest(run_node, _inv)
             _cts = (_inv or {}).get("cts") or {}
+            _vms = (_inv or {}).get("vms") or {}       # §17.1402 — VMs are measured too
             # §17.1356 — and the guest each service the step NAMES actually lives in.
             # Measuring only the subject guest is how ADD132 ("Make Radarr and Sonarr
             # actually drive qBittorrent") was measured in 103 alone: of the eleven
@@ -2615,21 +2616,23 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # running container finds them; no guest NAME would have (qBittorrent's
             # container is called `download-client`).
             _named = _st.names_in(run_node)
-            _where = (await _st.guests_of_the_named_services(spec, _named, _cts, reading=_reading)
+            _where = (await _st.guests_of_the_named_services(spec, _named, _cts, reading=_reading, vms=_vms,
+                                                             guest_names=(_inv or {}).get("names"))
                       if _named else {})
             # the step's own guest first, then the guests its services are in
             _order = ([_subj] if _subj else []) + [_where[n] for n in _named if n in _where] + _touch
             _touch = list(dict.fromkeys(g for g in _order if g))
             for _g in _touch[:4]:
-                if _cts.get(_g) != "running" and _g:
+                _state = _cts.get(_g) or _vms.get(_g)
+                if _state != "running" and _g:
                     _reading.gap(f"the services in guest {_g}",
-                                 f"the step touches it and it is {_cts.get(_g) or 'not a container'}")
-                if _cts.get(_g) == "running":
+                                 f"the step touches it and it is {_state or 'not a guest on this host'}")
+                if _state == "running":
                     # `units` was always None: the inventory carries no unit list.
                     # The listeners on the guest and the names the step mentions are
                     # what `read_services` goes on.
                     _services += await _st.read_services(spec, _g, mentioned=_named,
-                                                        reading=_reading)
+                                                        reading=_reading, vm=_g in _vms and _g not in _cts)
         except Exception as exc:
             logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
