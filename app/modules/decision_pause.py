@@ -192,6 +192,8 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
         # §17.1396 — the done-condition travels with the question, so the judge
         # that reads the run's checks sees what the operator decided
         "description": node.get("description") or "",
+        # §17.1407 — and what it stands on, so the answer can re-check it with no extra read
+        "depends_on": list(node.get("depends_on") or []),
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,
     }
     await db.execute(
@@ -234,6 +236,17 @@ async def resolve_decision(
     waiting = md.get("awaiting_decision") if isinstance(md.get("awaiting_decision"), dict) else {}
     if job["status"] != STATUS or waiting.get("node_key") != node_key:
         return {"outcome": "not_waiting", "current_status": job["status"], "waiting_on": waiting.get("node_key")}
+    # §17.1407 — and the step's dependencies must still be done when the answer
+    # comes. A question parked before an upstream step was reopened would otherwise
+    # run work on top of work that is no longer there.
+    if not delegate and (choice or "").strip().lower() in ("run", "yes", "approve"):
+        from app.modules.execution_agent import unmet_dependencies
+        _unmet = await unmet_dependencies(db, job_id, {"depends_on": waiting.get("depends_on") or []})
+        if _unmet:
+            logger.warning("decision_refused_upstream_open job=%s node=%s unmet=%s", job_id, node_key, _unmet)
+            return {"outcome": "upstream_open", "node_key": node_key, "unmet": _unmet,
+                    "detail": f"{node_key} depends on {', '.join(_unmet)}, which is not done any more; "
+                              f"reask so the run asks about {_unmet[0]} first"}
     now = datetime.now(timezone.utc).isoformat()
     if waiting.get("kind") == "run":
         # §17.1186 — a hands-on step parked with its commands: run / myself / skip

@@ -285,7 +285,9 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     # §17.1334 — four restarts now: a step already met, a reopen/insert this step
     # waits for, a split, and a split's numbering or stated count corrected on this
     # step's own text (the draft reads that text, so it restarts rather than drafts).
-    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 4
+    # §17.1407 — five: and an upstream step reopened while this one was being drafted.
+    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 5
+    assert "decision_pause_upstream_moved" in body
     assert "step_split_restart" in body
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')
 

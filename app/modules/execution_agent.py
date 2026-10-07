@@ -2480,6 +2480,18 @@ def _order_of(node: dict) -> float:
         return float("inf")
 
 
+async def unmet_dependencies(db, job_id: str, node: dict) -> list[str]:
+    """§17.1407 — the dependencies of `node` that are not done or skipped NOW (read fresh)."""
+    deps = [str(d) for d in (node or {}).get("depends_on") or []]
+    if not deps:
+        return []
+    rows = await db.execute(
+        text("SELECT node_key FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
+             "AND status IN ('done', 'skipped')"), {"jid": job_id, "keys": deps})
+    done = {r[0] for r in rows}
+    return [d for d in deps if d not in done]
+
+
 async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
@@ -3102,6 +3114,17 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 await supervised_runs.record_wanted_prefixes(db, job_id, {**frame, "node_key": run_node.get("node_key")})
         except Exception as exc:
             logger.warning("wanted_prefixes_record_failed job=%s err=%r", job_id, exc)
+    # §17.1407 — a draft takes a minute, and the plan can move under it. Live,
+    # 2026-10-06: ADD122 was recorded done, the executor rightly picked ADD123 and
+    # began drafting it, and ADD122 was reset (its done was false) while that draft
+    # ran. ADD123 was parked anyway, waiting for approval on top of a step that was
+    # no longer done. Re-read the dependencies now, at the moment of asking.
+    async with async_session() as db:
+        _unmet = await unmet_dependencies(db, job_id, target)
+    if _unmet:
+        logger.warning("decision_pause_upstream_moved job=%s node=%s unmet=%s",
+                       job_id, target.get("node_key"), _unmet)
+        return await _pause_for_decision(job_id, _depth + 1) if _depth < 6 else None
     async with async_session() as db:
         return await decision_pause.park_awaiting_decision(db, job_id, target, frame)
 

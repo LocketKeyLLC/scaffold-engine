@@ -215,6 +215,10 @@ async def decide_endpoint(
             "waiting_on": outcome.get("waiting_on"),
             "node_key": body.node_key,
         })
+    if outcome["outcome"] == "upstream_open":                  # §17.1407 — a dependency was reopened under it
+        raise HTTPException(status_code=409, detail={"error": "a step this one depends on is no longer done",
+                                                     "node_key": body.node_key, "unmet": outcome.get("unmet"),
+                                                     "hint": outcome.get("detail")})
     if outcome["outcome"] == "inputs_missing":                 # §17.1187 — the runbook's values, checked
         raise HTTPException(status_code=422, detail={"error": "the runbook needs values the request did not supply",
                                                      "problems": outcome.get("problems"), "inputs": outcome.get("inputs")})
