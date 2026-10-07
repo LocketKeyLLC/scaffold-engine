@@ -160,6 +160,21 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
             bits.append(f"keys that were never there: {', '.join(map(str, rt['extra'][:4]))}")
         if rt.get("file_after") is not None:
             bits.append(f"the file after the save begins `{' '.join(str(rt['file_after']).split())[:160]}`")
+    # §17.1411b — and WHY, whatever the status: what the block did to the backend's own
+    # files. Live: five repairs kept a `sed` that matched no line in server.js; GET answered
+    # 404 (or the EARLIER run's leftover route answered), and nothing said the draft's own
+    # edit had changed nothing.
+    unchanged = [p for p in report.get("unchanged_files") or [] if p.endswith((".js", ".py", ".ts"))]
+    changed = report.get("changed_files") or []
+    if unchanged and not any(str(c.get("path", "")).endswith((".js", ".py", ".ts")) for c in changed):
+        bits.append(f"after the block, {', '.join(f'`{p}`' for p in unchanged[:3])} "
+                    f"{'is' if len(unchanged) == 1 else 'are'} EXACTLY as before -- this draft's edit changed "
+                    f"nothing (an edit that matches no line inserts nothing and still exits 0), so whatever "
+                    f"answered was not this draft's route")
+    for c in changed[:2]:
+        bits.append(f"`{c.get('path')}` changed: {' '.join(str(c.get('diff') or '').split())[:300]}")
+    if report.get("server_log") and "listening" not in str(report.get("server_log")).lower()[-200:]:
+        bits.append(f"the backend said: {' '.join(str(report['server_log']).split())[-240:]}")
     return [{"command": "(rehearsal)", "why": (
         f"{MARK} (read off the machines just now) and did what a user of the feature would: read the settings "
         f"through its GET and sent them straight back through its PUT -- a save that changes nothing. "

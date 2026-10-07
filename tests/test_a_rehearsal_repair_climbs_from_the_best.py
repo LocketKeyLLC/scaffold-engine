@@ -120,3 +120,33 @@ def test_the_repair_loop_runs_after_the_chain_and_keeps_the_best():
     assert "rehearsal.remember_best(" in src and "rehearsal.best_so_far(" in src
     assert "_rh_reports[rb] = report" in src
     assert rh.REPAIRS >= 3
+
+
+# ── §17.1411b — the evidence says what the block DID ─────────────────────────
+
+NOOP = json.loads((FIX / "report_edit_changed_nothing.json").read_text())
+GOOD_DIFF = json.loads((FIX / "report_good_route_with_diff.json").read_text())
+
+
+def test_an_edit_that_changed_nothing_is_said():
+    """Live: five repairs kept a `sed` that matched no line of server.js, told only
+    "GET 404" each time."""
+    assert "/opt/control-panel-backend/server.js" in NOOP["unchanged_files"]
+    why = rh.refusal_from(NOOP)[0]["why"]
+    assert "EXACTLY as before" in why and "changed nothing" in why
+    assert "`/opt/control-panel-backend/server.js`" in why
+
+
+def test_a_good_route_reports_its_diff_and_passes():
+    assert [c["path"] for c in GOOD_DIFF["changed_files"]] == ["/opt/control-panel-backend/server.js"]
+    assert "routes/good" in GOOD_DIFF["changed_files"][0]["diff"]
+    assert rh.refusal_from(GOOD_DIFF) == []
+
+
+def test_a_changed_backend_shows_its_diff_not_the_no_op_note():
+    rep = {"commands": [], "unchanged_files": ["/opt/x/package.json"],
+           "changed_files": [{"path": "/opt/x/server.js", "diff": "+app.use('/api/a', require('./a'))"}],
+           "roundtrip": {"ok": False, "get_status": 404, "get_body": "Cannot GET"}}
+    why = rh.refusal_from(rep)[0]["why"]
+    assert "EXACTLY as before" not in why
+    assert "`/opt/x/server.js` changed: +app.use('/api/a'" in why
