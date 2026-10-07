@@ -203,6 +203,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "answers JSON, and this hands that JSON to a text tool",   # §17.1400
                    "the engine writes a block's files on the Proxmox",   # §17.1403
                    "a Proxmox HOST tool",                          # §17.1403
+                   "and JSON is not shell quoting",                # §17.1405
+                   "is done by the calling shell, not by sudo",    # §17.1405
                    "and nothing runs it",                          # §17.1288k
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
@@ -297,6 +299,8 @@ _WHOSE_GAP: dict[str, str] = {
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "a Proxmox HOST tool": "drafter",                                # §17.1403
+    "and JSON is not shell quoting": "drafter",                      # §17.1405
+    "is done by the calling shell, not by sudo": "drafter",          # §17.1405
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
@@ -5081,7 +5085,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
             _svc_refused = (_st.values_from_another_guest(cmds, files, services)
                             + _st.edits_a_config_the_service_rewrites(cmds, files, services)
                             # §17.1368 — and the same mistake from the host side
-                            + _st.loopback_on_the_host(cmds, files, services))
+                            + _st.loopback_on_the_host(cmds, files, services)
+                            # §17.1405 — and a write to a measured config that sudo does not cover
+                            + _st.a_redirect_sudo_does_not_cover(cmds, files, services))
         except TypeError:
             # §17.1359 — a swallowed TypeError here once disabled ~15 gates for a
             # day. A signature that no longer matches is a defect in this file,
@@ -5211,6 +5217,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + the_agents_json_read_as_text(cmds, shape_files)
     # §17.1403 — a host-written file, or a host tool, run inside a guest.
     refused = refused + a_host_file_run_inside_a_guest(cmds, shape_files)
+    # §17.1405 — JSON used as shell quoting.
+    refused = refused + json_used_as_shell_quoting(cmds, shape_files)
     # §17.1383 — and the block must read a service's key where that service
     # keeps it: the substitution leaves a written file alone, so a draft that
     # rolls its own read can roll the wrong one.
@@ -6074,6 +6082,43 @@ def a_check_that_proves_nothing(verify: list[str]) -> list[dict]:
 #: this pattern required a bare quote and saw nothing (§17.1048 — a gate matches
 #: modulo formatting, or it does not match the thing that happens).
 _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?![0-9.])""")
+
+
+#: §17.1405 — a JSON-encoded value interpolated into a shell command
+_JSON_NAME_RE = re.compile(r"\b(?:const|let|var)\s+(\w+)\s*=\s*JSON\.stringify\(")
+_SHELLISH_RE = re.compile(r"\b(?:printf|echo|ssh|sh\s+-c|bash\s+-c|tee)\b|>\s*\S")
+
+
+def json_used_as_shell_quoting(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1405 — JSON.stringify is not shell quoting.
+
+    Live, 2026-10-06, ADD122's draft sent the Palworld settings file to VM 106 as
+    `printf '%s' ${JSON.stringify(content)} > …` inside an `execSync` ssh command.
+    JSON writes a newline as the two characters `\n`, which `printf '%s'` prints
+    literally: the `[/Script/Pal.PalGameWorldSettings]` header and the
+    `OptionSettings=…` line become one corrupt line. And JSON's double quotes let
+    the remote shell expand `$` and backticks inside a value -- a password, say.
+    Content belongs on stdin, where nothing re-parses it.
+    """
+    texts = [str((f or {}).get("content") or "") for f in files or []] + [str(c) for c in commands or []]
+    out: list[dict] = []
+    for t in texts:
+        if "JSON.stringify" not in t:
+            continue
+        names = set(_JSON_NAME_RE.findall(t))
+        for line in t.split("\n"):
+            if line.lstrip().startswith("//") or not _SHELLISH_RE.search(line):
+                continue
+            if "${JSON.stringify(" in line or any("${" + n + "}" in line for n in names):
+                out.append({"command": line.strip()[:200], "why": (
+                    "a JSON-encoded value is spliced into a shell command here, and JSON is not shell quoting: "
+                    "it writes a newline as the two characters `\\n`, which `printf '%s'`/`echo` write literally "
+                    "(a multi-line file becomes one line), and its double quotes let the shell expand `$` and "
+                    "backticks inside the value. Pass the content on STDIN, where nothing re-parses it -- "
+                    "`execFile('ssh', [target, 'sudo tee <path> >/dev/null'], { input: content })` in Node, "
+                    "`subprocess.run([...], input=content)` in Python.")})
+                break
+    return out
 
 
 #: §17.1403 — a guest exec and what runs after its `--`
