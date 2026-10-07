@@ -92,6 +92,7 @@ def main() -> None:
         os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
         with open(path, "w") as fh:
             fh.write(f.get("content") or "")
+    _seed_before = {f["path"]: f.get("content") or "" for f in job.get("seeds", []) if str(f.get("path") or "").startswith("/")}
     for cmd in job.get("commands", []):
         p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
         report["commands"].append({"command": cmd[:200], "exit": p.returncode,
@@ -130,6 +131,22 @@ def main() -> None:
         else:
             verdict["ok"] = False
         report["roundtrip"] = verdict
+    # §17.1411b — what the block DID to the copied files: a 404 with an untouched server.js is
+    # "nothing registered the route", which "GET 404" alone never said (five repairs kept the
+    # same no-op `sed` because nobody told them it inserted nothing).
+    import difflib
+    rt_paths = {(job.get("roundtrip") or {}).get(k) for k in ("config", "baseline")}
+    report["changed_files"], report["unchanged_files"] = [], []
+    for path, before in _seed_before.items():
+        if path in rt_paths:
+            continue
+        after = open(path).read() if os.path.isfile(path) else None
+        if after == before:
+            report["unchanged_files"].append(path)
+        else:
+            diff = "".join(list(difflib.unified_diff(before.splitlines(True), (after or "").splitlines(True),
+                                                     "before", "after", n=1))[2:40])
+            report["changed_files"].append({"path": path, "diff": diff[:1200] if after is not None else "(deleted)"})
     report["log"] = open("/rehearsal/log").read()[-1500:]
     report["server_log"] = open("/rehearsal/server.log").read()[-800:] if os.path.exists("/rehearsal/server.log") else ""
     print(json.dumps(report))
