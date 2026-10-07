@@ -130,7 +130,11 @@ class ServiceTruth:
             bits.append(f"unit {self.unit}" + (f" ({self.state})" if self.state else ""))
         if self.workdir:
             bits.append(f"installed in {self.workdir}")          # §17.1402
-        if self.config:
+        if self.config and _is_template(self.config):
+            # §17.1403 — said plainly, so a drafter never edits the template and calls it done
+            bits.append(f"settings TEMPLATE {self.config} (the server copies from it and does not read it; "
+                        f"the live settings file was not found)")
+        elif self.config:
             own = self.rewrites_its_own_config
             bits.append(f"config {self.config}" + (" (the service rewrites it: stop it before editing)"
                                                    if own else " (not writable by the service)" if own is False else ""))
@@ -198,6 +202,12 @@ def data_dir_of(argv: str) -> str:
     return m.group("path").rstrip("/") if m else ""
 
 
+def _is_template(path: str) -> bool:
+    """`DefaultPalWorldSettings.ini`, `default.conf.example`: a file to copy from, not the live one."""
+    base = str(path or "").rsplit("/", 1)[-1].lower()
+    return base.startswith("default") or base.endswith((".example", ".sample", ".dist", ".template"))
+
+
 def config_candidates(name: str, user: str, data_dir: str, home: str = "", workdir: str = "") -> list[str]:
     """Paths worth a `stat`, most specific first. No invention: each is either the
     service's own data dir, or its home, or a name the unit itself gave."""
@@ -207,7 +217,10 @@ def config_candidates(name: str, user: str, data_dir: str, home: str = "", workd
     # §17.1402 — the unit's own WorkingDirectory is a name the unit gave: Palworld's
     # `palworld.service` says `/opt/palworld`, where `DefaultPalWorldSettings.ini` is.
     if workdir:
-        out += [f"{workdir}/config.xml", f"{workdir}/*.ini", f"{workdir}/*.conf"]
+        out += [f"{workdir}/config.xml", f"{workdir}/*.ini", f"{workdir}/*.conf",
+                # §17.1403 — an Unreal server reads its settings from `<Game>/Saved/Config/<Platform>/`:
+                # Palworld's live file is `/opt/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini`
+                f"{workdir}/*/Saved/Config/*/*.ini"]
     base = (home or f"/var/lib/{name}").rstrip("/")
     # §17.1346b — the directory under `.config` is the APP's own spelling, not the
     # unit's: qBittorrent keeps its file at `.config/qBittorrent/qBittorrent.conf`
@@ -495,6 +508,10 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         cands = config_candidates(s.name, user, s.data_dir, workdir=s.workdir)
         ok3, found = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'ls -1d {' '.join(cands)} 2>/dev/null'")
         paths = [ln.strip() for ln in (found or "").split("\n") if ln.strip().startswith("/")] if ok3 else []
+        # §17.1403 — a saved-config directory holds the ENGINE's files too (Engine.ini,
+        # Input.ini, forty more): keep only the ones named for this service.
+        _w = _norm(s.name)[:6]
+        paths = [q for q in paths if "/Saved/Config/" not in q or (_w and _w in _norm(q.rsplit("/", 1)[-1]))]
         # §17.1361 — a service can have SEVERAL config files, and `ls` returns them
         # alphabetically. Live, qBittorrent keeps `qBittorrent.conf` (5 sections,
         # `[Preferences]`, `WebUI\Port=8080`) beside `qBittorrent-data.conf` (1
@@ -521,6 +538,9 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
             ok4, st_text = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'stat -c \"%U:%G %a %n\" "
                                               + " ".join(paths[:8]) + "'")
             if ok4:
+                # §17.1403 — a `Default*` file is the template the server copies FROM, not the file
+                # it reads; it never leads, however many keys it has (Palworld's live file is 1 byte).
+                paths = [q for q in paths if not _is_template(q)] + [q for q in paths if _is_template(q)]
                 s.configs = tuple(paths[:8])
                 s.config_stat = {p: (o, m) for o, m, p in parse_stats(st_text)}
                 s.reads["stat"] = f"{len(s.config_stat)} config file(s)"
