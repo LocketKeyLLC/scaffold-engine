@@ -202,6 +202,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "forgets a host key and pins nothing",          # §17.1399
                    "answers JSON, and this hands that JSON to a text tool",   # §17.1400
                    "the engine writes a block's files on the Proxmox",   # §17.1403
+                   "the rehearsal ran this block against copies of the real files",   # §17.1409
                    "a Proxmox HOST tool",                          # §17.1403
                    "and JSON is not shell quoting",                # §17.1405
                    "is done by the calling shell, not by sudo",    # §17.1405
@@ -298,6 +299,7 @@ _WHOSE_GAP: dict[str, str] = {
     "forgets a host key and pins nothing": "drafter",              # §17.1399
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
+    "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
     "a Proxmox HOST tool": "drafter",                                # §17.1403
     "and JSON is not shell quoting": "drafter",                      # §17.1405
     "is done by the calling shell, not by sudo": "drafter",          # §17.1405

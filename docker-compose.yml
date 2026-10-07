@@ -669,6 +669,7 @@ services:
     restart: unless-stopped
     networks:
       - ai-network
+      - rehearsal          # §17.1409 — reaches the rehearsal sandbox; the sandbox reaches nothing
     depends_on:
       scaffold-postgres:
         condition: service_healthy
@@ -888,6 +889,45 @@ services:
       retries: 3
       start_period: 10s
 
+  # §17.1409 — the rehearsal sandbox. Before a draft that edits a service's settings is
+  # offered for approval, the engine runs it HERE against COPIES of the real files (read
+  # off the machines through the read-only channel) and checks the round trip: read the
+  # settings through the draft's own route, save them straight back, and the file must
+  # still say the same thing. Each job runs chrooted into a fresh copy of this image's own
+  # filesystem and is deleted afterwards with every process it started. Hardened like the
+  # coderunner (all capabilities dropped, read-only root, no-new-privileges) plus the two
+  # a chroot-per-job needs; on an INTERNAL network with no route out.
+  scaffold-rehearsal:
+    image: scaffold-rehearsal:${SCAFFOLD_REHEARSAL_IMAGE_TAG:-local}
+    build:
+      context: ./docker/rehearsal
+      dockerfile: Dockerfile
+    container_name: scaffold-rehearsal
+    init: true
+    logging: *default-logging
+    mem_limit: 768m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_CHROOT
+      - MKNOD
+    read_only: true
+    tmpfs:
+      - /jobs:rw,nosuid,exec,dev,size=1200m
+      - /tmp:rw,nosuid,exec,size=64m
+    restart: always
+    networks:
+      - rehearsal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8799/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # §17.435 — LLM observability backend (Arize Phoenix). Ingests the
   # orchestrator's OTLP traces (incl. the gen_ai.* LLM spans) and renders
   # per-job/node model/token/latency views. NON-DEFAULT profile "observability"
@@ -928,6 +968,9 @@ networks:
   ai-network:
     external: true
     name: ai-network
+  # §17.1409 — the rehearsal sandbox's only network: internal, so nothing in it can reach out
+  rehearsal:
+    internal: true
 
 volumes:
   open-webui:

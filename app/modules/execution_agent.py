@@ -2727,6 +2727,33 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             up_block = (up_block + "\n\n" + _st2.table(_services, _reading)).strip()
         runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
+        # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
+        # runs against copies of the real files in the rehearsal sandbox before it is
+        # offered. The copies are read once per pause; every redraft reuses them.
+        from app.modules import rehearsal
+        try:
+            _rh_target = rehearsal.roundtrip_target(run_node, _services)
+        except Exception as exc:
+            logger.warning("rehearsal_target_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+            _rh_target = None
+        _rh_seeds: list = []
+
+        async def _rehearse_or_nothing(rb: str, files: list) -> list[dict]:
+            if not _rh_target:
+                return []
+            try:
+                if not _rh_seeds:
+                    _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
+                report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds)
+                refused = rehearsal.refusal_from(report)
+                logger.warning("rehearsal_done job=%s node=%s ok=%s seeds=%d secs=%s",
+                               job_id, run_node.get("node_key"), not refused if report else None,
+                               len(_rh_seeds), (report or {}).get("seconds"))
+                return refused
+            except Exception as exc:
+                logger.warning("rehearsal_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+                return []
+
         async def _pre_for(rb: str) -> list[dict]:
             # §17.1359 — a TypeError here is a PROGRAMMING error, not a machine the
             # engine could not read, and `except Exception` turned one into "no
@@ -2744,7 +2771,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                          truth=_truth, services=_services,
                          verify=supervised_runs.verify_commands(rb), reading=_reading)
             try:
-                return await unmet(supervised_runs.runbook_commands(rb), spec, **_args)
+                _pre = await unmet(supervised_runs.runbook_commands(rb), spec, **_args)
+                # §17.1409 — only a draft nothing else refused is worth a rehearsal
+                return _pre or await _rehearse_or_nothing(rb, _f or supervised_runs.file_writes(rb))
             except TypeError as exc:
                 if "unmet()" in str(exc):
                     logger.error("preconditions_signature_mismatch job=%s node=%s err=%r",

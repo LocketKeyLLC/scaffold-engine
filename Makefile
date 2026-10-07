@@ -589,6 +589,9 @@ build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restar
 		printf '  Wait for them to finish, or FORCE_BUILD=1 make build.\n'; \
 		exit 1; \
 	fi
+	@# §17.1409 — the rehearsal sandbox the engine runs settings drafts in; up FIRST, so a
+	@# deploy never leaves the orchestrator pointing at a sandbox that is not there
+	$(COMPOSE) up -d --build scaffold-rehearsal
 	$(COMPOSE) up -d --build $(CONTAINER)
 	@$(MAKE) --no-print-directory prune-images
 
