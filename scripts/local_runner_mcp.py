@@ -716,7 +716,9 @@ def elevate(command: str, keep: str = "") -> str:
         if not m:
             break
         body = body[m.end():]
-    if has_shell_operator(body):
+    # §17.1430 — a line that carries secrets (keep) is handed to the root shell whole, so `$NAME` is expanded
+    # AFTER sudo has logged the command: expanded before it, the value lands in the host's journal.
+    if has_shell_operator(body) or (keep and "$" in body and not re.match(r"bash\s+-c\s", body)):
         return f"sudo -n {keep}bash -c {shlex.quote(body)}"
     return f"sudo -n {keep}{body}"
 

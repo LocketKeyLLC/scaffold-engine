@@ -31,6 +31,7 @@ import hmac
 import json
 import logging
 import re
+import shlex
 import secrets
 import time
 from typing import Any, Optional
@@ -489,6 +490,13 @@ def secret_prefixes_as_references(cmd: str) -> str:
     return rest.rstrip() + " # " + " ".join(f"${n}" for n in names)
 
 
+def wrap_for_secrets(cmd: str) -> str:
+    """§17.1430 — `bash -c '<cmd>'`, so `$NAME` is expanded by the elevated shell, after sudo has logged."""
+    if re.match(r"^\s*(?:/usr/bin/|/bin/)?bash\s+-c\s", cmd or ""):
+        return cmd
+    return "bash -c " + shlex.quote(cmd)
+
+
 async def run_block(spec, commands: list[str], *, on_progress=None,
                     env: dict[str, str] | None = None) -> list[dict]:
     """Run the approved commands in order through the runner; stop at the
@@ -506,9 +514,15 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
     done: list[dict] = []
     for i, cmd in enumerate(commands, 1):
         cmd = secret_prefixes_as_references(cmd)        # §17.1429 — before the approval is signed over it
+        needed = {n: v for n, v in (env or {}).items() if f"${n}" in cmd or "${" + n + "}" in cmd}
+        # §17.1430 — a secret is expanded INSIDE the root shell, never before sudo. The runner elevates a line
+        # with no shell operator as `sudo -n … <line>`, so the calling shell expands `$NAME` first and sudo
+        # LOGS the expanded command: live, ADD127's check `curl -u panel:"$PANEL_PASSWORD"` put the password
+        # in the host's journal twice. Handed to `bash -c`, sudo logs only the literal `$NAME`.
+        if needed:
+            cmd = wrap_for_secrets(cmd)
         ap = mint_approval(cmd, token)
         payload = {"command": cmd, "approval": ap, "timeout_s": RUN_COMMAND_TIMEOUT_S}
-        needed = {n: v for n, v in (env or {}).items() if f"${n}" in cmd or "${" + n + "}" in cmd}
         if needed:
             payload["env"] = needed
         try:
