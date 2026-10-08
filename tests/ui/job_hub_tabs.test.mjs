@@ -97,3 +97,10 @@ test("jobHref: the bare address is the job's current stage", () => {
   assert.equal(jobHref("J"), "#/job/J");
   assert.equal(jobHref("J", "plan"), "#/job/J/plan");
 });
+
+// ── §17.1433 — a stopped job offers the walkthrough on its Run tab ──
+const { walkthroughOffered } = await import("../../app/ui/static/views/job_hub.js");
+test("a blocked, failed or decision-waiting job offers the walkthrough; a running or finished one does not", () => {
+  for (const s of ["blocked", "failed", "awaiting_decision"]) assert.equal(walkthroughOffered(s), true, s);
+  for (const s of ["running", "completed", "planning", "assisted_executing", "", undefined]) assert.equal(walkthroughOffered(s), false, String(s));
+});
