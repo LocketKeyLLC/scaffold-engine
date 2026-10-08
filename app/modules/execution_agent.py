@@ -2802,7 +2802,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
                 facts = f"{facts}\n\n{develop.engine_doc(run_node)}"
-            apis = await develop.read_apis(spec, _services)   # §17.1416 — what the called APIs hold now
+            status = await develop.read_status(spec, _services)       # §17.1422 — what each probed path answers
+            apis = await develop.read_apis(spec, _services, status)   # §17.1416 — what the called APIs hold now
             if apis:
                 facts = f"{facts}\n\n{apis}"
                 logger.info("develop_apis job=%s node=%s %s", job_id, _nk_dev, " | ".join(apis.splitlines()[1:])[:600])
@@ -2831,6 +2832,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
+                _dead = develop.calls_a_dead_path(files, status)          # §17.1422
+                if _dead:
+                    fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}
                 sc = develop.score(fr, _rh_reports.get(rb))
                 logger.warning("develop_round job=%s node=%s round=%d files=%d score=%s best=%s why=%r",
                                job_id, _nk_dev, round_no, len(files), sc, best[0] if best else None,

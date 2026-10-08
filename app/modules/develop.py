@@ -420,7 +420,45 @@ def _summarise(body: str) -> str:
     return "; ".join(rows[:20])
 
 
-async def read_apis(spec, services: Optional[list]) -> str:
+async def read_status(spec, services: Optional[list]) -> list[dict]:
+    """§17.1422 — `[{service, path, code, address}]`: what each probed path answers on the machine now."""
+    from app.modules import service_truth as st
+    out: list[dict] = []
+    for name, path, cmd in status_reads(services):
+        ok, body = await st._probe(spec, cmd)
+        code = str(body or "").strip()[-3:] if ok else ""
+        addr = next((getattr(s, "address", "") for s in services or []
+                     if str(getattr(s, "name", "")).lower().startswith(name)), "")
+        out.append({"service": name, "path": path, "code": code if code.isdigit() else "", "address": addr})
+    return out
+
+
+def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> list[dict]:
+    """§17.1422 — the version's code calls a path the engine MEASURED as not answering. Live, ADD125: told
+    `/api/stats/summary` → 200 and `/admin/api.php?summary` → 400 (Pi-hole v6.4.3), the model still wrote
+    the v5 path -- its step text asked for an "API token", a v5 notion -- and the sandbox, which reaches no
+    machine, passed the route because it answered at all."""
+    alive = [s for s in status or [] if s.get("code", "").startswith("2")]
+    out: list[dict] = []
+    for s in status or []:
+        code = s.get("code", "")
+        if not code or code.startswith("2"):
+            continue
+        base = s["path"].split("?", 1)[0]
+        hit = next((p for p, c in (files or {}).items() if base in (c or "")), None)
+        if hit is None:
+            continue
+        better = [a["path"] for a in alive if a["service"] == s["service"]]
+        where = f" ({s['address']})" if s.get("address") else ""
+        out.append({"command": f"{hit}: {base}", "why": (
+            f"this code calls `{base}` on {s['service']}{where}, "
+            f"and the engine asked that path just now: it answers HTTP {code}, so the feature cannot work. "
+            + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx, no key)' for b in better)} -- use that, and "
+               f"its own response fields." if better else "Use a path the service actually serves."))})
+    return out
+
+
+async def read_apis(spec, services: Optional[list], status: Optional[list[dict]] = None) -> str:
     """§17.1416 — what the services the code calls hold NOW, for the prompt. The model is handed the
     service's own files (§17.1412) but never the state of the APIs its code talks to, so it invented the
     values those APIs hold. Read like the files: read-only, off the machine, just now."""
@@ -432,13 +470,10 @@ async def read_apis(spec, services: Optional[list]) -> str:
         addr = next((getattr(s, "address", "") for s in services or [] if str(getattr(s, "name", "")).lower() == name), "")
         lines.append(f"- {name}{f' ({addr})' if addr else ''} /api/{_ARR_API[name][0]}/{ep}: "
                      + (got or "(could not be read just now)"))
-    for name, path, cmd in status_reads(services):                 # §17.1421
-        ok, body = await st._probe(spec, cmd)
-        code = str(body or "").strip()[-3:] if ok else ""
-        addr = next((getattr(s, "address", "") for s in services or []
-                     if str(getattr(s, "name", "")).lower().startswith(name)), "")
-        lines.append(f"- {name}{f' ({addr})' if addr else ''} GET {path} without a key: "
-                     + (f"HTTP {code}" if code.isdigit() else "(could not be read just now)"))
+    for s in (status if status is not None else await read_status(spec, services)):   # §17.1421
+        where = f" ({s['address']})" if s.get("address") else ""
+        lines.append(f"- {s['service']}{where} GET {s['path']} without a key: "
+                     + (f"HTTP {s['code']}" if s.get("code") else "(could not be read just now)"))
     if not lines:
         return ""
     return ("THE APIS YOUR CODE CALLS, AS THEY ARE NOW (read off the machine just now). Where your code needs one of "
