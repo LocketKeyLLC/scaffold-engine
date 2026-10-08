@@ -2832,7 +2832,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
-                _dead = develop.calls_a_dead_path(files, status)          # §17.1422
+                _dead = (develop.calls_a_dead_path(files, status)         # §17.1422
+                         + develop.values_put_into_html_attributes(files))  # §17.1424
                 if _dead:
                     fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}
                 sc = develop.score(fr, _rh_reports.get(rb))
