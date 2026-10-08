@@ -90,4 +90,4 @@ def test_an_unreadable_api_says_so_and_a_step_with_none_adds_nothing():
 
 def test_the_develop_loop_puts_them_in_the_facts():
     src = inspect.getsource(execution_agent._pause_for_decision)
-    assert "await develop.read_apis(spec, _services)" in src
+    assert "await develop.read_apis(spec, _services, status)" in src
