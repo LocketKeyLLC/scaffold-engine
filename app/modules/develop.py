@@ -238,11 +238,18 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
             for p in secret_files:
                 if SECRET_MARK.format(name=name) in (files[p] or ""):
                     sh.append(f'sed -i "s|{SECRET_MARK.format(name=name)}|$V_{name}|g" {shlex.quote(staged(p))}')
+    # §17.1424 — back up EVERY path the delivery writes, not only the service directory. Live, ADD126 would
+    # have overwritten /opt/control-panel-ui/index.html (the Vite app's entry from T34) with a backup of
+    # /opt/control-panel-backend alone. `--ignore-failed-read`: a file the delivery creates is not there yet.
+    wd_root = host.workdir.rstrip("/") + "/"
+    outside = sorted(p.lstrip("/") for p in files if not p.startswith(wd_root))
+    keep = " ".join(shlex.quote(r) for r in [wd_rel, *outside])
+    tar = f"tar czf \"$BACKUP\" --ignore-failed-read --exclude=node_modules -C / {keep}"
     if host.vm:
         g = f"qm guest exec {host.guest}"
         sh += [f"qm status {host.guest} | grep -q running || qm start {host.guest}",
                f"BACKUP=/root/scaffold-backup-{nk}-$(date +%Y%m%d%H%M%S).tgz",
-               f"{g} -- tar czf \"$BACKUP\" --exclude=node_modules -C / {shlex.quote(wd_rel)} >/dev/null"]
+               f"{g} -- {tar} >/dev/null"]
         for path in files:
             sh.append(f"{g} -- mkdir -p {shlex.quote(os.path.dirname(path))} >/dev/null")
             sh.append(f"{g} --pass-stdin 1 -- sh -c {shlex.quote('cat > ' + shlex.quote(path))} "
@@ -252,7 +259,7 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
         g = f"pct exec {host.guest} --"
         sh += [f"pct status {host.guest} | grep -q running || pct start {host.guest}",
                f"BACKUP=/root/scaffold-backup-{nk}-$(date +%Y%m%d%H%M%S).tgz",
-               f"{g} tar czf \"$BACKUP\" --exclude=node_modules -C / {shlex.quote(wd_rel)}"]
+               f"{g} {tar}"]
         for path in files:
             sh.append(f"{g} mkdir -p {shlex.quote(os.path.dirname(path))}")
             sh.append(f"pct push {host.guest} {shlex.quote(staged(path))} {shlex.quote(path)}")
@@ -430,6 +437,38 @@ async def read_status(spec, services: Optional[list]) -> list[dict]:
         addr = next((getattr(s, "address", "") for s in services or []
                      if str(getattr(s, "name", "")).lower().startswith(name)), "")
         out.append({"service": name, "path": path, "code": code if code.isdigit() else "", "address": addr})
+    return out
+
+
+_INNER_TPL_RE = re.compile(r"(?:innerHTML|outerHTML|insertAdjacentHTML\([^,]*,)\s*\+?=?\s*`([^`]*)`", re.S)
+_ATTR_INTERP_RE = re.compile(r"""=\s*(["'])[^"'`]*\$\{""")
+
+
+def values_put_into_html_attributes(files: dict[str, str]) -> list[dict]:
+    """§17.1424 — data interpolated into an HTML attribute inside an innerHTML template. A value holding a
+    quote ends the attribute early: the input shows a cut value, and a form that saves what it shows writes
+    the cut value back. Live, ADD126's page built `<input value="${value}">` for the Palworld settings, and
+    nine of the live values carry double quotes (`ServerName = "Default Palworld Server"`, `BanListURL`, …):
+    each would have shown empty, and Save would have written them back empty."""
+    out: list[dict] = []
+    for path, content in (files or {}).items():
+        if not path.endswith((".html", ".htm", ".js", ".mjs")):
+            continue
+        for m in _INNER_TPL_RE.finditer(content or ""):
+            hits = list(_ATTR_INTERP_RE.finditer(m.group(1)))
+            if not hits:
+                continue
+            # name the one that loses data: a `value=` attribute is what a form saves back
+            hit = next((h for h in hits if re.search(r"value\s*$", m.group(1)[:h.start()])), hits[0])
+            line = m.group(1)[max(0, hit.start() - 40):hit.end() + 40].strip().replace("\n", " ")
+            out.append({"command": f"{path}: {line[:120]}", "why": (
+                f"this code puts data into an HTML attribute through an innerHTML template (`{line[:90]}`). A "
+                f"value that holds a quote ends the attribute early -- the field shows a cut value, and a form "
+                f"that saves what it shows writes the cut value back. The service's real values do hold quotes "
+                f"(the Palworld settings: `ServerName = \"Default Palworld Server\"`, `BanListURL`, and seven "
+                f"more). Build the element with document.createElement and set `.value` / `.textContent` "
+                f"directly, never through markup.")})
+            break
     return out
 
 
