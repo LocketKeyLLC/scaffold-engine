@@ -138,6 +138,16 @@ def main() -> None:
     for pr in job.get("probes", []):
         st, body = http(pr.get("method", "GET"), pr["url"])
         report["probes"].append({"name": pr.get("name"), "status": st, "body": body[:800]})
+    # §17.1417 — the step's own request, to the service this version started. Another machine's API is
+    # unreachable here, so an answer ABOUT that is fine; a 404 (no route) or no answer (not running) is not.
+    if job.get("accept"):
+        report["accept"] = []
+        for a in job["accept"]:
+            body = a.get("body")
+            st, out = http(str(a.get("method") or "GET"), str(a["url"]),
+                           body.encode() if isinstance(body, str) else None)
+            report["accept"].append({"method": a.get("method"), "url": a["url"], "status": st, "body": out[:400],
+                                     "ok": bool(st) and st != 404})
     rt = job.get("roundtrip")
     if rt:
         base_text = open(rt["baseline"]).read() if rt.get("baseline") and os.path.exists(rt["baseline"]) else ""

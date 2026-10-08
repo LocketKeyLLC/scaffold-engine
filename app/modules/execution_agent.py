@@ -2747,19 +2747,29 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _rh_target = None
         _rh_seeds: list = []
         _rh_reports: dict = {}             # §17.1411 — runbook -> its rehearsal report, for scoring
+        # §17.1417 — a developed step whose own check is a request to its service's route is rehearsed
+        # too: the sandbox starts the service with the version's files and sends that request.
+        _rh_accept = (rehearsal.acceptance_requests(develop.acceptance_checks(run_node))
+                      if _developed and not _rh_target else [])
 
         async def _rehearse_or_nothing(rb: str, files: list) -> list[dict]:
-            if not _rh_target:
+            if not _rh_target and not _rh_accept:
                 return []
             try:
                 if not _rh_seeds:
-                    _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
+                    if _rh_target:
+                        _rh_seeds.extend(await rehearsal.seeds_for(spec, _rh_target, _services))
+                    elif _dev_host is not None:
+                        _rh_seeds.extend({"path": p, "content": c}
+                                         for p, c in (await develop.read_workspace(spec, _dev_host)).items())
+                        _rh_seeds.extend(rehearsal.stand_in_keys(_services))
                 report = await rehearsal.rehearse(supervised_runs.runbook_commands(rb), files, _rh_target, _rh_seeds,
                                                   known_units=[str(getattr(s, "unit", "")) for s in _services or []
                                                                if getattr(s, "unit", "")],
                                                   users=[{"user": s.user, "uid": s.uid, "group": s.group or s.user,
                                                           "gid": s.gid} for s in _services or []
-                                                         if getattr(s, "user", "") and getattr(s, "uid", "")])
+                                                         if getattr(s, "user", "") and getattr(s, "uid", "")],
+                                                  accept=_rh_accept)
                 _rh_reports[rb] = report
                 refused = rehearsal.refusal_from(report)
                 _ran = bool(report) and not report.get("error")

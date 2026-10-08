@@ -86,7 +86,9 @@ def test_bash_level_the_key_lands_in_the_pushed_file_and_the_staged_copy_is_gone
         '  status) echo "status: running";;\n'
         '  push) cp "$3" "' + str(pushed) + '/$(basename "$4")";;\n'
         '  exec) shift 2; [ "$1" = "--" ] && shift;\n'
-        '        if [[ "$*" == *config.xml* ]]; then echo "<Config><ApiKey>c0ffee1234567890abcdef1234567890</ApiKey></Config>";\n'
+        # like the real `cat` of two paths of which one never exists: the XML, and exit 1 (§17.1417 --
+        # the stub that exited 0 hid that `set -euo pipefail` killed the script on this read)
+        '        if [[ "$*" == *config.xml* ]]; then echo "<Config><ApiKey>c0ffee1234567890abcdef1234567890</ApiKey></Config>"; exit 1;\n'
         '        elif [ "$1" = "systemctl" ] && [ "$2" = "is-active" ]; then echo active; fi;;\n'
         "esac\n")
     (stub / "pct").chmod(0o755)
