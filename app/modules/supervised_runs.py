@@ -1595,10 +1595,8 @@ def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
     # fails on a 400 yet proves nothing about the value the PUT left, which is this gate's case.
     accepted = {str(a).strip() for a in acceptance or []}
     cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted]
-    ran = [str((f or {}).get("content") or "") for f in files or []
-           if (f or {}).get("path") and any(re.search(
-               rf"(?:^|[;&|]\s*|\b(?:ba|da|z)?sh\s+|\bpython3?\s+|\bnode\s+|\bperl\s+){re.escape(str(f['path']))}(?![\w./-])", c)
-               for c in cmd_texts)]
+    from app.modules.runbook_preconditions import files_the_block_runs     # §17.1420 — one definition
+    ran = [str((f or {}).get("content") or "") for f in files_the_block_runs(cmd_texts, files)]
     changed = api_ports_changed(cmd_texts + ran)
     if not changed:
         return []

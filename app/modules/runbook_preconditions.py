@@ -812,6 +812,19 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
     return out
 
 
+def files_the_block_runs(commands: list[str], files: Optional[list[dict]]) -> list[dict]:
+    """§17.1420 — the written files the block EXECUTES (`bash /tmp/x.sh`, `python3 /tmp/x.py`, `node …`,
+    or the path as a command). A file it only writes and delivers -- a service's code, the engine's kit --
+    runs later, inside the service, and is not this block reaching anywhere. §17.1415 drew this line for
+    the API read-back gate; §17.1420 for the ssh-key rule (live: ADD125 refused for the `ssh` inside the
+    engine's own `scaffold-kit/remote.js`, delivered, never run by the block)."""
+    cmd_texts = [str(c) for c in commands or []]
+    return [f for f in files or []
+            if (f or {}).get("path") and any(re.search(
+                rf"(?:^|[;&|]\s*|\b(?:ba|da|z)?sh\s+|\bpython3?\s+|\bnode\s+|\bperl\s+){re.escape(str(f['path']))}(?![\w./-])", c)
+                for c in cmd_texts)]
+
+
 async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 files: Optional[list[dict]] = None, node: Optional[dict] = None,
                 inventory: Optional[dict] = None, truth=None,
@@ -871,7 +884,11 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             return [ln for ln in executed_lines(t)
                     if _SSH_RE.search(ln) and "sshpass" not in ln and "ssh-copy-id" not in ln
                     and not ln.lstrip().startswith("#") and not ssh_runs_inside_a_guest(ln)]
-        cmd_bare = [ln for t in texts for ln in _bare(str(t))]
+        # §17.1420 — the block's commands and the files it RUNS; a delivered file (the kit's remote.js
+        # holds an `ssh` in a JS string) is not an ssh this block makes
+        run_texts = [_resolve_ids(str(c)) for c in commands or []] + \
+                    [_resolve_ids(str((f or {}).get("content") or "")) for f in files_the_block_runs(commands, files)]
+        cmd_bare = [ln for t in run_texts for ln in _bare(str(t))]
         if cmd_bare and not copies:
             names = (inv or {}).get("names") or {}
             for gid in subjects:
