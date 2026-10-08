@@ -26,6 +26,7 @@ import json
 import ast
 import asyncio
 import logging
+import os
 import shlex
 import re
 from datetime import datetime, timezone
@@ -4228,7 +4229,8 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
 
 
 def unsourced_addresses_in_files(commands: list[str], files: Optional[list[dict]], env: Optional[dict],
-                                 node: Optional[dict], upstream: str = "") -> list[dict]:
+                                 node: Optional[dict], upstream: str = "",
+                                 engine_held: Optional[list] = None) -> list[dict]:
     """§17.1312 — an IPv4 literal written into a file or a command must appear in
     something the engine holds: a fact, a pin, the system map, the step's own
     text, or an upstream output. Live, ADD100's server.js said Pi-hole is
@@ -4242,6 +4244,10 @@ def unsourced_addresses_in_files(commands: list[str], files: Optional[list[dict]
     held = (json.dumps(e, default=str) + " " + str(upstream or "") + " "
             + " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))
     held_ips = set(_IPV4_LITERAL_RE.findall(held))
+    # §17.1419 — the engine's OWN address is a value it holds: measured (§17.1333) or published by its
+    # LAN overlay (§17.1418). Live: ADD124's config named http://192.168.1.43:8000, the URL the engine had
+    # itself put in the prompt, and this gate called it a guess.
+    held_ips |= {str(a) for a in engine_held or [] if a}
     texts = [(str(c), "command") for c in commands or []] + \
             [(str((f or {}).get("content") or ""), str((f or {}).get("path") or "file")) for f in files or []]
     out: list[dict] = []
@@ -5191,7 +5197,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1306 — a sample value written to disk is a config that is wrong on purpose.
     refused = refused + placeholder_values_in_files(cmds, files, env)
     refused = refused + invented_email_in_files(cmds, files, env, node)       # §17.1307
-    refused = refused + unsourced_addresses_in_files(cmds, files, env, node, upstream)   # §17.1312
+    refused = refused + unsourced_addresses_in_files(cmds, files, env, node, upstream,   # §17.1312
+                                                     [engine_address, os.environ.get("SCAFFOLD_LAN_ADDRESS")])
     # §17.1357 — judged against the units of the guest each line addresses
     refused = refused + unsourced_service_name(cmds, files, env, node, upstream, units,
                                               units_by_guest)  # §17.1327, §17.1357

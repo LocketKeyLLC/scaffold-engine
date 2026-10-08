@@ -177,6 +177,11 @@ def engine_doc(node: Optional[dict]) -> str:
             f"needs the engine's API key. Never 127.0.0.1 or localhost for it: from a guest, that is the guest.")
 
 
+def own_checks(node: Optional[dict]) -> list[str]:
+    """§17.1419 — every check the step's text names (backticked `pct exec N -- …`), reads and writes."""
+    return list(dict.fromkeys(c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or ""))))
+
+
 def acceptance_checks(node: Optional[dict]) -> list[str]:
     """§17.1414 — the step's own checks that WRITE (ADD123: a POST that asks Radarr for a film). They
     cannot be verified read-only, and the sandbox cannot reach another machine's API, so they run as

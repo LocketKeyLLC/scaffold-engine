@@ -2749,7 +2749,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         _rh_reports: dict = {}             # §17.1411 — runbook -> its rehearsal report, for scoring
         # §17.1417 — a developed step whose own check is a request to its service's route is rehearsed
         # too: the sandbox starts the service with the version's files and sends that request.
-        _rh_accept = (rehearsal.acceptance_requests(develop.acceptance_checks(run_node))
+        # §17.1419 — every one of the step's own loopback checks, a read (ADD124's GET) as much as a write
+        _rh_accept = (rehearsal.acceptance_requests(develop.own_checks(run_node))
                       if _developed and not _rh_target else [])
 
         async def _rehearse_or_nothing(rb: str, files: list) -> list[dict]:

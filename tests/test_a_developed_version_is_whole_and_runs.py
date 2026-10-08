@@ -112,7 +112,7 @@ def test_the_roundtrip_path_is_unchanged_by_it():
 
 def test_the_loop_rehearses_a_developed_step_with_its_acceptance_requests():
     src = inspect.getsource(execution_agent._pause_for_decision)
-    assert "rehearsal.acceptance_requests(develop.acceptance_checks(run_node))" in src
+    assert "rehearsal.acceptance_requests(develop.own_checks(run_node))" in src
     assert "accept=_rh_accept" in src
 
 

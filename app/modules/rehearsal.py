@@ -57,6 +57,12 @@ def roundtrip_target(node: Optional[dict], services: Optional[list]) -> Optional
     if route_checks and all(re.search(r"\s-X\s*(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-\w+)?)\s", c)
                             for c in route_checks):
         return None
+    # §17.1419 — and only a step that SAVES: a round trip is "GET, then PUT it back". Live, ADD124 (a
+    # read-only proxy to the engine's /health) was handed this test because its text names a route and a
+    # measured service; to "pass" it the model invented `PUT /api/scaffold-engine` forwarding a PUT to
+    # /health. A step whose text names no PUT and no save is tested by its own request instead.
+    if not re.search(r"\bPUT\b|\bsav(?:e|es|ing)\b|\bwrites?\b", text):      # ADD122 said "read/write"
+        return None
     url = f"http://127.0.0.1:{m.group(1)}{m.group(2).rstrip('.')}"
     low = text.lower()
     for svc in services or []:
