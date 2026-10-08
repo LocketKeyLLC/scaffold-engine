@@ -3289,7 +3289,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1330 — the step does not FIT in one block (§17.1312 cut its content). Refusing is
         # right and stopping there is not: the engine splits it into steps it can carry, chains
         # them, makes this one wait for the last, and asks about the first. Once per step.
-        if _depth < 6:
+        # §17.1423 — never a DEVELOPED step: its one delivery carries any number of whole files, so
+        # "one block of commands per step" is not its limit. Live, ADD126 developed to score 0 and was
+        # then split ("2 deliverables: a frontend, a page" -- one thing) into five runbook steps, two of
+        # which split again; the passing version was thrown away.
+        if _depth < 6 and not _developed:
             try:
                 from app.modules import step_decomposition as _sd
                 _why = _sd.too_large(frame, run_node)
