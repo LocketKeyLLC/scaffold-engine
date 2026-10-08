@@ -6108,6 +6108,17 @@ _ZERO_ID_RE = re.compile(r"""\\?['"]((?:[a-z][a-z0-9]*)?[Ii]d)\\?['"]\s*:\s*0(?!
 #: §17.1405 — a JSON-encoded value interpolated into a shell command
 _JSON_NAME_RE = re.compile(r"\b(?:const|let|var)\s+(\w+)\s*=\s*JSON\.stringify\(")
 _SHELLISH_RE = re.compile(r"\b(?:printf|echo|ssh|sh\s+-c|bash\s+-c|tee)\b|>\s*\S")
+#: §17.1425 — the shell words alone, and an HTML tag: on a line of markup, a bare `>` closes a tag. Live,
+#: ADD126's page showed an answer as `innerHTML = `<div class="result">${JSON.stringify(data)}</div>`` -- no
+#: shell anywhere -- and §17.1405 refused all eight rounds for the tag's `>`.
+_SHELL_WORD_RE = re.compile(r"\b(?:printf|echo|ssh|sh\s+-c|bash\s+-c|tee|execSync|spawnSync)\b")
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][\w-]*(?:\s[^<>]*)?>")
+
+
+def _shellish(line: str) -> bool:
+    if _SHELL_WORD_RE.search(line):
+        return True
+    return bool(_SHELLISH_RE.search(line)) and not _HTML_TAG_RE.search(line)
 
 
 def json_used_as_shell_quoting(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -6128,7 +6139,7 @@ def json_used_as_shell_quoting(commands: list[str], files: Optional[list[dict]] 
             continue
         names = set(_JSON_NAME_RE.findall(t))
         for line in t.split("\n"):
-            if line.lstrip().startswith("//") or not _SHELLISH_RE.search(line):
+            if line.lstrip().startswith("//") or not _shellish(line):
                 continue
             if "${JSON.stringify(" in line or any("${" + n + "}" in line for n in names):
                 out.append({"command": line.strip()[:200], "why": (
