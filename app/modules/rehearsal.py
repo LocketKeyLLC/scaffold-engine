@@ -78,6 +78,15 @@ def roundtrip_target(node: Optional[dict], services: Optional[list]) -> Optional
 _CAT_ERROR_RE = re.compile(r"^cat: .*(?:Is a directory|No such file or directory|Permission denied)\s*$")
 
 
+def listing_command(in_guest: str, wd: str) -> str:
+    """§17.1417 — a service directory's own files. `node_modules` is pruned IN the find: live, CT 111's
+    listing was 317 lines of it and the read channel cut it off at `/opt/` before `scaffold-kit/` --
+    the files the step works on can be the ones that never arrive. (`-prune` with parentheses is
+    refused by the read-only channel; `-not -path` is not -- both measured.)"""
+    return (f'{in_guest} find {wd} -maxdepth 3 -type f -size -256k '
+            f'-not -path "*/node_modules/*" -not -path "*/.git/*"')
+
+
 async def _cat(spec, gid: str, vm: bool, path: str) -> Optional[str]:
     from app.modules import service_truth as st
     if not path or path.endswith("/"):
@@ -101,7 +110,7 @@ async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:
     host = next((s for s in services or [] if target.get("port") in tuple(getattr(s, "ports", ()) or ())), None)
     if host is not None and getattr(host, "workdir", ""):
         gid, vm, wd = str(host.guest), bool(getattr(host, "vm", False)), str(host.workdir)
-        ok, listing = await st._probe(spec, f"{st.in_guest(gid, vm)} find {wd} -maxdepth 3 -type f -size -256k")
+        ok, listing = await st._probe(spec, listing_command(st.in_guest(gid, vm), wd))
         paths = [p.strip() for p in (listing or "").split("\n")
                  if p.strip().startswith(wd.rstrip("/") + "/") and not p.strip().endswith("/")] if ok else []
         for p in [p for p in paths if not _SKIP_RE.search(p)][:MAX_SEED_FILES]:
@@ -116,14 +125,57 @@ async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:
     return seeds
 
 
-async def rehearse(commands: list[str], files: list[dict], target: dict, seeds: list[dict],
+_LOOPBACK_URL_RE = re.compile(r"""['"]?(https?://(?:127\.0\.0\.1|localhost)(?::\d+)?/[^\s'"]*)""")
+_METHOD_RE = re.compile(r"(?:^|\s)(?:-X|--request)\s*['\"]?([A-Z]+)")
+_DATA_RE = re.compile(r"""(?:^|\s)(?:-d|--data(?:-raw|-binary)?)\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")""")
+
+
+def acceptance_requests(checks: list[str]) -> list[dict]:
+    """§17.1417 — the step's own write checks (`curl -X POST -d '…' http://127.0.0.1:3001/…`) as requests
+    the sandbox can send to the service it started. Only loopback: a call to another machine is not
+    this service's route, and the sandbox reaches no machine."""
+    out: list[dict] = []
+    for c in checks or []:
+        m = _LOOPBACK_URL_RE.search(c)
+        if not m or not re.search(r"\bcurl\b", c):
+            continue
+        d = _DATA_RE.search(c)
+        body = (d.group(1) if d and d.group(1) is not None else (d.group(2) if d else None))
+        meth = _METHOD_RE.search(c)
+        out.append({"method": meth.group(1) if meth else ("POST" if body is not None else "GET"),
+                    "url": m.group(1), "body": body})
+    return out
+
+
+#: §17.1417 — the stand-in key in the sandbox: obviously not a key, and never sent anywhere real (the
+#: sandbox reaches no machine)
+STAND_IN_KEY = "rehearsal-stand-in-not-a-key"
+
+
+def stand_in_keys(services: Optional[list]) -> list[dict]:
+    """Seeds standing in for the config files a delivery reads keys from (`pct exec 103 -- cat
+    /var/lib/radarr/config.xml`): in the sandbox `pct` runs here, where that file does not exist, so
+    without a stand-in every version stops at "could not read RADARR_API_KEY" and nothing is tested."""
+    from app.modules import machine_values as mv
+    out: list[dict] = []
+    for svc in services or []:
+        r = mv._SERVICES.get(str(getattr(svc, "name", "") or "").lower())
+        if r is None or r.command or not r.paths:
+            continue
+        out.append({"path": r.paths[0],
+                    "content": f"<Config>\n  <ApiKey>{STAND_IN_KEY}</ApiKey>\n  <Port>1</Port>\n</Config>\n"})
+    return out
+
+
+async def rehearse(commands: list[str], files: list[dict], target: Optional[dict], seeds: list[dict],
                    url: Optional[str] = None, known_units: Optional[list[str]] = None,
-                   users: Optional[list[dict]] = None) -> Optional[dict]:
+                   users: Optional[list[dict]] = None, accept: Optional[list[dict]] = None) -> Optional[dict]:
     """POST the job to the rehearsal service; the report, or None when it cannot run."""
     job = {"seeds": seeds, "files": [{"path": f.get("path"), "content": f.get("content")} for f in files or []],
            "commands": list(commands or []), "known_units": list(known_units or []),
            "users": list(users or []),
-           "roundtrip": {k: target[k] for k in ("get", "put", "config", "baseline")}}
+           "roundtrip": {k: target[k] for k in ("get", "put", "config", "baseline")} if target else None,
+           "accept": list(accept or [])}
     try:
         import httpx
         async with httpx.AsyncClient(timeout=300) as client:
@@ -142,6 +194,8 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
             logger.warning("rehearsal_could_not_run err=%s stderr=%r", report.get("error"),
                            str(report.get("stderr") or "")[-400:])
         return []
+    if report.get("roundtrip") is None and report.get("accept") is not None:
+        return _acceptance_refusal(report)
     rt = report.get("roundtrip") or {}
     if rt.get("ok"):
         return []
@@ -205,6 +259,40 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
           "section header, write what the PUT body asks for, and restart the unit the facts name.")}]
 
 
+def _acceptance_refusal(report: dict) -> list[dict]:
+    """§17.1417 — the sandbox ran the delivery, started the service, and sent the step's own request."""
+    bad = [a for a in report.get("accept") or [] if not a.get("ok")]
+    if not bad:
+        return []
+    bits: list[str] = []
+    # the step's own request also runs in the block, and in here it always fails (`curl -f` on the error
+    # about the unreachable API): that is not the version's fault, and the answer below says what it got
+    urls = [str(a.get("url") or "") for a in report.get("accept") or []]
+    failed = [c for c in report.get("commands") or [] if c.get("exit")
+              and not any(u and u.split("://", 1)[-1].split("/", 1)[-1] in str(c.get("command") or "") for u in urls)]
+    if failed:
+        c = failed[0]
+        bits.append(f"`{c.get('command', '')[:90]}` exited {c.get('exit')}: "
+                    f"{' '.join(str(c.get('out') or '').split())[-220:]}")
+    for a in bad[:2]:
+        st, body = a.get("status"), " ".join(str(a.get("body") or "").split())[:200]
+        if st == 404:
+            bits.append(f"{a.get('method')} {a.get('url')} answered 404 `{body}` -- nothing serves that route: "
+                        f"the service's entry file never loads the module that defines it")
+        elif not st:
+            bits.append(f"{a.get('method')} {a.get('url')} got no answer at all ({body}) -- the service is not "
+                        f"running: it did not start, or crashed on load")
+        else:
+            bits.append(f"{a.get('method')} {a.get('url')} answered {st} `{body}`")
+    if report.get("server_log"):
+        bits.append(f"the service said: {' '.join(str(report['server_log']).split())[-300:]}")
+    return [{"command": "(rehearsal)", "why": (
+        f"{MARK} (read off the machines just now), started the service with this version's files, and sent "
+        f"it the step's own request. Another machine's API cannot be reached from the sandbox, so an error "
+        f"ABOUT that call is expected -- but the route must exist and the service must run. It did not: "
+        + "; ".join(bits) + ".")}]
+
+
 # ── §17.1411: repair from the best attempt, and remember it ─────────────────────
 
 #: extra drafts a rehearsal-only refusal gets, each shown the best draft so far
@@ -222,6 +310,12 @@ def score(report: Optional[dict]) -> int:
     """
     if not report or report.get("error"):
         return 10_000
+    if report.get("roundtrip") is None and report.get("accept") is not None:     # §17.1417
+        bad = [a for a in report["accept"] if not a.get("ok")]
+        urls = [str(a.get("url") or "").split("://", 1)[-1].split("/", 1)[-1] for a in report["accept"]]
+        fails = sum(1 for c in report.get("commands") or [] if c.get("exit")
+                    and not any(u and u in str(c.get("command") or "") for u in urls))
+        return 0 if not bad else 1000 * fails + sum(5000 if not a.get("status") else 3000 for a in bad)
     rt = report.get("roundtrip") or {}
     if rt.get("ok"):
         return 0

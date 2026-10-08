@@ -112,7 +112,7 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
     """The service directory's code and config as it is NOW, read through the read-only channel."""
     from app.modules import rehearsal
     from app.modules import service_truth as st
-    ok, listing = await st._probe(spec, f"{st.in_guest(host.guest, host.vm)} find {host.workdir} -maxdepth 3 -type f -size -256k")
+    ok, listing = await st._probe(spec, rehearsal.listing_command(st.in_guest(host.guest, host.vm), host.workdir))
     paths = [p.strip() for p in (listing or "").split("\n")
              if p.strip().startswith(host.workdir + "/") and not p.strip().endswith("/")] if ok else []
     out: dict[str, str] = {}
@@ -193,7 +193,10 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
             if not read:
                 sh.append(f"echo 'the engine cannot read {name} on any machine' >&2; exit 1")
                 continue
-            sh.append(f"V_{name}=$({read})")
+            # §17.1417 — `|| true`: the read cats BOTH places an app may keep its config, one never exists,
+            # `cat` exits 1, and under `set -euo pipefail` the assignment killed the script silently before
+            # anything was backed up or pushed. Caught by the rehearsal; the empty-read check below decides.
+            sh.append(f"V_{name}=$({read} || true)")
             sh.append(f'[ -n "$V_{name}" ] || {{ echo "could not read {name} on the machine" >&2; exit 1; }}')
             for p in secret_files:
                 if SECRET_MARK.format(name=name) in (files[p] or ""):
@@ -447,11 +450,45 @@ async def propose(prompt: str) -> tuple[Optional[dict[str, str]], str]:
                                                         temperature=0.2, max_tokens=16000, think=False)
     except Exception as exc:
         return None, f"the model call failed: {exc!r}"
+    # §17.1417 — only an answer that is WHOLE, valid JSON. Live, ADD123: the model wrote `"movie"`
+    # unescaped inside a file's content; the lenient repair kept the text before the break and dropped
+    # the rest -- the route file cut off mid-line and server.js gone -- and that fragment passed every gate.
+    raw = _raw_text(resp)
+    if raw:
+        import json as _json
+        try:
+            _json.loads(_strip_fence(raw))
+        except ValueError as exc:
+            at = getattr(exc, "pos", None)
+            near = _strip_fence(raw)[max(0, (at or 0) - 80):(at or 0) + 40] if at is not None else ""
+            return None, (f"your answer was not valid JSON ({exc}), so no file in it can be trusted whole. Near "
+                          f"the break: `{near}`. Inside a file's \"content\" string every double quote must be "
+                          f"escaped as \\\" and every newline as \\n -- e.g. 'Type must be \\\"movie\\\"'.")
     files = (parsed or {}).get("files") if isinstance(parsed, dict) else None
     if not isinstance(files, list) or not files:
         return None, "the model returned no files"
     out = {str(f.get("path") or ""): str(f.get("content") or "") for f in files if isinstance(f, dict)}
     return out, str((parsed or {}).get("summary") or "")
+
+
+def _raw_text(resp) -> str:
+    for attr in ("text", "content", "response_content"):
+        v = getattr(resp, attr, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    if isinstance(resp, str):
+        return resp.strip()
+    return ""
+
+
+def _strip_fence(t: str) -> str:
+    """The answer's own JSON object: inside a ``` fence, or the outermost `{…}` of prose around it."""
+    t = t.strip()
+    m = re.match(r"^```(?:json)?\s*\n(.*)\n```\s*$", t, re.S)
+    t = m.group(1).strip() if m else t
+    if not t.startswith("{") and "{" in t and "}" in t:
+        t = t[t.index("{"):t.rindex("}") + 1]
+    return t
 
 
 def score(frame: dict, report: Optional[dict]) -> int:
