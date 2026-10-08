@@ -2784,6 +2784,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             creds = develop.credentials_for(_services)        # §17.1415 — keys read on the machine at delivery
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
+            apis = await develop.read_apis(spec, _services)   # §17.1416 — what the called APIs hold now
+            if apis:
+                facts = f"{facts}\n\n{apis}"
+                logger.info("develop_apis job=%s node=%s %s", job_id, _nk_dev, " | ".join(apis.splitlines()[1:])[:600])
             best = None                            # (score, frame, files)
             current: dict | None = None
             evidence = ""
