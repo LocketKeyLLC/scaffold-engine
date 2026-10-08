@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -230,4 +231,5 @@ def test_the_pause_splits_before_it_parks_and_only_once_per_descent():
     assert body.count("_sd.split_step(") == 1 and body.count("_sd.too_large(frame, run_node)") == 1
     assert body.index("_sd.split_step(") < body.index('logger.warning("supervised_run_parked'), "split before parking"
     assert body.index("supervised_runs.already_met(") < body.index("_sd.too_large(frame"), "a step already done is not split"
-    assert "_pause_for_decision(job_id, _depth + 1)" in body and "if _depth < 6:" in body
+    # bounded: every re-entry is behind a depth guard (§17.1423/§17.1426 added conditions to the guards)
+    assert "_pause_for_decision(job_id, _depth + 1)" in body and re.search(r"if _depth < 6\b", body)

@@ -2797,7 +2797,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             workspace = await develop.read_workspace(spec, host)
             checks = develop.done_checks(run_node, host)
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
-            creds = develop.credentials_for(_services)        # §17.1415 — keys read on the machine at delivery
+            creds = develop.credentials_for(_services, (policy or {}).get("secrets"), run_node)   # §17.1415/§17.1426
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
@@ -3256,7 +3256,12 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # machine first; when every one confirms the goal, record the step done
         # with that evidence and ask about the NEXT step instead of this one.
         # Bounded: a plan of already-met steps is walked, not recursed forever.
-        if _depth < 6:
+        # §17.1426 — a DEVELOPED step is code; `systemctl is-active`/`is-enabled` is the same whether the code
+        # exists or not. Live, ADD127 ("add authentication and wire the systemd service") was recorded already
+        # met from those two reads alone while the panel answered 200 with no credential.
+        _state_only = _developed and all(
+            re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in (frame.get("verify") or [""]))
+        if _depth < 6 and not _state_only:
             try:
                 _met = await supervised_runs.already_met(spec, run_node, frame, _env)
             except Exception as exc:

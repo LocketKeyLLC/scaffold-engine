@@ -134,12 +134,22 @@ def _is_read(cmd: str) -> bool:
         return False
 
 
+#: §17.1426 — a check that names a runner secret (`$PANEL_PASSWORD`). The runner injects secrets only into
+#: APPROVED commands whose text references them; the read-only check channel never gets one.
+_SECRET_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,60})\}?")
+
+
+def _needs_a_secret(cmd: str) -> bool:
+    return bool(_SECRET_REF_RE.search(cmd))
+
+
 def done_checks(node: Optional[dict], host: Host) -> list[str]:
     """The step's own READ checks (backticked `pct exec N -- …` in its text), then the unit is active.
 
     §17.1414 — only reads: the verify channel carries nothing else, and silently dropped ADD123's
     POST. A check that WRITES is the run's own acceptance step (`acceptance_checks`)."""
-    checks = [c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or "")) if _is_read(c.strip())]
+    checks = [c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or ""))
+              if _is_read(c.strip()) and not _needs_a_secret(c.strip())]
     tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
     checks.append(f"{tool} systemctl is-active {host.unit}")
     return list(dict.fromkeys(checks))
@@ -190,7 +200,7 @@ def acceptance_checks(node: Optional[dict]) -> list[str]:
     out: list[str] = []
     for c in _CHECK_RE.findall(str((node or {}).get("description") or "")):
         c = c.strip()
-        if _is_read(c):
+        if _is_read(c) and not _needs_a_secret(c):      # §17.1426 — a read that needs a secret runs approved
             continue
         if re.search(r"\bcurl\b", c) and not re.search(r"\bcurl\b[^|;&]*\s-(?:[a-zA-Z]*f[a-zA-Z]*)\b|--fail\b", c):
             c = re.sub(r"\bcurl\b", "curl -f", c, count=1)
@@ -233,11 +243,22 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
             # §17.1417 — `|| true`: the read cats BOTH places an app may keep its config, one never exists,
             # `cat` exits 1, and under `set -euo pipefail` the assignment killed the script silently before
             # anything was backed up or pushed. Caught by the rehearsal; the empty-read check below decides.
-            sh.append(f"V_{name}=$({read} || true)")
-            sh.append(f'[ -n "$V_{name}" ] || {{ echo "could not read {name} on the machine" >&2; exit 1; }}')
+            if read == RUNNER_HELD:                                  # §17.1426 — handed in by the run line
+                sh.append(f'V_{name}="${{{name}:-}}"')
+                sh.append(f'[ -n "$V_{name}" ] || {{ echo "the runner holds no {name} -- store it in Settings -> Machines" >&2; exit 1; }}')
+            else:
+                sh.append(f"V_{name}=$({read} || true)")
+                sh.append(f'[ -n "$V_{name}" ] || {{ echo "could not read {name} on the machine" >&2; exit 1; }}')
             for p in secret_files:
                 if SECRET_MARK.format(name=name) in (files[p] or ""):
-                    sh.append(f'sed -i "s|{SECRET_MARK.format(name=name)}|$V_{name}|g" {shlex.quote(staged(p))}')
+                    # §17.1426 — perl reads the value from the environment: `sed s|…|$V|` corrupts a password
+                    # holding `|`, `&` or `\`, and nothing here re-parses what perl substitutes
+                    # and inside a .json file the value is a JSON string: `"` and `\` are escaped, or a password
+                    # holding one leaves the config unparseable and the service down (caught at bash level)
+                    mark = SECRET_MARK.format(name=name).replace("@", "\\@")
+                    esc = r'$v =~ s/([\\"])/\\$1/g; ' if p.endswith(".json") else ""
+                    prog = "BEGIN { $v = $ENV{SCAFFOLD_V}; " + esc + "} s/" + mark + "/$v/g"
+                    sh.append(f"SCAFFOLD_V=\"$V_{name}\" perl -pi -e {shlex.quote(prog)} {shlex.quote(staged(p))}")
     # §17.1424 — back up EVERY path the delivery writes, not only the service directory. Live, ADD126 would
     # have overwritten /opt/control-panel-ui/index.html (the Vite app's entry from T34) with a backup of
     # /opt/control-panel-backend alone. `--ignore-failed-read`: a file the delivery creates is not there yet.
@@ -264,6 +285,8 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
             sh.append(f"{g} mkdir -p {shlex.quote(os.path.dirname(path))}")
             sh.append(f"pct push {host.guest} {shlex.quote(staged(path))} {shlex.quote(path)}")
         own = g
+    for path in secret_files:                     # §17.1426 — a file holding a credential is its owner's alone
+        sh.append(f"{own} chmod 600 {shlex.quote(path)}" + (" >/dev/null" if host.vm else ""))
     if host.user and host.user != "root":
         owner = host.user + (f":{host.group}" if host.group else "")
         for path in files:
@@ -281,7 +304,12 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
     if carried:
         out += [f"({len(carried)} file(s) carried inside deliver.sh base64-encoded, because their text holds "
                 f"a fence or a heading line: {', '.join(carried)})", ""]
-    run = [f"bash {stage}--deliver.sh", *(acceptance or [])]      # §17.1414 — the step's own write check, last
+    # §17.1426 — the runner injects a secret only into a command whose TEXT names it: the run line names
+    # each runner-held one the delivery uses, so deliver.sh gets the value and the engine never does
+    held = sorted(n for n, r in (credentials or {}).items() if r == RUNNER_HELD
+                  and any(SECRET_MARK.format(name=n) in (c or "") for c in files.values()))
+    prefix = "".join(f'{n}="${n}" ' for n in held)
+    run = [f"{prefix}bash {stage}--deliver.sh", *(acceptance or [])]      # §17.1414 — the step's own write check, last
     out += ["## Run this", "", "```bash", "\n".join(run), "```", "",
             "## Verify", "", "```bash", "\n".join(checks), "```", ""]
     return "\n".join(out)
@@ -325,7 +353,11 @@ SECRET_MARK = "@@SCAFFOLD:{name}@@"
 _MARK_RE = re.compile(r"@@SCAFFOLD:([A-Z][A-Z0-9_]{2,60})@@")
 
 
-def credentials_for(services: Optional[list]) -> dict[str, str]:
+RUNNER_HELD = "@runner"          # §17.1426 — the value lives in the runner's secret store, injected at run time
+
+
+def credentials_for(services: Optional[list], runner_secrets: Optional[list] = None,
+                    node: Optional[dict] = None) -> dict[str, str]:
     """`{NAME: read command}` for the API keys the engine can read ON THE MACHINE for the measured
     services (Radarr's key from its own config.xml on its guest, …) -- the machine-values registry
     (§17.1332), never a value the engine or the model holds."""
@@ -339,6 +371,12 @@ def credentials_for(services: Optional[list]) -> dict[str, str]:
         r = mv.readable_for(key)
         if r is not None and r.app == name.lower():
             out[key] = r.read(gid)
+    # §17.1426 — and a secret the RUNNER holds that the step names (ADD127: the panel's own password,
+    # operator decision 2026-10-08). Its value never reaches the engine: the run line hands it to deliver.sh.
+    text = _text(node)
+    for n in runner_secrets or []:
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{2,60}", str(n)) and re.search(rf"\b{re.escape(str(n))}\b", text):
+            out[str(n)] = RUNNER_HELD
     return out
 
 
@@ -347,8 +385,10 @@ def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
         return ""
     where = {re.sub(r"[^A-Z0-9]", "_", str(getattr(s, "name", "")).upper()) + "_API_KEY": getattr(s, "guest", "?")
              for s in services or []}
-    lines = [f"- `{SECRET_MARK.format(name=n)}` -- {n.replace('_API_KEY', '').title()}'s API key (read on guest "
-             f"{where.get(n, '?')} at delivery)" for n in sorted(creds)]
+    lines = [(f"- `{SECRET_MARK.format(name=n)}` -- the runner's secret {n} (held by the runner, put in at delivery)"
+              if creds[n] == RUNNER_HELD else
+              f"- `{SECRET_MARK.format(name=n)}` -- {n.replace('_API_KEY', '').title()}'s API key (read on guest "
+              f"{where.get(n, '?')} at delivery)") for n in sorted(creds)]
     return ("CREDENTIALS: where your code needs one of these, put the MARKER literally in a config file you deliver "
             "(never in code, never a value you invent, never an empty string). The delivery replaces it on the machine "
             "with the real key; the value never passes through you:\n" + "\n".join(lines))
