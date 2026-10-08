@@ -63,7 +63,7 @@ def test_the_frame_shows_the_marker_never_a_key():
     assert "V_RADARR_API_KEY=$(pct exec 103 -- sh -c 'cat /var/lib/radarr/config.xml" in sh
     assert 'could not read RADARR_API_KEY on the machine' in sh
     # §17.1426 — perl from the environment, not `sed s|…|$V|` (a value holding `|`/`&`/`\` corrupted it)
-    assert 'SCAFFOLD_V="$V_RADARR_API_KEY" perl -pi -e' in sh and staged in sh
+    assert 'SCAFFOLD_V="$V_RADARR_API_KEY" python3 -c' in sh and staged in sh
     assert sh.index("trap ") < sh.index("V_RADARR_API_KEY=")
     assert subprocess.run(["bash", "-n"], input=sh, text=True).returncode == 0
 

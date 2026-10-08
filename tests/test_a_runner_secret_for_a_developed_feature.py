@@ -48,7 +48,7 @@ def test_the_run_line_names_the_secret_so_the_runner_injects_it():
     cmds = sr.runbook_commands(_rb())
     assert cmds[0].startswith('PANEL_PASSWORD="$PANEL_PASSWORD" bash /tmp/scaffold-dev-ADD127--deliver.sh')
     sh = {f["path"]: f["content"] for f in sr.file_writes(_rb())}["/tmp/scaffold-dev-ADD127--deliver.sh"]
-    assert 'V_PANEL_PASSWORD="${PANEL_PASSWORD:-}"' in sh and "perl -pi -e" in sh
+    assert 'V_PANEL_PASSWORD="${PANEL_PASSWORD:-}"' in sh and 'SCAFFOLD_V="$V_PANEL_PASSWORD" python3 -c' in sh
     assert "pct exec 111 -- chmod 600 /opt/control-panel-backend/config/auth.json" in sh
     assert subprocess.run(["bash", "-n"], input=sh, text=True).returncode == 0
 
@@ -90,3 +90,13 @@ def test_service_state_alone_never_makes_a_developed_step_already_met():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "_state_only = _developed and all(" in src
     assert "if _depth < 6 and not _state_only:" in src
+
+
+def test_the_filler_carries_no_dollar_and_passes_the_unset_variable_rule():
+    """§17.1428 — live: the perl filler's `$v` was read by §17.1348 as an unset shell variable and refused
+    ADD127 all eight rounds. The python filler carries no `$`; the frame's own gate passes it."""
+    assert "$" not in dv._FILL_PROG
+    rb = _rb()
+    files = sr.file_writes(rb)
+    refs = sr.variables_nothing_sets(sr.runbook_commands(rb), files, {"held": ["PANEL_PASSWORD"]})
+    assert refs == [], refs

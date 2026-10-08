@@ -253,12 +253,12 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
                 if SECRET_MARK.format(name=name) in (files[p] or ""):
                     # §17.1426 — perl reads the value from the environment: `sed s|…|$V|` corrupts a password
                     # holding `|`, `&` or `\`, and nothing here re-parses what perl substitutes
-                    # and inside a .json file the value is a JSON string: `"` and `\` are escaped, or a password
-                    # holding one leaves the config unparseable and the service down (caught at bash level)
-                    mark = SECRET_MARK.format(name=name).replace("@", "\\@")
-                    esc = r'$v =~ s/([\\"])/\\$1/g; ' if p.endswith(".json") else ""
-                    prog = "BEGIN { $v = $ENV{SCAFFOLD_V}; " + esc + "} s/" + mark + "/$v/g"
-                    sh.append(f"SCAFFOLD_V=\"$V_{name}\" perl -pi -e {shlex.quote(prog)} {shlex.quote(staged(p))}")
+                    # and inside a .json file the value is a JSON string (json.dumps), or a password holding `"`
+                    # or `\` leaves the config unparseable and the service down (caught at bash level).
+                    # §17.1428 — python, not perl: a perl program's `$v` read as an unset SHELL variable to
+                    # §17.1348 and refused ADD127 eight rounds; this program carries no `$` at all.
+                    sh.append(f"SCAFFOLD_V=\"$V_{name}\" python3 -c {shlex.quote(_FILL_PROG)} "
+                              f"{shlex.quote(staged(p))} {shlex.quote(SECRET_MARK.format(name=name))}")
     # §17.1424 — back up EVERY path the delivery writes, not only the service directory. Live, ADD126 would
     # have overwritten /opt/control-panel-ui/index.html (the Vite app's entry from T34) with a backup of
     # /opt/control-panel-backend alone. `--ignore-failed-read`: a file the delivery creates is not there yet.
@@ -353,6 +353,15 @@ SECRET_MARK = "@@SCAFFOLD:{name}@@"
 _MARK_RE = re.compile(r"@@SCAFFOLD:([A-Z][A-Z0-9_]{2,60})@@")
 
 
+#: §17.1428 — the marker filler: value from the environment (never argv), plain string replace, JSON-escaped
+#: inside a .json file. No `$` anywhere, so no shell-level gate can read it as a variable.
+_FILL_PROG = ("import json, os, sys\n"
+              "path, mark = sys.argv[1], sys.argv[2]\n"
+              "value = os.environ['SCAFFOLD_V']\n"
+              "if path.endswith('.json'):\n"
+              "    value = json.dumps(value, ensure_ascii=False)[1:-1]\n"
+              "text = open(path, encoding='utf-8').read()\n"
+              "open(path, 'w', encoding='utf-8').write(text.replace(mark, value))\n")
 RUNNER_HELD = "@runner"          # §17.1426 — the value lives in the runner's secret store, injected at run time
 
 
