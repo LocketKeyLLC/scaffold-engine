@@ -18,7 +18,16 @@ fi
 # Docker keeps an existing DOCKER-USER chain; creating it here, before docker.service,
 # means the rule is in place before any container publishes the port.
 iptables -N DOCKER-USER 2>/dev/null || true
-RULE=(-p tcp -m conntrack --ctorigdst "$ADDR" --ctorigdstport "$PORT" ! -s "$ALLOW" -j DROP)
+# `--ctdir ORIGINAL`: judge only packets travelling TOWARD the engine. The conntrack ORIGINAL tuple
+# is the same for both directions of a connection, so without it the engine's REPLIES (source
+# 172.18.x, "not ALLOW") matched too and every connection died -- the allowed one included.
+# Measured 2026-10-07: CT 111 timed out, 30 packets on the DROP counter. (§17.1418b)
+RULE=(-p tcp -m conntrack --ctdir ORIGINAL --ctorigdst "$ADDR" --ctorigdstport "$PORT" ! -s "$ALLOW" -j DROP)
+OLD=(-p tcp -m conntrack --ctorigdst "$ADDR" --ctorigdstport "$PORT" ! -s "$ALLOW" -j DROP)
+if iptables -C DOCKER-USER "${OLD[@]}" 2>/dev/null; then
+    iptables -D DOCKER-USER "${OLD[@]}"
+    echo "scaffold-lan-gate: removed the earlier rule that also dropped the engine's replies"
+fi
 if iptables -C DOCKER-USER "${RULE[@]}" 2>/dev/null; then
     echo "scaffold-lan-gate: already in place ($ADDR:$PORT, only $ALLOW)"
 else

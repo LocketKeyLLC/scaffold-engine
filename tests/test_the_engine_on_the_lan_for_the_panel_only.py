@@ -95,8 +95,46 @@ def test_the_gate_installs_once_and_only_lets_the_allowed_client_in(stub):
     assert _run(env, f).returncode == 0 and _run(env, f).returncode == 0
     log = (tmp / "log").read_text().splitlines()
     inserts = [ln for ln in log if " -I " in f" {ln} "]
-    assert inserts == ["iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdst 192.168.1.43 "
+    assert inserts == ["iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctdir ORIGINAL --ctorigdst 192.168.1.43 "
                        "--ctorigdstport 8000 ! -s 192.168.1.25 -j DROP"]
+
+
+def test_the_rule_judges_only_packets_toward_the_engine():
+    """§17.1418b — measured: without `--ctdir ORIGINAL` the engine's REPLIES (source 172.18.x) matched
+    `! -s ALLOW` on the shared original tuple, and the allowed client timed out too."""
+    src = (ROOT / "scripts/scaffold_lan_gate.sh").read_text()
+    rule = next(ln for ln in src.splitlines() if ln.startswith("RULE=("))
+    assert "--ctdir ORIGINAL" in rule
+
+
+def test_the_earlier_rule_is_removed_on_upgrade(tmp_path):
+    """The rule already on the operator's host is the reply-dropping one: rerunning the gate must
+    delete it, not stack the new rule beside it."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    # a stateful stub: rules live in a file, -C/-I/-D act on it
+    stub_lines = [
+        "#!/bin/bash",
+        'R="$RULES"',
+        'case "$1" in',
+        "  -N) exit 0;;",
+        '  -C) grep -qxF -- "${*:3}" "$R" 2>/dev/null;;',
+        '  -D) grep -vxF -- "${*:3}" "$R" > "$R.t"; mv "$R.t" "$R";;',
+        '  -I) echo "${*:4}" >> "$R";;',
+        "esac",
+    ]
+    (b / "iptables").write_text("\n".join(stub_lines) + "\n")
+    (b / "iptables").chmod(0o755)
+    rules = tmp_path / "rules"
+    rules.write_text("-p tcp -m conntrack --ctorigdst 192.168.1.43 --ctorigdstport 8000 ! -s 192.168.1.25 -j DROP\n")
+    f = tmp_path / ".env"
+    f.write_text("SCAFFOLD_LAN_ADDRESS=192.168.1.43\nSCAFFOLD_LAN_ALLOW=192.168.1.25\n")
+    env = {**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "RULES": str(rules)}
+    r = subprocess.run(["bash", str(ROOT / "scripts/scaffold_lan_gate.sh"), str(f)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "removed the earlier rule" in r.stdout
+    assert rules.read_text().splitlines() == [
+        "-p tcp -m conntrack --ctdir ORIGINAL --ctorigdst 192.168.1.43 --ctorigdstport 8000 ! -s 192.168.1.25 -j DROP"]
 
 
 def test_the_gate_does_nothing_when_the_overlay_is_off(stub):
