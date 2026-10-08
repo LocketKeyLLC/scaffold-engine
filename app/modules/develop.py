@@ -359,6 +359,26 @@ _ARR_API = {"radarr": ("v3", ("rootfolder", "qualityprofile")),
             "whisparr": ("v3", ("rootfolder", "qualityprofile"))}
 
 
+#: §17.1421 — services whose API answers WITHOUT a key on this home lab, probed by status: which path the
+#: installed version serves (live: Pi-hole v6.4.3 answers `/api/stats/summary` 200 and the v5
+#: `/admin/api.php?summary` 400; a round of ADD125 wrote the v5 path).
+_STATUS_PROBES = {"pihole": (80, ("/api/stats/summary", "/admin/api.php?summary"))}
+
+
+def status_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
+    """`(service, path, command)` -- `curl -o /dev/null -w %{http_code}` inside the service's own guest."""
+    out: list[tuple[str, str, str]] = []
+    for svc in services or []:
+        name, gid = str(getattr(svc, "name", "") or "").lower(), str(getattr(svc, "guest", "") or "")
+        key = next((k for k in _STATUS_PROBES if name.startswith(k)), None)
+        if key is None or not gid or getattr(svc, "vm", False):
+            continue
+        port, paths = _STATUS_PROBES[key]
+        for path in paths:
+            out.append((key, path, f'pct exec {gid} -- curl -s -m 10 -o /dev/null -w %{{http_code}} "http://127.0.0.1:{port}{path}"'))
+    return out
+
+
 def api_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
     """`(service, endpoint, command)` -- each a read run INSIDE the service's guest (§17.1342): the key
     and the port come out of the app's own config.xml there, so neither leaves the guest."""
@@ -412,6 +432,13 @@ async def read_apis(spec, services: Optional[list]) -> str:
         addr = next((getattr(s, "address", "") for s in services or [] if str(getattr(s, "name", "")).lower() == name), "")
         lines.append(f"- {name}{f' ({addr})' if addr else ''} /api/{_ARR_API[name][0]}/{ep}: "
                      + (got or "(could not be read just now)"))
+    for name, path, cmd in status_reads(services):                 # §17.1421
+        ok, body = await st._probe(spec, cmd)
+        code = str(body or "").strip()[-3:] if ok else ""
+        addr = next((getattr(s, "address", "") for s in services or []
+                     if str(getattr(s, "name", "")).lower().startswith(name)), "")
+        lines.append(f"- {name}{f' ({addr})' if addr else ''} GET {path} without a key: "
+                     + (f"HTTP {code}" if code.isdigit() else "(could not be read just now)"))
     if not lines:
         return ""
     return ("THE APIS YOUR CODE CALLS, AS THEY ARE NOW (read off the machine just now). Where your code needs one of "

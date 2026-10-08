@@ -1487,7 +1487,20 @@ _NAME_RE = re.compile(r"\b(radarr|sonarr|prowlarr|lidarr|readarr|bazarr|jellyfin
                       r"palworld|control-panel|jackett|overseerr|tautulli)\b", re.I)
 
 
+#: §17.1421 — spellings people use for a service, for MEASURING it. Kept out of `_NAME_RE` on purpose:
+#: `step_classify`'s title fallback reads `_NAME_RE` too, and "Point the router's DNS at Pi-hole" (phone-app
+#: work, §17.1253) must not turn hands-on because Pi-hole became a known name there.
+_ALIAS_RE = re.compile(r"\b(pi-hole)\b", re.I)
+_ALIASES = {"pi-hole": "pihole"}
+
+
 def names_in(node: Optional[dict]) -> list[str]:
-    """The service names a step's text mentions, lower-cased and deduplicated."""
+    """The service names a step's text mentions, lower-cased and deduplicated, in order of appearance.
+
+    §17.1421 — "Pi-hole" is how people (and ADD125) spell it; the service listens as `pihole-FTL`. The
+    hyphenated spelling matched nothing, so the step's Pi-hole was never measured: no guest, no address,
+    and the model wrote `192.168.1.130` (the guest ID) and then a `<PIHOLE_IP>`."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
-    return list(dict.fromkeys(m.group(1).lower() for m in _NAME_RE.finditer(text)))
+    hits = [(m.start(), m.group(1).lower()) for m in _NAME_RE.finditer(text)]
+    hits += [(m.start(), _ALIASES[m.group(1).lower()]) for m in _ALIAS_RE.finditer(text)]
+    return list(dict.fromkeys(n for _, n in sorted(hits)))
