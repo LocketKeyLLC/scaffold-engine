@@ -1,0 +1,27 @@
+# §17.1418 — the allow-list for the engine's LAN binding (docker-compose.lan.yml).
+#
+# Runs BEFORE docker.service so the DROP rule exists before any container
+# publishes the port: the engine is never reachable from the whole LAN, not
+# even for the seconds after a reboot.
+#
+# Install (replace /home/youruser with your checkout's home):
+#   sed "s#/home/youruser#$HOME#g" scripts/scaffold-lan-gate.service \
+#     | sudo tee /etc/systemd/system/scaffold-lan-gate.service >/dev/null
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now scaffold-lan-gate
+#
+# Verify:
+#   sudo iptables -S DOCKER-USER
+
+[Unit]
+Description=Scaffold Engine LAN gate (only the allowed client reaches the engine's LAN port)
+Documentation=https://github.com/LocketKeyLLC/scaffold-engine/blob/main/OVERVIEW.md
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /home/youruser/scaffold-engine/scripts/scaffold_lan_gate.sh /home/youruser/scaffold-engine/.env
+
+[Install]
+WantedBy=docker.service

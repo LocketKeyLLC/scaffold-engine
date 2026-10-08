@@ -1,0 +1,24 @@
+# §17.1418 — publish the engine on ONE LAN address, for ONE allowed client.
+#
+# The engine stays loopback-only by default (§17.93). A machine the engine
+# drives sometimes has to reach it (the home-lab control panel proxies the
+# engine's own /health and API), so this overlay adds a second binding on the
+# host's LAN address. It is OFF unless your .env names it:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml
+#   SCAFFOLD_LAN_ADDRESS=192.168.1.43      # this host's LAN address
+#   SCAFFOLD_LAN_ALLOW=192.168.1.25        # the ONE client allowed in
+#
+# ufw cannot filter a Docker-published port (Docker's DNAT bypasses it), so
+# the allow-list is a DOCKER-USER rule: install scripts/scaffold-lan-gate.service
+# FIRST (it runs before docker.service, so the port is never open at boot),
+# then turn this overlay on. Every route but /health, /metrics, /web/* and /
+# still requires the API key.
+services:
+  scaffold-orchestrator:
+    ports:
+      - "${SCAFFOLD_LAN_ADDRESS:?set SCAFFOLD_LAN_ADDRESS in .env}:8000:8000"
+    environment:
+      # what the engine tells a machine-side developer about itself (§17.1418)
+      SCAFFOLD_LAN_URL: http://${SCAFFOLD_LAN_ADDRESS}:8000
+      SCAFFOLD_LAN_ALLOW: ${SCAFFOLD_LAN_ALLOW:?set SCAFFOLD_LAN_ALLOW in .env}
