@@ -307,6 +307,78 @@ def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
             "with the real key; the value never passes through you:\n" + "\n".join(lines))
 
 
+# ── §17.1416: the APIs the code calls, as they are now ──────────────────────
+
+#: the *arr endpoints whose answers a client must use rather than invent (live, ADD123: a lookup result
+#: carries no root folder, and the model filled `/movies` where Radarr's only root folder is
+#: `/media/movies` -- every new film would have been refused).
+_ARR_API = {"radarr": ("v3", ("rootfolder", "qualityprofile")),
+            "sonarr": ("v3", ("rootfolder", "qualityprofile")),
+            "lidarr": ("v1", ("rootfolder", "qualityprofile")),
+            "readarr": ("v1", ("rootfolder", "qualityprofile")),
+            "whisparr": ("v3", ("rootfolder", "qualityprofile"))}
+
+
+def api_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
+    """`(service, endpoint, command)` -- each a read run INSIDE the service's guest (§17.1342): the key
+    and the port come out of the app's own config.xml there, so neither leaves the guest."""
+    from app.modules import machine_values as mv
+    out: list[tuple[str, str, str]] = []
+    for svc in services or []:
+        name, gid = str(getattr(svc, "name", "") or "").lower(), str(getattr(svc, "guest", "") or "")
+        r = mv._SERVICES.get(name)
+        if name not in _ARR_API or r is None or not gid or getattr(svc, "vm", False):
+            continue
+        ver, endpoints = _ARR_API[name]
+        cfg = "cat " + " ".join(r.paths) + " 2>/dev/null"
+        key = f'$({cfg} | sed -n "s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p" | head -n 1)'
+        port = f'$({cfg} | sed -n "s:.*<Port>\\(.*\\)</Port>.*:\\1:p" | head -n 1)'
+        for ep in endpoints:
+            # only each object's own top-level fields: a quality profile is tens of KB of nested qualities
+            # and the read channel cuts it off mid-object (measured: not JSON past the first profile)
+            inner = (f'curl -s -m 10 -H "X-Api-Key: {key}" "http://127.0.0.1:{port}/api/{ver}/{ep}" '
+                     '| grep -E "^ {4}.(id|name|path).: "')     # no single quote: the read channel refuses `'\\''`
+            out.append((name, ep, f"pct exec {gid} -- sh -c {mv._sq(inner)}"))
+    return out
+
+
+_FIELD_RE = re.compile(r'^\s*"(id|name|path)":\s*"?(.*?)"?,?\s*$')
+
+
+def _summarise(body: str) -> str:
+    """The top-level `id`/`name`/`path` lines, one object per `id` (the *arr apps write `id` last)."""
+    rows: list[str] = []
+    cur: dict[str, str] = {}
+    for ln in str(body or "").splitlines():
+        m = _FIELD_RE.match(ln)
+        if not m:
+            continue
+        cur[m.group(1)] = m.group(2)
+        if m.group(1) == "id":
+            rows.append(", ".join(f"{k}={cur[k]!r}" for k in ("id", "name", "path") if k in cur))
+            cur = {}
+    return "; ".join(rows[:20])
+
+
+async def read_apis(spec, services: Optional[list]) -> str:
+    """§17.1416 — what the services the code calls hold NOW, for the prompt. The model is handed the
+    service's own files (§17.1412) but never the state of the APIs its code talks to, so it invented the
+    values those APIs hold. Read like the files: read-only, off the machine, just now."""
+    from app.modules import service_truth as st
+    lines: list[str] = []
+    for name, ep, cmd in api_reads(services):
+        ok, body = await st._probe(spec, cmd)
+        got = _summarise(body) if ok else ""
+        addr = next((getattr(s, "address", "") for s in services or [] if str(getattr(s, "name", "")).lower() == name), "")
+        lines.append(f"- {name}{f' ({addr})' if addr else ''} /api/{_ARR_API[name][0]}/{ep}: "
+                     + (got or "(could not be read just now)"))
+    if not lines:
+        return ""
+    return ("THE APIS YOUR CODE CALLS, AS THEY ARE NOW (read off the machine just now). Where your code needs one of "
+            "these values -- a root folder, a quality profile -- use what the service holds (read it from the API at "
+            "run time, or use these); never invent a default:\n" + "\n".join(lines))
+
+
 FILES_SCHEMA = {
     "type": "object",
     "properties": {
