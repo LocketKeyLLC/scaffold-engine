@@ -709,6 +709,13 @@ def elevate(command: str, keep: str = "") -> str:
     secret names, which the inner shell expands, so no value enters argv.
     """
     body = _SUDO_RE.sub("", command or "", count=1).strip()
+    # §17.1429 — `NAME="$NAME" cmd`: sudo would LOG `NAME=<value>` (live: the host's journal held a panel
+    # password). `--preserve-env` (keep) already carries the name, so the prefix is dropped here.
+    while True:
+        m = re.match(r"""([A-Z][A-Z0-9_]{0,63})=(["']?)\$\{?\1\}?\2\s+""", body)
+        if not m:
+            break
+        body = body[m.end():]
     if has_shell_operator(body):
         return f"sudo -n {keep}bash -c {shlex.quote(body)}"
     return f"sudo -n {keep}{body}"
