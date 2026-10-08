@@ -355,13 +355,19 @@ _MARK_RE = re.compile(r"@@SCAFFOLD:([A-Z][A-Z0-9_]{2,60})@@")
 
 #: §17.1428 — the marker filler: value from the environment (never argv), plain string replace, JSON-escaped
 #: inside a .json file. No `$` anywhere, so no shell-level gate can read it as a variable.
+#: §17.1429 — opened `r+` (no O_CREAT): the staged file belongs to the runner's user in sticky /tmp, and
+#: `fs.protected_regular` refuses even root an O_CREAT open of it (live: PermissionError on ADD127).
 _FILL_PROG = ("import json, os, sys\n"
               "path, mark = sys.argv[1], sys.argv[2]\n"
               "value = os.environ['SCAFFOLD_V']\n"
               "if path.endswith('.json'):\n"
               "    value = json.dumps(value, ensure_ascii=False)[1:-1]\n"
-              "text = open(path, encoding='utf-8').read()\n"
-              "open(path, 'w', encoding='utf-8').write(text.replace(mark, value))\n")
+              "f = open(path, 'r+', encoding='utf-8')\n"
+              "text = f.read()\n"
+              "f.seek(0)\n"
+              "f.write(text.replace(mark, value))\n"
+              "f.truncate()\n"
+              "f.close()\n")
 RUNNER_HELD = "@runner"          # §17.1426 — the value lives in the runner's secret store, injected at run time
 
 

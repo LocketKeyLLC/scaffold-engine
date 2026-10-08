@@ -466,6 +466,29 @@ async def write_files_on(spec, files: list[dict]) -> list[dict]:
     return done
 
 
+#: §17.1429 — `NAME="$NAME" cmd`: a leading self-assignment of a secret. The runner elevates with
+#: `sudo -n --preserve-env=NAME …`, and sudo LOGS every `NAME=value` it is handed on the command line:
+#: live, 2026-10-08, the host's journal recorded `ENV=PANEL_PASSWORD=<the value>` for ADD127's delivery.
+#: `--preserve-env` already carries the name; the prefix only added the log line.
+_SELF_PREFIX_RE = re.compile(r"""^\s*([A-Z][A-Z0-9_]{0,63})=(["']?)\$\{?\1\}?\2\s+""")
+
+
+def secret_prefixes_as_references(cmd: str) -> str:
+    """`A="$A" B="$B" bash x.sh` -> `bash x.sh # $A $B`: the runner still sees the names in the text
+    (so it injects them, out of band) and sudo never sees a `NAME=value` to log."""
+    names: list[str] = []
+    rest = cmd or ""
+    while True:
+        m = _SELF_PREFIX_RE.match(rest)
+        if not m:
+            break
+        names.append(m.group(1))
+        rest = rest[m.end():]
+    if not names:
+        return cmd
+    return rest.rstrip() + " # " + " ".join(f"${n}" for n in names)
+
+
 async def run_block(spec, commands: list[str], *, on_progress=None,
                     env: dict[str, str] | None = None) -> list[dict]:
     """Run the approved commands in order through the runner; stop at the
@@ -482,6 +505,7 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
     token = runner_token(spec)
     done: list[dict] = []
     for i, cmd in enumerate(commands, 1):
+        cmd = secret_prefixes_as_references(cmd)        # §17.1429 — before the approval is signed over it
         ap = mint_approval(cmd, token)
         payload = {"command": cmd, "approval": ap, "timeout_s": RUN_COMMAND_TIMEOUT_S}
         needed = {n: v for n, v in (env or {}).items() if f"${n}" in cmd or "${" + n + "}" in cmd}
