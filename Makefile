@@ -84,6 +84,7 @@ _TEST_MOUNTS = -v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/tests:/code/tests:ro -
 	-v $(CURDIR)/docs:/code/docs:ro -v $(CURDIR)/pyproject.toml:/code/pyproject.toml:ro -v $(CURDIR)/presets:/code/presets:ro \
 	-v $(CURDIR)/rules:/code/rules:ro -v $(CURDIR)/sgconfig.yml:/code/sgconfig.yml:ro -v $(CURDIR)/.env.example:/code/.env.example:ro \
 	-v $(CURDIR)/.github:/code/.github:ro \
+	-v $(CURDIR)/docker-compose.yml:/code/docker-compose.yml:ro -v $(CURDIR)/docker-compose.lan.yml:/code/docker-compose.lan.yml:ro \
 	-v $(CURDIR)/Makefile:/code/Makefile:ro
 _TEST_RUN_PRE = docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$(TEST_DB_URL)" \
 	-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e HOME=/tmp -e COVERAGE_FILE=/tmp/.coverage \

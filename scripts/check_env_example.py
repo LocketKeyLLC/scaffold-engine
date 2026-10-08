@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-COMPOSE_FILES = ["docker-compose.yml", "docker-compose.dev.yml"]
+COMPOSE_FILES = ["docker-compose.yml", "docker-compose.dev.yml", "docker-compose.lan.yml"]
 
 # Compose-internal knobs an operator never sets per-install via .env.example
 # documentation (add sparingly, with a reason):

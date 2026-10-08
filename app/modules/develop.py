@@ -145,6 +145,38 @@ def done_checks(node: Optional[dict], host: Host) -> list[str]:
     return list(dict.fromkeys(checks))
 
 
+NO_OWN_CHECK = "names no command the engine can run to see the feature work"
+
+
+def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
+    """§17.1418 — a developed step needs a check of ITS feature. `done_checks` always adds the unit's
+    `is-active`, which the delivery itself makes true; a step whose text names nothing else would be
+    recorded done while its route answers a connection error. Live: ADD124 ("returns the engine's
+    /health with status healthy", in prose) was offered with `is-active` as its only check."""
+    if acceptance_checks(node) or len(done_checks(node, host)) > 1:
+        return []
+    return [{"command": "(the step's done-condition)", "why": (
+        f"this step {NO_OWN_CHECK}: its only check would be `systemctl is-active {host.unit}`, which the "
+        f"delivery makes true by restarting the unit, so the step would be recorded done whether the feature "
+        f"works or not. Its text must name the check in backticks, as a command run on the machine -- e.g. "
+        f"`{'qm guest exec' if host.vm else 'pct exec'} {host.guest} -- curl -s http://127.0.0.1:<port>/api/<route>`.")}]
+
+
+def engine_doc(node: Optional[dict]) -> str:
+    """§17.1418 — what a machine-side developer must know about THIS engine, when the step is about it.
+    Live: ADD124's route was pointed at `127.0.0.1:3000` -- the container itself, on an invented port."""
+    # the engine as a SERVICE the step reaches -- not any mention ("proven by the engine's rehearsal")
+    if not re.search(r"scaffold-engine|engine's own (?:ai )?(?:surface|api|health|address)", _text(node), re.I):
+        return ""
+    url, allow = os.environ.get("SCAFFOLD_LAN_URL", ""), os.environ.get("SCAFFOLD_LAN_ALLOW", "")
+    if not url:
+        return ("THE ENGINE ITSELF (scaffold-engine) is NOT reachable from the operator's machines: it listens on "
+                "its own host's loopback only. Do not invent an address for it.")
+    return (f"THE ENGINE ITSELF (scaffold-engine): {url} -- reachable from {allow or 'one allowed machine'} only. "
+            f"`GET {url}/health` needs no key and answers JSON with \"status\": \"healthy\"; every other route "
+            f"needs the engine's API key. Never 127.0.0.1 or localhost for it: from a guest, that is the guest.")
+
+
 def acceptance_checks(node: Optional[dict]) -> list[str]:
     """§17.1414 — the step's own checks that WRITE (ADD123: a POST that asks Radarr for a film). They
     cannot be verified read-only, and the sandbox cannot reach another machine's API, so they run as

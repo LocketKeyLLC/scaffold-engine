@@ -2788,12 +2788,19 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             and the best version go back to the model."""
             from app.modules import service_truth as _st_dev
             _nk_dev = str(run_node.get("node_key") or "")
+            _no_check = develop.own_check_refusal(run_node, host)      # §17.1418 — no check, no run
+            if _no_check:
+                logger.warning("develop_no_own_check job=%s node=%s", job_id, _nk_dev)
+                return {**empty_frame, "refused": list(empty_frame.get("refused") or []) + _no_check,
+                        "suggested": "myself"}
             workspace = await develop.read_workspace(spec, host)
             checks = develop.done_checks(run_node, host)
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
             creds = develop.credentials_for(_services)        # §17.1415 — keys read on the machine at delivery
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
+            if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
+                facts = f"{facts}\n\n{develop.engine_doc(run_node)}"
             apis = await develop.read_apis(spec, _services)   # §17.1416 — what the called APIs hold now
             if apis:
                 facts = f"{facts}\n\n{apis}"

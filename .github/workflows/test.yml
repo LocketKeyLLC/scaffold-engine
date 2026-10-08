@@ -305,6 +305,8 @@ jobs:
             -v "$PWD/sgconfig.yml:/code/sgconfig.yml:ro" \
             -v "$PWD/.github:/code/.github:ro" \
             -v "$PWD/.env.example:/code/.env.example:ro" \
+            -v "$PWD/docker-compose.yml:/code/docker-compose.yml:ro" \
+            -v "$PWD/docker-compose.lan.yml:/code/docker-compose.lan.yml:ro" \
             -v "$PWD/Makefile:/code/Makefile:ro" \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
