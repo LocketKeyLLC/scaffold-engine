@@ -31,6 +31,15 @@ def _result(rowcount: int = 0, mappings_first=None, mappings_all=None, scalar=No
     return r
 
 
+def _scalars(values):
+    """A result whose .scalars().all() is `values` (§17.1434's revive SELECT)."""
+    r = MagicMock()
+    sc = MagicMock()
+    sc.all.return_value = list(values)
+    r.scalars.return_value = sc
+    return r
+
+
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_start_session_rejects_unknown_job():
@@ -139,7 +148,7 @@ async def test_start_session_returns_session_dict_and_commits():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
-        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
+        _scalars([]),                       # §17.1434 revive: no finished step on a pending node
         _result(scalar=4),                  # SELECT total
         _result(scalar=4),                  # SELECT pending
     ]
@@ -170,7 +179,7 @@ async def test_start_session_on_awaiting_assist_seeds_directly():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
-        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
+        _scalars([]),                       # §17.1434 revive: no finished step on a pending node
         _result(scalar=7),                  # SELECT total
         _result(scalar=7),                  # SELECT pending
     ]
@@ -227,7 +236,7 @@ async def test_start_session_seeds_environment_from_sibling():
         _result(),                          # UPDATE session metadata (seed)
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
-        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
+        _scalars([]),                       # §17.1434 revive: no finished step on a pending node
         _result(scalar=3),                  # SELECT total
         _result(scalar=3),                  # SELECT pending
     ]
@@ -261,7 +270,7 @@ async def test_start_session_existing_session_does_not_seed():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
-        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
+        _scalars([]),                       # §17.1434 revive: no finished step on a pending node
         _result(scalar=3),                  # SELECT total
         _result(scalar=3),                  # SELECT pending
     ]

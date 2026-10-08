@@ -22,13 +22,13 @@ def _start_src() -> str:
 def test_a_finished_session_is_revived_on_the_steps_the_plan_has_open():
     start = _start_src()
     i = start.index("§17.1434")
-    body = start[i:i + 3000]
+    body = start[i:i + 3500]
     assert "if not reopening:" in body
-    assert "d.status NOT IN ('done', 'skipped')" in body                       # only what the plan has open
-    assert "s.status NOT IN ('pending', 'presented', 'awaiting_input', 'submitted')" in body
-    assert "guidance_meta = '{}'::jsonb, guidance_status = 'none'" in body    # NOT NULL columns (dry run)
-    assert "SET status = 'active', completed_at = NULL, current_node_key = NULL" in body
-    # before the totals that decide whether the session is "stranded" and gets finalized again
+    assert "d.status = 'pending'" in body                                         # a pending plan node only
+    assert "s.status IN ('committed', 'skipped', 'handed_off', 'escalated')" in body
+    assert "ORDER BY d.execution_order DESC" in body                              # earliest ends as the cursor
+    assert "_reopen_step_mirrored(db=db, job_id=job_id, session_id=session_id, node_key=_nk" in body   # FSM + mirror
+    assert body.index("SET status = 'active'") < body.index("_reopen_step_mirrored(")                  # cursor needs active
     assert start.index("§17.1434") < start.index("if total and not pending and not reopening:")
 
 

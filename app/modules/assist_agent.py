@@ -333,40 +333,33 @@ async def start_assist_session(
     # §17.1434 — a job with OPEN steps whose walkthrough session already finished. Live, 2026-10-08: ADD4
     # (the router walkthrough) was reopened on a `blocked` job; "Walk me through it" returned the job's
     # session from 2026-08-27 -- still `completed`, its ADD4 step still `committed`, the cursor on ADD65 --
-    # so the operator got a finished session with no Guide me button. Bring it back to life on exactly
-    # the steps the plan has open again; nothing the plan still counts done is touched.
+    # so the operator got a finished session with no Guide me button. Bring it back to life on exactly the
+    # steps whose plan node is pending again, through the same mirrored reopen ↩ Back a step uses (FSM
+    # oracle, both tables, cached guidance dropped, the cursor moved) -- latest first, so the EARLIEST open
+    # step ends up as the cursor. A failed plan node is not revived: a pending step must sit next to a
+    # pending node (the mirror invariant).
     if not reopening:
-        revived = (await db.execute(
+        _revive = (await db.execute(
             text("""
-                UPDATE assist_steps s
-                   SET status = 'pending', evidence = NULL, evidence_kind = NULL,
-                       presented_at = NULL, submitted_at = NULL, committed_at = NULL,
-                       guidance = NULL, guidance_meta = '{}'::jsonb, guidance_status = 'none',
-                       guidance_generated_at = NULL, divergence = FALSE,
-                       replan_triggered = FALSE, updated_at = NOW()
-                  FROM dag_nodes d
-                 WHERE s.session_id = :sid AND d.job_id = s.job_id AND d.node_key = s.node_key
-                   AND d.status NOT IN ('done', 'skipped')
-                   AND s.status NOT IN ('pending', 'presented', 'awaiting_input', 'submitted')
+                SELECT s.node_key
+                  FROM assist_steps s
+                  JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND d.status = 'pending'
+                   AND s.status IN ('committed', 'skipped', 'handed_off', 'escalated')
+                 ORDER BY d.execution_order DESC NULLS FIRST, s.node_key DESC
             """),
             {"sid": session_id},
-        )).rowcount
-        if revived or (sess_row["status"] not in ("active", "paused")):
+        )).scalars().all()
+        if _revive:
             await db.execute(
-                text("""
-                    UPDATE assist_sessions
-                       SET status = 'active', completed_at = NULL, current_node_key = NULL, updated_at = NOW()
-                     WHERE id = :sid AND status <> 'active'
-                       AND EXISTS (SELECT 1 FROM assist_steps WHERE session_id = :sid AND status = 'pending')
-                """),
+                text("UPDATE assist_sessions SET status = 'active', completed_at = NULL, updated_at = NOW() "
+                     "WHERE id = :sid AND status <> 'active'"),
                 {"sid": session_id},
             )
-            await db.execute(
-                text("UPDATE assist_sessions SET current_node_key = NULL WHERE id = :sid AND current_node_key IN "
-                     "(SELECT node_key FROM dag_nodes WHERE job_id = :jid AND status IN ('done', 'skipped'))"),
-                {"sid": session_id, "jid": job_id},
-            )
-            logger.info("assist_session_revived session_id=%s job_id=%s steps=%s", session_id, job_id, revived)
+            for _nk in _revive:
+                await _reopen_step_mirrored(db=db, job_id=job_id, session_id=session_id, node_key=_nk,
+                                            preserve_guidance=False)
+            logger.info("assist_session_revived session_id=%s job_id=%s steps=%s", session_id, job_id, list(_revive))
 
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
