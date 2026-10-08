@@ -2797,7 +2797,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             workspace = await develop.read_workspace(spec, host)
             checks = develop.done_checks(run_node, host)
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
-            creds = develop.credentials_for(_services, (policy or {}).get("secrets"), run_node)   # §17.1415/§17.1426
+            # §17.1426/§17.1427 — the runner's own secrets file AND the engine's encrypted store (`held`): the
+            # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it
+            creds = develop.credentials_for(_services, list((policy or {}).get("secrets") or [])
+                                            + list((policy or {}).get("held") or []), run_node)
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
@@ -2833,7 +2836,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
                 _dead = (develop.calls_a_dead_path(files, status)         # §17.1422
-                         + develop.values_put_into_html_attributes(files))  # §17.1424
+                         + develop.values_put_into_html_attributes(files)   # §17.1424
+                         + develop.a_secret_written_in_the_clear(files, creds))   # §17.1427
                 if _dead:
                     fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}
                 sc = develop.score(fr, _rh_reports.get(rb))

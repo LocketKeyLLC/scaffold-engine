@@ -512,6 +512,29 @@ def values_put_into_html_attributes(files: dict[str, str]) -> list[dict]:
     return out
 
 
+def a_secret_written_in_the_clear(files: dict[str, str], creds: Optional[dict[str, str]]) -> list[dict]:
+    """§17.1427 — a literal value assigned to a secret the runner holds. Live, ADD127's unit file said
+    `Environment=PANEL_PASSWORD=defrusciohomelab.duckdns.org`: the model, never shown the marker, invented
+    the panel's password -- the public domain name -- and wrote it in the clear. Only the marker (filled at
+    delivery) or a lookup (`process.env.X`, `$X`) may stand where the value goes."""
+    names = [n for n, r in (creds or {}).items() if r == RUNNER_HELD]
+    out: list[dict] = []
+    for name in names:
+        lit = re.compile(rf"\b{re.escape(name)}\s*[\"']?\s*[=:]\s*[\"']?(?!@@SCAFFOLD:|\$|process\.env)([^\s\"',;}}]+)")
+        for path, content in (files or {}).items():
+            m = lit.search(content or "")
+            if not m:
+                continue
+            out.append({"command": f"{path}: {name}=…", "why": (
+                f"`{path}` assigns a literal value to {name}, a secret the RUNNER holds: a value written here is "
+                f"invented, and it sits in the file in the clear. Put `{SECRET_MARK.format(name=name)}` where "
+                f"the value goes -- the delivery fills it from the runner's store on the machine, and the "
+                f"engine never sees it -- e.g. `Environment={name}={SECRET_MARK.format(name=name)}` in a unit "
+                f"file, then read `process.env.{name}`.")})
+            break
+    return out
+
+
 def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> list[dict]:
     """§17.1422 — the version's code calls a path the engine MEASURED as not answering. Live, ADD125: told
     `/api/stats/summary` → 200 and `/admin/api.php?summary` → 400 (Pi-hole v6.4.3), the model still wrote
