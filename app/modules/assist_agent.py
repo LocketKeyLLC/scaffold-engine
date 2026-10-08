@@ -50,6 +50,9 @@ _VALID_START_STATUSES = (
     # here specifically so the operator drives it via /assist; its nodes are
     # already 'pending', so start seeds steps directly (no re-open reset needed).
     "awaiting_assist",
+    # §17.1433 — a job parked on a decision can still be walked through: the operator chose to do the
+    # remaining steps themselves, guided. Refusing it left the router walkthrough unreachable.
+    "awaiting_decision",
     # Allow re-entry from an existing assist status — start_assist_session
     # is idempotent on (job_id) via the UNIQUE constraint.
     "assisted_executing", "assisted_running", "assisted_paused",

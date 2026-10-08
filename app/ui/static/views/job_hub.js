@@ -72,6 +72,15 @@ const ASSIST_STATUSES = new Set([
   "assisted_executing", "assisted_running", "assisted_paused", "awaiting_assist",
 ]);
 
+// §17.1433 — a job the engine stopped on (blocked, failed, or waiting on a decision) must still let
+// the operator be WALKED THROUGH its remaining steps. Live, 2026-10-08: the router walkthrough (ADD4)
+// was the first open step of a `blocked` job, and the page offered only "Fix" -> the autonomous run
+// view; "Walk me through it" existed only on the Plan stage before a job's first run. No path at all.
+const WALKTHROUGH_OFFERED = new Set(["blocked", "failed", "awaiting_decision"]);
+export function walkthroughOffered(status) {
+  return WALKTHROUGH_OFFERED.has(String(status || ""));
+}
+
 // The approval gate is a moment, not a place (operator decision): while the
 // job sits at (or before) the gate, Idea and Approve are the same page.
 export const GATE_STATUSES = new Set(["pending", "refining", "awaiting_confirmation"]);
@@ -216,7 +225,26 @@ function renderDrawing(container, jobId, job) {
 
 // ── Run ──────────────────────────────────────────────────────────────
 function renderRun(container, jobId, job, ctx, opts = {}) {
-  if (!ASSIST_STATUSES.has(job.status)) return renderTheater(container, jobId, ctx);
+  if (!ASSIST_STATUSES.has(job.status)) {
+    if (!walkthroughOffered(job.status)) return renderTheater(container, jobId, ctx);
+    // §17.1433 — the run view, with the walkthrough one click away above it
+    const host = el("div");
+    const btn = el("button", { class: "btn btn-sm btn-primary", text: "✦ Walk me through it",
+      title: "You do each remaining step yourself; the engine guides you screen by screen and checks the result." });
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const was = btn.textContent;
+      btn.textContent = "Starting…";
+      const ok = await startAssistFor(api, jobId, toast);
+      if (!ok) { btn.disabled = false; btn.textContent = was; }
+    });
+    mount(container, el("div", {},
+      el("div", { class: "row row-wrap stage-hint-row" },
+        el("span", { class: "dim stage-hint", text: "Some remaining steps are yours to do (a router app, a phone, a screen the engine cannot reach). The engine can walk you through them." }),
+        el("span", { class: "spacer" }), btn),
+      host));
+    return renderTheater(host, jobId, ctx);
+  }
   // §17.1209 — RESOLVE the session, do not start one. This was
   // `POST /assist/start` on the comment that it was "idempotent,
   // unique-per-job". It is idempotent about creating a session and about
