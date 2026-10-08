@@ -139,6 +139,7 @@ async def test_start_session_returns_session_dict_and_commits():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
+        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
         _result(scalar=4),                  # SELECT total
         _result(scalar=4),                  # SELECT pending
     ]
@@ -169,6 +170,7 @@ async def test_start_session_on_awaiting_assist_seeds_directly():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
+        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
         _result(scalar=7),                  # SELECT total
         _result(scalar=7),                  # SELECT pending
     ]
@@ -225,6 +227,7 @@ async def test_start_session_seeds_environment_from_sibling():
         _result(),                          # UPDATE session metadata (seed)
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
+        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
         _result(scalar=3),                  # SELECT total
         _result(scalar=3),                  # SELECT pending
     ]
@@ -258,6 +261,7 @@ async def test_start_session_existing_session_does_not_seed():
         }),
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
+        _result(rowcount=0),                # §17.1434 revive: nothing reopened, session already active
         _result(scalar=3),                  # SELECT total
         _result(scalar=3),                  # SELECT pending
     ]

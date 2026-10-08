@@ -330,6 +330,44 @@ async def start_assist_session(
             {"sid": session_id},
         )
 
+    # §17.1434 — a job with OPEN steps whose walkthrough session already finished. Live, 2026-10-08: ADD4
+    # (the router walkthrough) was reopened on a `blocked` job; "Walk me through it" returned the job's
+    # session from 2026-08-27 -- still `completed`, its ADD4 step still `committed`, the cursor on ADD65 --
+    # so the operator got a finished session with no Guide me button. Bring it back to life on exactly
+    # the steps the plan has open again; nothing the plan still counts done is touched.
+    if not reopening:
+        revived = (await db.execute(
+            text("""
+                UPDATE assist_steps s
+                   SET status = 'pending', evidence = NULL, evidence_kind = NULL,
+                       presented_at = NULL, submitted_at = NULL, committed_at = NULL,
+                       guidance = NULL, guidance_meta = '{}'::jsonb, guidance_status = 'none',
+                       guidance_generated_at = NULL, divergence = FALSE,
+                       replan_triggered = FALSE, updated_at = NOW()
+                  FROM dag_nodes d
+                 WHERE s.session_id = :sid AND d.job_id = s.job_id AND d.node_key = s.node_key
+                   AND d.status NOT IN ('done', 'skipped')
+                   AND s.status NOT IN ('pending', 'presented', 'awaiting_input', 'submitted')
+            """),
+            {"sid": session_id},
+        )).rowcount
+        if revived or (sess_row["status"] not in ("active", "paused")):
+            await db.execute(
+                text("""
+                    UPDATE assist_sessions
+                       SET status = 'active', completed_at = NULL, current_node_key = NULL, updated_at = NOW()
+                     WHERE id = :sid AND status <> 'active'
+                       AND EXISTS (SELECT 1 FROM assist_steps WHERE session_id = :sid AND status = 'pending')
+                """),
+                {"sid": session_id},
+            )
+            await db.execute(
+                text("UPDATE assist_sessions SET current_node_key = NULL WHERE id = :sid AND current_node_key IN "
+                     "(SELECT node_key FROM dag_nodes WHERE job_id = :jid AND status IN ('done', 'skipped'))"),
+                {"sid": session_id, "jid": job_id},
+            )
+            logger.info("assist_session_revived session_id=%s job_id=%s steps=%s", session_id, job_id, revived)
+
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
         {"sid": session_id},
@@ -1699,7 +1737,8 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
                        n.status              AS node_status,
                        n.execution_order,
                        n.depends_on,
-                       (COALESCE(s.guidance, '') <> '') AS has_guidance
+                       (COALESCE(s.guidance, '') <> '') AS has_guidance,
+                       s.presented_at        -- §17.1434: the page's auto-guide counts only this pass's turns
                   FROM assist_steps s
                   JOIN dag_nodes n
                     ON n.job_id = s.job_id AND n.node_key = s.node_key
