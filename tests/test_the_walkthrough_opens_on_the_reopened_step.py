@@ -44,4 +44,5 @@ def test_the_auto_guide_counts_only_this_pass_and_the_panel_has_a_way_back():
     ag = js[js.index("async function maybeAutoGuide()"):]
     ag = ag[:ag.index("\n  }\n")]
     assert "st.presented_at" in ag and "Date.parse(t.created_at) >= since" in ag
+    assert "const has = since != null &&" in ag            # §17.1435b — unclaimed = no current guide
     assert js.count('text: "← Back to the walkthrough"') == 1 and "back(), el(\"span\"" in js
