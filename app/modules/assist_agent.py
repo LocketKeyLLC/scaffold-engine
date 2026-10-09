@@ -2374,6 +2374,7 @@ async def run_step_fix(
         step_recap=mem.recap,  # §17.1027 — the OPEN item is the research fallback
         operator_conversation=_operator_text(mem.history),  # §17.1028
         runner_ledger=_runner_ledger,  # §17.1158
+        session_id=session_id, db=db,  # §17.1437 — the step's kept sources
     )
     await _record_sourced_values(  # §17.1030
         session_id=session_id, node_key=nk,

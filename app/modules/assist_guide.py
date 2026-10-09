@@ -398,6 +398,7 @@ from app.modules.assist_placeholders import (
 
 # §17.856 — the research subsystem moved to app/modules/assist_research_lib.py;
 # re-exported so assist_guide.<NAME> and external callers keep resolving.
+from app.modules.step_sources import keep_and_recall  # §17.1437
 from app.modules.assist_research_lib import (
     _is_useful_grounding,
     _detect_unknowns,
@@ -2542,6 +2543,8 @@ async def generate_guidance(
     operator_conversation: Optional[str] = None,  # §17.1029 — operator-authored dialogue only
     flagged: Optional[set] = None,  # §17.1029 — values earlier replies flagged
     runner_ledger: Optional[list[dict]] = None,  # §17.1166 — already run this session
+    session_id: Optional[str] = None,  # §17.1437 — the step's kept sources
+    db=None,
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -2576,6 +2579,8 @@ async def generate_guidance(
             sources, environment=environment, operator_notes=operator_notes,
             ctx=ctx, node_key=node_key, domain=domain,
         )
+        # §17.1437 — parity with the stream guide.
+        sources = await keep_and_recall(db, session_id=session_id, node_key=node_key, sources=sources)
 
     system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
     user = _build_guide_user_prompt(
@@ -3936,6 +3941,8 @@ async def generate_fix(
     step_recap: Optional[str] = None,  # §17.1027 — the OPEN item is the fallback subject
     operator_conversation: Optional[str] = None,  # §17.1028 — operator-authored dialogue only
     runner_ledger: Optional[list[dict]] = None,  # §17.1158 — what the local runner already ran this session
+    session_id: Optional[str] = None,  # §17.1437 — the step's kept sources
+    db=None,
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -4036,6 +4043,8 @@ async def generate_fix(
                 ))
         except Exception as exc:
             logger.debug("assist_fix_error_query_failed: %s", exc)
+        # §17.1437 — the pages this step's research found before, ranked with the fresh ones.
+        sources = await keep_and_recall(db, session_id=session_id, node_key=node_key, sources=sources)
         sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
         # §17.974b — a durable record of what this fix actually researched.
         # `guidance_meta.research_sources` is returned by this function and then
@@ -5258,6 +5267,7 @@ async def ensure_guidance(
         conversation=conversation,
         operator_conversation=operator_conversation, flagged=flagged,  # §17.1029
         runner_ledger=_ledger,  # §17.1166
+        session_id=session_id, db=db,  # §17.1437
     )
     # §17.851 — code-enforced placeholder resolution (see resolve_placeholders).
     from app.config import settings as _settings
@@ -5404,6 +5414,8 @@ async def generate_guidance_stream(
             sources, environment=environment, operator_notes=operator_notes,
             ctx=ctx, node_key=node_key, domain=domain,
         )
+        # §17.1437 — what this step's research found on an earlier pass rides along.
+        sources = await keep_and_recall(db, session_id=session_id, node_key=node_key, sources=sources)
 
     # §17.1166 — a walkthrough must not ask for what the runner already ran.
     # Fetched HERE (this path has db + session_id) so every caller of the
