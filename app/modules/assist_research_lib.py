@@ -277,6 +277,10 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None,
     results = await _searxng_structured(query)
     if skip is not None:
         results = [r for r in results if not skip(r)]
+    # §17.1436 — rank by relevance BEFORE choosing which pages to fetch: the top-N by engine order were
+    # Spectrum's homepage and billing page; the page with the steps was never read.
+    from app.modules.research_extractors import relevant_search_results as _rel
+    results = _rel(query, results) or results
     if not results or top_n <= 0:
         return []
     try:

@@ -2561,6 +2561,7 @@ async def generate_guidance(
             max_queries=settings.assist_guide_max_research_queries,
             node_key=node_key,
             domain=domain,
+            deep=_is_ui_walkthrough(ctx),                     # §17.1436 — parity with the stream guide
             # §17.771 (Phase 3) — ground the option research in the operator's
             # actual system so a DECISION step's options are system-specific, not
             # a generic textbook list. render_environment_block folds in the
@@ -5295,6 +5296,19 @@ async def ensure_guidance(
 # ── Streaming generation (§17.493) ─────────────────────────────────────────
 
 
+#: §17.1436 — a step the operator performs in an app or admin page (a router app, a device's web UI). Its
+#: research must READ the top pages, not their search snippets: live, ADD4's snippets stopped one line
+#: short of "Set up an IP reservation for your device", and the walkthrough skipped the screen the
+#: operator actually landed on (Create IP Reservations).
+_UI_WALKTHROUGH_RE = re.compile(r"\b(?:app|router|admin page|web ?ui|web interface|portal|dashboard|"
+                                r"settings page|control panel ui|phone)\b", re.I)
+
+
+def _is_ui_walkthrough(ctx) -> bool:
+    tool = str(getattr(ctx, "tool", "") or "").lower()
+    return tool not in ("shell", "codegen") and bool(_UI_WALKTHROUGH_RE.search(str(getattr(ctx, "base_prompt", "") or "")))
+
+
 async def generate_guidance_stream(
     *,
     session_id: str,
@@ -5368,6 +5382,7 @@ async def generate_guidance_stream(
             task_text=ctx.base_prompt, tool=ctx.tool, role=role,
             max_queries=settings.assist_guide_max_research_queries,
             node_key=node_key, domain=domain,
+            deep=_is_ui_walkthrough(ctx),                     # §17.1436 — read the pages, not snippets
             # §17.854 (audit C1) — the STREAM path had dropped the §17.771
             # environment grounding the non-stream path passes, so a streamed
             # DECISION step (the SPA path) researched generic textbook options

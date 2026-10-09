@@ -927,6 +927,28 @@ def _brief_text(brief: dict | None) -> str:
     return "\n".join(p for p in parts if p)
 
 
+async def _drop_previous_pass(history: list[dict] | None, *, session_id: str, nk: str | None,
+                              db) -> tuple[list[dict] | None, bool]:
+    """§17.1436 — `(history, fresh)`. When the step is unclaimed, its earlier guide/fix replies are from a
+    previous pass: drop them from the history (matched by content, so the client's and the transcript's
+    history are both covered) and report `fresh` so the caller skips the step's saved recap."""
+    if not nk:
+        return history, False
+    presented = (await db.execute(
+        text("SELECT presented_at FROM assist_steps WHERE session_id = :sid AND node_key = :nk"),
+        {"sid": session_id, "nk": nk})).scalar()
+    if presented is not None:
+        return history, False
+    old = {str(r).strip() for r in (await db.execute(
+        text("SELECT content FROM assist_turns WHERE session_id = :sid AND node_key = :nk "
+             "AND role = 'assistant' AND kind IN ('guide', 'fix')"),
+        {"sid": session_id, "nk": nk})).scalars().all() if r}
+    if not history or not old:
+        return history, True
+    kept = [h for h in history if not (h.get("role") == "assistant" and str(h.get("content") or "").strip() in old)]
+    return kept, True
+
+
 async def assemble_generation_memory(
     *, session_id: str, nk: str, sess: dict, db,
     ctx: "StepContext | None" = None,
@@ -1002,7 +1024,16 @@ async def assemble_generation_memory(
     history = await _history_or_transcript(
         history=history, session_id=session_id, db=db, exclude_tail=exclude_tail,
     )
-    recap = await get_step_recap(
+    # §17.1436 — a FRESH pass of a step (unclaimed: no presented_at) is guided from what is true now, not
+    # from its previous pass. Live, ADD4 was reset and re-guided, and the stream still opened "📍 Where we
+    # are … Next: describe the first screen" and asked the operator to describe it again: its saved recap
+    # and the transcript's last turns were the old pass's "describe what you see" guides.
+    fresh = False
+    try:
+        history, fresh = await _drop_previous_pass(history, session_id=session_id, nk=nk, db=db)
+    except Exception as exc:
+        logger.warning("assist_previous_pass_filter_failed session=%s nk=%s err=%r", session_id, nk, exc)
+    recap = None if fresh else await get_step_recap(
         session_id=session_id, node_key=nk,
         title=title or (ctx.title if ctx else None) or nk, db=db,
     )
@@ -1694,7 +1725,9 @@ async def _reopen_step_mirrored(
                  "SET status='pending', committed_at=NULL, submitted_at=NULL, "
                  "    evidence=NULL, evidence_kind=NULL, presented_at=NULL, "
                  "    guidance=NULL, guidance_status='none', "
-                 "    guidance_generated_at=NULL, updated_at=NOW() "
+                 "    guidance_generated_at=NULL, "
+                 "    progress_recap=NULL, progress_recap_turns=0, "    # §17.1436 — the old pass's recap
+                 "    updated_at=NOW() "
                  "WHERE session_id=:sid AND node_key=:nk"),
             {"sid": session_id, "nk": node_key},
         )
