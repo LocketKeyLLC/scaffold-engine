@@ -246,7 +246,12 @@ _SCREEN_GROUNDING_DIRECTIVE = (
     "answer ('if you see X do…; if you see Y do…'). Give a straight-line sequence "
     "of navigation steps only once the starting screen is confirmed. This does NOT "
     "apply to an ordinary shell step: a command whose output you ask them to report "
-    "back is already self-confirming."
+    "back is already self-confirming.\n"
+    "§17.1436 — nor to a step that STARTS FROM A KNOWN ENTRY POINT the research covers: opening an app or a "
+    "settings page fresh IS a confirmed starting screen. Tell them to open it, then give the complete path the "
+    "sources describe, every screen in order with what they will see on it (including any screen the flow "
+    "requires first, such as reserving a device before forwarding to it). Ask what is on screen only when the "
+    "operator is somewhere mid-flow the sources do not cover, or reports a screen that does not match."
 )
 
 

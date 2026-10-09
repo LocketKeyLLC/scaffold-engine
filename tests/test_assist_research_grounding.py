@@ -174,10 +174,13 @@ def test_the_fix_path_keeps_its_deliberate_differences():
     """`deep=True` (§17.500 — troubleshooting wants doc content) and NO floor
     (§17.912 says only the guide path carries that defect) are intentional."""
     calls = _prepass_call_args()
-    fix = [c for c in calls if "deep" in c]
+    # §17.1436 — the two GUIDE calls now pass `deep` too (an app/router walkthrough reads its pages), so
+    # the fix path is the deep call WITHOUT the guide's floor; both guide calls carry deep identically.
+    fix = [c for c in calls if "deep" in c and "floor_when_empty" not in c]
     assert len(fix) == 1
-    assert "floor_when_empty" not in fix[0]
     assert "environment_block" in fix[0]      # §17.975
+    guides = [c for c in calls if "floor_when_empty" in c]
+    assert len(guides) == 2 and all("deep" in g for g in guides)
 
 
 def test_an_empty_research_result_is_logged_loudly():

@@ -48,30 +48,31 @@ def test_the_system_prompt_carries_the_rule_too():
     assert "distinctive" in s
 
 
-def test_the_relevance_gate_cannot_catch_leading_term_junk():
-    """Why this had to be fixed at GENERATION and not with another filter.
-
-    §17.988's gate drops results sharing no distinctive token with the query.
-    A python.org landing page returned for 'python markdown pdf library' shares
-    'python' — so it is legitimately kept, and no amount of gating removes it.
-    """
+def test_the_relevance_gate_now_drops_landing_pages():
+    """§17.1436 — this test used to pin that the gate COULD NOT drop leading-term landing pages (python.org
+    for 'python markdown pdf library'), and said: "if the gate ever DOES drop these, the generation-side
+    rule can be revisited". It does now -- a bare homepage never answers a how-to, and a long query needs
+    two of its words, not one. Live, the one-word rule let Spectrum's homepage and billing page outrank
+    the support page with the router's port-forwarding steps, and the walkthrough read the wrong pages.
+    The generation-side query-shape rule (§17.988) stays: it still keeps junk from being returned at all."""
     from app.modules.research_extractors import relevant_search_results
 
-    junk = [
-        {"title": "Welcome to Python.org",
-         "content": "The official home of the Python Programming Language"},
-        {"title": "Download Python | Python.org",
-         "content": "Download the latest version of Python"},
+    landing = [
+        {"title": "Welcome to Python.org", "content": "The official home of the Python Programming Language",
+         "url": "https://www.python.org/"},
+        {"title": "Spectrum Account Sign-In & Bill Pay", "content": "Sign in to your Spectrum account",
+         "url": "https://www.spectrum.net/?msockid=abc"},
     ]
-    kept = relevant_search_results("python markdown pdf library", junk)
-    assert len(kept) == 2, (
-        "if the gate ever DOES drop these, the generation-side rule can be "
-        "revisited — until then it is the only thing standing between the "
-        "distiller and a corpus of landing pages")
-
-    # Move the broad term off the front and the same pages stop being returned
-    # at all — which is the fix, and is not something a filter can do.
-    assert len(relevant_search_results("markdown pdf library python", junk)) == 2
+    answer = {"title": "Advanced WiFi: Advanced Settings | Spectrum Support",
+              "content": "select Router. Scroll down and select Advanced Settings. Select Port Forwarding & IP Reservations",
+              "url": "https://www.spectrum.net/support/internet/advanced-wifi-advanced-settings"}
+    # a homepage alone is kept (it can be the answer) but ranks behind any page with content
+    py_doc = {"title": "Markdown to PDF in Python — library comparison", "content": "python markdown pdf library",
+              "url": "https://example.org/guides/md-pdf"}
+    assert relevant_search_results("python markdown pdf library", landing[:1] + [py_doc])[0] is py_doc
+    # a long query needs two of its words: the sign-in page (only "spectrum") is out, the support page is first
+    got = relevant_search_results("Spectrum SAX1V1K port forwarding My Spectrum app steps", landing + [answer])
+    assert got == [answer]
 
 
 # ── §17.994 — drift, not just deletion ──────────────────────────────────

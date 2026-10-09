@@ -178,13 +178,34 @@ def relevant_search_results(
     want = _query_tokens(query)
     if not want:
         return results
-    kept: list[dict] = []
-    for r in results:
+    # §17.1436 — one shared word was enough, so "Spectrum" alone let Spectrum's HOMEPAGE and BILLING page
+    # through for "Spectrum SAX1V1K port forwarding My Spectrum app steps" -- ranked first, they were the
+    # pages the deep fetch read, while the support page with the exact steps sat lower. Now: a query with
+    # 4+ distinctive words needs 2 of them (a short query keeps 1: "Zenarmor pricing" answers "Zenarmor free
+    # vs paid"); a bare homepage ranks behind every page with content; and within that, by how many of the
+    # query's words a result shares (stable within a tie).
+    need = 2 if len(want) >= 4 else 1
+    scored: list[tuple[int, int, int, dict]] = []
+    for i, r in enumerate(results):
         hay = f"{r.get(title_key, '')} {r.get(content_key, '')}".lower()
         have = {t for t in re.split(r"[^a-z0-9]+", hay) if len(t) >= 3}
-        if want & have:
-            kept.append(r)
-    return kept
+        n = len(want & have)
+        if n >= need:
+            # a bare homepage ranks LAST (kept when it is all there is: it can be the answer to "what is X")
+            scored.append((1 if _is_bare_homepage(str(r.get("url") or "")) else 0, -n, i, r))
+    return [r for *_k, r in sorted(scored, key=lambda x: (x[0], x[1], x[2]))]
+
+
+def _is_bare_homepage(url: str) -> bool:
+    """`https://www.spectrum.com/` or `https://www.spectrum.net/?msockid=…` -- a site's front door."""
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url)
+    except Exception:
+        return False
+    return bool(u.netloc) and u.path in ("", "/")
 
 _EXTRACT_BATCH_FULL_PAGE = 5
 _EXTRACT_BATCH_SNIPPET = 10
