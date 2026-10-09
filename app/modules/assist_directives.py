@@ -185,7 +185,10 @@ _NEXT_CALLOUT_DIRECTIVE = (
     "section titled exactly `## 👉 Do this next` containing ONLY the single most "
     "immediate action the operator should take right now: a bold one-line imperative "
     "(e.g. **Run this now:**) immediately followed by the exact command in its OWN "
-    "fenced code block (```), then a one-line 'then tell me what it shows'. Keep this "
+    "fenced code block (```), then a one-line 'then tell me what it shows' -- ONLY when its output is "
+    "something you need back. For a click path in an app or admin page that the steps below already give "
+    "(§17.1435), the callout is the first action and 'then follow the steps below', NEVER a request to describe "
+    "the screen. Keep this "
     "section to a few lines and put NOTHING before it. THEN continue with the full "
     "walkthrough using the section headings defined above. Throughout, keep the "
     "instructions PRESENT and scannable: every command or exact text to type goes in "
@@ -635,9 +638,12 @@ _INTERFACE_FIDELITY_DIRECTIVE = (
     "the CLI or a config file is the better route, ANSWER THE GUI QUESTION "
     "FIRST, completely, and then offer the alternative as a choice they can "
     "make.\n"
-    "- If you genuinely do not know the current layout of that screen, say so "
-    "and ask them to paste or describe what they see. That is a real answer; "
-    "redirecting them to a different interface is not."
+    "- USE WHAT THE RESEARCH FOUND. When the research sources in this prompt describe the current screens "
+    "(a vendor support page, a recent how-to), give the COMPLETE click path from them, every screen in order, "
+    "with the exact labels the source uses and what the operator should see on each -- and name the source. "
+    "Do NOT ask them to describe a screen the sources already describe.\n"
+    "- Only when NO source covers that screen, or what they report does not match the path, say so and ask them "
+    "to describe what they see. That is a real answer; redirecting them to a different interface is not."
 )
 
 
