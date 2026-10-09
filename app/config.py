@@ -331,6 +331,9 @@ class Settings(BaseSettings):
     codegen_execution_check_enabled: bool = False
 
     searxng_url: str = "http://searxng:8080"
+    # §17.1438 — Ollama web search (ollama.com/settings/keys). Supplements a THIN SearXNG answer; empty = off.
+    ollama_web_search_key: str = ""
+    web_search_supplement_min_useful: int = 3
     redis_url: str = "redis://scaffold-redis:6379/0"
 
     # Embedding config

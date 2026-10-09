@@ -26,15 +26,18 @@ def _get_or_create(name: str, factory) -> httpx.AsyncClient:
 
 
 def _build_searxng() -> httpx.AsyncClient:
+    from app.utils.web_search_supplement import SupplementedSearchTransport
+    limits = httpx.Limits(
+        max_connections=10,
+        max_keepalive_connections=5,
+        keepalive_expiry=30,
+    )
     client = httpx.AsyncClient(
         base_url=settings.searxng_url,
         timeout=30.0,
         follow_redirects=True,
-        limits=httpx.Limits(
-            max_connections=10,
-            max_keepalive_connections=5,
-            keepalive_expiry=30,
-        ),
+        # §17.1438 — a thin SearXNG answer is supplemented by an API-keyed backend (no key → pass-through).
+        transport=SupplementedSearchTransport(httpx.AsyncHTTPTransport(limits=limits)),
     )
     logger.info("SearXNG client initialized: %s", settings.searxng_url)
     return client

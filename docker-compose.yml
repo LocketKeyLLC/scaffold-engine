@@ -426,6 +426,7 @@ services:
       MODEL_EMBEDDER_PIPELINE: nomic-embed-text
       MODEL_RERANKER: cross-encoder/ms-marco-MiniLM-L-12-v2  # §17.1124 — 26× cheaper per pair than Qwen3-Reranker-0.6B at equal golden-set quality
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OLLAMA_WEB_SEARCH_KEY: ${OLLAMA_WEB_SEARCH_KEY:-}  # §17.1438 — search backend when SearXNG is thin
       GITHUB_MAX_FILES: "50"
       # §17.801 — bound the research fetch/extract fan-out. The semaphore in
       # _fetch_and_extract spans the fetch AND the trafilatura/lxml parse, so
