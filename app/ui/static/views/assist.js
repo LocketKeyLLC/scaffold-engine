@@ -1130,11 +1130,16 @@ export function renderChat(container, sessionId, opts = {}) {
     sessionBtn.setAttribute("aria-expanded", show ? "true" : "false");
     if (show) {
       if (!sessionDrawer.childElementCount) {
+        // §17.1434 — a way back that cannot be missed: live, the operator opened this panel on a phone
+        // and found no return to the chat (the only exit was a small ✕ in the corner)
+        const back = () => el("button", { class: "btn btn-sm btn-primary", text: "← Back to the walkthrough", onClick: () => toggleSession(false) });
         mount(sessionDrawer,
           el("div", { class: "row follow-drawer-head" },
-            el("strong", { text: "This session" }), el("span", { class: "spacer" }),
+            back(), el("span", { class: "spacer" }),
             el("button", { class: "btn btn-sm btn-ghost", text: "✕", "aria-label": "Close session details", onClick: () => toggleSession(false) })),
-          belowGrid, briefSlot);
+          el("strong", { text: "This session" }),
+          belowGrid, briefSlot,
+          el("div", { class: "row" }, back()));
       }
       sessionDialog = openDialog(sessionDrawer, { label: "Session details", onClose: () => toggleSession(false), trap: false });
     } else if (sessionDialog) { sessionDialog.close(); sessionDialog = null; }
@@ -2364,7 +2369,12 @@ export function renderChat(container, sessionId, opts = {}) {
     if (!follow || autoGuided || guiding || disposed || !session) return;
     const key = workingKey(session, steps);
     if (!key || session.status !== "active") return;
-    const has = turns.some((t) => t && t.node_key === key && t.role === "assistant" && (t.kind === "guide" || t.kind === "fix"));
+    // §17.1434 — only guidance from THIS pass of the step counts: a reopened step keeps its old turns
+    // (ADD4's 2026-09-11 "find your public IP"), and counting them skipped the walkthrough entirely.
+    const st = (steps || []).find((s) => s && s.node_key === key);
+    const since = st && st.presented_at ? Date.parse(st.presented_at) : null;
+    const has = turns.some((t) => t && t.node_key === key && t.role === "assistant" && (t.kind === "guide" || t.kind === "fix")
+      && (since == null || !t.created_at || Date.parse(t.created_at) >= since - 1000));
     if (has) return;
     autoGuided = true;
     await runTurnStream({ command: "guide" });

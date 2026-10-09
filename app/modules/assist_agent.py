@@ -330,6 +330,37 @@ async def start_assist_session(
             {"sid": session_id},
         )
 
+    # §17.1434 — a job with OPEN steps whose walkthrough session already finished. Live, 2026-10-08: ADD4
+    # (the router walkthrough) was reopened on a `blocked` job; "Walk me through it" returned the job's
+    # session from 2026-08-27 -- still `completed`, its ADD4 step still `committed`, the cursor on ADD65 --
+    # so the operator got a finished session with no Guide me button. Bring it back to life on exactly the
+    # steps whose plan node is pending again, through the same mirrored reopen ↩ Back a step uses (FSM
+    # oracle, both tables, cached guidance dropped, the cursor moved) -- latest first, so the EARLIEST open
+    # step ends up as the cursor. A failed plan node is not revived: a pending step must sit next to a
+    # pending node (the mirror invariant).
+    if not reopening:
+        _revive = (await db.execute(
+            text("""
+                SELECT s.node_key
+                  FROM assist_steps s
+                  JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND d.status = 'pending'
+                   AND s.status IN ('committed', 'skipped', 'handed_off', 'escalated')
+                 ORDER BY d.execution_order DESC NULLS FIRST, s.node_key DESC
+            """),
+            {"sid": session_id},
+        )).scalars().all()
+        if _revive:
+            await db.execute(
+                text("UPDATE assist_sessions SET status = 'active', completed_at = NULL, updated_at = NOW() "
+                     "WHERE id = :sid AND status <> 'active'"),
+                {"sid": session_id},
+            )
+            for _nk in _revive:
+                await _reopen_step_mirrored(db=db, job_id=job_id, session_id=session_id, node_key=_nk,
+                                            preserve_guidance=False)
+            logger.info("assist_session_revived session_id=%s job_id=%s steps=%s", session_id, job_id, list(_revive))
+
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
         {"sid": session_id},
@@ -1699,7 +1730,8 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
                        n.status              AS node_status,
                        n.execution_order,
                        n.depends_on,
-                       (COALESCE(s.guidance, '') <> '') AS has_guidance
+                       (COALESCE(s.guidance, '') <> '') AS has_guidance,
+                       s.presented_at        -- §17.1434: the page's auto-guide counts only this pass's turns
                   FROM assist_steps s
                   JOIN dag_nodes n
                     ON n.job_id = s.job_id AND n.node_key = s.node_key
