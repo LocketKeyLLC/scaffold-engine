@@ -114,7 +114,12 @@ DEFAULT_SOURCE_SCORE = 0.50
 # currently refused by IP or CAPTCHA, but §17.1003's cooldown drops them
 # automatically after three consecutive failures and retries them later, so
 # they cost little while blocked and return on their own if the block lifts.
-_GENERAL_BACKBONE = ("bing,brave,startpage,mojeek,"
+# §17.1435 — `google cse` FIRST: the instance enables it by default (use_default_settings), and on
+# 2026-10-08 it was the ONLY general engine answering -- brave/mojeek/stackoverflow/superuser/askubuntu
+# suspended, startpage failing -- while it was absent from this list. Every walkthrough's research then
+# came from Bing alone, which answered "Spectrum SAX1V1K port forwarding My Spectrum app steps" with
+# Spectrum's homepage, and the router walkthrough asked the operator to describe their screens.
+_GENERAL_BACKBONE = ("google cse,bing,brave,startpage,mojeek,"
                      "github,stackoverflow,superuser,askubuntu")
 CATEGORY_ENGINES: dict[str, str] = {
     # §17.1005 — github/stackoverflow/superuser/askubuntu moved INTO the
@@ -131,7 +136,7 @@ CATEGORY_ENGINES: dict[str, str] = {
 # §17.712 — the 0-results fallback set: the widest general net (adds qwant +
 # wikipedia). Retried once when the category engines return nothing, so a single
 # transient CAPTCHA can't zero a query.
-SEARXNG_FALLBACK_ENGINES = "bing,brave,startpage,mojeek,qwant,wikipedia"   # §17.991
+SEARXNG_FALLBACK_ENGINES = "google cse,bing,brave,startpage,mojeek,qwant,wikipedia"   # §17.991 · §17.1435
 
 # §17.729 — generic filler that carries no topic signal, so a result matching
 # ONLY these isn't really relevant. Kept small + deliberately tech-flavored:
