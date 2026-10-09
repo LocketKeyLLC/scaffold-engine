@@ -2373,8 +2373,11 @@ export function renderChat(container, sessionId, opts = {}) {
     // (ADD4's 2026-09-11 "find your public IP"), and counting them skipped the walkthrough entirely.
     const st = (steps || []).find((s) => s && s.node_key === key);
     const since = st && st.presented_at ? Date.parse(st.presented_at) : null;
-    const has = turns.some((t) => t && t.node_key === key && t.role === "assistant" && (t.kind === "guide" || t.kind === "fix")
-      && (since == null || !t.created_at || Date.parse(t.created_at) >= since - 1000));
+    // §17.1435b — an UNCLAIMED step (no presented_at) has no current guide at all: every guide turn it has is
+    // from an earlier pass. Live: after ADD4 was reset, the page counted the old "describe what you see"
+    // turns because presented_at was empty, and never asked for the new researched guide.
+    const has = since != null && turns.some((t) => t && t.node_key === key && t.role === "assistant"
+      && (t.kind === "guide" || t.kind === "fix") && (!t.created_at || Date.parse(t.created_at) >= since - 1000));
     if (has) return;
     autoGuided = true;
     await runTurnStream({ command: "guide" });
