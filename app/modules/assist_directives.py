@@ -250,8 +250,15 @@ _SCREEN_GROUNDING_DIRECTIVE = (
     "§17.1436 — nor to a step that STARTS FROM A KNOWN ENTRY POINT the research covers: opening an app or a "
     "settings page fresh IS a confirmed starting screen. Tell them to open it, then give the complete path the "
     "sources describe, every screen in order with what they will see on it (including any screen the flow "
-    "requires first, such as reserving a device before forwarding to it). Ask what is on screen only when the "
-    "operator is somewhere mid-flow the sources do not cover, or reports a screen that does not match."
+    "requires first, such as reserving a device before forwarding to it).\n"
+    "§17.1437 — opening an app or settings page fresh is a confirmed starting screen WHETHER OR NOT a source "
+    "covers it, and so is any screen the operator has NAMED ('I'm on the router page'): give the next taps from "
+    "there. When no source in this prompt gives the path, say so in one line — your search found no current guide "
+    "THIS TIME; never claim that none is published — give the path as this product is generally laid out, marked "
+    "unconfirmed, and ask "
+    "them to tell you only where their screen differs. Ask what is on screen only when they are somewhere "
+    "neither of you has named, and then ask for the ONE thing you need (the title, or which of two labels is "
+    "there) — never a list of every menu and button on a screen."
 )
 
 
@@ -482,7 +489,9 @@ _DONE_CRITERION_DIRECTIVE = (
     "  1. a single OBSERVABLE condition that means this step is finished — something "
     "they can SEE on their own screen (an exact prompt, a status line, a page that "
     "loads, a service reported active). Never 'when it works' or 'when the "
-    "configuration is correct'; name what is visible.\n"
+    "configuration is correct'; name what is visible. It is the step's GOAL as it "
+    "shows on screen (§17.1437) — never 'you have told me what you see' or any "
+    "other report back to you: a report is a means to the goal, not the finish line.\n"
     "  2. one line telling them exactly how to move on: press "
     "**✓ Done → next step** (or type `next`).\n"
     "  3. if the observable condition does NOT appear, one line saying to paste what "
@@ -647,8 +656,11 @@ _INTERFACE_FIDELITY_DIRECTIVE = (
     "(a vendor support page, a recent how-to), give the COMPLETE click path from them, every screen in order, "
     "with the exact labels the source uses and what the operator should see on each -- and name the source. "
     "Do NOT ask them to describe a screen the sources already describe.\n"
-    "- Only when NO source covers that screen, or what they report does not match the path, say so and ask them "
-    "to describe what they see. That is a real answer; redirecting them to a different interface is not."
+    "- §17.1437 — when NO source covers that screen, say in one line that your search found none this time (never "
+    "that none is published), give the path as this product is "
+    "generally laid out, marked unconfirmed, and ask them to tell you only where their screen differs. A screen "
+    "the operator has named is where they are: give the next tap from it, never ask them to list everything "
+    "on it. That is a real answer; redirecting them to a different interface is not."
 )
 
 
