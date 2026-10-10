@@ -161,6 +161,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "points a PUBLIC DNS name at a private address",  # §17.1453
                    "is the only field this rewrite of net0 may change",  # §17.1457
                    "lines it holds now would be lost",              # §17.1457
+                   "lives on the Proxmox HOST, not inside a guest",  # §17.1459
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -304,6 +305,7 @@ _WHOSE_GAP: dict[str, str] = {
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
+    "lives on the Proxmox HOST, not inside a guest": "drafter",    # §17.1459 — write /etc/pve from the host
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
@@ -690,9 +692,15 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
         # §17.1245 — a decision is consumed by the attempt it authorised. Skip the
         # node only while that answer still belongs to THIS attempt.
         _entry = decided.get(node["node_key"])
+        # §17.1458 — a step whose rest is the operator's is theirs to finish, not the engine's to re-run
+        from app.modules import operator_steps as _ops
+        if isinstance(_entry, dict) and _entry.get("result") == _ops.ENGINE_HALF_DONE:
+            continue
         if _entry is not None and not await decision_is_stale(db, job_id, node["node_key"], _entry):
             continue
         if str(node.get("node_type") or "") == "decision":
+            continue
+        if _ops.is_wholly_operators(node):
             continue
         on, why = step_is_hands_on(node)
         if on and not why.startswith("tool:human"):
@@ -2313,7 +2321,11 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         texts = [_resolve_ids(cmd)] + [_resolve_ids(str((f or {}).get("content") or "")) for f in files or []
                                        if (f or {}).get("path") and str(f["path"]) in cmd]
         # §17.1291 — the guest's serial socket (`/var/run/qemu-server/106.serial0`) reaches the guest too
+        # §17.1459 — and a file under /etc/pve/ is the HOST's own config about a guest (its firewall,
+        # its .conf): writing it there IS the host-side operation on the guest. Live, ADD151's correct
+        # `… | tee /etc/pve/firewall/101.fw` was refused here and redrafted INTO each guest.
         return any(_GUEST_ADDRESS_RE.search(t) or re.search(r"\bssh\b", t) or re.search(r"qemu-server/\d{3,5}\.serial", t)
+                   or re.search(r"(?<![\w.-])/etc/pve/", t)
                    for t in texts)
     unreached = [c for c in writes if not _reaches(c)]
     if not unreached:
@@ -2940,6 +2952,25 @@ _DDNS_UPDATE = re.compile(r"(?i)duckdns\.org/update|/nic/update|dynupdate|dynv6\
 _DDNS_IP = re.compile(r"(?i)(?:[?&](?:ip|myip|ipv4)=|\"content\"\s*:\s*\"|content=)"
                       r"((?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"
                       r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})")
+
+
+_IN_GUEST_PVE_WRITE_RE = re.compile(
+    r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\b[\s\S]*?(?:\btee\s+(?:-a\s+)?|>>?\s*)(/etc/pve/\S+)")
+
+
+def pve_config_written_inside_a_guest(commands: list[str]) -> list[dict]:
+    """§17.1459 — `/etc/pve` is the Proxmox host's cluster filesystem; a guest has none. Live (ADD151): every
+    guest's firewall file was written INSIDE that guest (`pct exec 101 -- sh -c 'cat > /etc/pve/firewall/101.fw'`)
+    — useless there, and the host's own files left as they were."""
+    out: list[dict] = []
+    for c in commands or []:
+        m = _IN_GUEST_PVE_WRITE_RE.search(str(c))
+        if m:
+            out.append({"command": str(c), "why": (
+                f"{m.group(2)} lives on the Proxmox HOST, not inside a guest: /etc/pve is the host's cluster "
+                f"filesystem, and guest {m.group(1)} has none. Write it from the runner's own shell on the host "
+                f"(`printf '%s\\n' … | tee {m.group(2)}`), with no `pct exec`/`qm guest exec` around it.")})
+    return out
 
 
 def public_dns_to_private_address(commands: list[str]) -> list[dict]:
@@ -5165,6 +5196,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # a chance to fix it before the operator ever sees the block.
     refused = refused + curl_writes_without_fail(cmds)
     refused = refused + public_dns_to_private_address(cmds)   # §17.1453
+    refused = refused + pve_config_written_inside_a_guest(cmds)   # §17.1459
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.

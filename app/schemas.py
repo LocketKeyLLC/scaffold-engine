@@ -471,6 +471,7 @@ class DecideResult(BaseModel):
     diagnosis: str | None = None            # §17.1230 — the researched diagnosis
     unknown_outcome: bool | None = None     # §17.1201 — the runner dropped mid-block
     confirmed_after_drop: bool | None = None
+    evidence: str | None = None             # §17.1458 — what the operator-step checks read on the machine
 
 
 class SkipNodeInput(BaseModel):

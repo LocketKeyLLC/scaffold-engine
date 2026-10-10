@@ -199,7 +199,8 @@ def test_the_pause_compares_both_candidates():
     assert "_order_of(node), _order_of(run_node)" in src
     assert "if _r < _d:" in src
     # the hands-on look-up no longer hides behind `node is None`
-    assert src.index("pending_hands_on(db, job_id)") < src.index("if node is None and run_node is None:")
+    # §17.1458 — the operator-step candidate joins the comparison; the hands-on look-up still comes first
+    assert src.index("pending_hands_on(db, job_id)") < src.index("if node is None and run_node is None and op_node is None:")
 
 
 def test_both_candidate_queries_select_the_order_they_are_compared_on():

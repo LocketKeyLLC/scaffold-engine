@@ -222,6 +222,10 @@ async def decide_endpoint(
     if outcome["outcome"] == "inputs_missing":                 # §17.1187 — the runbook's values, checked
         raise HTTPException(status_code=422, detail={"error": "the runbook needs values the request did not supply",
                                                      "problems": outcome.get("problems"), "inputs": outcome.get("inputs")})
+    if outcome["outcome"] == "not_yet":                        # §17.1458 — the operator's part, not seen on the machine yet
+        raise HTTPException(status_code=409, detail={
+            "error": "the machine does not show it done yet", "node_key": body.node_key,
+            "evidence": outcome.get("evidence") or "", "verdicts": outcome.get("verdicts") or []})
     if outcome["outcome"] == "bad_choice":                     # §17.1186 — a run pause takes run | myself | skip
         raise HTTPException(status_code=422, detail={"error": "choice must be one of run, myself, skip",
                                                      "choices": outcome.get("choices")})
@@ -259,6 +263,7 @@ async def decide_endpoint(
         reason=outcome.get("reason"), diagnosis=outcome.get("diagnosis"),
         unknown_outcome=outcome.get("unknown_outcome"),
         confirmed_after_drop=outcome.get("confirmed_after_drop"),
+        evidence=outcome.get("evidence"),
     )
 
 
