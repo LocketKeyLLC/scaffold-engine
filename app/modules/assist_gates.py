@@ -74,6 +74,8 @@ GATES: tuple[Gate, ...] = (
          "screen labels and menu paths stated with no documentation retrieved are marked as general knowledge"),
     Gate("source_authority", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM), "§17.1036",
          "how authoritative the best retrieved source is, so an unsourced interface answer can say so"),
+    Gate("interface_path_hosts", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM), "§17.1448",
+         "an unofficial-docs footer names the fetched pages that state the menu path, never 'general knowledge'"),
     Gate("sourced_now", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM, EXECUTOR), "§17.1030",
          "what THIS turn's sources confirmed, so the next turn need not refetch to credit it"),
     Gate("problem_class_query", "retrieval", "assist_evidence", "class_query", (RESEARCH,), "§17.1086",

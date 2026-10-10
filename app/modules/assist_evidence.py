@@ -564,6 +564,40 @@ def interface_specifics_present(answer: str) -> bool:
     return len(_INTERFACE_RE.findall(answer or "")) >= 3
 
 
+# §17.1448 — the labels an answer tells the operator to look for: bold text and the steps of an `A → B → C`
+# path. Live (ADD4 turn 3155): "Services → Router → Advanced Settings → Port Forwarding & IP Reservations →
+# Add Port Assignment" came word for word from PureVPN and natchecker pages fetched that turn, yet the footer
+# said the menu paths "come from general knowledge, not from a page fetched for this question" — only an
+# OFFICIAL documentation host counted as a source.
+_BOLD_LABEL_RE = re.compile(r"\*\*([^*\n]{3,60})\*\*")
+_PATH_STEP_RE = re.compile(r"(?:^|→|->|>)\s*([A-Z][\w&/' -]{2,50}?)\s*(?=→|->|$|\.|,|\n)", re.M)
+
+
+def interface_labels(answer: str) -> set[str]:
+    labels = {m.strip(" :.").lower() for m in _BOLD_LABEL_RE.findall(answer or "")}
+    for ln in (answer or "").splitlines():
+        if "→" in ln or "->" in ln:
+            labels |= {m.strip(" :.").lower() for m in _PATH_STEP_RE.findall(ln.replace("**", ""))}
+    return {lb for lb in labels if len(lb) >= 4 and re.search(r"[a-z]", lb) and not re.search(r"\d{2,}", lb)}
+
+
+def interface_path_hosts(answer: str, sources: list) -> list[str]:
+    """Hosts of the fetched web pages that state at least two of the answer's interface labels."""
+    labels = interface_labels(answer)
+    if len(labels) < 2:
+        return []
+    hosts: list[str] = []
+    for src in sources or []:
+        if not (isinstance(src, dict) and src.get("kind") in ("web", "searxng") and src.get("url")):
+            continue
+        body = str(src.get("text") or src.get("content") or "").lower()
+        if sum(1 for lb in labels if lb in body) >= 2:
+            m = re.match(r"https?://(?:www\.)?([^/?#]+)", str(src["url"]).lower())
+            if m and m.group(1) not in hosts:
+                hosts.append(m.group(1))
+    return hosts
+
+
 def source_date_key(source: dict) -> int:
     """``YYYYMMDD`` as an int for sorting; 0 when the source carries no date."""
     m = _DATE_RE.search(str(source.get("date") or ""))
@@ -1076,10 +1110,17 @@ def grounding_footer(unsupported: list[dict], cite: Optional[dict],
                      *, off_question: Optional[str] = None,
                      shape: Optional[list] = None,
                      plan_only: Optional[list] = None,
-                     unsourced_interface: bool = False) -> str:
+                     unsourced_interface: bool = False,
+                     interface_hosts: Optional[list] = None) -> str:
     """What the operator sees when the answer still fails after regeneration."""
     lines = ["\n\n---"]
-    if unsourced_interface:
+    if unsourced_interface and interface_hosts:
+        # §17.1448 — the labels ARE in pages fetched for this question, just not the vendor's own docs.
+        lines.append(
+            "ℹ️ **The menu path above comes from third-party guides fetched for this question ("
+            + ", ".join(interface_hosts[:3]) + "), not the product's own documentation** — screens change "
+            "between app versions, so check the labels against the screen in front of you.")
+    elif unsourced_interface:
         # §17.1036 — F3/F4 in the §17.1035 run: screen labels and setting
         # levels stated with no documentation retrieved, reading as sourced.
         lines.append(
@@ -1299,7 +1340,9 @@ async def verify_answer(
     if _fails(unsupported, cite, off, shape, ingress, prereq) or plan_only or unsourced_iface:
         footer = grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
-            plan_only=plan_only, unsourced_interface=unsourced_iface) + ingress_footer(ingress, topology or {}) + prerequisite_footer(prereq)
+            plan_only=plan_only, unsourced_interface=unsourced_iface,
+            interface_hosts=(run_gate("interface_path_hosts", interface_path_hosts, answer, sources, default=[])
+                             if unsourced_iface else None)) + ingress_footer(ingress, topology or {}) + prerequisite_footer(prereq)
         report["footer"] = footer
         if annotate:
             answer = answer.rstrip() + footer
