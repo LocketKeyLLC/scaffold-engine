@@ -368,6 +368,30 @@ async def test_claim_and_guide_repairs_pending_pointer_step():
     assert any(n == "assist_guide_done" for n, _ in out)
 
 
+async def test_claim_repair_guides_the_step_the_claim_took():
+    """§17.1452 — live (ADD4 committed, 2026-10-10 15:35): the pointer sat on ADD49 (next by plan order, its
+    dependencies not done); the dependency-gated claim took ADD128 and re-pointed the session, but ADD49's
+    walkthrough streamed."""
+    from unittest.mock import MagicMock
+    sess = {"current_node_key": "ADD49", "status": "active", "step_counts": {}}
+    guided = []
+
+    async def _stream(**kw):
+        guided.append(kw.get("node_key"))
+        yield {"type": "delta", "text": "x"}
+        yield {"type": "done", "status": "presented"}
+    db = AsyncMock()
+    probe = MagicMock()
+    probe.scalar.return_value = "pending"
+    db.execute = AsyncMock(return_value=probe)
+    with patch("app.modules.assist_agent.get_session", new=AsyncMock(return_value=sess)), \
+         patch("app.modules.assist_agent.generate_step_guidance_stream", new=_stream), \
+         patch("app.routers.assist.assist_next", new=AsyncMock(return_value={"node_key": "ADD128"})):
+        out = [e async for e in assist_turn._claim_and_guide(_SID, None, [], db, orient=False)]
+    assert guided == ["ADD128"]
+    assert any("Preparing the walkthrough for ADD128" in str(d.get("text")) for _, d in out)
+
+
 # ── §17.880 — terminal-pointer heal (Guide/Done must not replay a done step) ─
 
 
@@ -635,7 +659,8 @@ async def test_a_prose_fact_routed_set_env_is_recorded_as_a_note():
                                    "node_updates": [{"node_key": "ADD128", "corrections": [corr]}]}}
     note = AsyncMock(return_value=note_res)
     set_env = AsyncMock()
-    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+    p1, p2 = _guide_patches(node_key="ADD128")
+    with p1, p2, patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
          patch("app.modules.assist_decide.decide_turn",
                new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
          patch("app.routers.assist.assist_note", new=note), \
@@ -687,3 +712,32 @@ async def test_a_failed_pin_says_so_in_a_kept_reply():
         ev = await _collect(message="CADDY_IP=192.168.1.127", node_key="ADD128")
     assert any("couldn't save that" in str(d.get("text")) for n, d in ev if n == "assist_answer")
     assert any("couldn't save that" in c.kwargs.get("content", "") for c in capture.await_args_list)
+
+
+async def test_a_correction_that_clears_this_steps_walkthrough_writes_the_new_one():
+    """§17.1452 — after "caddy (ct 120) is at 192.168.1.127, not 192.168.1.26." ADD128's walkthrough was
+    cleared and nothing replaced it: the operator was left on a step with no walkthrough."""
+    corr = {"kind": "ip", "old": "192.168.1.26", "new": "192.168.1.127"}
+    note_res = {"recorded": True,
+                "reconciliation": {"trigger": "note", "source_node_key": "ADD128", "guidance_resets": ["ADD128"],
+                                   "node_updates": [{"node_key": "ADD128", "corrections": [corr]}]}}
+    p1, p2 = _guide_patches(node_key="ADD128")
+    for action in ("note", "set_env"):
+        with p1, p2, patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+             patch("app.modules.assist_decide.decide_turn",
+                   new=AsyncMock(return_value={"action": action, "confidence": "high"})), \
+             patch("app.routers.assist.assist_note", new=AsyncMock(return_value=note_res)):
+            ev = await _collect(message=_ADD128_CORRECTION, node_key="ADD128")
+        names = _names(ev)
+        assert "assist_guide_done" in names, (action, names)
+        assert names.index("assist_answer") < names.index("assist_guide_done"), "the plan note leads"
+
+
+async def test_a_note_that_changes_nothing_here_does_not_re_guide():
+    p1, p2 = _guide_patches(node_key="ADD128")
+    with p1, p2, patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "note", "confidence": "high"})), \
+         patch("app.routers.assist.assist_note", new=AsyncMock(return_value={"recorded": True})):
+        ev = await _collect(message="the router is in the hallway closet", node_key="ADD128")
+    assert "assist_guide_done" not in _names(ev)

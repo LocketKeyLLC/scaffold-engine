@@ -1730,6 +1730,10 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .follow-pane-title { color: var(--text-dim); }
 .checklist-quiet { text-transform: none; letter-spacing: 0; font-weight: var(--fw-med); color: var(--text-faint); font-size: var(--fs-xs); }
 .assist-main.follow .guide-btn:not(.guiding) { display: none; }
+/* §17.1452 — a step with no walkthrough on screen gets its button back; the engine says what it is doing */
+.assist-main.follow.needs-guide .guide-btn { display: inline-flex; }
+.engine-state { font-size: var(--fs-xs); color: var(--text-faint); margin-left: 8px; }
+.engine-state[data-state="working"] { color: var(--accent); }
 @media (max-width: 720px) {
   /* header (2 lines) + pill + strip ≈ 230px above, the bottom bar ≈ 62px below */
   .assist-main.follow { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); height: calc(100dvh - 300px); min-height: 380px; position: relative; }
