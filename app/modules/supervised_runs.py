@@ -158,6 +158,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "cannot witness the work",                       # §17.1382
                    "the verify channel will refuse this check",      # §17.1390
                    "a credential into the block as a literal value",  # §17.1391
+                   "points a PUBLIC DNS name at a private address",  # §17.1453
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -298,6 +299,7 @@ _WHOSE_GAP: dict[str, str] = {
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
+    "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
@@ -2928,6 +2930,38 @@ def curl_writes_without_fail(commands: list[str]) -> list[dict]:
     return out
 
 
+# §17.1453 — a dynamic-DNS update that names a private (RFC 1918 / loopback / link-local) address.
+_DDNS_UPDATE = re.compile(r"(?i)duckdns\.org/update|/nic/update|dynupdate|dynv6\.com/api/update|freedns\.afraid\.org|"
+                          r"api\.cloudflare\.com/[^\s'\"]*dns_records")
+_DDNS_IP = re.compile(r"(?i)(?:[?&](?:ip|myip|ipv4)=|\"content\"\s*:\s*\"|content=)"
+                      r"((?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"
+                      r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})")
+
+
+def public_dns_to_private_address(commands: list[str]) -> list[dict]:
+    """§17.1453 — ``[{command, why}]`` for a dynamic-DNS update that would point a public name at an address
+    only the LAN can reach.
+
+    Live (ADD128, 2026-10-10): the drafted block for "fix Caddy's DNS and get a certificate" carried
+    `curl "https://www.duckdns.org/update?domains=defrusciohomelab&token=<DUCKDNS_TOKEN>&ip=192.168.1.127"` —
+    Caddy's LAN address — next to the correct `…&ip=` (DuckDNS fills in the caller's public address). Run, it
+    would have taken the domain off the internet and made the certificate it was for impossible to issue.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        if not _DDNS_UPDATE.search(cmd):
+            continue
+        m = _DDNS_IP.search(cmd)
+        if m:
+            out.append({"command": cmd, "why": (
+                f"this update points a PUBLIC DNS name at a private address ({m.group(1)}): only machines "
+                "inside the network can reach it, so the name stops working from outside and a public "
+                "certificate for it can never be issued. A public record holds the router's PUBLIC address — "
+                "leave `ip=` empty and the service records the address the request came from.")})
+    return out
+
+
 async def host_inventory(spec) -> str:
     """§17.1232 — the guests that exist, for the drafter that keeps guessing.
 
@@ -5126,6 +5160,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # engine made, so it joins the gate's refusals and the §17.1196 redraft gets
     # a chance to fix it before the operator ever sees the block.
     refused = refused + curl_writes_without_fail(cmds)
+    refused = refused + public_dns_to_private_address(cmds)   # §17.1453
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
