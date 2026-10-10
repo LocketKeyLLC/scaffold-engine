@@ -60,11 +60,14 @@ def test_no_blocker_recorded_yields_no_query():
 # ── what must still get through ──────────────────────────────────────────
 def test_a_distilled_fact_is_trusted_without_title_overlap():
     """Facts are curated system observations: 'Caddy' need not appear in the
-    title 'Configure reverse proxy' for the fact to be about this step."""
+    title 'Configure reverse proxy' for the fact to be about this step —
+    §17.1440: the step's own DESCRIPTION is what ties it (the facts window is
+    session-wide, so a fact tied to nothing on the step is not its blocker)."""
     env = {"facts": ["Caddy fails to start: permission denied binding port 443"]}
-    out = q(env, [], STEP)
+    out = q(env, [], STEP, task_text="Install Caddy and write a Caddyfile that proxies the panel.")
     assert "Caddy fails to start" in out
     assert out.startswith("reverse proxy")  # the step subject is prepended
+    assert q(env, [], STEP) == "", "with nothing on the step naming Caddy, it is not this step's blocker"
 
 
 def test_an_on_topic_note_survives():

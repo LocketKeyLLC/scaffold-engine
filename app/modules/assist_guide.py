@@ -2578,6 +2578,7 @@ async def generate_guidance(
         await _add_blocker_research(
             sources, environment=environment, operator_notes=operator_notes,
             ctx=ctx, node_key=node_key, domain=domain,
+            node_description=node_description,  # §17.1440
         )
         # §17.1437 — parity with the stream guide.
         sources = await keep_and_recall(db, session_id=session_id, node_key=node_key, sources=sources)
@@ -3281,7 +3282,20 @@ def find_unescaped_expansions(text_out: str) -> list[dict]:
 # uncheck for the security update."
 _BLOCKER_FACT_RE = re.compile(
     r"\b(hang|hangs|hung|stuck|frozen|freeze|unresponsive|fail(?:s|ed|ing)?|"
-    r"error|crash(?:es|ed)?|loop|won'?t boot|times? out|timed out)\b",
+    r"error|crash(?:es|ed)?|loop|won'?t boot|times? out|timed out)\b"
+    # §17.1440 — how this engine's own facts say something is broken. None of these matched before: "ENGINE
+    # MEASURED: VM 106 cannot resolve names", "VM 106 is stopped … reopened", "QEMU guest agent is not
+    # running", "Let's Encrypt: Timeout during connect", "/opt/… does not exist", "'pct' … not available".
+    # Measured on every stored fact and note (37 + 49): 12 newly matched, all real blockers or constraints.
+    r"|\b(?:cannot|can'?t|could\s*n[o']t|unable\s+to|won'?t|will\s+not|does\s*n[o']t|did\s*n[o']t)\s+"
+    r"(?:resolve|reach|connect|start|boot|load|mount|find|open|bind|ping|access|install|verify|authenticate|"
+    r"see|detect)\b"
+    r"|\bnot\s+(?:running|responding|reachable|found|resolving|starting|booting|detected|installed|available|"
+    r"listening)\b"
+    r"|\b(?:is|are|was|remains?)\s+(?:still\s+)?(?:stopped|down|offline|unreachable|missing|disabled|inactive)\b"
+    r"|\b(?:refuses?|refused|rejects?|rejected|denied|unreachable|no\s+route\s+to\s+host|connection\s+refused|"
+    r"timeout|timed?[-\s]out|does\s+not\s+exist|printed\s+nothing|returns?\s+nothing|no\s+output|"
+    r"exit(?:ed)?\s+(?:code\s+)?[1-9]\d*)\b",
     re.IGNORECASE,
 )
 # A message ADDRESSED TO THE ENGINE is not a technical symptom. The first cut
@@ -3307,6 +3321,7 @@ _BLOCKER_NOISE_RE = re.compile(
 
 async def _add_blocker_research(
     sources: list, *, environment, operator_notes, ctx, node_key, domain,
+    node_description: Optional[str] = None,
 ) -> None:
     """§17.918 — append ONE deterministic query about what is BLOCKING this step.
 
@@ -3324,7 +3339,7 @@ async def _add_blocker_research(
     """
     try:
         bq = blocker_research_query(environment, operator_notes, ctx.title,
-                                    task_text=getattr(ctx, "base_prompt", None))  # §17.1439
+                                    task_text=node_description)  # §17.1440 — the step's own text
         if bq and bq not in {s.get("query") for s in sources}:
             from app.modules.assist_research_lib import _confirm_query
             sources.extend(await _confirm_query(
@@ -3366,11 +3381,75 @@ _RELEVANCE_STOP = frozenset({
     "get", "got", "can", "its", "now", "not", "that", "this", "then", "when", "will", "has", "have", "had",
     "from", "into", "inside", "container", "lxc", "guest", "host", "machine", "operator", "fails", "failed",
     "error", "errors", "using", "use", "via", "all", "any", "one", "two", "so", "but", "also", "still",
+    # the ledger's own words
+    "engine", "measured", "recorded", "reopened", "done", "though", "list", "output", "shows", "returns",
+    "true", "more", "state", "printed", "nothing",
 })
 
 
 def _is_symptom(text: str) -> bool:
     return bool(_BLOCKER_FACT_RE.search(_RESOLVED_PHRASE_RE.sub(" ", text)))
+
+
+# §17.1440 — which machine a text is about: "VM 106", "container '111'", "LXC 120", or an IPv4 address.
+_INSTANCE_ID_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*'?(\d{2,5})'?", re.IGNORECASE)
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;!])\s+(?=[A-Z'\"(])|\s+(?:--|—)\s+")
+
+
+# …and as a Proxmox command addresses it: `qm agent 106 ping`, `pct exec 111 -- …`.
+_PVE_CMD_ID_RE = re.compile(r"\b(?:qm|pct)\s+[a-z-]+\s+(\d{2,5})\b")
+
+
+def _machine_ids(text: str) -> set[str]:
+    t = text or ""
+    return ({f"#{n}" for n in _INSTANCE_ID_RE.findall(t)} | {f"#{n}" for n in _PVE_CMD_ID_RE.findall(t)}
+            | set(_IPV4_RE.findall(t)))
+
+
+def _symptom_sentences(fact: str) -> str:
+    """The sentences of a fact that carry the symptom — a fact can be a paragraph of state ("container 120 is
+    running; Caddy is active … serves Jellyfin/Prowlarr/Radarr … Let's Encrypt: Timeout during connect"), and
+    only its broken part is the blocker. The whole fact when no single sentence carries it."""
+    parts = [p for p in _SENTENCE_SPLIT_RE.split(fact or "") if p.strip()]
+    hit = [p for p in parts if _is_symptom(p)]
+    return " ".join(hit) if hit else fact
+
+
+# A machine's name as the ledger writes it beside its number: "container 111 (control-panel)",
+# "VM 106 (palworld-server)", "container 120 (caddy-proxy, 192.168.1.26)".
+_MACHINE_NAME_RE = re.compile(r"\b(?:VM|CT|LXC|container)\s*'?\d{2,5}'?\s*\(\s*([A-Za-z][\w-]{2,})", re.IGNORECASE)
+# A fact about the ENGINE's own machinery is not something to search the web for ("The local runner
+# (pve-runner) refuses mutation verbs …" rode along on every step that mentioned apt or systemctl).
+_ENGINE_INTERNAL_RE = re.compile(r"\b(?:local\s+runner|pve-runner|runner\s+helper|the\s+engine)\b", re.IGNORECASE)
+
+
+def _names_machine(step_text: str, name: str) -> bool:
+    flat = lambda t: re.sub(r"[\s_-]+", " ", t.lower())  # noqa: E731 — "control-panel" ≡ "control panel"
+    return f" {flat(name)} " in f" {flat(re.sub(r'[^A-Za-z0-9_-]+', ' ', step_text))} "
+
+
+def _fact_on_step(fact: str, step_text: str) -> bool:
+    """§17.1440 — the facts window is session-wide, so a fact must show it is about this step before it is
+    searched as the step's blocker. Measured on the live job: with the wider symptom vocabulary and word
+    overlap against the step's assembled prompt (which carries the whole project brief), one fact about
+    container 120 rode along on 151 of 178 steps.
+    - a fact about the engine's own runner is never a web search;
+    - a fact that names a MACHINE is about the steps on that machine — by number or address when the step
+      names one ("VM 106 cannot resolve names" → "Give VM 106 a working nameserver", not container 111), by
+      the machine's name otherwise ("container 111 (control-panel) is stopped" → "Build control panel
+      backend");
+    - otherwise the SYMPTOM sentence must share a distinctive word with the step's own title/description."""
+    if _ENGINE_INTERNAL_RE.search(fact):
+        return False
+    fid = _machine_ids(fact)
+    if fid:
+        sid = _machine_ids(step_text)
+        if sid:
+            return bool(fid & sid)
+        return any(_names_machine(step_text, n) for n in _MACHINE_NAME_RE.findall(fact))
+    words = _distinctive(step_text) - _RELEVANCE_STOP
+    return bool(words & (_distinctive(_symptom_sentences(fact)) - _RELEVANCE_STOP))
 
 
 def blocker_research_query(
@@ -3404,54 +3483,35 @@ def blocker_research_query(
     # is not a blocker; if nothing recent records one, returning "" is correct.
     facts = list((environment or {}).get("facts") or [])[-_BLOCKER_RECENT_WINDOW:]
     notes = list(operator_notes or [])[-_BLOCKER_RECENT_WINDOW:]
-    candidates = _pick(facts)
-    from_notes = False
-    if not candidates:
-        candidates = _pick((n or {}).get("text") or "" for n in notes)
-        from_notes = True
-    if not candidates:
-        return ""
-    # Prefer the MOST SPECIFIC blocker, not merely the newest: "installation
-    # hangs during the final system configuration phase while downloading and
-    # installing security updates" retrieves an answer; "installation is hung on
-    # rebooting" retrieves noise. Length is a crude but reliable proxy for how
-    # much a symptom narrows a search; recency breaks ties.
-    #
-    # §17.1012 — but RELEVANCE TO THIS STEP outranks both. Length alone made the
-    # session's most rambling sentence win permanently, regardless of which step
-    # was being researched. A blocker that shares a distinctive word with the
-    # step's title is about this step; one that shares none is somebody else's
-    # problem, and searching it spends the step's one blocker query on noise.
+    # §17.1440 — a FACT earns the step's one blocker query by being about THIS step, judged on the step's own
+    # text (title + description, never the project brief, which shares words with everything) — see
+    # `_fact_on_step`. On-step facts first; with none, the operator's notes, which must share a title word.
     topic = _distinctive(title)
-    blocker = max(candidates, key=lambda c: (
-        len(topic & _distinctive(c)), len(c[:220]), candidates.index(c)))
-    # §17.1012 — FACTS are distilled system observations, trusted even when they
-    # share no wording with the step ("Caddy fails to start" on a step titled
-    # "Configure reverse proxy"). A raw NOTE is whatever the operator typed, so
-    # it earns the step's one blocker query only by being ABOUT this step. With
-    # no overlap and no fact, the honest answer is that this step records no
-    # blocker — which is exactly what "" means here.
-    if from_notes and topic and not (topic & _distinctive(blocker)):
-        logger.info("assist_blocker_query_off_topic node=%r skipped", title)
-        return ""
-    # §17.1439 — a fact is trusted without sharing the TITLE's words ("Caddy fails to start" on "Configure
-    # reverse proxy"), but not without sharing the STEP's: the facts window is session-wide, so a Jellyfin
-    # apt fact rode along on the router step. Given the task text, a fact must share a word with it or the
-    # title.
-    # One shared TITLE word is enough; the task text is longer and shares generic words ("container") with
-    # anything, so it takes two.
-    if not from_notes and task_text:
-        task_words = _distinctive(task_text) - _RELEVANCE_STOP
-
-        def _on_step(c: str) -> int:
-            d = _distinctive(c) - _RELEVANCE_STOP
-            return 2 * len(topic & d) + len(task_words & d) if (topic & d or len(task_words & d) >= 2) else 0
-        on_step = [c for c in candidates if _on_step(c)]
-        if not on_step:
-            logger.info("assist_blocker_query_off_step node=%r skipped", title)
+    step_text = f"{title}\n{task_text or ''}"
+    candidates = [c for c in _pick(facts) if _fact_on_step(c, step_text)]
+    if candidates:
+        # the machine named on both sides first, then the symptom's overlap with the step, then the NEWEST
+        # (facts are distilled measurements: the latest is the machine's current state — length was a proxy
+        # for a rambling note, and made "VM 106 is stopped … recorded done" beat the newer, sharper "VM 106
+        # cannot resolve names")
+        candidates = [_symptom_sentences(c) for c in candidates]
+        blocker = max(candidates, key=lambda c: (
+            bool(_machine_ids(c) & _machine_ids(step_text)),
+            len((_distinctive(step_text) - _RELEVANCE_STOP) & _distinctive(c)),
+            candidates.index(c)))
+    else:
+        candidates = _pick((n or {}).get("text") or "" for n in notes)
+        if not candidates:
             return ""
-        if blocker not in on_step:
-            blocker = max(on_step, key=lambda c: (_on_step(c), len(c[:220]), on_step.index(c)))
+        # Prefer the MOST SPECIFIC blocker, not merely the newest: "installation hangs during the final system
+        # configuration phase while downloading and installing security updates" retrieves an answer;
+        # "installation is hung on rebooting" retrieves noise. §17.1012 — relevance to the step outranks
+        # length, and a raw NOTE (whatever the operator typed) must share a title word to count at all.
+        blocker = max(candidates, key=lambda c: (
+            len(topic & _distinctive(c)), len(c[:220]), candidates.index(c)))
+        if topic and not (topic & _distinctive(blocker)):
+            logger.info("assist_blocker_query_off_topic node=%r skipped", title)
+            return ""
     # Instance identifiers ("VM 106") are noise to a search engine; the
     # technology and the symptom are the signal.
     blocker = re.sub(r"\b(?:VM|CT|container)\s+\d{2,5}\b", "", blocker,
@@ -5464,6 +5524,7 @@ async def generate_guidance_stream(
         await _add_blocker_research(
             sources, environment=environment, operator_notes=operator_notes,
             ctx=ctx, node_key=node_key, domain=domain,
+            node_description=node_description,  # §17.1440
         )
         # §17.1437 — what this step's research found on an earlier pass rides along.
         sources = await keep_and_recall(db, session_id=session_id, node_key=node_key, sources=sources)
