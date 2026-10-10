@@ -83,6 +83,8 @@ GATES: tuple[Gate, ...] = (
     # ── coherence gates: a walkthrough is ONE coherent action (§17.1098) ──
     Gate("single_action", "answer", "assist_coherence", "multi_action_issue", (GUIDE, STREAM), "§17.1098",
          "a step's walkthrough is one action in one place — not two phases or two execution contexts; enforced (regenerate-then-clip) via enforce_coherence"),
+    Gate("no_premature_done", "answer", "assist_coherence", "premature_done_issue", (GUIDE, STREAM), "§17.1441",
+         "a walkthrough never sends the operator to ✓ Done while promising more of the same step — Done closes it; defused deterministically via enforce_coherence"),
     Gate("no_self_contradiction", "answer", "assist_coherence", "self_contradictions", (GUIDE, STREAM), "§17.1098",
          "a walkthrough never stops a resource and then uses that same resource's console/exec afterwards; enforced via enforce_coherence"),
     # ── fix-path integrity gates ──

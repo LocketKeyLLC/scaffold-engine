@@ -197,9 +197,38 @@ def multi_action_issue(text: str) -> Optional[dict]:
     ctxs = execution_contexts(text)
     phases = count_phases(text)
     changes = changing_commands(text)
-    if len(ctxs) >= 2 or phases >= 2 or len(changes) > MAX_CHANGES_PER_STEP:
+    # §17.1441 — phases split SHELL work, where each change needs its output read before the next is
+    # decided. A click path through one app or admin page with no system-changing command is one action
+    # however many screens it crosses: clipping ADD4's router walkthrough to "find the port-forwarding
+    # screen" left the operator told to press Done on a step whose rules were never covered.
+    phases_count = phases >= 2 and (bool(changes) or len(ctxs) >= 2)
+    if len(ctxs) >= 2 or phases_count or len(changes) > MAX_CHANGES_PER_STEP:
         return {"contexts": ctxs, "phases": phases, "changes": changes}
     return None
+
+
+# §17.1441 — "✓ Done → next step" CLOSES the step and moves the plan on; nothing of this step follows it.
+# Live (ADD4, turn 3140): "Then press ✓ Done → next step and I'll give the exact fields for the two rules."
+# — the rules were the step. Measured on 765 real assistant turns: 2 hits, both this promise.
+_PREMATURE_DONE_RE = re.compile(
+    r"[^\n.]*?(?:press|tap|click|hit)\s+\**\s*✓?\s*\**\s*Done[^\n]{0,60}?\b(?:and|then|,)\s+"
+    r"(?:I'?ll|I\s+will|we'?ll)\s+(?:give|walk|show|tell|send|provide|guide|cover|continue|move)[^\n]*",
+    re.IGNORECASE,
+)
+CONTINUE_SAME_STEP = ("When you've done that, tell me what you see and I'll give you the next part of this step. "
+                      "Only press **✓ Done → next step** once the whole step is finished.")
+
+
+def premature_done_issue(text: str) -> list[str]:
+    """Sentences that send the operator to ✓ Done while promising more of THIS step after it."""
+    return [m.group(0).strip() for m in _PREMATURE_DONE_RE.finditer(text or "")]
+
+
+def defuse_premature_done(text: str) -> tuple[str, int]:
+    """Replace each such sentence with the honest continuation. Deterministic — the model is not trusted to
+    stop writing it, because the clip note below taught it the phrase."""
+    out, n = _PREMATURE_DONE_RE.subn(CONTINUE_SAME_STEP, text or "")
+    return out, n
 
 
 def self_contradictions(text: str) -> list[dict]:
@@ -274,8 +303,8 @@ def _first_split_point(text: str) -> Optional[int]:
 
 _CLIP_NOTE = (
     "\n\n---\n_✳️ This step had more than one action, so only the first is shown "
-    "above. Once it is done, press **✓ Done → next step** and I'll walk you "
-    "through the rest as the next step._"
+    "above. When it is done, tell me what you see and I'll give you the next part of "
+    "this step. Only press **✓ Done → next step** once the whole step is finished._"   # §17.1441
 )
 
 
@@ -314,8 +343,11 @@ def coherence_directive(issues: dict) -> str:
         "FIRST thing they must do; do not include later phases, a second "
         "execution context, later CHANGES that depend on this one's result, "
         "or any step that uses a resource after stopping it. "
-        "If more work remains, it becomes the NEXT step — end after the first "
-        "action's verification. Output the corrected walkthrough in full."
+        "If more work of this step remains, end after the first action's verification by asking "
+        "them to tell you when it is done so you can give the next part — NEVER tell them to press "
+        "✓ Done for it: Done closes the whole step (§17.1441). A click path through ONE app or admin "
+        "page is a single action however many screens it crosses — keep it whole. "
+        "Output the corrected walkthrough in full."
     )
 
 
