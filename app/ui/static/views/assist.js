@@ -158,6 +158,27 @@ export function openSectionFor(kind) {
   return kind === "fix" ? FIX_OPEN_SECTION : GUIDE_OPEN_SECTION;
 }
 
+// §17.1443 — an open section that sends the operator to "the steps below"
+// must not leave those steps folded. ADD4's walkthrough led with "Tap the
+// Services tab, then follow the steps below" over a row reading "Steps (9)":
+// the operator had to scroll down and open it to find out what to do.
+export const POINTS_BELOW = /\b(?:steps?|instructions?)\s+below\b|\bsee below\b|\bbelow\b[^.\n]{0,40}\bsteps?\b/i;
+export const POINTED_SECTION = /^(?:steps?|run this|instructions?|how to\b|what to do)/i;
+
+// And a walkthrough that came back WITHOUT its 👉 lead (a model draw, live in a
+// replay of the same step) would show only "Done when" with every action
+// folded — so with no action lead, the steps open.
+const ACTION_LEAD = /(?:\u{1F449}|do this next)/iu;
+
+export function isOpenSection(section, kind, sections) {
+  if (openSectionFor(kind).test(section.title)) return true;
+  if (!POINTED_SECTION.test(section.title.replace(/^[^\p{L}\p{N}]+/u, ""))) return false;
+  const all = sections || [];
+  if (!all.some((s) => ACTION_LEAD.test(s.title))) return true;
+  const openRe = openSectionFor(kind);
+  return all.some((s) => openRe.test(s.title) && POINTS_BELOW.test(s.body.join("\n")));
+}
+
 export function splitGuideSections(md) {
   const lines = String(md || "").split("\n");
   const lead = [];
@@ -1462,12 +1483,12 @@ export function renderChat(container, sessionId, opts = {}) {
 
   function guideBody(content, kind) {
     const { lead, sections } = splitGuideSections(content);
-    const openRe = openSectionFor(kind);
+    const isOpen = (s) => isOpenSection(s, kind, sections);
     // Nothing to fold (short guidance, or no headings at all) — render as-is.
-    const foldable = sections.filter((s) => !openRe.test(s.title));
+    const foldable = sections.filter((s) => !isOpen(s));
     if (!foldable.length) return el("div", { class: "msg-body md", html: mdToHtml(content || "") });
 
-    const open = sections.filter((s) => openRe.test(s.title));
+    const open = sections.filter(isOpen);
     const openMd = [lead.trim(), ...open.map((s) => `## ${s.title}\n${s.body.join("\n")}`)]
       .filter(Boolean).join("\n\n");
 

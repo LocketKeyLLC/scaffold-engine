@@ -280,6 +280,7 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None,
     # §17.1436 — rank by relevance BEFORE choosing which pages to fetch: the top-N by engine order were
     # Spectrum's homepage and billing page; the page with the steps was never read.
     from app.modules.research_extractors import relevant_search_results as _rel
+    from app.utils.page_focus import focus as focus_page
     results = _rel(query, results) or results
     if not results or top_n <= 0:
         return []
@@ -306,7 +307,9 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None,
             continue
         hit = by_url.get(p.get("url")) or {}
         out.append({
-            "query": query, "kind": "web", "text": p["content"][:2000],
+            # §17.1443 — the page's stretches about the query, not its first 2000 chars (ADD4: the app
+            # steps were at char ~8,000 of 12,196 and never reached the model).
+            "query": query, "kind": "web", "text": focus_page(p["content"], query, 2000),
             "url": p.get("url", ""), "title": hit.get("title", ""),
             # Prefer the page's own declared date; fall back to the engine's.
             "date": (p.get("date") or hit.get("date") or "")[:10],
