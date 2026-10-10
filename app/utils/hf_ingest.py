@@ -424,7 +424,6 @@ async def fetch_hf_doc(topic: str) -> list[dict[str, Any]]:
     if not topic or not topic.strip():
         return []
     import asyncio as _aio
-    import trafilatura
 
     url = f"{settings.huggingface_api_base}/docs/{topic}"
     cache = get_fetch_cache()
@@ -452,8 +451,9 @@ async def fetch_hf_doc(topic: str) -> list[dict[str, Any]]:
             )
             return []
         html = r.text
+        from app.utils.html_extract import extract_text  # §17.1442
         extracted = await _aio.to_thread(
-            trafilatura.extract, html,
+            extract_text, html,
             output_format="txt", with_metadata=False,
         )
         if not extracted or not extracted.strip():
