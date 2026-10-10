@@ -3933,6 +3933,12 @@ async def enforce_coherence(
     if not (text_out or "").strip():
         return text_out, {}, ""
 
+    # §17.1441 — never "press ✓ Done and I'll give the rest": Done closes the step. Deterministic, first.
+    defused = 0
+    if run_gate("no_premature_done", coh.premature_done_issue, text_out, default=[]):
+        text_out, defused = coh.defuse_premature_done(text_out)
+        logger.warning("assist_premature_done_defused label=%s n=%d", label, defused)
+
     ma = run_gate("single_action", coh.multi_action_issue, text_out, default=None)
     sc = run_gate("no_self_contradiction", coh.self_contradictions, text_out, default=[])
     issues: dict = {}
@@ -3941,7 +3947,8 @@ async def enforce_coherence(
     if sc:
         issues["contradictions"] = sc
     if not issues:
-        return text_out, {}, ""
+        return (text_out, {"action": "defused_done", "issues": {"premature_done": defused}}, "") if defused \
+            else (text_out, {}, "")
 
     logger.warning("assist_coherence_violation label=%s multi_action=%s contradictions=%d (regenerating)",
                    label, bool(ma), len(sc))
@@ -3979,8 +3986,8 @@ async def enforce_coherence(
     clipped, did = coh.first_action_only(text_out)
     if did:
         block = ("\n\n---\n✳️ **Trimmed to one action** — this walkthrough had more "
-                 "than one; keeping the first. Once it's done, press ✓ and I'll walk "
-                 "you through the rest as the next step.\n\n" + clipped)
+                 "than one; keeping the first. When it's done, tell me what you see and I'll "
+                 "give you the next part of this step.\n\n" + clipped)   # §17.1441
         return clipped, {"action": "clipped", "issues": issues}, block
 
     # (3) can't cleanly clip (single-block contradiction) — flag it visibly.
@@ -4920,6 +4927,19 @@ def _trivial_turns() -> set[str]:
     return set(_TRIVIAL_TURN)
 
 
+def _cached_sends_to_done_early(cached: dict) -> bool:
+    """§17.1441 — a saved walkthrough that tells the operator to press ✓ Done while promising more of the
+    step (written before the gate existed — ADD4's turn 3140) is regenerated, never re-served."""
+    from app.modules import assist_coherence as coh
+    try:
+        bad = bool(coh.premature_done_issue(str((cached or {}).get("guidance") or "")))
+    except Exception:
+        return False
+    if bad:
+        logger.info("assist_guide_cache_premature_done_regen")
+    return bad
+
+
 async def cached_guidance_is_stale(
     *, session_id: str, node_key: str, generated_at, db,
 ) -> bool:
@@ -5336,7 +5356,7 @@ async def ensure_guidance(
             stale = await cached_guidance_is_stale(
                 session_id=session_id, node_key=node_key,
                 generated_at=cached.get("_generated_at_raw"), db=db,
-            )
+            ) or _cached_sends_to_done_early(cached)  # §17.1441
             if not stale:
                 cached.pop("_generated_at_raw", None)
                 # §17.932 — a CACHED walkthrough needs the finish line just as
@@ -5483,7 +5503,7 @@ async def generate_guidance_stream(
             stale = await cached_guidance_is_stale(
                 session_id=session_id, node_key=node_key,
                 generated_at=cached.get("_generated_at_raw"), db=db,
-            )
+            ) or _cached_sends_to_done_early(cached)  # §17.1441
             if not stale:
                 yield {"type": "delta", "text": cached["guidance"]}
                 yield {"type": "done", "status": "ready",
@@ -5602,6 +5622,8 @@ async def generate_guidance_stream(
             yield {"type": "replace", "text": text_out,
                    "reason": ("♻️ Rewritten as ONE action — the first draft asked for several commands at once."
                               if (coherence_meta.get("issues") or {}).get("multi_action")
+                              else "♻️ Corrected — ✓ Done closes this step, so the next part comes when you tell me."
+                              if coherence_meta.get("action") == "defused_done"
                               else "♻️ Rewritten — the first draft contradicted itself.")}
         elif _coh_block:
             yield {"type": "delta", "text": _coh_block}
