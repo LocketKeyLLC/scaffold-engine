@@ -1160,8 +1160,15 @@ async def _run_turn_inner(
             # note — recorded, and its correction applied to the steps ahead (§17.1045). Live (ADD128,
             # turn 3165): it reached here, `substitutions=None` failed AssistEnvInput's validation, and
             # the operator read "Couldn't update the environment (1 validation error …)".
+            _replied = False
             async for e in _note(session_id, {**d, "note_kind": d.get("note_kind") or "note"}, text_, nk, db):
+                _replied = _replied or (e[0] == ASSIST_ANSWER)
                 yield e
+            if not _replied:
+                # the operator must see an answer that survives a reload, not only a status line
+                async for e in _durable_note(session_id, nk, "📝 Noted — recorded for this step. Nothing in the "
+                                             "steps ahead needed changing.", db):
+                    yield e
             handled["v"] = "set_env_as_note"
             return
         try:
@@ -1174,7 +1181,10 @@ async def _run_turn_inner(
             async for e in _reconciliation_note(session_id, nk, _env_res, db):  # §17.1046
                 yield e
         except Exception as exc:
-            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't update the environment ({exc})."})
+            logger.warning("turn_set_env_failed sid=%s err=%r", session_id, exc)
+            async for e in _durable_note(session_id, nk, "⚠️ I couldn't save that to the environment — nothing "
+                                         "was changed. Say it again in a sentence and I'll record it as a note.", db):
+                yield e
         handled["v"] = "set_env"
         return
     if confident and action == "fix":
@@ -1821,6 +1831,17 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
                 yield e
         except Exception:
             logger.warning("turn_loop_refused_submit_orient_failed sid=%s", session_id)
+
+
+async def _durable_note(session_id: str, nk, text_: str, db) -> AsyncIterator[_Event]:
+    """§17.1450 — a reply the transcript keeps. A status frame is never persisted, so a turn that ended on one
+    showed the operator nothing after a reload (live ADD128, turn 3165: only their own message remained)."""
+    yield _ev(ASSIST_ANSWER, {"kind": "note", "text": text_})
+    try:
+        from app.modules import assist_agent as _aa
+        await _aa.capture_assistant_reply(session_id=session_id, node_key=nk, kind="note", content=text_, db=db)
+    except Exception:
+        logger.warning("turn_durable_note_capture_failed sid=%s", session_id)
 
 
 async def _reconciliation_note(session_id: str, nk, res, db) -> AsyncIterator[_Event]:

@@ -662,3 +662,28 @@ async def test_a_real_pin_still_sets_the_environment_with_a_dict():
     assert ev[-1][1]["handled"] == "set_env"
     from app.routers.assist import AssistEnvInput
     assert AssistEnvInput(substitutions={}, verbosity="terse").substitutions == {}
+
+
+async def test_a_prose_fact_with_nothing_to_change_still_gets_a_kept_reply():
+    capture = AsyncMock()
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_note", new=AsyncMock(return_value={"recorded": True})), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=capture):
+        ev = await _collect(message="the router is in the hallway closet", node_key="ADD128")
+    answers = [d for n, d in ev if n == "assist_answer"]
+    assert answers and answers[-1]["text"].startswith("📝 Noted")
+    assert any(c.kwargs.get("content", "").startswith("📝 Noted") for c in capture.await_args_list)
+
+
+async def test_a_failed_pin_says_so_in_a_kept_reply():
+    capture = AsyncMock()
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_set_env", new=AsyncMock(side_effect=RuntimeError("db down"))), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=capture):
+        ev = await _collect(message="CADDY_IP=192.168.1.127", node_key="ADD128")
+    assert any("couldn't save that" in str(d.get("text")) for n, d in ev if n == "assist_answer")
+    assert any("couldn't save that" in c.kwargs.get("content", "") for c in capture.await_args_list)
