@@ -98,12 +98,17 @@ def test_override_shell_error_forces_fix():
     assert "command not found" in out["error_text"]
 
 
-def test_override_midfix_paste_forces_fix():
+def test_override_midfix_clean_paste_is_judged_not_forced():
+    """§17.1447 — a clean paste after a fix goes to the verifier: of 60 such real pastes, 17 proved the step
+    done and advanced it. A "not done" continues the fix (no confirm offer, assist_turn)."""
     d = _decision("submit", {"shell_paste": True, "shell_error": False,
                              "last_assistant_was_fix": True})
     out = P.apply_deterministic_overrides(d, "root@pve:~# ip a\n1: lo")
-    assert out["action"] == "fix"
-    assert out["override"] == "shell_error"
+    assert out["action"] == "submit" and "override" not in out
+    q = _decision("question", {"shell_paste": True, "shell_error": False, "last_assistant_was_fix": True})
+    assert P.apply_deterministic_overrides(q, "root@pve:~# ip a\n1: lo")["action"] == "submit"
+    err = _decision("submit", {"shell_paste": True, "shell_error": True, "last_assistant_was_fix": True})
+    assert P.apply_deterministic_overrides(err, "root@pve:~# x\nNo such file or directory")["action"] == "fix"
 
 
 def test_override_clean_shell_forces_submit():

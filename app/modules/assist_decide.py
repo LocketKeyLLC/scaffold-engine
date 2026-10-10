@@ -120,8 +120,9 @@ _DECIDE_EXTRA = (
     "message: shell_paste (the message contains a real shell prompt line — it is "
     "the operator reporting a result), shell_error (that paste contains an error — "
     "the step is NOT done, route to fix), last_assistant_was_fix (your previous "
-    "turn was a troubleshooting fix, so a paste now is a diagnostic REPLY, route "
-    "to fix — do not advance past a broken command). Trust these.\n\n"
+    "turn was a troubleshooting fix, so a paste now ANSWERS it: with shell_error "
+    "route to fix; clean output that may show the step's goal met → submit, and the "
+    "verifier decides — a 'not done' continues the fix). Trust these.\n\n"
     "Call record_decision exactly once."
 )
 

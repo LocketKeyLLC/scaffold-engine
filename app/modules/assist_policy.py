@@ -63,6 +63,19 @@ _SHELL_ERROR_RE = re.compile(
 )
 
 
+# §17.1447 — what a fix reply looks like. The two markers below are the OWUI pipeline's (render_fix's
+# `## 🔧 Troubleshooting` banner, the NL fix banner); the native engine's fix replies carry neither — they are
+# `## 👉 Do this next … ## Diagnosis … ## Fix` — so on the native surface `last_assistant_was_fix` was False
+# for all 104 clean shell pastes that followed a fix (measured 2026-10-10 over every session's turns).
+_FIX_REPLY_SHAPE_RE = re.compile(r"(?m)^##\s+Diagnosis\b")
+
+
+def is_fix_reply(content: str, kind: str | None = None) -> bool:
+    c = content or ""
+    return (kind == "fix" or "🔧 Troubleshooting" in c or "something went wrong — let me help" in c
+            or bool(_FIX_REPLY_SHAPE_RE.search(c)))
+
+
 def _compute_signals(message: str, history: list[dict] | None) -> dict:
     """The deterministic features the decision reasons with (§17.705/748/749)."""
     msg = message or ""
@@ -75,9 +88,7 @@ def _compute_signals(message: str, history: list[dict] | None) -> dict:
             continue
         c = m.get("content") or ""
         if seen_assistant == 0:
-            last_was_fix = ("🔧 Troubleshooting" in c) or (
-                "something went wrong — let me help" in c
-            )
+            last_was_fix = is_fix_reply(c, m.get("kind"))
         # §17.1053 — did the engine JUST propose a step ("## Needs its own
         # step")? A short "add them" / "insert it" is then an add-step reply,
         # not chat. The nudge frames that can follow a fix (↩︎ "reply confirm")
@@ -826,10 +837,14 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
     means the LLM's decision stands unchanged."""
     msg = message or ""
     # 1. A pasted shell prompt line IS the operator reporting this step's result.
-    #    An error / mid-fix paste is a diagnostic reply → fix (do NOT advance past
-    #    a broken command, §17.748/§17.749); a clean paste → submit (§17.705).
+    #    An error paste is a diagnostic reply → fix (do NOT advance past a broken
+    #    command, §17.748/§17.749); a clean paste → submit (§17.705).
+    #    §17.1447 — a CLEAN paste after a fix is no longer forced to fix. The marker that rule keyed on was
+    #    dead on the native surface, and the 60 such pastes that reached submit anyway split 17 correct
+    #    advances (the output proved the step done) / 25 "not done" — so the verifier judges, and a "not done"
+    #    continues the fix without offering "reply confirm" (assist_turn, the operator claimed nothing).
     if signals.get("shell_paste"):
-        if signals.get("shell_error") or signals.get("last_assistant_was_fix"):
+        if signals.get("shell_error"):
             if action != "fix":
                 return "fix", "shell_error", {"error_text": msg.strip()}
             return action, None, {}
