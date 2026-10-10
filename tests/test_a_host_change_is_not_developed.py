@@ -44,3 +44,12 @@ def test_a_step_on_a_guest_with_no_measured_service_is_not_hosted_elsewhere():
     assert dv.host_for(node, [PANEL, RADARR]) is None
     host = dv.host_for(node, [PANEL, RADARR, CADDY])
     assert host is None or host.guest == "120"
+
+
+def test_a_validation_or_write_up_step_is_not_developed():
+    """§17.1454 — T37 "Validate entire build" was developed (its text names the backend it checks)."""
+    t37 = json.loads((FIX / "t37_node_2026_10_10.json").read_text())
+    assert t37["title"] == "Validate entire build"
+    assert dv.host_for(t37, [PANEL, CADDY, RADARR]) is None
+    for title in ("Document architecture and setup", "Verify the panel answers", "Test the media request"):
+        assert dv.host_for({"title": title, "description": "LXC 111: build the control-panel route"}, [PANEL]) is None
