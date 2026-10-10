@@ -1461,15 +1461,16 @@ async def assist_note(session_id: UuidPath, body: AssistNoteInput, db=Depends(ge
         out["replan_proposal"] = proposal
     # §17.1045 — a correction the note states in its own words is applied to
     # the steps ahead deterministically (structural impact is the proposal above).
-    if not note.get("deduped"):
-        from app.modules.plan_reconcile import reconcile_after_note, render_note
-        rec = await reconcile_after_note(
-            db=db, session_id=session_id, job_id=str(sess["job_id"]),
-            note_text=note["text"], note_kind=note["kind"], node_key=body.node_key,
-        )
-        if rec:
-            out["reconciliation"] = rec
-            out["reconciliation_note"] = render_note(rec)
+    # §17.1451 — a repeated note re-checks the plan too: the correction is idempotent (a value already replaced
+    # matches nothing), and live the repeat was the operator re-sending a correction a since-fixed bug dropped.
+    from app.modules.plan_reconcile import reconcile_after_note, render_note
+    rec = await reconcile_after_note(
+        db=db, session_id=session_id, job_id=str(sess["job_id"]),
+        note_text=note["text"], note_kind=note["kind"], node_key=body.node_key,
+    )
+    if rec:
+        out["reconciliation"] = rec
+        out["reconciliation_note"] = render_note(rec)
     # §17.755 — if THIS note declares a reset/rebuild (§17.714), retract the facts
     # about the now-abandoned system so the ledger stops dragging dead state into
     # later steps. Fail-soft; surfaces what was retracted so the operator sees it.

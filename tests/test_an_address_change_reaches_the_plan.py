@@ -105,3 +105,36 @@ def test_set_environment_runs_it_after_the_write():
 def test_a_typed_correction_with_both_addresses_is_one_correction():
     corr, _ = pr.note_corrections("Caddy (CT 120) is at 192.168.1.127, not 192.168.1.26.", ADD128["description"])
     assert corr == [{"kind": "ip", "old": "192.168.1.26", "new": "192.168.1.127"}]
+
+
+# §17.1451 — the live note (ADD128, turn 3166) derived the right correction and applied it to no step.
+def test_a_note_corrects_the_step_it_was_written_on(monkeypatch):
+    monkeypatch.setattr(pr.settings, "plan_reconcile_enabled", True, raising=False)
+    db = _DB([{"node_key": "ADD128", "status": "pending", "prompt_template": ADD128["description"]}])
+    rec = asyncio.run(pr.reconcile_after_note(
+        db=db, session_id="613dd1df-4c92-43f7-a35f-c9519add5701", job_id="55f68b7f-2ced-4e13-a1bc-812320df56f8",
+        note_text="caddy (ct 120) is at 192.168.1.127, not 192.168.1.26.", note_kind="note", node_key="ADD128"))
+    assert rec and [u["node_key"] for u in rec["node_updates"]] == ["ADD128"]
+    assert "--resolve defrusciohomelab.duckdns.org:443:192.168.1.127" in rec["node_updates"][0]["prompt_template"]
+    assert pr.render_note(rec).startswith("🔁 **Plan updated from your note** — the correction has been applied to this step")
+
+
+def test_a_fix_still_does_not_rewrite_its_own_step():
+    node = {"node_key": "ADD4", "status": "pending", "prompt_template": "forward to 192.168.1.26"}
+    corr = [{"kind": "ip", "old": "192.168.1.26", "new": "192.168.1.127"}]
+    assert pr.plan_changes([node], [], corr, source_node_key="ADD4")["node_updates"] == []
+
+
+def test_a_repeated_note_still_reconciles_and_is_idempotent(monkeypatch):
+    src = pathlib.Path("app/routers/assist.py").read_text()
+    assert 'if not note.get("deduped"):\n        from app.modules.plan_reconcile import reconcile_after_note' not in src
+    monkeypatch.setattr(pr.settings, "plan_reconcile_enabled", True, raising=False)
+    note = "caddy (ct 120) is at 192.168.1.127, not 192.168.1.26."
+    db = _DB([{"node_key": "ADD128", "status": "pending", "prompt_template": ADD128["description"]}])
+    first = asyncio.run(pr.reconcile_after_note(db=db, session_id="s", job_id="j", note_text=note,
+                                                note_kind="note", node_key="ADD128"))
+    applied = first["node_updates"][0]["prompt_template"]
+    db2 = _DB([{"node_key": "ADD128", "status": "pending", "prompt_template": applied}])
+    again = asyncio.run(pr.reconcile_after_note(db=db2, session_id="s", job_id="j", note_text=note,
+                                                note_kind="note", node_key="ADD128"))
+    assert again is None and not [q for q, _ in db2.sql if "UPDATE dag_nodes" in q]
