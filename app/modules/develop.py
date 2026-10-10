@@ -90,6 +90,12 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
     pick = None
     if m:
         pick = next((s for s in cands if str(s.guest) == m.group(1)), None)
+        # §17.1454 — the title names the guest the work is on; a service elsewhere is not its host.
+        # Live (ADD149 "CT 120 (Caddy): publish ONLY the control panel"): no measured service on 120 has a
+        # directory, so the name fallback below picked RADARR (CT 103) because the text says "Radarr's 302",
+        # and seven rounds proposed `/etc/caddy/Caddyfile` for the wrong container until each was refused.
+        if pick is None:
+            return None
     if pick is None:
         low = text.lower()
         pick = next((s for s in cands if str(getattr(s, "name", "")).lower() in low
