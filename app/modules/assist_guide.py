@@ -3323,7 +3323,8 @@ async def _add_blocker_research(
     which is why this one is a shared function rather than a second copy.
     """
     try:
-        bq = blocker_research_query(environment, operator_notes, ctx.title)
+        bq = blocker_research_query(environment, operator_notes, ctx.title,
+                                    task_text=getattr(ctx, "base_prompt", None))  # §17.1439
         if bq and bq not in {s.get("query") for s in sources}:
             from app.modules.assist_research_lib import _confirm_query
             sources.extend(await _confirm_query(
@@ -3348,8 +3349,33 @@ _BLOCKER_RECENT_WINDOW = 8
 _BLOCKER_QUERY_MAX = 180
 
 
+# §17.1439 — what a fact says WORKS is not a symptom. "Inside LXC container 101 (jellyfin), apt-get update now
+# succeeds … without error" matched `error` and won ADD4's (router port forwarding) blocker query. Phrases of
+# success are removed before the symptom test, so "X now succeeds but Y fails" still counts.
+_RESOLVED_PHRASE_RE = re.compile(
+    r"\b(?:without|with no|no(?:\s+more)?)\s+(?:an?\s+|any\s+)?(?:errors?|issues?|problems?|failures?|hangs?)\b"
+    r"|\bno\s+longer\s+\w+(?:\s+\w+)?"
+    r"|\b(?:now\s+)?(?:succeeds?|succeeded|works?|worked|resolved|fixed)\b",
+    re.IGNORECASE,
+)
+
+
+# §17.1439 — words that say nothing about WHICH machine or task a fact is about ("apt-get" and "can get" share
+# "get"; every guest is a "container").
+_RELEVANCE_STOP = frozenset({
+    "get", "got", "can", "its", "now", "not", "that", "this", "then", "when", "will", "has", "have", "had",
+    "from", "into", "inside", "container", "lxc", "guest", "host", "machine", "operator", "fails", "failed",
+    "error", "errors", "using", "use", "via", "all", "any", "one", "two", "so", "but", "also", "still",
+})
+
+
+def _is_symptom(text: str) -> bool:
+    return bool(_BLOCKER_FACT_RE.search(_RESOLVED_PHRASE_RE.sub(" ", text)))
+
+
 def blocker_research_query(
     environment: dict | None, operator_notes: list | None, title: str,
+    *, task_text: str | None = None,
 ) -> str:
     """§17.918 — one deterministic query about what is actually BLOCKING this
     step, drawn from the facts ledger and operator notes. "" when the session
@@ -3365,7 +3391,7 @@ def blocker_research_query(
         out = []
         for it in items:
             t = " ".join(str(it).split())
-            if t and _BLOCKER_FACT_RE.search(t) and not _BLOCKER_NOISE_RE.search(t):
+            if t and _is_symptom(t) and not _BLOCKER_NOISE_RE.search(t):
                 out.append(t)
         return out
 
@@ -3408,6 +3434,24 @@ def blocker_research_query(
     if from_notes and topic and not (topic & _distinctive(blocker)):
         logger.info("assist_blocker_query_off_topic node=%r skipped", title)
         return ""
+    # §17.1439 — a fact is trusted without sharing the TITLE's words ("Caddy fails to start" on "Configure
+    # reverse proxy"), but not without sharing the STEP's: the facts window is session-wide, so a Jellyfin
+    # apt fact rode along on the router step. Given the task text, a fact must share a word with it or the
+    # title.
+    # One shared TITLE word is enough; the task text is longer and shares generic words ("container") with
+    # anything, so it takes two.
+    if not from_notes and task_text:
+        task_words = _distinctive(task_text) - _RELEVANCE_STOP
+
+        def _on_step(c: str) -> int:
+            d = _distinctive(c) - _RELEVANCE_STOP
+            return 2 * len(topic & d) + len(task_words & d) if (topic & d or len(task_words & d) >= 2) else 0
+        on_step = [c for c in candidates if _on_step(c)]
+        if not on_step:
+            logger.info("assist_blocker_query_off_step node=%r skipped", title)
+            return ""
+        if blocker not in on_step:
+            blocker = max(on_step, key=lambda c: (_on_step(c), len(c[:220]), on_step.index(c)))
     # Instance identifiers ("VM 106") are noise to a search engine; the
     # technology and the symptom are the signal.
     blocker = re.sub(r"\b(?:VM|CT|container)\s+\d{2,5}\b", "", blocker,
@@ -3418,7 +3462,14 @@ def blocker_research_query(
     subject_src = re.sub(r"\b(?:on|in)?\s*(?:VM|CT|container)\s+\d{2,5}\b", " ",
                          title or "", flags=re.IGNORECASE)
     subject = " ".join(w for w in subject_src.split()
-                       if w.lower() not in _GENERIC_TITLE_WORDS)[:60]
+                       if w.lower() not in _GENERIC_TITLE_WORDS)
+    # §17.1439 — cut on a word boundary and drop what is left dangling: a hard [:60] ended ADD4's subject on
+    # "Caddy proxy (192.168.1." — half an address and an open parenthesis.
+    if len(subject) > 60:
+        subject = subject[:61].rsplit(" ", 1)[0]
+    subject = " ".join(w for w in subject.split()
+                       if w.count("(") == w.count(")")
+                       and not re.fullmatch(r"\d+(?:\.\d+)+\.?", w.strip("(),;:")))   # an address, whole or cut
     query = f"{subject} {blocker}".strip() if subject else blocker
     # §17.1020 — and the model, when the blocker is about that device.
     from app.modules.assist_render import hardware_for_text

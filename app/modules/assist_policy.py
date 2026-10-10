@@ -473,6 +473,49 @@ def hedged_completion_report(msg: str) -> bool:
     return _completion_shape(msg) and expresses_uncertainty(msg)
 
 
+# ── Position report (§17.1439) ──────────────────────────────────────────────
+# Live (ADD4, 2026-10-09 21:21): "yes i am logged in and have gotten to the router page of the app." was routed
+# to submit — the /decide model's own rationale read "a partial result on the current step, not yet the
+# completed port-forward rules" — because nothing routed WHERE THE OPERATOR IS. The submit was judged
+# incomplete ("has not yet described what they see") and answered "If it IS done, reply confirm". A report of
+# the screen they reached is the cue for the next instruction from there: `fix`, the path that works the step
+# from the operator's current state (as a no-error paste does). Precision-first: short, not a question, and
+# never a completion claim ("I'm on the rules page and both are saved" stays a submit).
+_POSITION_RE = re.compile(
+    r"\b(?:(?:i'?ve|i\s+have|we'?ve|we\s+have)\s+(?:now\s+)?(?:gotten|got|made\s+it|navigated|gone|come)\s+"
+    r"(?:to|into|in\s+to|as\s+far\s+as|through\s+to)\b"
+    r"|(?:i'?m|i\s+am|we'?re|we\s+are)\s+(?:now\s+)?(?:on|at|in|into|looking\s+at|viewing)\s+(?:the\s+|a\s+|my\s+)?"
+    r"(?:[\w&'-]+\s+){0,4}(?:page|screen|tab|menu|section|settings|dashboard|window|dialog|app)\b"
+    r"|\b(?:got|made\s+it|navigated)\s+(?:to|into)\s+the\b"
+    r"|\breached\s+the\b"
+    r"|\b(?:i'?m|i\s+am|we'?re)\s+(?:now\s+)?(?:logged|signed)\s+in\b"
+    r"|^\s*(?:(?:yes|yeah|yep|ok(?:ay)?)[,!.\s]+)?(?:now\s+)?(?:logged|signed)\s+in\b)",
+    re.IGNORECASE,
+)
+
+
+# A position report that also states a RESULT ("… and both rules are saved") is the step's outcome → submit.
+_POSITION_RESULT_RE = re.compile(
+    r"\b(?:saved|created|added|applied|configured|enabled|installed|done|finished|complete[d]?|"
+    r"works|worked|working|succeeded|success(?:ful(?:ly)?)?)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_position_report(msg: str) -> bool:
+    """§17.1439 — the operator saying which screen/page they are on now, mid-step."""
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if len(m) > 300 or "?" in m or _CLAIM_SHELL_PROMPT_RE.search(m):
+        return False
+    if _completion_shape(m) or expresses_uncertainty(m) or _POSITION_RESULT_RE.search(m):
+        return False
+    if looks_like_howto_question(m) or looks_like_help_request(m):
+        return False
+    return bool(_POSITION_RE.search(m))
+
+
 # ── Advancement signal (§17.891) ─────────────────────────────────────────────
 # The mirror image of §17.890. Live incident (2026-08-31 02:40): the §17.754
 # tracker — confidence above threshold, current_step_done=true — retired
@@ -813,6 +856,11 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
         if action != "status":
             return "status", "whats_next", {}
         return action, None, {}
+    # 2b. §17.1439 — where the operator IS mid-step ("I'm logged in and on the router page") is not a
+    #     result: the next instruction from that screen is (`fix`). Overrides the model's submit too — its
+    #     own rationale called that message "a partial result … not yet the completed rules".
+    if action in ("submit", "advance", "question", "note", "status") and looks_like_position_report(msg):
+        return "fix", "position_report", {"error_text": msg.strip()}
     # 3. §17.890 — an explicit completion CLAIM is a submit, no matter what the
     #    model said (live: "I did that already" was routed to question/ask →
     #    tracker "isn't sure" → dead end, while the operator repeated themselves).
