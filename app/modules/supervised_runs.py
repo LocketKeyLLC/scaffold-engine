@@ -159,6 +159,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "the verify channel will refuse this check",      # §17.1390
                    "a credential into the block as a literal value",  # §17.1391
                    "points a PUBLIC DNS name at a private address",  # §17.1453
+                   "is the only field this rewrite of net0 may change",  # §17.1457
+                   "lines it holds now would be lost",              # §17.1457
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -300,6 +302,8 @@ _WHOSE_GAP: dict[str, str] = {
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
+    "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
+    "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
@@ -5610,6 +5614,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     runnable, refused = _sw.gate_block(commands, policy.get("allow") or [])
     if refused:                                   # the policy changed since the frame was drawn, or a value broke the shape
         return {"outcome": "not_runnable", "refused": [{"command": mask_secrets(r["command"], values, need), "why": r["why"]} for r in refused]}
+    # §17.1457 — the last look before anything runs: the machine may have moved since the frame was drawn
+    from app.modules.rewrite_guard import destructive_rewrites
+    _lost = await destructive_rewrites(runnable, spec, [f for f in (waiting.get("files") or []) if (f or {}).get("path")])
+    if _lost:
+        return {"outcome": "not_runnable", "refused": [{"command": mask_secrets(r["command"], values, need), "why": r["why"]} for r in _lost]}
     claimed = await db.execute(
         text("UPDATE dag_nodes SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
              "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),

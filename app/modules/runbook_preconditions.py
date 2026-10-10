@@ -860,6 +860,13 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # the guest the file lands in, against whatever target the file names: it is
     # not this block reaching into its own subject.
     out: list[dict] = []
+    # §17.1457 — a rewrite that loses what the machine holds now (a net0 losing its address or MAC, a config
+    # file overwritten by a fragment), read live
+    from app.modules.rewrite_guard import destructive_rewrites
+    try:
+        out.extend(await destructive_rewrites(commands or [], spec, files))
+    except Exception as exc:                       # fail-soft: blindness is not a refusal
+        logger.warning("rewrite_guard_failed err=%r", exc)
     inv = inventory if inventory is not None else (await read_inventory(spec) if spec is not None else None)
     # §17.1344 — an id no machine has is not a guest. Live, "in-container 999:996"
     # (the services' uid and gid) read as guest 999, and the host-side `chown` was
