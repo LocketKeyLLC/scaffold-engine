@@ -888,8 +888,14 @@ async def _run_turn_inner(
     # not divert the turn to the note path (live: "add a step for this"
     # routed add_step + reshape → filed as a note, nothing added).
     if confident and (action == "note" or (impact == "reshape" and action != "add_step")):
-        async for e in _note(session_id, d, text_, nk, db):
+        _nout: dict = {}
+        async for e in _note(session_id, d, text_, nk, db, out=_nout):
             yield e
+        if _resets_current(_nout, nk):
+            # §17.1452 — the correction cleared this step's walkthrough: write the corrected one now, rather
+            # than leave the operator on a step with nothing to follow (live ADD128 after the .26→.127 note).
+            async for e in _claim_and_guide(session_id, nk, history, db, orient=False):
+                yield e
         # §17.903 — recording is not answering. A pivot framed as a QUESTION
         # was overridden ask→note, filed, and the turn ENDED — the operator's
         # direct "delete this VM and start over?" got no reply at all, and
@@ -1161,9 +1167,14 @@ async def _run_turn_inner(
             # turn 3165): it reached here, `substitutions=None` failed AssistEnvInput's validation, and
             # the operator read "Couldn't update the environment (1 validation error …)".
             _replied = False
-            async for e in _note(session_id, {**d, "note_kind": d.get("note_kind") or "note"}, text_, nk, db):
+            _nout: dict = {}
+            async for e in _note(session_id, {**d, "note_kind": d.get("note_kind") or "note"}, text_, nk, db,
+                                 out=_nout):
                 _replied = _replied or (e[0] == ASSIST_ANSWER)
                 yield e
+            if _resets_current(_nout, nk):
+                async for e in _claim_and_guide(session_id, nk, history, db, orient=False):  # §17.1452
+                    yield e
             if not _replied:
                 # the operator must see an answer that survives a reload, not only a status line
                 async for e in _durable_note(session_id, nk, "📝 Noted — recorded for this step. Nothing in the "
@@ -1276,7 +1287,13 @@ async def _run_turn_inner(
     handled["v"] = "fallback"
 
 
-async def _note(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterator[_Event]:
+def _resets_current(out: dict, nk) -> bool:
+    """§17.1452 — did this turn's correction clear the walkthrough of the step the operator is on?"""
+    rec = ((out or {}).get("res") or {}).get("reconciliation") or {}
+    return bool(nk) and nk in (rec.get("guidance_resets") or [])
+
+
+async def _note(session_id: str, d: dict, text_: str, nk, db, out: dict | None = None) -> AsyncIterator[_Event]:
     yield _ev(ASSIST_TURN_STATUS, {"text": "Recording that and checking whether it changes the plan…"})
     from app.routers.assist import AssistNoteInput, assist_note
     kind = d.get("note_kind") or ("decision" if (d.get("plan_impact") == "reshape") else "note")
@@ -1285,6 +1302,8 @@ async def _note(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterator[_
         AssistNoteInput(text=text_, kind=kind, node_key=nk),  # §17.886(#4) — reset-intent regexes need the original words
         db=db,
     )
+    if out is not None:
+        out["res"] = res
     yield _ev(ASSIST_NOTE_RECORDED, {
         "kind": kind,
         "retracted": len(res.get("retracted_facts") or []),
@@ -1898,7 +1917,16 @@ async def _claim_and_guide(
                 {"sid": session_id, "nk": nk})).scalar()
             if st == "pending":
                 logger.info("turn_loop_claim_repair sid=%s nk=%s", session_id, nk)
-                await assist_next(session_id, db=db)
+                # §17.1452 — guide the step the claim actually took. The pointer can sit on a step whose
+                # dependencies are not done (after ADD4 committed it moved to ADD49, next by plan order);
+                # the claim is dependency-gated and took ADD128 — the pointer followed, but this local `nk`
+                # stayed ADD49, so ADD49's walkthrough streamed while the session was on ADD128 and the
+                # runner's `qm status 110` was then judged against ADD128 ("unrelated").
+                _claimed = await assist_next(session_id, db=db)
+                _ck = (_claimed or {}).get("node_key")
+                if _ck and _ck != nk:
+                    logger.info("turn_loop_claim_repair_moved sid=%s from=%s to=%s", session_id, nk, _ck)
+                    nk = _ck
             elif st in assist_agent._TERMINAL_STEP_STATUSES:
                 logger.info("turn_loop_terminal_pointer_heal sid=%s nk=%s st=%s",
                             session_id, nk, st)

@@ -330,7 +330,9 @@ def collapse_double_records(rows: list[dict]) -> list[dict]:
         if (
             prev is not None
             and (r.get("role") or "") == "operator" == (prev.get("role") or "")
-            and (r.get("kind") or "") in ("submit", "skip")
+            # §17.1452 — and "note": a message routed to the note path is recorded again as a `note` row;
+            # live ADD128 showed every correction twice (3169/3170 …).
+            and (r.get("kind") or "") in ("submit", "skip", "note")
             and (prev.get("kind") or "") == "message"
             and (r.get("content") or "").strip() == (prev.get("content") or "").strip()
         ):

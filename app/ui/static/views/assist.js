@@ -496,6 +496,24 @@ const NODE_DONE = new Set(["done", "skipped"]);
 // was ADD50 — "if we are on add 50, why is it on ADD 65 on the web ui?".
 // The cursor still wins while it names a step that is genuinely open; only a
 // SPENT cursor defers to what the DAG says is next.
+// §17.1452 — what the engine is doing, said in the composer, so a quiet page never reads as a hung one.
+// Live (ADD128, 2026-10-10): after a correction cleared the step's walkthrough the turn ended on a note; the
+// page showed only notes, the Guide button is folded away in the Follow view, and the operator reported
+// "there is no indicator … if the engine is still running". `needsGuide`: the current step's latest reply is
+// not a walkthrough or fix, so the operator has nothing to follow until one is written.
+export function engineState({ guiding, turns, stepKey }) {
+  if (guiding) return { state: "working", label: "● Engine working…", needsGuide: false };
+  const mine = (turns || []).filter((t) => t && t.role === "assistant" && !t._pending
+    && (!stepKey || !t.node_key || t.node_key === stepKey));
+  const last = mine[mine.length - 1];
+  const needsGuide = !!stepKey && !(last && (last.kind === "guide" || last.kind === "fix"));
+  return {
+    state: "idle",
+    label: needsGuide ? `○ Engine idle — no walkthrough on screen for ${stepKey}` : "○ Engine idle — waiting for you",
+    needsGuide,
+  };
+}
+
 function workingKey(session, steps) {
   const nk = session && session.current_node_key;
   const cur = (steps || []).find((x) => x.node_key === nk);
@@ -681,6 +699,15 @@ export function renderChat(container, sessionId, opts = {}) {
     rows: "2",
   });
   const guideBtn = el("button", { class: "btn btn-sm guide-btn", text: "✦ Guide me", onClick: () => guideCurrent() });
+  const engineStateEl = el("span", { class: "engine-state", role: "status", "aria-live": "polite" });
+  function paintEngineState() {
+    const st = engineState({ guiding, turns, stepKey: workingKey(session, steps) });
+    engineStateEl.textContent = st.label;
+    engineStateEl.dataset.state = st.state;
+    const m = engineStateEl.closest(".assist-main");
+    if (m) m.classList.toggle("needs-guide", st.needsGuide);
+    if (!guiding) guideBtn.textContent = st.needsGuide ? `✦ Show ${workingKey(session, steps)}'s walkthrough` : "✦ Guide me";
+  }
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
   // Current-step hero — the persistent status layer over the conversation.
   const stepHero = el("div", { class: "card card-pad step-hero hidden" });
@@ -1069,7 +1096,7 @@ export function renderChat(container, sessionId, opts = {}) {
     replanSlot,
     // Full-width input below.
     composerText,
-    el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
+    el("div", { class: "composer-actions" }, guideBtn, engineStateEl, el("span", { class: "spacer" }), sendBtn)
   );
 
   // §17.1096 — the "?" panel: a discoverable path that explains the controls
@@ -1531,6 +1558,7 @@ export function renderChat(container, sessionId, opts = {}) {
   }
 
   function renderTranscript() {
+    queueMicrotask(paintEngineState);   // §17.1452
     // §17.890 — never rebuild the DOM out from under an active selection.
     if (selectionWithin(transcript)) { transcriptRenderDeferred = true; return; }
     transcriptRenderDeferred = false;
@@ -2131,6 +2159,7 @@ export function renderChat(container, sessionId, opts = {}) {
     guiding = true;
     guideBtn.textContent = "■ Stop";
     guideBtn.classList.add("guiding");
+    paintEngineState();   // §17.1452
     sendBtn.disabled = true;
     let sawDone = false, stoppedByUser = false;   // §17.1082
     abort = new AbortController();
@@ -2313,6 +2342,7 @@ export function renderChat(container, sessionId, opts = {}) {
       sendBtn.disabled = false;
       guideBtn.textContent = "✦ Guide me";
       guideBtn.classList.remove("guiding");
+      paintEngineState();   // §17.1452
       clearStatusLine();
       if (live) live.classList.remove("streaming");
       // §17.1082 — the stream closed without a terminal frame and nobody
