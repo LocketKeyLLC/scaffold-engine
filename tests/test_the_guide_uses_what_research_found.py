@@ -53,5 +53,5 @@ def test_the_fallback_runs_when_nothing_relevant_survives(monkeypatch):
 def test_the_directives_say_to_use_the_research_and_not_ask():
     src = inspect.getsource(ad)
     assert "USE WHAT THE RESEARCH FOUND" in src
-    assert "NEVER a request to describe" in src and "then follow the steps below" in src
+    assert "never a request to describe the screen" in src and "the callout IS the path" in src
     assert "A CLICK PATH IS THE STEPS" in inspect.getsource(arl._render_research_block)

@@ -131,3 +131,32 @@ test("openSectionFor defaults to the walkthrough rule", () => {
   }
   assert.equal(openSectionFor("fix"), FIX_OPEN_SECTION);
 });
+
+// §17.1443 — the REAL ADD4 walkthrough (turn 3141): "Tap the Services tab at the
+// bottom of the app, then follow the steps below" over a folded "Steps (9)" row.
+const ADD4 = readFileSync(join(here, "fixtures", "add4_guide_3141.md"), "utf8");
+const { isOpenSection } = await import("../../app/ui/static/views/assist.js");
+
+test("a lead that points to the steps below opens them", () => {
+  const { sections } = splitGuideSections(ADD4);
+  const steps = sections.find((s) => s.title === "Steps");
+  assert.ok(steps, "fixture has a Steps section");
+  assert.ok(isOpenSection(steps, "guide", sections), "Steps must open when the lead says 'the steps below'");
+  const goal = sections.find((s) => s.title === "Goal");
+  assert.ok(!isOpenSection(goal, "guide", sections), "only the pointed-to section opens");
+});
+
+test("T35's lead points nowhere, so its runbook stays folded", () => {
+  const { sections } = splitGuideSections(T35);
+  const open = sections.filter((s) => isOpenSection(s, "guide", sections));
+  assert.equal(open.length, 2, `got ${open.map((s) => s.title)}`);
+});
+
+test("a walkthrough with no 👉 lead opens its steps instead of hiding every action", () => {
+  // a real draw of ADD4's walkthrough (read-only replay, 2026-10-10) that came back without the callout
+  const NOLEAD = readFileSync(join(here, "fixtures", "add4_guide_no_lead.md"), "utf8");
+  const { sections } = splitGuideSections(NOLEAD);
+  assert.ok(!sections.some((s) => /do this next/i.test(s.title)));
+  const open = sections.filter((s) => isOpenSection(s, "guide", sections)).map((s) => s.title);
+  assert.ok(open.includes("Steps") && !open.includes("Goal"), `open: ${open}`);
+});
