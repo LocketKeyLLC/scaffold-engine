@@ -90,4 +90,4 @@ def test_a_saved_walkthrough_with_the_promise_is_not_re_served():
     assert _cached_sends_to_done_early({"guidance": LIVE}) is True
     assert _cached_sends_to_done_early({"guidance": CLICK_PATH}) is False
     src = pathlib.Path("app/modules/assist_guide.py").read_text()
-    assert src.count("or _cached_sends_to_done_early(cached)  # §17.1441") == 2, "both cache paths (guide + stream)"
+    assert src.count("or _cached_sends_to_done_early(cached) or _cached_predates_rules(cached)") == 2, "both cache paths"
