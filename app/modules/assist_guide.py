@@ -4927,6 +4927,31 @@ def _trivial_turns() -> set[str]:
     return set(_TRIVIAL_TURN)
 
 
+# §17.1444 — when the engine changes HOW a walkthrough is researched or written, a walkthrough saved before
+# the change is the old engine's answer. Live: after §17.1443 shipped (research read pages from their first
+# 2000 chars; the callout pointed at folded steps), ADD4's Guide re-served turn 3141's saved text in 0.15 s —
+# "Add Port Forwarding", no IP reservation, "follow the steps below". Bump this with any such change.
+GUIDE_RULES_EPOCH = datetime(2026, 10, 10, 12, 12, tzinfo=timezone.utc)
+
+
+def _cached_predates_rules(cached: dict) -> bool:
+    gen = (cached or {}).get("_generated_at_raw")
+    if isinstance(gen, str):
+        try:
+            gen = datetime.fromisoformat(gen.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(gen, datetime):
+        return False
+    if gen.tzinfo is None:
+        gen = gen.replace(tzinfo=timezone.utc)
+    old = gen < GUIDE_RULES_EPOCH
+    if old:
+        logger.info("assist_guide_cache_predates_rules_regen generated_at=%s epoch=%s",
+                    gen.isoformat(), GUIDE_RULES_EPOCH.isoformat())
+    return old
+
+
 def _cached_sends_to_done_early(cached: dict) -> bool:
     """§17.1441 — a saved walkthrough that tells the operator to press ✓ Done while promising more of the
     step (written before the gate existed — ADD4's turn 3140) is regenerated, never re-served."""
@@ -5356,7 +5381,7 @@ async def ensure_guidance(
             stale = await cached_guidance_is_stale(
                 session_id=session_id, node_key=node_key,
                 generated_at=cached.get("_generated_at_raw"), db=db,
-            ) or _cached_sends_to_done_early(cached)  # §17.1441
+            ) or _cached_sends_to_done_early(cached) or _cached_predates_rules(cached)  # §17.1441/1444
             if not stale:
                 cached.pop("_generated_at_raw", None)
                 # §17.932 — a CACHED walkthrough needs the finish line just as
@@ -5503,7 +5528,7 @@ async def generate_guidance_stream(
             stale = await cached_guidance_is_stale(
                 session_id=session_id, node_key=node_key,
                 generated_at=cached.get("_generated_at_raw"), db=db,
-            ) or _cached_sends_to_done_early(cached)  # §17.1441
+            ) or _cached_sends_to_done_early(cached) or _cached_predates_rules(cached)  # §17.1441/1444
             if not stale:
                 yield {"type": "delta", "text": cached["guidance"]}
                 yield {"type": "done", "status": "ready",

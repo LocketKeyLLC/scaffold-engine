@@ -2154,7 +2154,7 @@ async def test_ensure_guidance_fresh_cache_served_without_sentinel():
     stripped (it's internal plumbing, not part of the API shape)."""
     db = AsyncMock()
     cached = {"guidance": "cached", "status": "ready", "cached": True,
-              "_generated_at_raw": "2026-08-29T00:00:00Z"}
+              "_generated_at_raw": "2026-10-11T00:00:00Z"}  # after GUIDE_RULES_EPOCH (§17.1444)
     with patch.object(assist_guide, "read_cached_guidance",
                       new=AsyncMock(return_value=cached)), \
          patch.object(assist_guide, "cached_guidance_is_stale",
