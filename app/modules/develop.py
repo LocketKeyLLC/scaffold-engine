@@ -72,6 +72,9 @@ _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|
                              r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces")
 
 
+_CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:validate|verify|check|test|audit|review|document)\b", re.I)
+
+
 def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
     """The step builds software, and a measured service with a directory hosts it -- or None.
 
@@ -79,6 +82,11 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
     from app.modules.step_decomposition import builds_a_capability
     text = _text(node)
     if not builds_a_capability(text):
+        return None
+    # §17.1454 — a step that checks or writes up the build does not build software. Live (T37 "Validate
+    # entire build", 2026-10-10): its text names the control-panel backend it checks, so it was developed,
+    # refused for having no feature check of its own, and parked with nothing to run.
+    if _CHECKS_OR_WRITES_UP_RE.match(str((node or {}).get("title") or "")):
         return None
     # §17.1431 — a step whose own text names a HOST-level change is not developed: the delivery carries
     # files into one service, never `pct set` / a reboot. Live, ADD128 ("CT 120: fix its DNS
@@ -90,6 +98,12 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
     pick = None
     if m:
         pick = next((s for s in cands if str(s.guest) == m.group(1)), None)
+        # §17.1454 — the title names the guest the work is on; a service elsewhere is not its host.
+        # Live (ADD149 "CT 120 (Caddy): publish ONLY the control panel"): no measured service on 120 has a
+        # directory, so the name fallback below picked RADARR (CT 103) because the text says "Radarr's 302",
+        # and seven rounds proposed `/etc/caddy/Caddyfile` for the wrong container until each was refused.
+        if pick is None:
+            return None
     if pick is None:
         low = text.lower()
         pick = next((s for s in cands if str(getattr(s, "name", "")).lower() in low

@@ -30,3 +30,26 @@ def test_add128_is_not_developed():
 def test_the_panel_feature_steps_still_are(fixture):
     node = json.loads((FIX / fixture).read_text())
     assert dv.host_for(node, [CADDY, PANEL]) is not None, fixture
+
+
+# §17.1454 — the guest the title names hosts the work, or nothing does.
+RADARR = st.ServiceTruth(guest="103", name="radarr", unit="radarr.service", workdir="/opt/Radarr")
+
+
+def test_a_step_on_a_guest_with_no_measured_service_is_not_hosted_elsewhere():
+    """Live (ADD149, 2026-10-10): no measured service on CT 120 had a directory; the name fallback picked
+    Radarr (CT 103) because the text says "Radarr's 302"."""
+    node = json.loads((FIX / "add149_node_2026_10_10.json").read_text())
+    assert "radarr" in node["description"].lower() and node["title"].startswith("CT 120")
+    assert dv.host_for(node, [PANEL, RADARR]) is None
+    host = dv.host_for(node, [PANEL, RADARR, CADDY])
+    assert host is None or host.guest == "120"
+
+
+def test_a_validation_or_write_up_step_is_not_developed():
+    """§17.1454 — T37 "Validate entire build" was developed (its text names the backend it checks)."""
+    t37 = json.loads((FIX / "t37_node_2026_10_10.json").read_text())
+    assert t37["title"] == "Validate entire build"
+    assert dv.host_for(t37, [PANEL, CADDY, RADARR]) is None
+    for title in ("Document architecture and setup", "Verify the panel answers", "Test the media request"):
+        assert dv.host_for({"title": title, "description": "LXC 111: build the control-panel route"}, [PANEL]) is None
