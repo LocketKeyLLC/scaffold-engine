@@ -1150,14 +1150,24 @@ async def _run_turn_inner(
     if confident and action in ("set_env", "set_verbosity"):
         import re as _re2
         from app.routers.assist import AssistEnvInput, assist_set_env
+        subs = dict(_re2.findall(r"([A-Za-z_]\w*)=(\S+)", text_))
+        verb = ("terse" if "terse" in text_.lower() else
+                "detailed" if "detail" in text_.lower() else
+                "normal" if action == "set_verbosity" else None)
+        if not subs and verb is None:
+            # §17.1450 — a fact stated in prose ("caddy (ct 120) is at 192.168.1.127, not 192.168.1.26.")
+            # carries no KEY=value to pin and no verbosity: there is nothing for set_env to set. It is a
+            # note — recorded, and its correction applied to the steps ahead (§17.1045). Live (ADD128,
+            # turn 3165): it reached here, `substitutions=None` failed AssistEnvInput's validation, and
+            # the operator read "Couldn't update the environment (1 validation error …)".
+            async for e in _note(session_id, {**d, "note_kind": d.get("note_kind") or "note"}, text_, nk, db):
+                yield e
+            handled["v"] = "set_env_as_note"
+            return
         try:
-            subs = dict(_re2.findall(r"([A-Za-z_]\w*)=(\S+)", text_))
-            verb = ("terse" if "terse" in text_.lower() else
-                    "detailed" if "detail" in text_.lower() else
-                    "normal" if action == "set_verbosity" else None)
             _env_res = await assist_set_env(
                 session_id,
-                AssistEnvInput(substitutions=subs or None, verbosity=verb),
+                AssistEnvInput(substitutions=subs, verbosity=verb),
                 db=db,
             )
             yield _ev(ASSIST_TURN_STATUS, {"text": "Noted — environment updated."})
