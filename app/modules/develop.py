@@ -105,9 +105,13 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
         if pick is None:
             return None
     if pick is None:
-        low = text.lower()
+        # §17.1456 — the host is the step's SUBJECT, which its title names. Live (ADD151 "Proxmox firewall:
+        # enforce the security groups on every guest", 2026-10-10): the description lists Jellyfin's ports, so
+        # the name match over the whole text hosted a firewall step on Jellyfin's container as a software build.
+        title = str((node or {}).get("title") or "")
+        low = title.lower()
         pick = next((s for s in cands if str(getattr(s, "name", "")).lower() in low
-                     or str(s.workdir) in text), None)
+                     or str(s.workdir) in title), None)
     if pick is None:
         return None
     return Host(guest=str(pick.guest), vm=bool(getattr(pick, "vm", False)), workdir=str(pick.workdir).rstrip("/"),

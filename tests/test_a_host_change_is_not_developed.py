@@ -53,3 +53,13 @@ def test_a_validation_or_write_up_step_is_not_developed():
     assert dv.host_for(t37, [PANEL, CADDY, RADARR]) is None
     for title in ("Document architecture and setup", "Verify the panel answers", "Test the media request"):
         assert dv.host_for({"title": title, "description": "LXC 111: build the control-panel route"}, [PANEL]) is None
+
+
+JELLYFIN = st.ServiceTruth(guest="101", name="jellyfin", unit="jellyfin.service", workdir="/var/lib/jellyfin")
+
+
+def test_a_service_only_the_description_mentions_is_not_the_host():
+    """§17.1456 — ADD151 (firewall on every guest) was hosted on Jellyfin because its text lists Jellyfin's ports."""
+    node = json.loads((FIX / "add151_node_2026_10_10.json").read_text())
+    assert "jellyfin" in node["description"].lower() and "jellyfin" not in node["title"].lower()
+    assert dv.host_for(node, [PANEL, RADARR, JELLYFIN, CADDY]) is None
