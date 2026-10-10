@@ -152,7 +152,8 @@ def derive_corrections(*, failing_pastes: list[str], fix_replies: list[str],
 
 
 def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
-                 *, source_node_key: str, source_label: Optional[str] = None) -> dict:
+                 *, source_node_key: str, source_label: Optional[str] = None,
+                 include_source: bool = False) -> dict:
     """Pure: which pending nodes' task text change and how, and which cached
     walkthroughs must be regenerated. ``nodes``: ``{node_key, status,
     prompt_template}``; ``steps``: ``{node_key, status, guidance}``.
@@ -162,7 +163,7 @@ def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
     node_updates: list[dict] = []
     for n in nodes or []:
         nk = n.get("node_key")
-        if nk == source_node_key or (n.get("status") or "") != "pending":
+        if (nk == source_node_key and not include_source) or (n.get("status") or "") != "pending":
             continue
         txt = n.get("prompt_template") or ""
         # Earlier provenance lines quote the old value; they are never a match
@@ -194,7 +195,8 @@ def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
     guidance_resets: list[str] = []
     for s in steps or []:
         nk = s.get("node_key")
-        if nk == source_node_key or (s.get("status") or "") in ("committed", "skipped", "handed_off", "escalated"):
+        if (nk == source_node_key and not include_source) \
+                or (s.get("status") or "") in ("committed", "skipped", "handed_off", "escalated"):
             continue
         g = s.get("guidance") or ""
         if g and any(_mentions(c["old"], g) for c in corrections):
@@ -213,7 +215,7 @@ def render_note(result: dict) -> str:
         return ""
     src = result.get("source_node_key", "?")
     if result.get("trigger") == "note":
-        head = "🔁 **Plan updated from your note** — the correction has been applied to the steps ahead:"
+        head = "🔁 **Plan updated from your note** — the correction has been applied to this step and the ones ahead:"
     elif result.get("trigger") == "substitution":
         head = "🔁 **Plan updated from your environment pin** — the new value has been applied to the steps ahead:"
     elif result.get("trigger") == "address":
@@ -575,9 +577,18 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
             logger.info("plan_reconcile_note_no_corrections session_id=%s kind=%s", session_id, note_kind)
             return None
         src = node_key or "?"
+        # §17.1451 — a note is about the step it was written on as much as the ones after it. The source
+        # exclusion is for a FIX trigger (the step whose fix worked is not re-written by it); a note's step
+        # is still pending and still carries the old value. Live (ADD128, turn 3166): "caddy (ct 120) is at
+        # 192.168.1.127, not 192.168.1.26." derived the right correction and applied it to no step
+        # (`nodes=[]`) — ADD128, the only pending step naming .26, was the note's own step.
         changes = plan_changes(nodes, steps, corrections, source_node_key=src,
-                               source_label=f"your note ({src})")
+                               source_label=f"your note ({src})", include_source=True)
         changes.update({"trigger": "note", "source_node_key": src, "corrections": corrections})
+        if not (changes["node_updates"] or changes["guidance_resets"]):
+            logger.info("plan_reconcile_note_nothing_to_apply session_id=%s corrections=%r", session_id,
+                        [(c["old"], c["new"]) for c in corrections])
+            return None
         for u in changes["node_updates"]:
             await db.execute(text(f"""
                 UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
