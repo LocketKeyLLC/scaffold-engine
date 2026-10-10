@@ -15,7 +15,6 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 import pdfplumber
-import trafilatura
 from pypdf import PdfReader
 
 from app.config import settings
@@ -681,7 +680,8 @@ async def _fetch_url_bounded(
 async def _extract_page_title(html: str, url: str) -> str:
     """trafilatura metadata → <title> regex → URL. Always returns a string."""
     try:
-        meta = await asyncio.to_thread(trafilatura.extract_metadata, html)
+        from app.utils.html_extract import extract_metadata  # §17.1442
+        meta = await asyncio.to_thread(extract_metadata, html)
         if meta:
             title = getattr(meta, "title", None)
             if title:

@@ -200,11 +200,12 @@ def _extract_text_and_date(html: str) -> tuple[str, str]:
     """Body text plus the page's declared publication date (§17.1027), in ONE
     worker thread — trafilatura parses the tree once per call, so the metadata
     pass is a second parse; bounded by the same byte cap as the fetch."""
-    text_out = trafilatura.extract(html, output_format="txt", with_metadata=False)
+    from app.utils.html_extract import extract_text, extract_metadata  # §17.1442 — one parse at a time
+    text_out = extract_text(html, output_format="txt", with_metadata=False)
     date = ""
     if text_out:
         try:
-            md = trafilatura.extract_metadata(html)
+            md = extract_metadata(html)
             date = str(getattr(md, "date", "") or "") if md else ""
         except Exception:
             date = ""
@@ -2330,8 +2331,9 @@ async def _run_research_url_mode(
             f"Failed to fetch {url} ({detail or reason})"
         )
 
+    from app.utils.html_extract import extract_text  # §17.1442
     text_content = await asyncio.to_thread(
-        trafilatura.extract, html,
+        extract_text, html,
         output_format="txt", with_metadata=False,
     )
     if not text_content or len(text_content) < 100:
