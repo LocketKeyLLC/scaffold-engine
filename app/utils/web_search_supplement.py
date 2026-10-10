@@ -42,8 +42,32 @@ def _is_bare_homepage(url: str) -> bool:
     return bool(u.netloc) and u.path in ("", "/")
 
 
-def useful_count(results: list) -> int:
-    return sum(1 for r in results if isinstance(r, dict) and r.get("url") and not _is_bare_homepage(str(r["url"])))
+def _stem(t: str) -> str:
+    return t[:5] if len(t) > 5 else t     # "forwarding" ~ "forward", "reservation" ~ "reserve"
+
+
+def _tokens(text: str) -> set[str]:
+    import re
+    return {_stem(t) for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 3}
+
+
+def useful_count(results: list, query: str = "") -> int:
+    """Results that answer the query: not a site's front door, and — §17.1445 — sharing two of the query's
+    distinctive words beyond the one most of the results share (the brand). Live 2026-10-10: with every
+    engine but bing suspended, "Spectrum Advanced WiFi router port forwarding My Spectrum app" returned ten
+    Spectrum pages (billing, packages, channel lineup, speed test); none is a front door, so the old count
+    said 10 useful and the keyed backend never ran — 0 supplements in 3 h while ADD4 researched on them."""
+    rows = [r for r in results if isinstance(r, dict) and r.get("url") and not _is_bare_homepage(str(r["url"]))]
+    if not query:
+        return len(rows)
+    from app.modules.research_extractors import _query_tokens
+    want = {_stem(t) for t in _query_tokens(query)}
+    if not want:
+        return len(rows)
+    hays = [_tokens(f"{r.get('title', '')} {r.get('content', '')} {r.get('url', '')}") & want for r in rows]
+    common = {t for t in want if rows and sum(1 for h in hays if t in h) >= max(2, 0.6 * len(rows))}
+    need = 2 if len(want - common) >= 2 else 1
+    return sum(1 for h in hays if len(h - common) >= need)
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -106,13 +130,13 @@ class SupplementedSearchTransport(httpx.AsyncBaseTransport):
             except Exception:
                 data = {}
         results = data.get("results") if isinstance(data.get("results"), list) else []
-        if resp.status_code == 200 and data and useful_count(results) >= settings.web_search_supplement_min_useful:
+        if resp.status_code == 200 and data and useful_count(results, q) >= settings.web_search_supplement_min_useful:
             return _rebuilt(resp, request, body)
         extra = await ollama_web_search(q)
         if not extra:
             return _rebuilt(resp, request, body)
         logger.info("web_search_supplemented q=%r searxng_status=%d searxng_useful=%d ollama=%d",
-                    q[:120], resp.status_code, useful_count(results), len(extra))
+                    q[:120], resp.status_code, useful_count(results, q), len(extra))
         data = data if isinstance(data, dict) else {}
         data["results"] = merge(results, extra)
         data.setdefault("query", q)
