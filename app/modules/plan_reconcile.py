@@ -63,6 +63,18 @@ KINDS = ("ip", "port", "version", "url", "path")
 PROVENANCE_PREFIX = "🔁 Updated after"
 
 
+# §17.1449 — a step's text is `prompt_template`, or `description` when that is empty (a step the planner wrote
+# whole into its description, or one split off another: ADD128 and ADD100 on the homelab job, 2 of its 6
+# pending steps). Every trigger here read and rewrote `prompt_template` only, so a correction could never
+# reach those steps — ADD128 still named Caddy's old 192.168.1.26 after the router moved it to .127. Reads
+# take the step's text; a write lands in the column that holds it.
+STEP_TEXT_EXPR = ("(CASE WHEN COALESCE(prompt_template, '') <> '' THEN prompt_template "
+                  "ELSE COALESCE(description, '') END)")
+STEP_TEXT_SQL = STEP_TEXT_EXPR + " AS prompt_template"
+STEP_TEXT_SET = ("prompt_template = CASE WHEN COALESCE(prompt_template, '') <> '' THEN :pt ELSE prompt_template END, "
+                 "description = CASE WHEN COALESCE(prompt_template, '') = '' THEN :pt ELSE description END")
+
+
 def values_in(text_value: str) -> list[dict]:
     """``{kind, value}`` for every concrete value in the text: the evidence
     layer's specifics (ip / port / version / url) plus absolute paths."""
@@ -204,6 +216,10 @@ def render_note(result: dict) -> str:
         head = "🔁 **Plan updated from your note** — the correction has been applied to the steps ahead:"
     elif result.get("trigger") == "substitution":
         head = "🔁 **Plan updated from your environment pin** — the new value has been applied to the steps ahead:"
+    elif result.get("trigger") == "address":
+        who = ", ".join(m["label"] for m in result.get("machines") or []) or "a machine"
+        head = (f"🔁 **Plan updated: {who} has a new address** — the steps ahead that named the old one now "
+                "use the measured one:")
     else:
         head = f"🔁 **Plan updated after step {src}** — the fix that worked has been applied to the steps ahead:"
     pairs: dict[tuple, list[str]] = {}
@@ -417,8 +433,8 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
     changes.update({"trigger": "decision", "source_node_key": node_key, "chosen": chosen,
                     "rejected": rejected, "replan_proposal": None})
     for u in changes["node_updates"]:
-        await db.execute(text("""
-            UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+        await db.execute(text(f"""
+            UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
              WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
         """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
     for nk in changes["guidance_resets"]:
@@ -543,8 +559,8 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
     if not settings.plan_reconcile_enabled:
         return None
     try:
-        nodes = [dict(r) for r in (await db.execute(text("""
-            SELECT node_key, status, prompt_template FROM dag_nodes
+        nodes = [dict(r) for r in (await db.execute(text(f"""
+            SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes
              WHERE job_id = :jid ORDER BY execution_order
         """), {"jid": job_id})).mappings().all()]
         steps = [dict(r) for r in (await db.execute(text("""
@@ -563,8 +579,8 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
                                source_label=f"your note ({src})")
         changes.update({"trigger": "note", "source_node_key": src, "corrections": corrections})
         for u in changes["node_updates"]:
-            await db.execute(text("""
-                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+            await db.execute(text(f"""
+                UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
                  WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:
@@ -656,8 +672,8 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
         corrections, new_keys = substitution_corrections(old_subs, new_subs)
         if not corrections and not new_keys:
             return None
-        nodes = [dict(r) for r in (await db.execute(text("""
-            SELECT node_key, status, prompt_template FROM dag_nodes
+        nodes = [dict(r) for r in (await db.execute(text(f"""
+            SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes
              WHERE job_id = :jid ORDER BY execution_order
         """), {"jid": job_id})).mappings().all()]
         steps = [dict(r) for r in (await db.execute(text("""
@@ -676,8 +692,8 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
                         session_id, [c["key"] for c in corrections] + new_keys)
             return None
         for u in changes["node_updates"]:
-            await db.execute(text("""
-                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+            await db.execute(text(f"""
+                UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
                  WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:
@@ -707,6 +723,103 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
         return changes
     except Exception as exc:
         logger.warning("plan_reconcile_substitution_failed session_id=%s err=%r", session_id, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# §17.1449 — a machine's address changed: the steps ahead that name the old one are corrected.
+#
+# Live (ADD4, 2026-10-10): the router app reserves only devices it leased an address to, so CT 120 went from a
+# fixed 192.168.1.26 to DHCP and was reserved at 192.168.1.127. The engine's record of CT 120 said .127 at once
+# (`pct config 120` + `ip a`); ADD128's text still said "Caddy in CT 120 (caddy-proxy, 192.168.1.26)" and its
+# done-check curled `--resolve …:443:192.168.1.26`. A measured value propagates deterministically, like an
+# environment pin: same rewrite, same provenance line, same revertable ledger entry.
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _machine_ip(rec) -> str:
+    if not isinstance(rec, dict):
+        return ""
+    ip = str(((rec.get("attrs") or {}).get("ip")) or "").split("/")[0].strip()
+    return ip if _IPV4_RE.match(ip) else ""
+
+
+def address_changes(before: Optional[dict], after: Optional[dict]) -> list[dict]:
+    """``[{id, label, old, new}]`` for machines whose recorded IPv4 address changed between two system
+    states. Skipped when it would be ambiguous: the old address is still another machine's, or the new one
+    already was."""
+    before, after = before or {}, after or {}
+    out: list[dict] = []
+    for mid, rec in after.items():
+        old, new = _machine_ip(before.get(mid)), _machine_ip(rec)
+        if not old or not new or old == new:
+            continue
+        others_after = {_machine_ip(r) for k, r in after.items() if k != mid}
+        others_before = {_machine_ip(r) for k, r in before.items() if k != mid}
+        if old in others_after or new in others_before:
+            logger.info("plan_reconcile_address_ambiguous machine=%s old=%s new=%s", mid, old, new)
+            continue
+        attrs = (rec.get("attrs") or {}) if isinstance(rec, dict) else {}
+        kind = "VM" if (rec.get("kind") if isinstance(rec, dict) else "") == "vm" else "CT"
+        label = f"{kind} {mid}" + (f" ({attrs['hostname']})" if attrs.get("hostname") else "")
+        out.append({"id": str(mid), "label": label, "old": old, "new": new})
+    return out
+
+
+async def reconcile_after_address_change(*, db, session_id: str, job_id: str,
+                                         changes: list[dict]) -> Optional[dict]:
+    """The address trigger. Fail-soft; None when no pending step names an old address."""
+    if not settings.plan_reconcile_enabled or not changes:
+        return None
+    try:
+        corrections = [{"kind": "ip", "old": c["old"], "new": c["new"], "key": c["label"]} for c in changes]
+        nodes = [dict(r) for r in (await db.execute(text(f"""
+            SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes
+             WHERE job_id = :jid ORDER BY execution_order
+        """), {"jid": job_id})).mappings().all()]
+        steps = [dict(r) for r in (await db.execute(text("""
+            SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
+        """), {"sid": session_id})).mappings().all()]
+        label = "the measured address of " + ", ".join(c["label"] for c in changes)
+        changes_out = plan_changes(nodes, steps, corrections, source_node_key="env", source_label=label)
+        changes_out.update({"trigger": "address", "source_node_key": "env", "corrections": corrections,
+                            "machines": changes})
+        if not (changes_out["node_updates"] or changes_out["guidance_resets"]):
+            logger.info("plan_reconcile_address_nothing_to_apply session_id=%s changes=%r", session_id,
+                        [(c["label"], c["old"], c["new"]) for c in changes])
+            return None
+        for u in changes_out["node_updates"]:
+            await db.execute(text(f"""
+                UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
+            """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
+        for nk in changes_out["guidance_resets"]:
+            await db.execute(text("""
+                UPDATE assist_steps
+                   SET guidance = NULL, guidance_status = 'none', guidance_generated_at = NULL, updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+            """), {"sid": session_id, "nk": nk})
+        entry = {
+            "at": datetime.now(timezone.utc).isoformat(), "trigger": "address",
+            "source_node_key": "env", "corrections": corrections,
+            "nodes": [u["node_key"] for u in changes_out["node_updates"]],
+            "changes": node_diffs(nodes, changes_out["node_updates"]),
+            "guidance_resets": changes_out["guidance_resets"],
+        }
+        await db.execute(text("""
+            UPDATE jobs
+               SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reconciliation}',
+                                        COALESCE(metadata->'reconciliation', '[]'::jsonb) || CAST(:e AS jsonb))
+             WHERE id = :jid
+        """), {"e": json.dumps(entry), "jid": job_id})
+        await db.commit()
+        logger.warning("plan_reconcile_address_applied session_id=%s changes=%r nodes=%r guidance_resets=%r",
+                       session_id, [(c["label"], c["old"], c["new"]) for c in changes], entry["nodes"],
+                       entry["guidance_resets"])
+        return changes_out
+    except Exception as exc:
+        logger.warning("plan_reconcile_address_failed session_id=%s err=%r", session_id, exc)
         return None
 
 
@@ -763,8 +876,8 @@ async def list_reconciliation(*, db, job_id: str) -> list[dict]:
         except (ValueError, TypeError):
             raw = []
     entries = list(raw or []) if isinstance(raw, list) else []
-    nodes = [dict(r) for r in (await db.execute(text("""
-        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid
+    nodes = [dict(r) for r in (await db.execute(text(f"""
+        SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes WHERE job_id = :jid
     """), {"jid": job_id})).mappings().all()]
     out = []
     for i, e in enumerate(entries):
@@ -802,16 +915,16 @@ async def revert_reconciliation(*, db, job_id: str, index: int) -> dict:
     entry = entries[index]
     if entry.get("reverted_at"):
         return {"index": index, "reverted": [], "already_reverted_at": entry["reverted_at"]}
-    nodes = [dict(r) for r in (await db.execute(text("""
-        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid
+    nodes = [dict(r) for r in (await db.execute(text(f"""
+        SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes WHERE job_id = :jid
     """), {"jid": job_id})).mappings().all()]
     rv = revertable(entry, nodes)
     reverted: list[str] = []
     for ch in rv:
-        res = await db.execute(text("""
-            UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+        res = await db.execute(text(f"""
+            UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
              WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
-               AND prompt_template = :after
+               AND {STEP_TEXT_EXPR} = :after
         """), {"pt": ch["before"], "jid": job_id, "nk": ch["node_key"], "after": ch["after"]})
         if res.rowcount:
             reverted.append(ch["node_key"])
@@ -1005,8 +1118,8 @@ async def apply_rewrite_proposals(*, db, session_id: str, job_id: str, proposals
                 and (p.get("current_assumption") or "").strip() and (p.get("proposed_change") or "").strip()]
     if not rewrites:
         return []
-    nodes = [dict(r) for r in (await db.execute(text("""
-        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order
+    nodes = [dict(r) for r in (await db.execute(text(f"""
+        SELECT node_key, status, {STEP_TEXT_SQL} FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order
     """), {"jid": job_id})).mappings().all()]
     steps = [dict(r) for r in (await db.execute(text("""
         SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
@@ -1021,8 +1134,8 @@ async def apply_rewrite_proposals(*, db, session_id: str, job_id: str, proposals
         ch = plan_changes(target, steps, corr, source_node_key=source_node_key,
                           source_label=f"the confirmed fix at {source_node_key} (change you approved)")
         for u in ch["node_updates"]:
-            await db.execute(text("""
-                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+            await db.execute(text(f"""
+                UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
                  WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
             all_updates.append(u)
@@ -1121,8 +1234,8 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
     if not settings.plan_reconcile_enabled:
         return None
     try:
-        nodes = [dict(r) for r in (await db.execute(text("""
-            SELECT node_key, status, node_type, title, prompt_template FROM dag_nodes
+        nodes = [dict(r) for r in (await db.execute(text(f"""
+            SELECT node_key, status, node_type, title, {STEP_TEXT_SQL} FROM dag_nodes
              WHERE job_id = :jid ORDER BY execution_order
         """), {"jid": job_id})).mappings().all()]
         steps = [dict(r) for r in (await db.execute(text("""
@@ -1166,8 +1279,8 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
         changes["corrections"] = corrections
         changes["trigger"] = "fix_confirmed"
         for u in changes["node_updates"]:
-            await db.execute(text("""
-                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+            await db.execute(text(f"""
+                UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW()
                  WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:

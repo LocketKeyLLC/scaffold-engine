@@ -304,9 +304,11 @@ async def set_environment(
                 h = str(m.get("host") or "").strip()
                 by_key[(t.lower(), h.lower())] = {"tool": t, "host": h}
         current["missing_tools"] = list(by_key.values())[-30:]
+    _state_before = None
     if system_state:
         # §17.914 — newest observation wins per resource; others survive.
         from app.modules.assist_state import merge_system_state
+        _state_before = json.loads(json.dumps(current.get("system_state") or {}))  # §17.1449 pre-image
         current["system_state"] = merge_system_state(
             current.get("system_state"), system_state)
     if file_writes or file_sizes or file_contents:
@@ -438,8 +440,33 @@ async def set_environment(
         {"sid": session_id, "patch": json.dumps(patch)},
     )
     await db.commit()
+    if _state_before is not None:
+        await _propagate_address_changes(session_id, _state_before, current.get("system_state"), db)
     current["verbosity"] = verbosity or _verbosity_from_metadata(sess.get("metadata"))
     return current
+
+
+async def _propagate_address_changes(session_id: str, before: dict, after: dict | None, db) -> None:
+    """§17.1449 — a machine whose recorded address changed: correct the steps ahead that name the old one,
+    and say so in the transcript. Fail-soft; never breaks the write it follows."""
+    try:
+        from app.modules import plan_reconcile as _pr
+        moved = _pr.address_changes(before, after)
+        if not moved:
+            return
+        row = (await db.execute(text("SELECT job_id, current_node_key FROM assist_sessions WHERE id = :sid"),
+                                {"sid": session_id})).mappings().first()
+        if not row or not row.get("job_id"):
+            return
+        rec = await _pr.reconcile_after_address_change(db=db, session_id=session_id, job_id=str(row["job_id"]),
+                                                       changes=moved)
+        note = _pr.render_note(rec) if rec else ""
+        if note:
+            from app.modules.assist_agent import capture_assistant_reply
+            await capture_assistant_reply(session_id=session_id, node_key=row.get("current_node_key"),
+                                          kind="note", content=note, db=db)
+    except Exception as exc:
+        logger.warning("assist_address_propagation_failed sid=%s err=%r", session_id, exc)
 
 
 # §17.701 — a pasted interactive-shell prompt (e.g. `root@pve:~#`) reveals the
