@@ -3649,7 +3649,10 @@ _SYMPTOM_LINE_RE = (
     r"error|fail|not found|not in |unable|denied|refus|timeout|timed out|"
     r"invalid|cannot|can't|no such|returned status|unexpected|corrupt|E:|"
     r"curl: \(|hang|hung|hangs|stuck|frozen|freeze|unresponsive|crash|panic|"
-    r"no progress|never finish|won't boot|wont boot|loop"
+    r"no progress|never finish|won't boot|wont boot|"
+    # §17.1446 — "loop" alone matched `LOOPBACK` in every `ip a`: ADD4's healthy `pct exec 120 -- ip a`
+    # (turn 3147) read as a failure, and its loopback line became the search query.
+    r"loop(?:s|ing|ed)?(?![A-Za-z])"
     r")"
 )
 

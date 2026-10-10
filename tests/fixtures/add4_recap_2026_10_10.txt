@@ -1,0 +1,16 @@
+GOAL: Forward TCP 80 and 443 on the Spectrum router to the Caddy proxy so Let's Encrypt can reach it.
+DONE:
+- CT 120 switched to DHCP and rebooted; eth0 now has 192.168.1.127/24 (dynamic), MAC bc:24:11:ac:c9:06.
+OPEN:
+- No port-forward rules saved yet; router app still shows no IP for bc:24:11:ac:c9:06 and won't allow a reservation.
+- Caddy's Let's Encrypt still fails: "Timeout during connect (likely firewall problem)".
+CONSTRAINTS:
+- Router is a Spectrum SAX1V1K; config is app-only (no web UI), so changes must be made in the My Spectrum app.
+- The app only lets you forward/reserve devices it has handed a DHCP lease to; a statically-assigned device shows no IP and Reserve is disabled.
+- Do not use the b4:af:15 / 192.168.1.129 entry — that is VM 110, not the Caddy proxy.
+- Turn off phone Wi-Fi (use cellular) before saving app changes to avoid changes not taking effect.
+NEXT: Get the router app to show an IP for bc:24:11:ac:c9:06 (now 192.168.1.127) and reserve it, then create the two TCP rules 80→80 and 443→443 pointing at that device.
+CONTEXT:
+- Caddy proxy: CT 120, MAC bc:24:11:ac:c9:06, now DHCP 192.168.1.127/24 (was fixed 192.168.1.26).
+- Proxmox host: root@pve, 192.168.1.129.
+- Caddy serves defrusciohomelab.duckdns.org (Jellyfin/Prowlarr/Radarr/Sonarr + control panel fallback); DNS works; only router forwarding is missing.
