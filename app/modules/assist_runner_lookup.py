@@ -169,6 +169,7 @@ class ReplyTail:
         self._last: str = ""
         self._guide_open = False
         self._node_key: str | None = None
+        self._kind: str | None = None
 
     def feed(self, name: str, data: dict[str, Any]) -> None:
         if name == "assist_guide_delta":
@@ -176,13 +177,18 @@ class ReplyTail:
                 self._guide, self._guide_open = [], True
             self._guide.append(str(data.get("text") or ""))
         elif name == "assist_guide_done":
-            self._last, self._guide_open = "".join(self._guide), False
+            self._last, self._guide_open, self._kind = "".join(self._guide), False, "guide"
             # §17.1166 — the step this reply was written FOR (§17.1149 stamps
             # it, since a repair step may have diverted the walkthrough).
             self._node_key = data.get("node_key") or self._node_key
         elif name == "assist_answer" and (data.get("kind") in ("fix", "guide")):
             self._last = str(data.get("text") or "")
+            self._kind = str(data.get("kind") or "")
             self._node_key = data.get("node_key") or self._node_key
+
+    def kind(self) -> str | None:
+        """§17.1447 — the reply's kind (guide / fix), carried into the re-entry's history."""
+        return self._kind
 
     def text(self) -> str:
         return self._last

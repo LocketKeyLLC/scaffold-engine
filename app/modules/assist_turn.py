@@ -373,6 +373,12 @@ async def run_turn(
             break
         if not record:
             break
+        # §17.1447 — the record answers the reply that asked for it; without that reply in `history` the
+        # re-entry's signals read the turn BEFORE it (live ADD4: the fix that asked for `ip a` was invisible
+        # to the routing of `ip a`'s output).
+        _asked = tail.text()
+        if _asked:
+            history = [*(history or []), {"role": "assistant", "kind": tail.kind(), "content": _asked}]
         msg, cmd, rounds = record, "message", rounds + 1
         # §17.1166 — ROUTING still resolves from the pointer (a repair commit
         # re-points, §17.1152), but the look-up turn must still be FILED
@@ -995,10 +1001,14 @@ async def _run_turn_inner(
             # (`[local-runner] ran the walkthrough's read-only look-up …`): the operator claimed nothing, so
             # there is nothing to take on their word. Live (ADD4 turn 3149): `pct exec 120 -- ip a` came back,
             # was judged "not done", and the operator was told "If it IS done, reply confirm" mid-step.
+            # §17.1447 — likewise a paste that ANSWERS the engine's own fix ("run this and tell me what it
+            # shows"): 25 of 60 clean post-fix pastes on the native surface were answered "If it IS done,
+            # reply confirm" — to output the engine had asked for, not a claim.
             from app.modules.assist_runner_lookup import is_own_lookup
-            _own_lookup = is_own_lookup(text_)
+            _own_lookup = is_own_lookup(text_) or bool(
+                assist_policy._compute_signals(text_ or "", history)["last_assistant_was_fix"])
             if _own_lookup:
-                logger.info("completion_confirm_offer_skipped_own_lookup sid=%s nk=%s", session_id, nk)
+                logger.info("completion_confirm_offer_skipped_answers_engine sid=%s nk=%s", session_id, nk)
             else:
                 try:
                     from app.modules import assist_notes

@@ -1905,7 +1905,8 @@ export function renderChat(container, sessionId, opts = {}) {
   }
 
   function historyForGuide() {
-    return turns.slice(-8).map((t) => ({ role: t.role, content: t.content }));
+    // §17.1447 — the kind rides along so the routing can tell a fix reply from a walkthrough
+    return turns.slice(-8).map((t) => ({ role: t.role, content: t.content, kind: t.kind }));
   }
 
   // §17.848 — typed advance intents ("next step", "done", "it worked",
