@@ -30,12 +30,40 @@ _BODY_CAP = 2000
 _RECALL_LIMIT = 3
 
 
+def _stems(text: str) -> set[str]:
+    import re
+    return {t[:5] for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 3}
+
+
+def about_its_query(url: str, title: str, query: str) -> bool:
+    """§17.1446 — a page is about its query when the query's words (other than the site's own name) are in
+    its URL path, or two of them in its title. Live (ADD4, 2026-10-10): with only bing answering, the step
+    kept spectrum.com/internet and /internet/speed-test ("Spectrum Internet Speed Test: Broadband Internet
+    Speed Check") and recalled them into every fix — a brand's marketing page shares only the brand."""
+    from urllib.parse import urlparse
+    from app.modules.research_extractors import _query_tokens
+    # the "(kept from this step's research on …)" suffix a recalled row carries is not part of the query
+    want = {t[:5] for t in _query_tokens((query or "").split(" (kept from")[0])}
+    if not want:
+        return True
+    try:
+        u = urlparse(url or "")
+    except Exception:
+        return True
+    host = _stems(u.netloc.replace(".", " "))
+    want -= host
+    if not want:
+        return True
+    return bool(_stems(u.path) & want) or len(_stems(title) & want) >= 2
+
+
 def _keepable(source: dict) -> bool:
     from app.modules.research_extractors import _is_bare_homepage
     url = str(source.get("url") or "")
     return (source.get("kind") == "web" and url.startswith("http")
             and not _is_bare_homepage(url)
-            and len(str(source.get("text") or "").strip()) >= _MIN_BODY_CHARS)
+            and len(str(source.get("text") or "").strip()) >= _MIN_BODY_CHARS
+            and about_its_query(url, str(source.get("title") or ""), str(source.get("query") or "")))
 
 
 async def keep_and_recall(db, *, session_id: Optional[str], node_key: Optional[str],
@@ -73,7 +101,9 @@ async def keep_and_recall(db, *, session_id: Optional[str], node_key: Optional[s
             "kind": "web", "url": str(r["url"]), "title": str(r["title"] or ""), "text": str(r["body"]),
             "date": str(r["published"] or ""),
             "query": f"{r['query']} (kept from this step's research on {str(r['found_at'])[:10]})",
-        } for r in rows]
+        } for r in rows
+            # rows kept before §17.1446 include brand pages; they are not recalled
+            if about_its_query(str(r["url"]), str(r["title"] or ""), str(r["query"] or ""))]
     except Exception as exc:
         logger.warning("assist_step_sources_failed node_key=%s err=%r", node_key, exc)
         return sources

@@ -991,38 +991,47 @@ async def _run_turn_inner(
                  "know your machine; I only see what you paste.\n\n"
                  "If something is still outstanding, here's where I'd "
                  "look next:"))
-            try:
-                from app.modules import assist_notes
-                await assist_notes.stage_completion_confirm(
-                    session_id=session_id, node_key=nk,
-                    reason=blocked_reason, db=db)
-                yield _ev(ASSIST_ANSWER,
-                          {"kind": "ask", "text": _confirm_offer_text})
-            except Exception as exc:
-                logger.warning("completion_confirm_offer_failed sid=%s err=%r",
-                               session_id, exc)
+            # §17.1446 — the "evidence" is the engine's OWN read-only look-up, run through the local runner
+            # (`[local-runner] ran the walkthrough's read-only look-up …`): the operator claimed nothing, so
+            # there is nothing to take on their word. Live (ADD4 turn 3149): `pct exec 120 -- ip a` came back,
+            # was judged "not done", and the operator was told "If it IS done, reply confirm" mid-step.
+            from app.modules.assist_runner_lookup import is_own_lookup
+            _own_lookup = is_own_lookup(text_)
+            if _own_lookup:
+                logger.info("completion_confirm_offer_skipped_own_lookup sid=%s nk=%s", session_id, nk)
             else:
-                # §17.952 — the offer is a QUESTION awaiting an answer, so it
-                # has to survive a reload like every other substantive reply
-                # (§17.873). It did not: staging recorded THAT the engine
-                # asked (session metadata), the transcript never recorded
-                # WHAT it asked. The SPA renders the streamed bubble into
-                # `ephemeralTail` only, and rebuilds from `assist_turns` on
-                # every reload — so the invitation evaporated and the
-                # operator was left reading a run of fixes, with no sign the
-                # engine had ever offered to take their word. Live on
-                # 2026-09-06: staged three times (T29 11:37, T29 11:40,
-                # T31 12:09), present in ZERO of the session's 584 turns;
-                # the operator gave up and forced T29 with the Done button.
                 try:
-                    await assist_agent.capture_assistant_reply(
-                        session_id=session_id, node_key=nk, kind="ask",
-                        content=_confirm_offer_text, db=db,
-                    )
-                except Exception:
-                    logger.warning(
-                        "completion_confirm_capture_failed sid=%s", session_id)
-                _offer_made = True
+                    from app.modules import assist_notes
+                    await assist_notes.stage_completion_confirm(
+                        session_id=session_id, node_key=nk,
+                        reason=blocked_reason, db=db)
+                    yield _ev(ASSIST_ANSWER,
+                              {"kind": "ask", "text": _confirm_offer_text})
+                except Exception as exc:
+                    logger.warning("completion_confirm_offer_failed sid=%s err=%r",
+                                   session_id, exc)
+                else:
+                    # §17.952 — the offer is a QUESTION awaiting an answer, so it
+                    # has to survive a reload like every other substantive reply
+                    # (§17.873). It did not: staging recorded THAT the engine
+                    # asked (session metadata), the transcript never recorded
+                    # WHAT it asked. The SPA renders the streamed bubble into
+                    # `ephemeralTail` only, and rebuilds from `assist_turns` on
+                    # every reload — so the invitation evaporated and the
+                    # operator was left reading a run of fixes, with no sign the
+                    # engine had ever offered to take their word. Live on
+                    # 2026-09-06: staged three times (T29 11:37, T29 11:40,
+                    # T31 12:09), present in ZERO of the session's 584 turns;
+                    # the operator gave up and forced T29 with the Done button.
+                    try:
+                        await assist_agent.capture_assistant_reply(
+                            session_id=session_id, node_key=nk, kind="ask",
+                            content=_confirm_offer_text, db=db,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "completion_confirm_capture_failed sid=%s", session_id)
+                    _offer_made = True
             # §17.884 — a blocked submit must NEVER dead-end. Live incident:
             # the operator ran the discovery command the engine asked for,
             # pasted the ground truth back, the verifier (correctly) said

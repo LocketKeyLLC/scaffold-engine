@@ -30,6 +30,13 @@ from typing import Any, Optional
 logger = logging.getLogger("scaffold")
 
 MARK = "[local-runner]"
+LOOKUP_HEAD = f"{MARK} ran the walkthrough's read-only look-up"
+
+
+def is_own_lookup(text: str) -> bool:
+    """§17.1446 — the record of a look-up the ENGINE asked for and ran itself (not an operator-approved
+    block, which is the operator's own work)."""
+    return (text or "").lstrip().startswith(LOOKUP_HEAD)
 MAX_AUTO_ROUNDS = 2
 _FENCE_RE = re.compile(r"```(?:bash|sh|shell)?[ \t]*\n(.*?)```", re.S)
 _RUN_NOW_RE = re.compile(r"\*\*Run this now:?\*\*|👉 Do this next", re.I)
@@ -130,7 +137,7 @@ def record_text(spec_name: str, executed: list[dict], pasted: str) -> str:
     """The operator turn the look-up becomes — what a paste would have been,
     marked so the transcript shows the engine ran it. Output sections are
     re-keyed by command (the state-check ids mean nothing here)."""
-    out: list[str] = [f"{MARK} ran the walkthrough's read-only look-up through your local runner ({spec_name}) — "
+    out: list[str] = [f"{LOOKUP_HEAD} through your local runner ({spec_name}) — "
                       f"these commands ran ON THE TARGET MACHINE itself, in the runner's own shell there, not in a sandbox:"]
     sections = dict(re.findall(r"^== (L\d+) ==\n(.*?)(?=^== L\d+ ==\n|\Z)", pasted or "", re.S | re.M))
     for e in executed:

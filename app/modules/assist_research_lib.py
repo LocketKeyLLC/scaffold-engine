@@ -670,7 +670,10 @@ def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
     # "external https org times times out host fails cellular…" found a
     # dictionary page for "external".
     low = _re.sub(r"https?://\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b|\b\d{1,3}(?:\.\d{1,3}){3}\b", " ", low)
-    toks = _re.findall(r"[a-z][a-z0-9-]{2,}", low)
+    # §17.1446 — a two-letter acronym the operator wrote in capitals ("no IP", "VM") is a technical term,
+    # not filler; the 3-letter floor dropped it from "router app still shows no IP … won't allow a reservation".
+    acr = {a.lower() for a in _re.findall(r"\b[A-Z]{2}\b", goal_terms or "")}
+    toks = [t for t in _re.findall(r"[a-z][a-z0-9-]{1,}", low) if len(t) >= 3 or t in acr]
     phrases: list[str] = []
     for a, b in zip(toks, toks[1:], strict=False):
         if a in _GOAL_STOPWORDS or b in _GOAL_STOPWORDS:
@@ -682,7 +685,7 @@ def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
             phrases.append(ph)
     words: list[str] = []
     for w in toks:
-        if len(w) < 4 or w in _GOAL_STOPWORDS or any(w in ph for ph in phrases):
+        if (len(w) < 4 and w not in acr) or w in _GOAL_STOPWORDS or any(w in ph.split() for ph in phrases):
             continue
         if w not in words:
             words.append(w)

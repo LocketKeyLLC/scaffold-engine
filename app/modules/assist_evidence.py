@@ -119,6 +119,11 @@ def split_paste(text: str) -> tuple[list[str], list[str]]:
     terminator: Optional[str] = None
     for raw in (text or "").splitlines():
         line = raw.rstrip()
+        # §17.1446 — the engine's own runner-record header ("[local-runner] ran the walkthrough's read-only
+        # look-up … not in a sandbox") is neither typed nor printed by the target; read as output, its
+        # wording was the "symptom" and the search query (live ADD4, turn 3147).
+        if line.lstrip().startswith("[local-runner]"):
+            continue
         if terminator is not None:
             if line.strip() == terminator:
                 terminator = None
@@ -161,6 +166,23 @@ def recap_open_lines(step_recap: Optional[str]) -> list[str]:
     return buckets["OPEN"] + buckets["GOAL"]
 
 
+# §17.1446 — an OPEN line often joins what is still missing to what is in the way: "No port-forward rules
+# saved yet; router app still shows no IP for bc:24:11:ac:c9:06 and won't allow a reservation". The search
+# is for the obstacle; the missing result is the step's own goal and already in every other query.
+_OBSTACLE_RE = re.compile(
+    r"\b(?:won'?t|can'?t|cannot|couldn'?t|doesn'?t|does not|isn'?t|refus\w*|fail\w*|error\w*|unable|"
+    r"denied|reject\w*|disabled|gr[ae]yed|blocked|times? out|timed out|not allow\w*|no longer)\b", re.I)
+
+
+def blocker_clause(line: str) -> str:
+    """The clause of a multi-clause OPEN line that names an obstacle, else the line."""
+    parts = [p.strip() for p in re.split(r"\s*;\s*|\.\s+(?=[A-Z])", line or "") if p.strip()]
+    if len(parts) < 2:
+        return (line or "").strip()
+    hits = [p for p in parts if _OBSTACLE_RE.search(p)]
+    return hits[0] if hits else parts[0]
+
+
 def _symptom_line(output_lines: list[str]) -> str:
     """The first PRINTED line that reads as a failure. Uses the fix path's own
     symptom vocabulary so the two cannot disagree about what an error is."""
@@ -177,7 +199,11 @@ def _keywords(text: str, limit: int) -> list[str]:
 
 
 def _cap(q: str) -> str:
-    return " ".join((q or "").split()[:_QUERY_MAX_WORDS])
+    # §17.1446 — overlapping phrases repeat their shared word ("port-forward rules" + "rules saved" →
+    # "port-forward rules rules saved", live ADD4); a word says the same thing once.
+    seen: set[str] = set()
+    words = [w for w in (q or "").split() if not (w.lower() in seen or seen.add(w.lower()))]
+    return " ".join(words[:_QUERY_MAX_WORDS])
 
 
 def _lines_about(text: str, block: Optional[str]) -> list[str]:
@@ -306,7 +332,7 @@ def derive_need(
     if not open_items and (goal_terms or "").strip():
         open_items = [goal_terms.strip()]
     if open_items:
-        subject = open_items[0]
+        subject = blocker_clause(open_items[0])
         # The OPEN line names the live blocker; the hardware only earns a place
         # when the blocker is about that device (same rule as every other query).
         hw = list(hardware_for_text(f"{title} {subject}", operator_notes))
