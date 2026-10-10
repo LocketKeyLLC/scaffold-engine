@@ -622,3 +622,68 @@ def test_pulse_event_is_registered_and_vendored():
     js = (root / "app" / "ui" / "static" / "views" / "assist.js").read_text(encoding="utf-8")
     for needle in ('case "assist_turn_pulse"', "working ${fmtElapsed", "no word from the engine", "closed before this turn finished", "maybeResumeActiveTurn(true)"):
         assert needle in js, needle
+
+
+# §17.1450 — the live ADD128 message (turn 3165), routed set_env by /decide.
+_ADD128_CORRECTION = "caddy (ct 120) is at 192.168.1.127, not 192.168.1.26."
+
+
+async def test_a_prose_fact_routed_set_env_is_recorded_as_a_note():
+    corr = {"kind": "ip", "old": "192.168.1.26", "new": "192.168.1.127"}
+    note_res = {"recorded": True,
+                "reconciliation": {"trigger": "note", "source_node_key": "ADD128", "guidance_resets": ["ADD128"],
+                                   "node_updates": [{"node_key": "ADD128", "corrections": [corr]}]}}
+    note = AsyncMock(return_value=note_res)
+    set_env = AsyncMock()
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_note", new=note), \
+         patch("app.routers.assist.assist_set_env", new=set_env):
+        ev = await _collect(message=_ADD128_CORRECTION, node_key="ADD128")
+    assert note.await_count == 1 and set_env.await_count == 0
+    assert note.await_args.args[1].text == _ADD128_CORRECTION
+    assert "assist_note_recorded" in _names(ev)
+    bad = [d for _, d in ev if "Couldn't update the environment" in str(d.get("text"))]
+    assert not bad, (bad, _names(ev))
+    assert any("`192.168.1.26` → `192.168.1.127` (ip) in ADD128" in str(d.get("text")) for _, d in ev), _names(ev)
+    assert ev[-1][1]["handled"] == "set_env_as_note"
+
+
+async def test_a_real_pin_still_sets_the_environment_with_a_dict():
+    set_env = AsyncMock(return_value={"environment": {}})
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_set_env", new=set_env):
+        ev = await _collect(message="CADDY_IP=192.168.1.127", node_key="ADD128")
+    body = set_env.await_args.args[1]
+    assert body.substitutions == {"CADDY_IP": "192.168.1.127"}
+    assert ev[-1][1]["handled"] == "set_env"
+    from app.routers.assist import AssistEnvInput
+    assert AssistEnvInput(substitutions={}, verbosity="terse").substitutions == {}
+
+
+async def test_a_prose_fact_with_nothing_to_change_still_gets_a_kept_reply():
+    capture = AsyncMock()
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_note", new=AsyncMock(return_value={"recorded": True})), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=capture):
+        ev = await _collect(message="the router is in the hallway closet", node_key="ADD128")
+    answers = [d for n, d in ev if n == "assist_answer"]
+    assert answers and answers[-1]["text"].startswith("📝 Noted")
+    assert any(c.kwargs.get("content", "").startswith("📝 Noted") for c in capture.await_args_list)
+
+
+async def test_a_failed_pin_says_so_in_a_kept_reply():
+    capture = AsyncMock()
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "set_env", "confidence": "high"})), \
+         patch("app.routers.assist.assist_set_env", new=AsyncMock(side_effect=RuntimeError("db down"))), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=capture):
+        ev = await _collect(message="CADDY_IP=192.168.1.127", node_key="ADD128")
+    assert any("couldn't save that" in str(d.get("text")) for n, d in ev if n == "assist_answer")
+    assert any("couldn't save that" in c.kwargs.get("content", "") for c in capture.await_args_list)
