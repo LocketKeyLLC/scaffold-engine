@@ -76,7 +76,7 @@ def test_a_success_fact_is_not_a_blocker():
     assert bq({"facts": [JELLYFIN]}, [], ADD4_TITLE, task_text=ADD4_TASK) == ""
     # a real failure in the same sentence still counts
     assert "fails" in bq({"facts": ["Caddy now starts but the certificate request fails with a timeout"]},
-                         [], "Configure reverse proxy")
+                         [], "Configure reverse proxy", task_text="Install Caddy as the reverse proxy.")
 
 
 def test_a_fact_about_another_machine_does_not_ride_along_when_the_step_text_is_known():
