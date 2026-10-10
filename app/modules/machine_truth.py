@@ -92,7 +92,11 @@ def _norm(s: str) -> str:
 
 
 def _mentions_guest(title: str, gid: str, name: str) -> bool:
-    if re.search(rf"\b{re.escape(gid)}\b", title):
+    # §17.1455 — a guest id inside a dotted number is an address or a version, not a guest. Live (ADD150,
+    # 2026-10-10): "Tailscale runs directly on the Proxmox host (pve, 100.84.253.90)" matched guest 100
+    # (gpu-vm, stopped); the step became a script that STARTS VM 100 and ssh-es into it to set up Tailscale,
+    # which runs on the host.
+    if re.search(rf"(?<![\w.]){re.escape(gid)}(?!\.?\d)(?![\w])", title):
         return True
     if _norm(name) and _norm(name) in _norm(title):
         return True
