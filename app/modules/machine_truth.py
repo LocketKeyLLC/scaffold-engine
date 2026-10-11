@@ -506,7 +506,22 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
     # §17.1313 — the block fetches by name inside a guest that resolves nothing. The
     # remedy is host-side and the engine has it (a sibling's nameserver): propose
     # the step, make this one wait for it, and refuse the block meanwhile.
-    if truth.resolves is False and "network" in needs:
+    # §17.1491 — never for a step that is itself the fix (the repair, or a step whose own text sets the guest's
+    # resolver), and never a second copy of the same repair. Live, CT 105's DNS repair was inserted for ADD160 (which
+    # sets the resolvconf base nameserver itself), then again for the repair, and again for that one —
+    # ADD162 → ADD163 → ADD164, each waiting on the next, and ADD160 behind all of them.
+    _own = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    _fixes_dns = bool(_FIXES_DNS_RE.search(_own))
+    _repair_title_kind = "VM" if truth.kind == "vm" else "container"
+    _existing = next((n for n in plan if str(n.get("status") or "") == "pending"
+                      and str(n.get("title") or "") == f"Give {_repair_title_kind} {gid} a working nameserver"), None)
+    if truth.resolves is False and "network" in needs and not _fixes_dns and _existing is not None:
+        out.append({"kind": "no_dns", "evidence": f"guest {gid} cannot resolve names",
+                    "fact": None, "reopen": None, "covered_by": None, "blocks": True,
+                    "waits": str((node or {}).get("node_key") or ""), "waits_for": str(_existing.get("node_key")),
+                    "remedy": f"{_existing.get('node_key')} (already in the plan) gives {_repair_title_kind} {gid} a "
+                              f"nameserver; this step waits for it"})
+    elif truth.resolves is False and "network" in needs and not _fixes_dns:
         tool = "qm" if truth.kind == "vm" else "pct"
         kind = "VM" if truth.kind == "vm" else "container"
         hint = truth.dns_hint or "<DNS_SERVER>"
@@ -541,6 +556,9 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
         })
     return out
 
+
+#: §17.1491 — a step whose own text gives the guest its resolver
+_FIXES_DNS_RE = re.compile(r"\bworking nameserver\b|resolv\.conf|\bresolvconf\b|--nameserver\b|\bnameserver\s+\d", re.I)
 
 #: §17.1315 — work done INSIDE a guest, which a fresh OS wipes: installs, services, configs, users, keys.
 _IN_GUEST_WORK_RE = re.compile(r"\b(?:install|configure|set ?up|enable|create|write|add|deploy|run)\b.*\b(?:server|service|unit|daemon|agent|key|user|account|package|docker|steam|game|config)\b|"
@@ -764,6 +782,20 @@ async def reconcile_from_truth(job_id: str, node: Optional[dict], truth: GuestTr
             logger.warning("machine_truth_fact_failed job=%s err=%r", job_id, exc)
     for r in rows:
         ins = r.get("insert")
+        # §17.1491 — the repair is already in the plan: wait for THAT one instead of inserting another
+        _wf, _cur = str(r.get("waits_for") or ""), str(r.get("waits") or "")
+        if _wf and _cur and _wf != _cur:
+            _deps = [str(d) for d in ((node or {}).get("depends_on") or [])]
+            if _wf not in _deps:
+                try:
+                    async with async_session() as db:
+                        await node_editor.edit_node(job_id, _cur, {"depends_on": _deps + [_wf]}, db=db, cascade=False,
+                                                    edited_by=f"engine:measured — {_cur} waits for {_wf}, already in the plan")
+                    if node is not None:
+                        node["depends_on"] = _deps + [_wf]
+                    done.append(f"{_cur} now waits for {_wf} (already in the plan)")
+                except Exception as exc:
+                    logger.warning("machine_truth_wait_failed job=%s node=%s err=%r", job_id, _cur, exc)
         if ins:
             try:
                 async with async_session() as db:
