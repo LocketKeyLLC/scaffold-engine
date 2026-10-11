@@ -1756,7 +1756,10 @@ async def execute_next_node(
         # failures fall back to raw_prompt rather than failing the node, while
         # exceptions raised before this point reach the W.4 outer handler.
         # §17.809 — quick mode skips this per-node LLM optimize pass (~6 s/node).
-        if not skip_optimize and settings.execution_optimize_enabled:
+        # §17.1483 — and never for a step given the inventory: live, T38's task was rewritten into "Document that
+        # /etc/pve/firewall/groups/ does not exist and security groups still need creation" — an instruction that
+        # outranked the inventory below it (every guest's firewall on, its own rules file).
+        if not skip_optimize and settings.execution_optimize_enabled and not _inventory_text:
             try:
                 opt_result = await optimize_prompt(
                     prompt=_task_prompt,  # §17.1042 — the task only
@@ -1855,6 +1858,7 @@ async def execute_next_node(
                 max_tokens=settings.node_generation_max_tokens,
                 draws=settings.node_generation_max_draws,
                 label=f"node-exec {node_key}",
+                    think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
             )
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")
@@ -1907,6 +1911,7 @@ async def execute_next_node(
                     max_tokens=settings.node_generation_max_tokens,
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-stream-fallback {node_key}",
+                    think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
                 )
                 if not resp.success:
                     raise RuntimeError(resp.error or "Model returned failure")
@@ -2012,6 +2017,7 @@ async def execute_next_node(
                     temperature=0.7, max_tokens=settings.node_generation_max_tokens,
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-regen {node_key}",
+                    think_off_rescue=True,   # §17.1483
                 ),
                 timeout=settings.node_timeout_seconds,
             )
