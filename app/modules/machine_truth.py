@@ -678,7 +678,7 @@ async def reopen_voided_work(job_id: str, plan: list[dict], gid: str, name: str 
     if done:
         try:
             async with async_session() as db:
-                row = (await db.execute(text("SELECT id, metadata FROM assist_sessions WHERE job_id = :j ORDER BY created_at DESC LIMIT 1"),
+                row = (await db.execute(text("SELECT id, metadata FROM assist_sessions WHERE job_id = :j ORDER BY updated_at DESC LIMIT 1"),
                                         {"j": job_id})).mappings().first()
                 if row:
                     facts = []
