@@ -4423,10 +4423,11 @@ def secret_inside_a_guest_script(files: Optional[list[dict]], secret_names: set[
                 into = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c 'umask 077; cat > <PATH>'" if vm else
                         f"pct exec {gid} -- sh -c 'umask 077; cat > <PATH>'")
                 out.append({"command": f"(inside {'VM' if vm else 'CT'} {gid}) ${name}", "why": (
-                    f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. Write the file from the host "
-                    f"instead, as its own command before the helper runs — `{into} <<< \"${name}\"` — so the value "
-                    f"crosses on stdin, expanded inside the runner's root shell, and never appears in the block or a "
-                    f"log; then let the in-guest script use the file.")})
+                    f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. Do not drop the work: name the "
+                    f"file in the template's SECRET_FILES (`<path inside the guest> {name}`, e.g. "
+                    f"`/etc/wireguard/wg0.conf {name}`) and the engine writes it from the host on stdin before the "
+                    f"commands run — `{into} <<< \"${name}\"`, expanded inside the runner's root shell — then keep "
+                    f"every command that USES the file in the in-guest commands.")})
     return out
 
 
