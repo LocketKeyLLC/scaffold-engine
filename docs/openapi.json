@@ -4732,6 +4732,11 @@
       },
       "SecretInput": {
         "properties": {
+          "for_operator": {
+            "default": false,
+            "title": "For Operator",
+            "type": "boolean"
+          },
           "hint": {
             "default": "",
             "maxLength": 200,
@@ -14321,6 +14326,56 @@
           }
         ],
         "summary": "Put Secret",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/secrets/{name}/reveal": {
+      "post": {
+        "description": "§17.1463 — show the operator their own login. 403 for a value that is not one (a service's key or token\nnever comes back out); 404 when nothing is stored under the name. Each reveal is recorded.",
+        "operationId": "reveal_secret_setup_secrets__name__reveal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reveal Secret Setup Secrets  Name  Reveal Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Reveal Secret",
         "tags": [
           "Setup"
         ]

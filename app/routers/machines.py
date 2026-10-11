@@ -57,6 +57,8 @@ class SecretInput(BaseModel):
     value: str = Field(min_length=1, max_length=4096)
     hint: str = Field(default="", max_length=200)
     runner: str | None = Field(default=None, max_length=64)
+    #: §17.1463 — the operator's own login (they can reveal it); a service's key stays write-only
+    for_operator: bool = False
 
 
 @router.get("/setup/machines")
@@ -344,9 +346,24 @@ async def put_secret(name: str, body: SecretInput, db: AsyncSession = Depends(ge
     """Store one value, encrypted at rest, referenced from then on by name."""
     from app.modules import runner_secrets as _rs
     try:
-        return await _rs.set_secret(db, name, body.value, runner=body.runner, hint=body.hint)
+        return await _rs.set_secret(db, name, body.value, runner=body.runner, hint=body.hint,
+                                    for_operator=body.for_operator)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/setup/secrets/{name}/reveal")
+async def reveal_secret(name: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1463 — show the operator their own login. 403 for a value that is not one (a service's key or token
+    never comes back out); 404 when nothing is stored under the name. Each reveal is recorded."""
+    from app.modules import runner_secrets as _rs
+    try:
+        out = await _rs.reveal(db, name)
+    except _rs.NotForOperator:
+        raise HTTPException(status_code=403, detail=f"{name} is not a login of yours: it never comes back out")
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"nothing is stored as {name}")
+    return out
 
 
 @router.delete("/setup/secrets/{name}")

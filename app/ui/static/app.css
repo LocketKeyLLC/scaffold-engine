@@ -1877,3 +1877,6 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 
 /* §17.1199 — the rule between "list the commands" and "trust what you approve" */
 .cap-rule { border: 0; border-top: 1px solid var(--border); margin: 14px 0 10px; }
+
+/* §17.1463 — a revealed login */
+.secret-shown { user-select: all; padding: 1px 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }

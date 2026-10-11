@@ -19,7 +19,9 @@ operator may simply be asked.
 
 At rest: Fernet, the same derivation as `provider_connections` (see
 `app/utils/secrets.py`). The plaintext leaves this module only on the path to
-a runner — never into an API response, a transcript, a prompt or a log line.
+a runner — never into an API response, a transcript, a prompt or a log line —
+§17.1463: except a value marked `for_operator` (the operator's own login), which
+`reveal` returns to the operator who asks, recorded each time.
 """
 from __future__ import annotations
 
@@ -40,31 +42,60 @@ def valid_name(name: str) -> bool:
 
 
 async def set_secret(db: AsyncSession, name: str, value: str, *,
-                     runner: Optional[str] = None, hint: str = "", owner: Optional[str] = None) -> dict:
-    """Store (or replace) one value. Returns the row WITHOUT the value."""
+                     runner: Optional[str] = None, hint: str = "", owner: Optional[str] = None,
+                     for_operator: bool = False) -> dict:
+    """Store (or replace) one value. Returns the row WITHOUT the value. §17.1463 — `for_operator` marks the
+    operator's own login (shown to them on request); anything else never comes back out."""
     from app.utils.secrets import encrypt
+    # §17.1463 — a value described as a login IS the operator's login (the same rule migration 0009 applied to
+    # the rows already stored), whoever stores it: the engine setting one up must not make it unreadable to them.
+    for_operator = bool(for_operator) or bool(re.search(r"\blogin\b", hint or "", re.I))
     if not valid_name(name):
         raise ValueError("a secret name is A-Z, 0-9 and _ , starting with a letter")
     if not str(value or "").strip():
         raise ValueError("a secret needs a value")
     await db.execute(text("""
-        INSERT INTO runner_secrets (name, value_enc, runner, hint, owner)
-        VALUES (:n, :v, :r, :h, :o)
+        INSERT INTO runner_secrets (name, value_enc, runner, hint, owner, for_operator)
+        VALUES (:n, :v, :r, :h, :o, :f)
         ON CONFLICT (name) DO UPDATE
            SET value_enc = EXCLUDED.value_enc, runner = EXCLUDED.runner,
-               hint = EXCLUDED.hint, updated_at = NOW()
-    """), {"n": name, "v": encrypt(str(value)), "r": runner, "h": (hint or "")[:200], "o": owner})
+               hint = EXCLUDED.hint, for_operator = EXCLUDED.for_operator, updated_at = NOW()
+    """), {"n": name, "v": encrypt(str(value)), "r": runner, "h": (hint or "")[:200], "o": owner,
+           "f": bool(for_operator)})
     await db.commit()
-    logger.warning("runner_secret_set name=%s runner=%s", name, runner)   # the NAME, never the value
-    return {"name": name, "runner": runner, "hint": hint}
+    logger.warning("runner_secret_set name=%s runner=%s for_operator=%s", name, runner, bool(for_operator))
+    return {"name": name, "runner": runner, "hint": hint, "for_operator": bool(for_operator)}
 
 
 async def list_secrets(db: AsyncSession) -> list[dict]:
     """Names and metadata only — this never returns a value."""
     rows = (await db.execute(text(
-        "SELECT name, runner, hint, created_at, updated_at, last_used_at "
+        "SELECT name, runner, hint, created_at, updated_at, last_used_at, for_operator, revealed_at, reveal_count "
         "FROM runner_secrets ORDER BY name"))).mappings().all()
     return [dict(r) for r in rows]
+
+
+class NotForOperator(Exception):
+    """A value that is not the operator's own login: it never comes back out."""
+
+
+async def reveal(db: AsyncSession, name: str) -> Optional[dict]:
+    """§17.1463 — the operator's own login, shown to them. None when there is no such value; NotForOperator
+    when it exists but is a service's (an API key, a token): those stay write-only. Every reveal is recorded."""
+    from app.utils.secrets import decrypt
+    row = (await db.execute(text(
+        "SELECT name, value_enc, hint, for_operator FROM runner_secrets WHERE name = :n"), {"n": name})
+    ).mappings().first()
+    if row is None:
+        return None
+    if not row["for_operator"]:
+        raise NotForOperator(name)
+    value = decrypt(row["value_enc"])
+    await db.execute(text(
+        "UPDATE runner_secrets SET revealed_at = NOW(), reveal_count = reveal_count + 1 WHERE name = :n"), {"n": name})
+    await db.commit()
+    logger.warning("runner_secret_revealed name=%s", name)   # the NAME, never the value
+    return {"name": row["name"], "hint": row["hint"] or "", "value": value or ""}
 
 
 async def names(db: AsyncSession) -> list[str]:

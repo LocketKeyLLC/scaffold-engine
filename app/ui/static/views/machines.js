@@ -316,22 +316,38 @@ export default function machines(container, params, opts = {}) {
           try { await api.del(`/setup/secrets/${encodeURIComponent(s.name)}`); toast(`${s.name} forgotten.`, "ok"); await load(); }
           catch (e) { toast((e && e.message) || "Could not forget it", "err"); }
         });
+        // §17.1463 — the operator's own login can be shown to them; a service's key never comes back out
+        const shown = el("code", { class: "secret-shown hidden" });
+        const reveal = s.for_operator ? el("button", { class: "btn btn-sm", text: "Reveal" }) : null;
+        if (reveal) reveal.addEventListener("click", async () => {
+          if (!shown.classList.contains("hidden")) { shown.textContent = ""; shown.classList.add("hidden"); reveal.textContent = "Reveal"; return; }
+          try {
+            const r = await api.post(`/setup/secrets/${encodeURIComponent(s.name)}/reveal`, {});
+            shown.textContent = r.value || ""; shown.classList.remove("hidden"); reveal.textContent = "Hide";
+          } catch (e) { toast((e && (e.detail || e.message)) || "Could not reveal it", "err"); }
+        });
         list.append(el("div", { class: "row row-wrap cap-actions" },
           el("code", { text: s.name }),
+          s.for_operator ? el("span", { class: "chip", text: "your login" }) : null,
           el("span", { class: "sub", text: s.hint || "" }),
-          el("span", { class: "spacer" }), del));
+          shown,
+          el("span", { class: "spacer" }), reveal, del));
       }
     }
     const name = el("input", { class: "input input-sm", type: "text", placeholder: "DB_PASSWORD" });
     const value = el("input", { class: "input", type: "password", placeholder: "the value — stored encrypted, never shown again" });
+    const mine = el("input", { type: "checkbox" });
+    const mineLabel = el("label", { class: "sub", title: "A login YOU type somewhere (a panel, a web UI). You can reveal it here later; anything else is never shown again." },
+      mine, el("span", { text: " this is a login I use" }));
     const add = el("button", { class: "btn btn-primary", text: "Store it" });
     add.addEventListener("click", async () => {
       const n = name.value.trim().toUpperCase();
       if (!n || !value.value) { toast("A name and a value.", "err"); return; }
       add.disabled = true;
       try {
-        await api.put(`/setup/secrets/${encodeURIComponent(n)}`, { value: value.value, runner: (d.runner || {}).name || null });
-        value.value = ""; name.value = "";
+        await api.put(`/setup/secrets/${encodeURIComponent(n)}`, { value: value.value, runner: (d.runner || {}).name || null,
+          for_operator: mine.checked });
+        value.value = ""; name.value = ""; mine.checked = false;
         toast(`${n} stored.`, "ok");
         await load();
       } catch (e) {
@@ -343,7 +359,7 @@ export default function machines(container, params, opts = {}) {
       el("h3", { class: "cap-title", text: "Values the engine holds for it" }),
       el("p", { class: "cap-summary", text: "A password or token a step needs. Typed once and kept encrypted; the engine writes only its NAME into a command and hands the value to the machine out of band, so it never appears in the command, the transcript, the helper's log or that machine's process list." }),
       list,
-      el("div", { class: "row row-wrap cap-actions" }, name, value, add));
+      el("div", { class: "row row-wrap cap-actions" }, name, value, mineLabel, add));
   }
 
   load();
