@@ -535,7 +535,28 @@ def host_side_only(node: dict) -> bool:
     text = _text(node)
     if spans_guests(node):                      # §17.1339b — no single-guest template fits
         return True
+    if _names_only_host_commands(text):         # §17.1469
+        return True
     return bool(_HOST_SIDE_RE.search(text)) and not _IN_GUEST_SIGNAL_RE.search(text)
+
+
+_HOST_TOOL_RE = re.compile(r"^\s*(?:qm|pct|pvesm|pvesh|pveum|pvenode|pve-firewall)\s+[a-z]")
+_HOST_INTO_GUEST_CMD_RE = re.compile(r"^\s*(?:qm\s+guest\s+exec|pct\s+(?:exec|enter|push|pull))\b")
+
+
+def _names_only_host_commands(text: str) -> bool:
+    """§17.1469 — a step whose work (before "Done when") names commands, all of them the host's own tools and none
+    of them a way into a guest, is host-side however much it says about the guest. Live, ADD154 (VM 106 to DHCP at
+    the source: `qm set 106 --ipconfig0 ip=dhcp`, `qm cloudinit update 106`, `qm reboot 106`) also said "the Palworld
+    service starts on boot" and checked with `qm guest exec 106 -- ip -4 addr show eth0` — in-guest signals — so the
+    three host commands were wrapped in the in-VM agent template and would have run inside the VM, where `qm` is
+    not."""
+    work = re.split(r"\bDone when\b", text or "", maxsplit=1, flags=re.I)[0]
+    cmds = re.findall(r"`([^`\n]+)`", work)
+    cmds = [c for c in cmds if re.match(r"\s*[a-z][\w.-]*\s", c)]
+    if re.search(r"\binside\b|\bwithin\s+(?:the\s+)?(?:vm|guest|container)\b", re.sub(r"`[^`\n]*`", "", work), re.I):
+        return False                 # §17.1329's ADD66: "then confirm inside the guest that palworld.service is active"
+    return bool(cmds) and all(_HOST_TOOL_RE.match(c) and not _HOST_INTO_GUEST_CMD_RE.match(c) for c in cmds)
 
 
 def _subject_kind(node: dict, truth) -> Optional[str]:
