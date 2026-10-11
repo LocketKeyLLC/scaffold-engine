@@ -74,6 +74,12 @@ def moves(before: dict[str, list[str]], after: dict[str, list[str]]) -> list[dic
     return out
 
 
+def repin(subs: dict, changes: list[dict]) -> dict:
+    """The pins whose value is a moved machine's old address, with the new one."""
+    old = {c["old"]: c["new"] for c in changes}
+    return {k: old[str(v).strip()] for k, v in (subs or {}).items() if str(v).strip() in old}
+
+
 def _label(gid: str, vm: bool, name: str) -> str:
     return f"{'VM' if vm else 'CT'} {gid}" + (f" ({name})" if name else "")
 
@@ -110,8 +116,13 @@ async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[
                              {"jid": job_id})).scalar()
     reconciled = None
     if sess:
-        from app.modules.assist_environment import set_environment
-        await set_environment(session_id=str(sess), facts=facts, db=db)
+        from app.modules.assist_environment import get_environment, set_environment
+        # §17.1472 — a value pinned to the old address moves with it. Live: ADR1's <PALWORLD_IP> was prefilled with
+        # 192.168.1.106 ("pinned as PALWORLD_IP") over the measured fact .44 — approved as filled, the block would
+        # have replaced .106 with .106.
+        _env = await get_environment(session_id=str(sess), db=db) or {}
+        repinned = repin(_env.get("substitutions") or {}, changes)
+        await set_environment(session_id=str(sess), facts=facts, substitutions=repinned or None, db=db)
         reconciled = await _pr.reconcile_after_address_change(db=db, session_id=str(sess), job_id=job_id,
                                                              changes=changes)
     added = await _add_repoint_step(db, job_id, node_key, plan, stale, spec) if stale else None

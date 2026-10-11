@@ -959,7 +959,7 @@ export function renderTheater(container, jobId, ctx = {}) {
     if (!canRun || inputs.length) runBtn.disabled = true;
     if (inputs.length) queueMicrotask(refresh);      // §17.1188 — prefilled pins count
     async function send(choice, label) {
-      runBtn.disabled = selfBtn.disabled = skipBtn.disabled = true;
+      runBtn.disabled = selfBtn.disabled = skipBtn.disabled = redraftBtn.disabled = true;
       const prev = runBtn.textContent; runBtn.textContent = label;
       const values = {};
       for (const [n, f] of fields) if (f.value.trim()) values[n] = f.value.trim();
@@ -979,6 +979,7 @@ export function renderTheater(container, jobId, ctx = {}) {
                 ? `${nodeKey} stopped: ${why.length > 160 ? why.slice(0, 160) + "…" : why}`
                 : `${nodeKey} stopped at a failed command — see the node's output.`)
             : res.outcome === "runbook" ? `${nodeKey} kept as a runbook for you — continuing.`
+            : res.outcome === "redraft" ? `${nodeKey} sent back with your correction — the engine is drafting it again.`
             : `${nodeKey} ${st} — continuing.`, res.outcome === "failed" ? "warn" : "ok");
         if (res.run_started && !running) attachRun();
         else await loadInitial();
@@ -986,12 +987,19 @@ export function renderTheater(container, jobId, ctx = {}) {
         const dt = e.detail || {};
         const probs = Array.isArray(dt.problems) ? dt.problems.map((p) => `<${p.name}>: ${p.why}`).join("; ") : "";
         toast(`Could not record it: ${dt.error || e.detail || e.message}${probs ? " — " + probs : ""}`, "err");
-        selfBtn.disabled = skipBtn.disabled = false; runBtn.textContent = prev; refresh();
+        selfBtn.disabled = skipBtn.disabled = redraftBtn.disabled = false; runBtn.textContent = prev; refresh();
       }
     }
     runBtn.addEventListener("click", () => send("run", "Running…"));
     selfBtn.addEventListener("click", () => send("myself", "Recording…"));
     skipBtn.addEventListener("click", () => send("skip", "Skipping…"));
+    // §17.1472 — send the block back: the note says what is wrong, the engine drafts the step again
+    const redraftBtn = el("button", { class: "btn", text: "↺ Redraft it with my correction",
+                                      title: "Write what is wrong with this block in the note, then press this." });
+    redraftBtn.addEventListener("click", () => {
+      if (!note.value.trim()) { toast("Write what is wrong with the block in the note first.", "warn"); note.focus(); return; }
+      send("redraft", "Sending back…");
+    });
     summaryEl.classList.remove("hidden");
     // §17.1214 — the standing panel steps back once a card owns "now"
     queueMicrotask(() => { if (!disposed) renderStanding(); });
@@ -1055,7 +1063,7 @@ export function renderTheater(container, jobId, ctx = {}) {
           el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
         note,
         needLabel,
-        el("div", { class: "row row-wrap summary-actions" }, runBtn, selfBtn, skipBtn,
+        el("div", { class: "row row-wrap summary-actions" }, runBtn, selfBtn, skipBtn, redraftBtn,
           canRun ? null : reaskBtn,          // §17.1197 — only where there is something to go and fix
           el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "See the plan" }))
       )

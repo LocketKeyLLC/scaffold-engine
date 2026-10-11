@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -248,7 +249,20 @@ async def resolve_decision(
                     "detail": f"{node_key} depends on {', '.join(_unmet)}, which is not done any more; "
                               f"reask so the run asks about {_unmet[0]} first"}
     now = datetime.now(timezone.utc).isoformat()
-    if waiting.get("kind") == "yours":
+    if waiting.get("kind") == "run" and not delegate and (choice or "").strip().lower() == "redraft":
+        # §17.1472 — the operator read the block and says what is wrong with it: that review joins the step's own
+        # text (which every draft reads), nothing runs, and the run drafts the step again.
+        if not (note or "").strip():
+            await db.rollback()
+            return {"outcome": "bad_choice", "choices": ["run", "myself", "skip", "redraft"],
+                    "current_status": job["status"], "waiting_on": node_key,
+                    "detail": "redraft needs a note: what is wrong with the block"}
+        await add_review(db, job_id, node_key, note, now)
+        entry = {"by": "operator", "choice": "redraft", "note": note.strip(), "at": now,
+                 "result": "redraft", "node_status": "pending"}
+        outcome = "redraft"
+        run_detail = {}
+    elif waiting.get("kind") == "yours":
         # §17.1458 — the operator's part: "I've done it — check" reads the machine; done only on its word
         from app.modules import operator_steps
         res = await operator_steps.resolve_operator(db, job_id, node_key, ("skip" if delegate else (choice or "")), waiting)
@@ -319,6 +333,29 @@ async def resolve_decision(
     await db.commit()
     logger.info("decision_pause_%s job=%s node=%s", outcome, job_id, node_key)
     return {"outcome": outcome, "node_key": node_key, "record": entry, **run_detail}
+
+
+REVIEW_HEAD = "Operator review"
+
+
+def with_review(step_text: str, note: str, when: str) -> str:
+    """The step's text with the operator's review of a drafted block added before its "Done when"."""
+    review = f"{REVIEW_HEAD} {when[:10]} of the drafted block: {note.strip()}"
+    parts = re.split(r"(\n\s*\n)(?=Done when\b)", step_text or "", maxsplit=1)
+    if len(parts) == 3:
+        return parts[0].rstrip() + "\n\n" + review + parts[1] + parts[2]
+    return (step_text or "").rstrip() + "\n\n" + review
+
+
+async def add_review(db: AsyncSession, job_id: str, node_key: str, note: str, when: str) -> None:
+    from app.modules.plan_reconcile import STEP_TEXT_SET, STEP_TEXT_SQL
+    row = (await db.execute(text(f"SELECT {STEP_TEXT_SQL} FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+                            {"jid": job_id, "nk": node_key})).mappings().first()
+    if not row:
+        return
+    await db.execute(text(f"UPDATE dag_nodes SET {STEP_TEXT_SET}, updated_at = NOW() "
+                          "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+                     {"jid": job_id, "nk": node_key, "pt": with_review(str(row["prompt_template"] or ""), note, when)})
 
 
 def _as_dict(v: Any) -> dict:
