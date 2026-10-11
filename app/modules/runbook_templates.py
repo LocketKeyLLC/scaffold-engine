@@ -393,9 +393,13 @@ RUN_IN_CONTAINER = Template(
     params=[Param("GID", "subject"), Param("STEP", "node_key"), Param("REMOTE_COMMANDS", "model", "the commands to run inside the container, as root, one per line"),
             # §17.1307 — parity with run_in_vm_via_agent: a check INSIDE the guest is what §17.1302 can read
             Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the container whose output shows this step's "
-                                            "goal is met (for example `caddy validate --config /etc/caddy/Caddyfile`, `systemctl is-active caddy`)")],
-    files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash /root/.scaffold_step.sh" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    result="$(ginfo "systemctl show -p Result --value $UNIT" | tr -d \'[:space:]\')"\n    code="$(ginfo "systemctl show -p ExecMainStatus --value $UNIT" | tr -d \'[:space:]\')"\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$result" = "success" ] || { [ -z "$result" ] && [ "$code" = "0" ]; }; then echo "$UNIT finished (exit ${code:-0})"; exit 0; fi\n    echo "FAILED: $UNIT ended with Result=$result exit=${code:-?}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
-    run=['bash /tmp/in_ct_{GID}.sh start', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh last'],   # §17.1317
+                                            "goal is met (for example `caddy validate --config /etc/caddy/Caddyfile`, `systemctl is-active caddy`)"),
+            # §17.1489 — a file whose content is a STORED SECRET, written from the host before the commands run.
+            # Read off the step's own text (`secret_files_from_text`), never a model draw: every container step
+            # would otherwise pay a third draw for a slot almost all of them leave empty.
+            Param("SECRET_FILES", "default", "", "")],
+    files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n{SECRET_FILES_WRITE}    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash /root/.scaffold_step.sh" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    result="$(ginfo "systemctl show -p Result --value $UNIT" | tr -d \'[:space:]\')"\n    code="$(ginfo "systemctl show -p ExecMainStatus --value $UNIT" | tr -d \'[:space:]\')"\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$result" = "success" ] || { [ -z "$result" ] && [ "$code" = "0" ]; }; then echo "$UNIT finished (exit ${code:-0})"; exit 0; fi\n    echo "FAILED: $UNIT ended with Result=$result exit=${code:-?}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
+    run=['bash /tmp/in_ct_{GID}.sh start{SECRET_REFS}', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh last'],   # §17.1317
     verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent)
     risk="Runs this step's commands as root inside container {GID}.",
 )
@@ -641,7 +645,7 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
         if p.source == "subject":
             vals[p.name] = gid
         elif p.source == "default":
-            vals[p.name] = p.default
+            vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES" else p.default)   # §17.1489
         elif p.source == "node_key":
             vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
         elif p.source == "derived":
@@ -678,12 +682,53 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
     return vals
 
 
+_SECRET_FILE_LINE_RE = re.compile(r"^\s*`?(/[\w./@+-]+)\s+\$?\{?([A-Z][A-Z0-9_]{1,63})\}?`?\s*$")
+
+
+_SECRET_REF_NEAR_PATH_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,63})\}?[^\n]{0,160}?\bto\s+`?(/[\w./@+-]+)")
+
+
+def secret_files_from_text(node: Optional[dict]) -> str:
+    """§17.1489 — "write the stored AirVPN config ($AIRVPN_WG_CONF, never as a literal) to /etc/wireguard/wg0.conf"
+    → `/etc/wireguard/wg0.conf AIRVPN_WG_CONF`: a stored secret the step tells the engine to write to a file."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    out = []
+    for m in _SECRET_REF_NEAR_PATH_RE.finditer(text):
+        line = f"{m.group(2).rstrip('.,;:')} {m.group(1)}"
+        if line not in out:
+            out.append(line)
+    return "\n".join(out[:4])
+
+
+def secret_file_parts(spec: str) -> tuple[str, str]:
+    """§17.1489 — ``(shell lines that write each secret file from the host, the run command's ` # $NAME` refs)``.
+
+    Live, ADD160 (AirVPN for CT 105): `run_in_container` had one slot — commands to run INSIDE the guest — and a
+    stored secret never reaches the guest, so the drafter, refused for reading `$AIRVPN_WG_CONF` in there
+    (§17.1488), dropped the config, the tunnel and the kill-switch and drafted only `apt-get install`. Each line
+    `<path> <NAME>` becomes `pct exec "$GID" -- sh -c 'umask 077; …; cat > PATH' <<< "$NAME"` in the helper's
+    start phase (the value crosses on stdin, expanded inside the runner's root shell) and ` # $NAME` on the start
+    command, the reference the runner reads to send the value (§17.1429)."""
+    writes, names = [], []
+    for ln in (spec or "").splitlines():
+        m = _SECRET_FILE_LINE_RE.match(ln)
+        if not m:
+            continue
+        path, name = m.group(1), m.group(2)
+        d = path.rsplit("/", 1)[0] or "/"
+        writes.append(f"    pct exec \"$GID\" -- sh -c 'umask 077; mkdir -p {d}; cat > {path}' <<< \"${name}\" "
+                      f"|| {{ echo \"FAILED: writing {path} into $GID\"; exit 1; }}\n")
+        names.append(name)
+    return "".join(writes), "".join(f" # ${n}" for n in dict.fromkeys(names))
+
+
 def render(template: Template, values: dict) -> str:
     """The runbook, in the exact shape `frame_run` parses: a marker line, the
     inputs, the risk, the files, the run command, the verify checks. Operator
     params are left as ``<NAME>`` placeholders; ``{GUEST_USER}`` inside a
     script is the ENVIRONMENT variable the run command sets from that placeholder."""
     v = dict(values)
+    v["SECRET_FILES_WRITE"], v["SECRET_REFS"] = secret_file_parts(v.get("SECRET_FILES", ""))   # §17.1489
     user_ph = f"<{v.get('GUEST_USER_NAME', 'GUEST_USER')}>"
 
     def fill(s: str) -> str:
