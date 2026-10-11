@@ -1474,6 +1474,15 @@ async def execute_next_node(
         exec_model = get_model(exec_role, exec_overrides)
         verifier_model = get_model("model_verifier", model_overrides)
 
+        # §17.1461 — the operator's part is never the worker's. Live (ADD153, 2026-10-11 01:25): a parallel
+        # worker claimed the human-tagged "join your devices to the tailnet" step while the pause was drafting
+        # another, and the H3 short-circuit below recorded it done — "Skipped: human review not required in
+        # auto mode" — 20 s after §17.1458 shipped. Handed back pending, the loop holds it and the drained loop's
+        # pause asks the operator (kind `yours`).
+        _op_held = await _hand_back_for_operator(db, job_id, node, tool)
+        if _op_held is not None:
+            return _op_held
+
         # ── Shell: §17.359 seam ──
         # When ``shell_tool_enabled`` is True we expect a real shell backend
         # bolted on here (subprocess dispatch, sandboxed exec, etc.). Until
@@ -3406,6 +3415,29 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
              "WHERE id = :id AND status = 'running'"), {"id": str(node.get("id"))})
     await db.commit()
     logger.info("supervised_run_needs_approval job=%s node=%s", job_id, node_key)
+    return {"status": "needs_approval", "node_key": node_key, "title": node.get("title"), "tool": tool}
+
+
+async def _hand_back_for_operator(db: AsyncSession, job_id: str, node: dict, tool: str) -> dict | None:
+    """§17.1461 — a claimed step whose remaining work is the OPERATOR's goes back to pending, reported
+    ``needs_approval`` like a hands-on step, so the loop holds it and the pause asks them. None otherwise."""
+    from app.modules import operator_steps as _ops
+    node_key = node.get("node_key")
+    try:
+        decided = _ops._as_dict_md((await db.execute(
+            text("SELECT metadata->'decisions' FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar())
+        entry = decided.get(node_key) if isinstance(decided, dict) else None
+        half = isinstance(entry, dict) and entry.get("result") == _ops.ENGINE_HALF_DONE
+        if not (half or _ops.is_wholly_operators(dict(node) if hasattr(node, "keys") else {})):
+            return None
+    except Exception as exc:
+        logger.error("operator_step_seam_failed job=%s node=%s err=%s", job_id, node_key, exc)
+        return None
+    await db.execute(
+        text("UPDATE dag_nodes SET status = 'pending', started_at = NULL, updated_at = NOW() "
+             "WHERE id = :id AND status = 'running'"), {"id": str(node.get("id"))})
+    await db.commit()
+    logger.info("operator_step_handed_back job=%s node=%s engine_half=%s", job_id, node_key, half)
     return {"status": "needs_approval", "node_key": node_key, "title": node.get("title"), "tool": tool}
 
 

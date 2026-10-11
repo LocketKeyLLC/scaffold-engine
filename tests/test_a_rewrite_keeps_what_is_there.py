@@ -123,3 +123,15 @@ def test_a_placeholder_name_is_not_a_note():
 def test_the_note_marker_is_registered():
     from app.modules import supervised_runs as sr
     assert rg.NOTE_MARKER in sr._SHAPE_REFUSALS and sr._WHOSE_GAP[rg.NOTE_MARKER] == "drafter"
+
+
+def test_a_new_file_has_nothing_to_lose(monkeypatch):
+    """§17.1461 — live, every NEW guest .fw was refused: the `cat` error was read as its content."""
+    async def _probe(spec, command):
+        if command.startswith("cat /etc/pve/firewall/102.fw"):
+            return True, "cat: /etc/pve/firewall/102.fw: No such file or directory"
+        return False, ""
+    import app.modules.service_truth as st
+    monkeypatch.setattr(st, "_probe", _probe)
+    cmd = "cat > /etc/pve/firewall/102.fw <<\"EOF\"\n[OPTIONS]\nenable: 1\nEOF"
+    assert _why([cmd]) == []

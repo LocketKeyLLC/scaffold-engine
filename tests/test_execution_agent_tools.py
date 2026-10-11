@@ -600,9 +600,11 @@ class TestHumanNodeSummaryVerified:
         sess_ctx.__aenter__ = AsyncMock(return_value=db)
         sess_ctx.__aexit__ = AsyncMock(return_value=False)
 
+        # §17.1461 — `human_review` (a review Auto mode may skip) keeps the short-circuit; a `human` step is the
+        # operator's WORK and is handed back to them (tests/test_a_worker_never_does_the_operators_part.py)
         node = {
             "id": "n1", "node_key": "T1", "title": "Human check",
-            "tool": "human", "node_type": "task", "assigned_model": "",
+            "tool": "human_review", "node_type": "task", "assigned_model": "",
             "depends_on": [], "prompt_template": None, "domain": None,
             "retry_count": 0, "last_verification_reason": None,
         }
