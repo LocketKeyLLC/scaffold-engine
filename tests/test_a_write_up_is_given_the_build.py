@@ -67,3 +67,20 @@ def test_tailscale_is_read_off_its_own_status():
 def test_the_list_outranks_a_stale_fact():
     assert "THIS LIST IS NEWER AND WINS" in ir.inventory_block([{"kind": "host", "id": "host", "name": "pve",
                                                                   "status": "running", "address": "x"}])
+
+
+UNITS = pathlib.Path("tests/fixtures/vm106_units_2026_10_11.txt").read_text()
+
+
+def test_how_a_service_runs_is_read_off_the_machine():
+    """§17.1486 — T38 wrote "The server runs in Docker" for VM 106 (fixture: its real running units)."""
+    got = ir.app_services(UNITS)
+    assert got == "palworld.service (PalWorld Dedicated Server)", got
+
+
+def test_no_docker_is_said_only_where_the_services_were_read():
+    seen = ir.inventory_block([{"kind": "vm", "id": "106", "name": "palworld-server", "status": "running",
+                                "address": "192.168.1.44", "services": "palworld.service", "_inside": True}])
+    blind = ir.inventory_block([{"kind": "vm", "id": "110", "name": "ai-vm", "status": "running", "address": "unread"}])
+    assert "runs palworld.service · no Docker" in seen
+    assert "no Docker" not in blind and "services not read (no way inside)" in blind
