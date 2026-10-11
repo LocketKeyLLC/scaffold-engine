@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -221,6 +222,21 @@ def _note_failure(act, spec, tool_name: str, args: dict, exc: BaseException) -> 
         logger.warning("runner_activity_note_failed err=%r", err)
 
 
+#: §17.1475 — a shell builtin is not a program: the runner runs a check as `sudo <command>`, and
+#: `sudo command -v ipmitool` answers "sudo: command: command not found" with ipmitool in /usr/bin.
+_LOOKUP_BUILTIN_RE = re.compile(r"^(\s*)(?:command\s+-[vV]|type(?:\s+-[aPpt]+)?|hash)\s+([\w.+-]+)\s*$")
+
+
+def without_lookup_builtins(command: str) -> str:
+    """``command -v X`` / ``type X`` / ``hash X`` → ``which X``, per segment of a ``&&``/``||``/``;`` chain.
+
+    Live (ADD155, 2026-10-11): the step's checks `command -v ipmitool` and `command -v ras-mc-ctl` came back
+    "sudo: command: command not found" after both were installed, and the step was failed "the work did not land"."""
+    parts = re.split(r"(\s*(?:&&|\|\||;)\s*)", command or "")
+    return "".join(_LOOKUP_BUILTIN_RE.sub(lambda m: f"{m.group(1)}which {m.group(2)}", p) if i % 2 == 0 else p
+                   for i, p in enumerate(parts))
+
+
 async def call_tool(
     spec: McpServerSpec, tool_name: str, arguments: dict[str, Any] | None = None
 ) -> McpToolResult:
@@ -229,6 +245,10 @@ async def call_tool(
     Raises ``McpError`` on transport failure and ``McpToolError`` when the
     server returns an error result (``isError=True``)."""
     args = arguments or {}
+    if tool_name in ("run_readonly", "run_supervised") and isinstance(args.get("command"), str):
+        _cmd = without_lookup_builtins(args["command"])        # §17.1475
+        if _cmd != args["command"]:
+            args = {**args, "command": _cmd}
 
     async def _do() -> McpToolResult:
         async with _open_session(spec) as session:
