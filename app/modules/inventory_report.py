@@ -100,6 +100,11 @@ async def measured_inventory(spec) -> list[dict]:
                 rec["address"] = (m.group(1) + " (configured)") if m else ("unread" if status == "running" else "")
             rec["firewall"] = guest_firewall(net0, await read(f"cat /etc/pve/firewall/{gid}.fw"))
             out.append(rec)
+    # §17.1485 — the security groups, where Proxmox keeps them
+    groups = re.findall(r"^\s*\[group\s+([\w-]+)\]", await read("cat /etc/pve/firewall/cluster.fw") or "", re.M | re.I)
+    if groups:
+        out[0]["groups"] = (", ".join(groups) + " — defined in /etc/pve/firewall/cluster.fw, which is where Proxmox "
+                            "keeps security groups (it has no per-group files and no groups/ directory)")
     # §17.1482 — the tunnel and the BMC, which the write-up otherwise reports from stale facts as "pending"
     ts = tailscale_summary(await read("tailscale status --json"))
     if ts:
@@ -164,6 +169,8 @@ def inventory_block(inv: list[dict]) -> str:
             bits.append(f"listens on {r['listens']}")
         if r.get("firewall"):
             bits.append(f"firewall {r['firewall']}")
+        if r.get("groups"):
+            bits.append(f"firewall security groups {r['groups']}")
         if r.get("tailscale"):
             bits.append(f"Tailscale {r['tailscale']}")
         if r.get("watchdog"):

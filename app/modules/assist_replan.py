@@ -596,8 +596,23 @@ async def store_preimages(*, db, session_id: str, preimages: list[dict]) -> None
         logger.warning("preimage_store_failed sid=%s err=%r", session_id, exc)
 
 
+def plan_update_label(source: dict | None) -> str:
+    """§17.1485 — what a plan update IS, in its own label. Every revision was appended as "[Plan update — operator
+    constraint]", whatever produced it. Live: "[Plan update — operator constraint]: Documentation must reflect that
+    /etc/pve/firewall/groups/ does not yet exist and the security groups still need to be created" was the engine's
+    reading of an observed fact (Proxmox has no groups/ directory; groups live in cluster.fw), dated before ADD151
+    turned every guest's firewall on — and T38's write-up, told the step's text wins, repeated it every time."""
+    src = source or {}
+    kind = {"note": "the operator's note", "fact": "the engine's reading of an observed fact",
+            "decision": "the engine's reading of a decision"}.get(str(src.get("note_kind") or ""), "a revision")
+    when = str(src.get("ts") or "")[:10]
+    said = " ".join(str(src.get("note_text") or "").split())[:120]
+    return ("[Plan update" + (f" {when}" if when else "") + f" — {kind}"
+            + (f" \"{said}\"" if said and kind != "a revision" else "") + ", approved by the operator]")
+
+
 async def apply_note_replan(
-    *, db, session_id: str, job_id: str, proposals: list[dict],
+    *, db, session_id: str, job_id: str, proposals: list[dict], source: dict | None = None,
 ) -> dict:
     """§17.677 — apply a confirmed note-impact proposal to the *pending* plan.
 
@@ -783,14 +798,14 @@ async def apply_note_replan(
             text("""
                 UPDATE dag_nodes
                    SET description = COALESCE(description, '')
-                         || E'\n\n[Plan update — operator constraint]: ' || :change,
+                         || E'\n\n' || :label || ': ' || :change,
                        updated_at = NOW()
                  WHERE job_id = :jid
                    AND node_key = :nk
                    AND status = 'pending'
              RETURNING node_key
             """),
-            {"jid": job_id, "nk": nk, "change": change},
+            {"jid": job_id, "nk": nk, "change": change, "label": plan_update_label(source)},
         )).mappings().first()
         if res:
             revised.append(nk)

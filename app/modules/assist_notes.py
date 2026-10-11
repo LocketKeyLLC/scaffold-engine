@@ -703,6 +703,7 @@ async def apply_pending_replan(
         result = await assist_replan.apply_note_replan(
             db=db, session_id=session_id, job_id=str(sess["job_id"]),
             proposals=pending.get("proposals") or [],
+            source={k: pending.get(k) for k in ("note_kind", "note_text", "ts")},   # §17.1485
         )
         # §17.747 — a reopened node's prior output is nulled on dag_nodes, but the
         # operator's original submission is real history worth keeping. Preserve
