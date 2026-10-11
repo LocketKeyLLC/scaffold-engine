@@ -5680,6 +5680,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     _lost = await destructive_rewrites(runnable, spec, [f for f in (waiting.get("files") or []) if (f or {}).get("path")])
     if _lost:
         return {"outcome": "not_runnable", "refused": [{"command": mask_secrets(r["command"], values, need), "why": r["why"]} for r in _lost]}
+    # §17.1466 — the addresses of the guests this block touches, read before it runs
+    from app.modules import address_watch as _aw
+    _aw_guests, _aw_before = await _aw.around_run(spec, runnable, waiting.get("files") or [])
     claimed = await db.execute(
         text("UPDATE dag_nodes SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
              "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
@@ -5856,6 +5859,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             await _mt.after_step_done(job_id, {"node_key": node_key, "title": str(waiting.get("title") or "")})
         except Exception as exc:
             logger.warning("after_step_done_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # §17.1466 — a guest that moved: a fact, the steps ahead corrected, a step for what done steps set up
+        await _aw.after_run(db, spec, job_id, node_key, _aw_guests, _aw_before)
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out,
                 "confirmed_after_drop": confirmed_after_drop}
     last = executed[-1] if executed else None

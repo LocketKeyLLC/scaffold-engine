@@ -1,0 +1,1 @@
+{"verify": ["qm guest exec 106 -- bash -c \"ip -4 addr show eth0 | grep dynamic\""], "commands": ["bash /tmp/in_vm_106_agent.sh start", "bash /tmp/in_vm_106_agent.sh wait", "bash /tmp/in_vm_106_agent.sh last"]}
