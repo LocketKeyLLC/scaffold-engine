@@ -94,3 +94,17 @@ def test_the_repoint_names_a_check_for_each_place():
     from app.modules import operator_steps as ops
     desc = "Done when nothing still names it — each of these prints nothing: " + ", ".join(f"`{c}`" for c in cs)
     assert ops.checks({"description": desc}) == cs
+
+
+def test_the_repoint_names_what_it_found(monkeypatch):
+    """§17.1471 — ADR1 was drafted as `sed … <FILE_PATH_1>` on the host: the step never said where the address was."""
+    found = {"pct exec 111": "/opt/control-panel-backend/palworld_settings_route.js\n/root/.ssh/known_hosts\n",
+             "qm guest exec 106": "", "grep -rIl": ""}
+
+    async def probe(spec, cmd):
+        return True, next((v for k, v in found.items() if cmd.startswith(k)), "")
+    import app.modules.service_truth as st
+    monkeypatch.setattr(st, "_probe", probe)
+    cs = ["pct exec 111 -- sh -c \"grep -rIl x /etc\"", "qm guest exec 106 -- sh -c \"grep x\"", "grep -rIl x /etc/hosts"]
+    assert asyncio.run(aw.where_it_is(object(), cs)) == [
+        "LXC 111: /opt/control-panel-backend/palworld_settings_route.js", "LXC 111: /root/.ssh/known_hosts"]
