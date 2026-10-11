@@ -951,10 +951,19 @@ _NEG_SSH_RE = re.compile(
     r"Could not resolve hostname|Too many authentication failures", re.I)
 
 
-def negative_evidence(command: str, output: str) -> str:
-    """The reason a check's output CONTRADICTS its claim with no model, or ``""``."""
+#: §17.1487 — a goal that UNDOES something: "inactive" / "No such file" is then the step succeeding
+_UNDOES_RE = re.compile(r"\b(?:stop|stopp(?:ed|ing)|disabl\w*|pause\w*|turn(?:ed|s)? off|shut(?:s|ting)? down|"
+                        r"remov\w*|delet\w*|uninstall\w*|purg\w*|mask\w*|kill\w*)\b", re.I)
+
+
+def negative_evidence(command: str, output: str, claim: str = "") -> str:
+    """The reason a check's output CONTRADICTS its claim with no model, or ``""``.
+
+    §17.1487 — judged against the claim: live, ADD159 "stop qBittorrent until it has a VPN" was failed "systemctl
+    is-active says 'inactive'" — the one answer that proved it worked."""
     import shlex
     cmd, out = str(command or ""), str(output or "")
+    undoes = bool(_UNDOES_RE.search(str(claim or "")))
     head = cmd
     if "--" in cmd:
         try:
@@ -964,9 +973,9 @@ def negative_evidence(command: str, output: str) -> str:
             pass
     if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_HTTP_RE.search(out):
         return f"the check answered an error, not the service: {_NEG_HTTP_RE.search(out).group(0)!r}"
-    if "is-active" in head and re.fullmatch(r"\s*(?:inactive|failed|unknown|deactivating)\s*", out):
+    if "is-active" in head and not undoes and re.fullmatch(r"\s*(?:inactive|failed|unknown|deactivating)\s*", out):
         return f"systemctl is-active says {out.strip()!r}"
-    if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and _NEG_FS_RE.search(out):
+    if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and not undoes and _NEG_FS_RE.search(out):
         return f"the path or command is not there: {_NEG_FS_RE.search(out).group(0)!r}"
     # §17.1393 — ssh that did not get in. Judged only when the check IS an ssh
     # (inside `pct exec N --` too), so a curl that mentions "Connection refused"
@@ -1066,7 +1075,7 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
     to_judge: dict[str, str] = {}
     for cid, txt in with_output.items():
         exp = " ".join((probed[cid].get("expect") or "").split()).lower()
-        neg = negative_evidence(probed[cid].get("command") or "", txt)
+        neg = negative_evidence(probed[cid].get("command") or "", txt, probed[cid].get("claim") or "")
         if len(exp) >= 6 and exp in " ".join(txt.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
         elif neg:
