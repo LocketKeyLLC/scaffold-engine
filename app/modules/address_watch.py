@@ -82,7 +82,7 @@ def _addr_re(addr: str) -> re.Pattern:
     return re.compile(rf"(?<![\d.]){re.escape(addr)}(?![\d])")
 
 
-async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[str, bool]) -> dict:
+async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[str, bool], spec=None) -> dict:
     """Record each move, correct the steps ahead, and add one step for what done steps set up."""
     from app.modules import plan_reconcile as _pr
     from app.modules.machine_truth import guest_name_from_plan
@@ -114,7 +114,7 @@ async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[
         await set_environment(session_id=str(sess), facts=facts, db=db)
         reconciled = await _pr.reconcile_after_address_change(db=db, session_id=str(sess), job_id=job_id,
                                                              changes=changes)
-    added = await _add_repoint_step(db, job_id, node_key, plan, stale) if stale else None
+    added = await _add_repoint_step(db, job_id, node_key, plan, stale, spec) if stale else None
     await db.commit()
     logger.warning("address_watch_carried job=%s node=%s moved=%r stale=%r added=%s", job_id, node_key,
                    [(c["label"], c["old"], c["new"]) for c in changes], [s[0]["node_key"] for s in stale], added)
@@ -138,7 +138,7 @@ async def _known_moves(db, job_id: str) -> set[tuple[str, str, str]]:
     return out
 
 
-async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], stale: list) -> Optional[str]:
+async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], stale: list, spec=None) -> Optional[str]:
     keys = {str(n["node_key"]) for n in plan}
     i = 1
     while f"ADR{i}" in keys:
@@ -154,10 +154,15 @@ async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], st
                      f"something up that names {old}: {'; '.join(steps)}. Find each place on the machine that "
                      f"holds {old} (config files, scripts, unit files, proxy targets, firewall rules), replace it "
                      f"with {new} and restart whatever reads it.")
+    checks_ = stale_checks(stale)
+    found = await where_it_is(spec, checks_) if spec is not None else []
+    if found:
+        lines.append("Measured when this step was added (each place that still holds the old address):\n"
+                     + "\n".join(f"  - {f}" for f in found))
     desc = (f"{node_key} changed a machine's address. " + "\n".join(lines)
             + "\n\nDone when nothing those steps set up still names the old address and each service that read "
               "it answers again — each of these prints nothing: "
-            + ", ".join(f"`{c}`" for c in stale_checks(stale)))
+            + ", ".join(f"`{c}`" for c in checks_))
     from app.modules.node_editor import insert_node
     res = await insert_node(job_id, {"node_key": new_key, "title": title[:240], "description": desc, "tool": "Shell",
                                      "node_type": "task", "depends_on": [node_key]},
@@ -180,6 +185,34 @@ async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], st
 _GREP_ROOTS = "/etc /opt /srv /home /root"
 _GREP_SKIP = ("--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=logs --exclude='*.bak*' --exclude='*.orig' "
               "--exclude='*.old' --exclude='*.log'")
+
+
+_WHERE_RE = re.compile(r"^(?:(pct)\s+exec|(qm)\s+guest\s+exec)\s+(\d+)")
+
+
+async def where_it_is(spec, checks_: list[str]) -> list[str]:
+    """§17.1471 — run the repoint's own checks once and name every file they find, by machine.
+
+    Live (2026-10-11): ADR1 said "find each place on the machine that holds 192.168.1.106"; the drafter, not told
+    where, wrote `sed -i 's/…/…/g' <FILE_PATH_1> <FILE_PATH_2> <FILE_PATH_3>` on the Proxmox host (refused). The engine
+    had already measured the places — the same greps found palworld_settings_route.js, remote.js and the panel's
+    known_hosts in LXC 111."""
+    from app.modules.service_truth import _probe
+    out: list[str] = []
+    for c in checks_:
+        try:
+            ok, text_ = await _probe(spec, c)
+        except Exception:
+            continue
+        if not ok:
+            continue
+        m = _WHERE_RE.match(c)
+        where = (f"LXC {m.group(3)}" if m.group(1) else f"VM {m.group(3)}") if m else "the Proxmox host"
+        for ln in (text_ or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("/"):
+                out.append(f"{where}: {ln}")
+    return out[:20]
 
 
 def stale_checks(stale: list) -> list[str]:
@@ -237,7 +270,7 @@ async def after_run(db, spec, job_id: str, node_key: str, guests: dict, before: 
         return None
     try:
         moved = moves(before, await measure(spec, {g: guests[g] for g in before}))
-        return await carry(db, job_id, node_key, moved, guests) if moved else None
+        return await carry(db, job_id, node_key, moved, guests, spec) if moved else None
     except Exception as exc:
         logger.warning("address_watch_after_failed job=%s node=%s err=%r", job_id, node_key, exc)
         return None
