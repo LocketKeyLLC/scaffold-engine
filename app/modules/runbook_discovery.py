@@ -318,8 +318,14 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
     # (a pin, the map, a fact) stands ahead of a fresh read. Live, T37's <PANEL_IP> carried "192.168.1.0" and the host's
     # Tailscale address from its text, so CT 111 (control-panel, 192.168.1.25) was never measured.
     def _settled(i: dict) -> bool:
-        return bool((i.get("value") or "").strip()) or any(
-            str((s or {}).get("confidence") or "") != "step" for s in (i.get("suggestions") or []))
+        # §17.1479 — and a VALUE prefilled from a step-text guess is that guess: live, T37's <PANEL_IP> and
+        # <CADDY_IP> were both prefilled with the host's Tailscale address (100.84.253.90) from the step's text, so
+        # neither was measured, and only a hand override at the approval kept the block off the wrong machine.
+        sugg = [s for s in (i.get("suggestions") or []) if isinstance(s, dict)]
+        if any(str(s.get("confidence") or "") != "step" for s in sugg):
+            return True
+        v = (i.get("value") or "").strip()
+        return bool(v) and v not in {str(s.get("value") or "") for s in sugg}
     pend = [i for i in inputs if not _settled(i)]
     if not pend:
         return

@@ -88,3 +88,22 @@ def test_the_most_relevant_facts_survive_the_cap():
     many = [f"Caddy proxy service public HTTPS note {i}" for i in range(20)]
     picked = relevant_facts(T37, many + [SNI])
     assert SNI[:300] in picked
+def test_a_value_prefilled_from_a_guess_is_still_measured(monkeypatch):
+    """§17.1479 — <PANEL_IP> was PREFILLED with the host's Tailscale address from the text, so never measured."""
+    import asyncio
+
+    from app.modules import runbook_discovery as rd
+    reads = {"pct list": "VMID Status Lock Name\n111 running control-panel\n",
+             "pct exec 111 -- hostname -I": "192.168.1.25 2603:7081::1\n"}
+
+    async def read(spec, cmd):
+        return reads.get(cmd, "")
+    monkeypatch.setattr(rd, "_read", read)
+
+    class Spec:
+        name = "pve-runner"
+    ins = [{"name": "PANEL_IP", "value": "100.84.253.90", "secret": False,
+            "suggestions": [{"value": "100.84.253.90", "source": "the step's own text", "confidence": "step"}]},
+           {"name": "RADARR_IP", "value": "10.0.0.9", "secret": False}]          # typed by the operator: kept
+    out = asyncio.run(rd.discover_inputs(ins, [], Spec()))
+    assert out[0]["value"] == "192.168.1.25" and out[1]["value"] == "10.0.0.9"
