@@ -248,7 +248,19 @@ async def resolve_decision(
                     "detail": f"{node_key} depends on {', '.join(_unmet)}, which is not done any more; "
                               f"reask so the run asks about {_unmet[0]} first"}
     now = datetime.now(timezone.utc).isoformat()
-    if waiting.get("kind") == "run":
+    if waiting.get("kind") == "yours":
+        # §17.1458 — the operator's part: "I've done it — check" reads the machine; done only on its word
+        from app.modules import operator_steps
+        res = await operator_steps.resolve_operator(db, job_id, node_key, ("skip" if delegate else (choice or "")), waiting)
+        if res["outcome"] in ("bad_choice", "no_channel", "node_gone", "not_yet"):
+            await db.rollback()
+            return {"outcome": res["outcome"], "current_status": job["status"], "waiting_on": node_key,
+                    **{k: v for k, v in res.items() if k != "outcome"}}
+        entry = {"by": "operator", "choice": (choice or "").strip(), "note": (note or "").strip(), "at": now,
+                 "result": res["outcome"], "node_status": res.get("node_status")}
+        outcome = res["outcome"]
+        run_detail = {k: v for k, v in res.items() if k not in ("outcome", "node_key")}
+    elif waiting.get("kind") == "run":
         # §17.1186 — a hands-on step parked with its commands: run / myself / skip
         from app.modules import supervised_runs
         res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")), waiting,
@@ -260,6 +272,18 @@ async def resolve_decision(
                  "at": now, "result": res["outcome"], "node_status": res.get("node_status"),
                  "inputs": sorted((inputs or {}).keys())}       # names only — a value may be a secret
         outcome = res["outcome"]
+        # §17.1458 — the engine's half ran and the check failed: if the rest is the operator's, it is theirs
+        # to do (with a walkthrough), not a failed step. Live ADD150: the route was advertised and needed
+        # approving in their Tailscale account.
+        if outcome == "failed":
+            from app.modules import operator_steps
+            _row = (await db.execute(text(
+                "SELECT node_key, title, description, prompt_template, tool, depends_on FROM dag_nodes "
+                "WHERE job_id = :jid AND node_key = :nk"), {"jid": job_id, "nk": node_key})).mappings().first()
+            if _row and await operator_steps.hand_back_engine_half(db, job_id, dict(_row), res):
+                entry["result"] = operator_steps.ENGINE_HALF_DONE
+                entry["node_status"] = "pending"
+                outcome = "yours"
         # §17.1261 — what actually happened has to reach the caller. The
         # early-return path above splats this detail; the final return dropped it,
         # so a run that worked answered `executed: 0` and a run that failed gave

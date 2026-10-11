@@ -555,7 +555,8 @@ def test_the_executor_redrafts_before_it_asks():
     src = inspect.getsource(ea._pause_for_decision)
     assert "shape_retry_note(frame)" in src
     assert "retry_note=fix" in src
-    assert src.index("shape_retry_note(frame)") < src.index("park_awaiting_decision"), \
+    # §17.1458 — an operator step parks earlier in the function, with no draft; the RUN frame's park is this one
+    assert src.index("shape_retry_note(frame)") < src.index("park_awaiting_decision(db, job_id, target, frame)"), \
         "the redraft must happen BEFORE the operator is asked"
 
 

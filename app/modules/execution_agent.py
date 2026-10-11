@@ -2513,7 +2513,15 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             ch = await supervised_runs.channel(db)
             if ch is not None:
                 run_node = await supervised_runs.pending_hands_on(db, job_id)
-            if node is None and run_node is None:
+            # §17.1458 — a step whose remaining work is the OPERATOR's (tagged human, an account or app only
+            # they can open, or the rest of one the engine did its half of) is a walkthrough the run waits on.
+            from app.modules import operator_steps as _ops
+            op_node = await _ops.pending_operator_step(db, job_id)
+            if op_node is not None and all(c is None or _order_of(op_node) <= _order_of(c) for c in (node, run_node)):
+                node = run_node = None
+            else:
+                op_node = None
+            if node is None and run_node is None and op_node is None:
                 return None
             # §17.1231 — ask about whichever comes FIRST in the plan. A decision
             # used to win unconditionally, so a hands-on step the operator had
@@ -2532,7 +2540,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     run_node = None
             elif node is not None:
                 run_node = None
-            target = node or run_node
+            target = op_node or node or run_node
             job = await _get_job(db, job_id)
             brief = _brief_text(job)
             brief_full = (job or {}).get("refined_brief") or {}
@@ -2544,6 +2552,12 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         logger.error("decision_pause_check_failed job=%s err=%s", job_id, exc)
         return None
     up_block = _format_upstream_block(upstream, target.get("node_key") or "") if upstream else ""
+    if op_node is not None:
+        frame = await _ops.frame_operator(op_node, upstream=up_block)          # §17.1458
+        logger.info("operator_step_parked job=%s node=%s engine_half=%s checks=%d", job_id,
+                    op_node.get("node_key"), bool(op_node.get("engine_half")), len(frame.get("verify") or []))
+        async with async_session() as db:
+            return await decision_pause.park_awaiting_decision(db, job_id, op_node, frame)
     if node is not None:
         frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
     else:

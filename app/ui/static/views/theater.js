@@ -1071,7 +1071,62 @@ export function renderTheater(container, jobId, ctx = {}) {
     return out;
   }
 
+  // §17.1458 — the operator's part of the plan: a walkthrough, then "I've done it — check", which reads the
+  // machine with the step's own checks. Live (ADD150): the Tailscale route needed approving in the
+  // operator's own account and nothing walked them through it; the step was recorded failed.
+  function showOperatorStep(d) {
+    if (d && d.node_key) { currentKey = d.node_key; renderNodes(); scrollToCurrent(); }
+    const nodeKey = d.node_key;
+    const verify = Array.isArray(d.verify) ? d.verify : [];
+    const result = el("div", { class: "decision-result" });
+    const doneBtn = el("button", { class: "btn btn-primary", text: "✓ I've done it — check" });
+    const skipBtn = el("button", { class: "btn btn-ghost", text: "Skip this step" });
+    async function send(choice) {
+      doneBtn.disabled = skipBtn.disabled = true;
+      const prev = doneBtn.textContent;
+      if (choice === "done") doneBtn.textContent = verify.length ? "Checking the machine…" : "Recording…";
+      try {
+        const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, choice });
+        summaryEl.classList.add("hidden");
+        ensureNode(nodeKey, { status: res.node_status || (choice === "skip" ? "skipped" : "done") });
+        renderNodes();
+        toast(choice === "skip" ? `${nodeKey} skipped — continuing.` : `${nodeKey} confirmed on the machine — continuing.`, "ok");
+        if (res.run_started && !running) attachRun(); else await loadInitial();
+      } catch (e) {
+        const dt = (e && e.detail) || {};
+        if (dt.error === "the machine does not show it done yet") {
+          mount(result, el("div", { class: "decision-fix" },
+            el("p", { text: "Not yet — the machine does not show it done. What the check read:" }),
+            el("pre", { class: "decision-cmds", text: String(dt.evidence || "(nothing)").slice(0, 2000) })));
+        } else {
+          toast((e && (dt.error || e.message)) || "Could not record that", "err");
+        }
+        doneBtn.disabled = skipBtn.disabled = false; doneBtn.textContent = prev;
+      }
+    }
+    doneBtn.addEventListener("click", () => send("done"));
+    skipBtn.addEventListener("click", () => send("skip"));
+    summaryEl.classList.remove("hidden");
+    queueMicrotask(() => { if (!disposed) renderStanding(); });
+    mount(
+      summaryEl,
+      el("div", { class: "card card-pad summary-card decision-card operator-step" },
+        el("div", { class: "summary-title", text: "Your turn — the run is waiting on you" }),
+        el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
+        d.engine_half ? el("div", { class: "decision-detail dim", text: "The engine did its part of this step. The rest is yours:" }) : null,
+        el("div", { class: "md decision-walkthrough", html: mdToHtml(d.walkthrough || d.part || "") }),
+        verify.length ? el("details", { class: "decision-verify" },
+          el("summary", { text: `How the engine will check it (${verify.length}, read-only)` }),
+          el("pre", { class: "decision-cmds", text: verify.join("\n") })) : null,
+        result,
+        el("div", { class: "row row-wrap summary-actions" }, doneBtn, skipBtn)
+      )
+    );
+    summaryEl.scrollIntoView({ block: "nearest" });
+  }
+
   function showDecision(d) {
+    if (d && d.kind === "yours") return showOperatorStep(d);   // §17.1458
     if (d && d.kind === "run") return showRunApproval(d);   // §17.1186
     const nodeKey = d.node_key;
     if (nodeKey) { currentKey = nodeKey; renderNodes(); scrollToCurrent(); }
