@@ -1333,6 +1333,17 @@
             ],
             "title": "Diagnosis"
           },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
           "executed": {
             "anyOf": [
               {
