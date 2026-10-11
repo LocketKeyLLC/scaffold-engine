@@ -86,8 +86,15 @@ async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[
     """Record each move, correct the steps ahead, and add one step for what done steps set up."""
     from app.modules import plan_reconcile as _pr
     from app.modules.machine_truth import guest_name_from_plan
+    # §17.1468 — a move already carried is not carried again. Re-running ADD154 (VM 106 to DHCP, after a host
+    # restart undid it) measures the same .106 → .44 again; a second reconcile would rewrite ADR1's own
+    # "moved from 192.168.1.106 to 192.168.1.44" into ".44 to .44", and a second repoint step would be added.
+    known = await _known_moves(db, job_id)
+    moved = [m for m in moved if (m["id"], m["old"], m["new"]) not in known]
+    if not moved:
+        return {"moved": [], "facts": [], "reconciled": False, "added": None, "stale": [], "already_carried": True}
     plan = [dict(r) for r in (await db.execute(text(f"""
-        SELECT node_key, title, status, output_text, execution_order, {_pr.STEP_TEXT_SQL}
+        SELECT node_key, title, status, output_text, execution_order, depends_on, {_pr.STEP_TEXT_SQL}
           FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order
     """), {"jid": job_id})).mappings().all()]
     changes, facts, stale = [], [], []
@@ -115,6 +122,22 @@ async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[
             "stale": [s[0]["node_key"] for s in stale]}
 
 
+_MOVED_FACT_RE = re.compile(r"\b(?:VM|CT)\s+(\d{3,5})\b[^\n]*?\bmoved from\s+(\S+)\s+to\s+(\S+?)\s+—\s+measured")
+
+
+async def _known_moves(db, job_id: str) -> set[tuple[str, str, str]]:
+    row = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE job_id = :jid ORDER BY updated_at DESC "
+                                 "LIMIT 1"), {"jid": job_id})).mappings().first()
+    facts = (((row or {}).get("metadata") or {}).get("environment") or {}).get("facts") or []
+    out = set()
+    for f in facts:
+        t = str(f if isinstance(f, str) else (f or {}).get("text") or "")
+        m = _MOVED_FACT_RE.search(t)
+        if m:
+            out.add((m.group(1), m.group(2), m.group(3)))
+    return out
+
+
 async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], stale: list) -> Optional[str]:
     keys = {str(n["node_key"]) for n in plan}
     i = 1
@@ -132,8 +155,9 @@ async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], st
                      f"holds {old} (config files, scripts, unit files, proxy targets, firewall rules), replace it "
                      f"with {new} and restart whatever reads it.")
     desc = (f"{node_key} changed a machine's address. " + "\n".join(lines)
-            + "\n\nDone when nothing those steps set up still names the old address (grep for it) and each "
-              "service that read it answers again.")
+            + "\n\nDone when nothing those steps set up still names the old address and each service that read "
+              "it answers again — each of these prints nothing: "
+            + ", ".join(f"`{c}`" for c in stale_checks(stale)))
     from app.modules.node_editor import insert_node
     res = await insert_node(job_id, {"node_key": new_key, "title": title[:240], "description": desc, "tool": "Shell",
                                      "node_type": "task", "depends_on": [node_key]},
@@ -141,7 +165,61 @@ async def _add_repoint_step(db, job_id: str, node_key: str, plan: list[dict], st
     if res.get("status") != "ok":
         logger.warning("address_watch_insert_failed job=%s err=%r", job_id, res.get("error"))
         return None
+    # §17.1468 — a step that builds on the work being repointed waits for the repoint. Live: ADR1 was appended
+    # with nothing waiting on it, and T37 "Validate entire build" (which depends on ADD151, one of the stale
+    # steps) was drafted while the panel still reached the Palworld VM at its old address.
+    for nk in waits_for_repoint(plan, {str(n["node_key"]) for n, _m, _l in stale}):
+        await db.execute(text(
+            "UPDATE dag_nodes SET depends_on = array_append(COALESCE(depends_on, ARRAY[]::text[]), :new), "
+            "updated_at = NOW() WHERE job_id = :jid AND node_key = :nk AND status = 'pending' "
+            "AND NOT (:new = ANY(COALESCE(depends_on, ARRAY[]::text[])))"),
+            {"jid": job_id, "nk": nk, "new": new_key})
     return new_key
+
+
+_GREP_ROOTS = "/etc /opt /srv /home /root"
+_GREP_SKIP = ("--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=logs --exclude='*.bak*' --exclude='*.orig' "
+              "--exclude='*.old' --exclude='*.log'")
+
+
+def stale_checks(stale: list) -> list[str]:
+    """§17.1468 — one read per place the stale steps worked: a grep for the old address that must print nothing.
+    Live: ADR1's "grep for it" named no command, so the frame refused it ("names no command the engine can run")."""
+    from app.modules.machine_truth import subject_guest
+    from app.modules.service_truth import in_guest
+    out: list[str] = []
+    for n, m, _label in stale:
+        old = m["old"]
+        gid = subject_guest(n)
+        if gid:
+            vm = bool(re.search(rf"\bVM\s*{gid}\b", str(n.get("title") or "")))
+            if not vm:
+                vm = gid == m["id"] and bool(re.search(rf"\bVM\s*{gid}\b", _label))
+            c = (f"{in_guest(gid, vm)} sh -c \"grep -rIl {_GREP_SKIP} -e '{old}' {_GREP_ROOTS} 2>/dev/null; true\"")
+        else:
+            c = f"grep -rIl -e '{old}' /etc/pve/firewall /etc/hosts 2>/dev/null; true"
+        if c not in out:
+            out.append(c)
+    return out[:6]
+
+
+def waits_for_repoint(plan: list[dict], stale_keys: set[str]) -> list[str]:
+    """The pending steps whose dependencies reach, directly or through others, a step being repointed."""
+    deps = {str(n["node_key"]): [str(d) for d in (n.get("depends_on") or [])] for n in plan}
+    out = []
+    for n in plan:
+        if n.get("status") != "pending":
+            continue
+        seen, todo = set(), list(deps.get(str(n["node_key"]), []))
+        while todo:
+            k = todo.pop()
+            if k in seen:
+                continue
+            seen.add(k)
+            todo.extend(deps.get(k, []))
+        if seen & stale_keys:
+            out.append(str(n["node_key"]))
+    return out
 
 
 async def around_run(spec, commands: list[str], files: Optional[list[dict]] = None) -> tuple[dict, dict]:

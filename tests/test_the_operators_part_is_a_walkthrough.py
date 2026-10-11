@@ -110,3 +110,14 @@ def test_it_is_wired_end_to_end():
     assert 'if waiting.get("kind") == "yours":' in dp and "hand_back_engine_half(db, job_id" in dp
     assert "_ops.is_wholly_operators(node)" in sr and "_ops.ENGINE_HALF_DONE" in sr
     assert 'if (d && d.kind === "yours") return showOperatorStep(d);' in th
+
+
+def test_an_address_does_not_end_the_sentence():
+    """§17.1468 — ADD152's part was recorded as '… reserve 192.'"""
+    node = {"tool": "Shell", "description": (
+        "Friends can join. The rest is the operator's, in the My Spectrum app (Services → Router → Advanced "
+        "Settings → Port Forwarding & IP Reservations): reserve 192.168.1.44 for that MAC, then Add Port Assignment "
+        "UDP 8211 → 192.168.1.44:8211. Friends connect to defrusciohomelab.duckdns.org:8211.\n\nDone when `grep x`")}
+    part = ops.operators_part(node)
+    assert part.endswith("UDP 8211 → 192.168.1.44:8211."), part
+    assert "reserve 192.168.1.44 for that MAC" in part and "Friends can join" not in part
