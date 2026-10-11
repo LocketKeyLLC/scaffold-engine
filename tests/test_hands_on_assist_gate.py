@@ -179,7 +179,8 @@ async def test_classify_counts_llm_tagged_host_work(monkeypatch):
          "prompt_template": "Write comprehensive documentation."},
     )
     cls = await execution_agent._classify_dag_executability(db, "job-1")
-    assert cls == {"total": 4, "nonexec": 3, "hands_on": True, "by_text": 2}   # + the checkpoint
+    # §17.1474 — T37 "Validate entire build" is hands-on by its own words now, not only as a checkpoint
+    assert cls == {"total": 4, "nonexec": 3, "hands_on": True, "by_text": 3}
 
 
 @pytest.mark.asyncio
