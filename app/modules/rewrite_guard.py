@@ -109,6 +109,17 @@ def drafter_notes(commands: list[str], files: Optional[list[dict]] = None) -> li
     return out
 
 
+_NO_SUCH_FILE_RE = re.compile(r"^\s*cat:\s.*No such file or directory\s*$")
+
+
+def _absent(existing: str) -> bool:
+    """§17.1461 — the read of a file that does not exist is not its content. Live (ADD151's fourth block): every
+    NEW guest .fw was refused because `cat: /etc/pve/firewall/102.fw: No such file or directory` was 'a line it
+    holds now'."""
+    t = (existing or "").strip()
+    return not t or bool(_NO_SUCH_FILE_RE.match(t))
+
+
 def lost_lines(existing: str, new_lines: list[str]) -> list[str]:
     """Lines of `existing` the new content neither keeps nor EDITS. A line one of the new lines extends or
     shortens is an edit (`IN ACCEPT -p tcp -dport 80 -source 192.168.1.0/24` → `IN ACCEPT -p tcp -dport 80`)."""
@@ -161,7 +172,7 @@ async def destructive_rewrites(commands: list[str], spec, files: Optional[list[d
             if new is None:
                 continue
             ok, existing = await _probe(spec, f"cat {path}")
-            if not ok or not (existing or "").strip():
+            if not ok or _absent(existing):
                 continue
             lost = lost_lines(existing, new)
             if lost:
@@ -174,7 +185,7 @@ async def destructive_rewrites(commands: list[str], spec, files: Optional[list[d
         if not path.startswith("/") or path.startswith(("/tmp/", "/dev/", "/proc/")):
             continue
         ok, existing = await _probe(spec, f"cat {path}")
-        if not ok or not (existing or "").strip():
+        if not ok or _absent(existing):
             continue
         lost = lost_lines(existing, content.splitlines())
         if lost:
