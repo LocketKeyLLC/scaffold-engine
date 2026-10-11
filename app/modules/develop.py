@@ -114,6 +114,15 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
                      or str(s.workdir) in title), None)
     if pick is None:
         return None
+    # §17.1465 — a step whose named files all lie outside the service's directory is configuring the
+    # GUEST, not building the service. Live (ADD154 "VM 106 (palworld-server): take its address from the
+    # router (DHCP)…"): its title names VM 106, the Palworld service there has a workdir, so the netplan
+    # change was "developed" in the game server's directory and refused for eight rounds.
+    _wd = str(pick.workdir).rstrip("/")
+    named = [p for p in re.findall(r"(?<![\w.~-])(/(?:etc|usr|var|lib|boot|root|home|srv|opt)/[\w./-]+)", text)
+             if not p.startswith("/etc/systemd/system/")]
+    if named and not any(p.startswith(_wd + "/") or p == _wd for p in named):
+        return None
     return Host(guest=str(pick.guest), vm=bool(getattr(pick, "vm", False)), workdir=str(pick.workdir).rstrip("/"),
                 unit=str(pick.unit), user=str(getattr(pick, "user", "") or ""),
                 group=str(getattr(pick, "group", "") or ""), name=str(getattr(pick, "name", "") or ""))
