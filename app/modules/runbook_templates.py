@@ -518,7 +518,17 @@ def spans_guests(node: dict) -> bool:
     template, which drafted work in the wrong machine. Two guests addressed from
     the host is host-side work, whatever words are in view.
     """
-    return len(guests_the_host_is_told_to_touch(node)) >= 2
+    return len(guests_the_host_is_told_to_touch(node)) >= 2 or bool(_WHOLE_SYSTEM_RE.search(_text(node)))
+
+
+#: §17.1473 — a step about the whole build, not one machine. Live, T37 "Validate entire build" ("Check all services
+#: reachable, firewall rules correct, VPN works, GPU works, control panel functional") named one guest once, in an
+#: old note ("rebuild the Caddyfile in LXC 120"), and was drafted entirely inside CT 120 — the host's firewall
+#: files, Tailscale on the host and every other machine read from inside the proxy container.
+_WHOLE_SYSTEM_RE = re.compile(
+    r"\b(?:(?:validate|verify|check|test|audit)\s+(?:the\s+)?(?:entire|whole|full|complete)\s+(?:build|system|lab|setup|"
+    r"homelab|deployment|stack)|all\s+(?:the\s+)?(?:services|guests|machines|containers)\s+(?:are\s+)?(?:reachable|"
+    r"running|up|work)|every\s+(?:guest|service|machine|container)\b)", re.I)
 
 
 def host_side_only(node: dict) -> bool:

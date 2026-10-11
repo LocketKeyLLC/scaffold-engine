@@ -255,9 +255,53 @@ def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "") -> l
     return out
 
 
+#: §17.1473 — "Operator decision 2026-10-10 (…): only the control panel is reachable from the internet; …"
+_DECISION_RE = re.compile(r"Operator decision (\d{4}-\d{2}-\d{2})(?:\s*\([^)]*\))?:\s*(.+?[.!?])(?=\s|$)", re.S)
+
+
+def operator_decisions(rows: list[dict]) -> list[str]:
+    """The decisions the operator made, as the done steps that carry them say, newest first, as facts that
+    outrank older notes in any step's text. Live: ADD149 recorded "only the control panel is reachable from the
+    internet; Jellyfin, Radarr, Sonarr and Prowlarr stay home-only", and T37's own text still carried an EARLIER
+    plan note "each service is reachable over public HTTPS" — its draft tested Jellyfin, Radarr and Prowlarr at
+    public URLs. Decisions lived only in the text of the steps where they were made."""
+    found: list[tuple[str, str, str]] = []
+    for r in rows or []:
+        if str(r.get("status") or "") != "done":
+            continue
+        txt = str(r.get("prompt_template") or "") or str(r.get("description") or "")
+        for m in _DECISION_RE.finditer(txt):
+            found.append((m.group(1), str(r.get("node_key") or ""), " ".join(m.group(2).split())[:400]))
+    seen, out = set(), []
+    for when, nk, what in sorted(found, key=lambda x: x[0], reverse=True):
+        if what in seen:
+            continue
+        seen.add(what)
+        out.append(f"Operator decision ({nk}, {when}) — newer than older notes in any step's text; where they "
+                   f"disagree, this wins: {what}")
+    return out[:12]
+
+
 async def job_environment(db, job_id: str) -> dict:
     """The environment ledger for a job: its assist session's (the newest),
-    else the job row's own ``metadata.environment``; ``{}`` when neither."""
+    else the job row's own ``metadata.environment``; ``{}`` when neither.
+    §17.1473 — with the operator's decisions from the done steps as facts."""
+    env = await _job_environment_ledger(db, job_id)
+    try:
+        from sqlalchemy import text
+        rows = (await db.execute(text(
+            "SELECT node_key, status, description, prompt_template FROM dag_nodes WHERE job_id = :jid"),
+            {"jid": job_id})).mappings().all()
+        decisions = operator_decisions([dict(r) for r in rows])
+    except Exception:
+        decisions = []
+    if decisions:
+        env = dict(env or {})
+        env["facts"] = decisions + [f for f in (env.get("facts") or []) if f not in decisions]
+    return env
+
+
+async def _job_environment_ledger(db, job_id: str) -> dict:
     from sqlalchemy import text
     from app.modules.assist_environment import _environment_from_metadata
     try:
