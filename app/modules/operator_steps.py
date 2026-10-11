@@ -34,7 +34,10 @@ ENGINE_HALF_DONE = "engine_half_done"
 # Sentences that hand work to the operator: "…is the operator's", "in their own account", an app or
 # console only they can open.
 _OPERATORS_RE = re.compile(
-    r"\b(?:is|are)\s+the\s+operator'?s\b|\bthe\s+operator'?s\s*(?:,|\(|own\b|part\b|to\s+do\b|action\b)|"
+    # §17.1487 — "own" only for a place the operator works ("the operator's own phone"), not their possessions: live,
+    # ADD159 ("stop qBittorrent") was handed to the operator for "sends its traffic on the operator's own connection"
+    r"\b(?:is|are)\s+the\s+operator'?s\b|\bthe\s+operator'?s\s*(?:,|\(|own\s+(?:screen|phone|device|account|"
+    r"browser|computer|laptop|hands|login)\b|part\b|to\s+do\b|action\b)|"
     r"\bin\s+their\s+own\s+account\b|\bin\s+(?:the\s+)?my\s+spectrum\s+app\b|\badmin\s+console\b|"
     r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens|reports)\b",
     re.I)
