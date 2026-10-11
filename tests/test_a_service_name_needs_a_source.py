@@ -141,7 +141,8 @@ def test_the_phase_script_prints_the_log_once(tmp_path):
                                  {"REMOTE_COMMANDS": "true", "VERIFY_INSIDE": "true"}))
     body = next(f["content"] for f in sr.file_writes(rb))
     assert ".scaffold_step.reported" in body and "printed by the phase that saw" in body
-    assert "/root/.scaffold_step.reported;" in body, "a rerun clears the sentinel with the logs"
+    # a rerun clears the sentinel with the logs — and §17.1490's recorded exit code with them
+    assert "/root/.scaffold_step.reported /root/.scaffold_step.rc;" in body, "a rerun clears the sentinel with the logs"
     assert subprocess.run(["bash", "-n"], input=body, capture_output=True, text=True).returncode == 0
     # drive the real wait phase twice against a stub `qm`: the guest's files live in tmp_path
     stub = tmp_path / "qm"
@@ -161,6 +162,7 @@ def test_the_phase_script_prints_the_log_once(tmp_path):
     guest = tmp_path / "root"; guest.mkdir()
     (guest / ".scaffold_step.log").write_text("Success! App '2394010' fully installed.\n")
     (guest / ".scaffold_step.err").write_text("")
+    (guest / ".scaffold_step.rc").write_text("0\n")     # §17.1490 — the run's own exit code, recorded by the unit
     script = tmp_path / "phase.sh"; script.write_text(body.replace("/root/.scaffold_step", str(guest / ".scaffold_step")))
     env = {"PATH": f"{tmp_path}:/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
     first = subprocess.run(["bash", str(script), "wait"], capture_output=True, text=True, env=env)
