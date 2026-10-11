@@ -98,8 +98,54 @@ async def measured_inventory(spec) -> list[dict]:
             if not rec["address"]:
                 m = re.search(r"\bip=(\d[\d.]+)", net0 or conf.get("ipconfig0", ""))
                 rec["address"] = (m.group(1) + " (configured)") if m else ("unread" if status == "running" else "")
+            rec["firewall"] = guest_firewall(net0, await read(f"cat /etc/pve/firewall/{gid}.fw"))
             out.append(rec)
+    # §17.1482 — the tunnel and the BMC, which the write-up otherwise reports from stale facts as "pending"
+    ts = tailscale_summary(await read("tailscale status --json"))
+    if ts:
+        out[0]["tailscale"] = ts
+    wd = re.search(r"Watchdog Timer Is:\s*(.+)", await read("ipmitool mc watchdog get") or "")
+    if wd:
+        out[0]["watchdog"] = wd.group(1).strip()
     return out
+
+
+def guest_firewall(net0: str, fw: str) -> str:
+    """§17.1482 — "on (policy_in DROP; IN ACCEPT udp 8211 from any, …; GROUP game)" off the guest's own file.
+    Live, T38 wrote "security groups … not yet materialized as per-guest group files … pending" from a stale fact
+    while every guest's net0 carried firewall=1 and /etc/pve/firewall/106.fw opened UDP 8211 to everyone."""
+    on = "firewall=1" in (net0 or "")
+    if not (fw or "").strip() or re.search(r"No such file or directory", fw or ""):
+        return "on (no rules file)" if on else "off"
+    enabled = re.search(r"^\s*enable:\s*1\b", fw, re.M) is not None
+    pol = re.search(r"^\s*policy_in:\s*(\w+)", fw, re.M)
+    rules = []
+    for ln in fw.splitlines():
+        ln = ln.strip()
+        m = re.match(r"IN\s+ACCEPT\s+-p\s+(\w+)\s+-dport\s+(\S+)(?:\s+-source\s+(\S+))?", ln)
+        if m:
+            rules.append(f"{m.group(2)}/{m.group(1)} from {m.group(3) or 'anywhere'}")
+        elif ln.startswith("GROUP "):
+            rules.append(f"group {ln.split()[1]}")
+    state = "on" if (on and enabled) else ("enabled in its file, off on net0" if enabled else "off")
+    detail = ([f"policy_in {pol.group(1)}"] if pol else []) + rules
+    return state + (f" ({'; '.join(detail)})" if detail else "")
+
+
+def tailscale_summary(js: str) -> str:
+    import json
+    try:
+        d = json.loads(js or "{}")
+    except (ValueError, TypeError):
+        return ""
+    if not d:
+        return ""
+    me = d.get("Self") or {}
+    routes = me.get("PrimaryRoutes") or []
+    peers = [p.get("HostName") for p in (d.get("Peer") or {}).values() if isinstance(p, dict)]
+    return (f"{d.get('BackendState') or '?'}, {', '.join((d.get('TailscaleIPs') or [])[:1]) or '?'}"
+            + (f"; serving subnet route {', '.join(routes)} (approved)" if routes else "; no subnet route approved")
+            + (f"; {len(peers)} other device(s): {', '.join(p for p in peers if p)}" if peers else "; no other devices"))
 
 
 def inventory_block(inv: list[dict]) -> str:
@@ -116,11 +162,19 @@ def inventory_block(inv: list[dict]) -> str:
             bits.append(f"devices {r['devices']}")
         if r.get("listens"):
             bits.append(f"listens on {r['listens']}")
+        if r.get("firewall"):
+            bits.append(f"firewall {r['firewall']}")
+        if r.get("tailscale"):
+            bits.append(f"Tailscale {r['tailscale']}")
+        if r.get("watchdog"):
+            bits.append(f"BMC watchdog {r['watchdog']}")
         lines.append("- " + " · ".join(bits))
     return ("\n\nTHE BUILD AS IT STANDS — read off the machines at " + when + " (read-only). Every machine, "
             "address, port and service you state must come from this list, the engine's measured facts or the "
-            "upstream outputs. Anything you cannot source from them, write as \"not verified\" — never fill it "
-            "from the original plan or general knowledge, and never describe planned work as done:\n"
+            "upstream outputs. Where a fact or an upstream output disagrees with this list, THIS LIST IS NEWER AND "
+            "WINS (do not report as pending what it shows in place). Anything you cannot source from them, write "
+            "as \"not verified\" — never fill it from the original plan or general knowledge, and never describe "
+            "planned work as done:\n"
             + "\n".join(lines))
 
 

@@ -1,0 +1,9 @@
+[OPTIONS]
+enable: 1
+policy_in: DROP
+
+[RULES]
+IN ACCEPT -p tcp -dport 22 -source 192.168.1.0/24
+IN ACCEPT -p udp -dport 8211
+IN ACCEPT -p udp -dport 27015 -source 192.168.1.0/24
+GROUP game

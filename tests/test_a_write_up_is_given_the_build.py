@@ -41,3 +41,29 @@ def test_it_is_wired_into_the_prompt_and_the_grounding():
     assert "_inventory_text = await _ir.block_for(node_snapshot, _idb)" in src
     assert "_grounding_blocks.append(_inventory_text.strip())" in src
     assert 'upstream_text=(_inventory_text or "") + ' in src
+
+
+FW106 = pathlib.Path("tests/fixtures/fw_106_2026_10_11.txt").read_text()
+
+
+def test_a_guests_firewall_is_read_off_its_own_file():
+    """§17.1482 — T38 wrote "security groups … pending" with every guest's firewall on (fixture: VM 106's real file)."""
+    got = ir.guest_firewall("virtio=BC:24:11:E8:9F:7A,bridge=vmbr0,firewall=1", FW106)
+    assert got.startswith("on (policy_in DROP;") and "8211/udp from anywhere" in got and "group game" in got
+    assert ir.guest_firewall("virtio=x,bridge=vmbr0", "cat: /etc/pve/firewall/100.fw: No such file or directory") == "off"
+    assert ir.guest_firewall("x,firewall=1", "") == "on (no rules file)"
+
+
+def test_tailscale_is_read_off_its_own_status():
+    """§17.1482 — T38 wrote the subnet route "pending" while it was approved and the phone had joined."""
+    import json
+    js = json.dumps({"BackendState": "Running", "TailscaleIPs": ["100.84.253.90"],
+                     "Self": {"PrimaryRoutes": ["192.168.1.0/24"]}, "Peer": {"k": {"HostName": "Adam's S24 Ultra"}}})
+    assert ir.tailscale_summary(js) == ("Running, 100.84.253.90; serving subnet route 192.168.1.0/24 (approved); "
+                                         "1 other device(s): Adam's S24 Ultra")
+    assert ir.tailscale_summary("") == ""
+
+
+def test_the_list_outranks_a_stale_fact():
+    assert "THIS LIST IS NEWER AND WINS" in ir.inventory_block([{"kind": "host", "id": "host", "name": "pve",
+                                                                  "status": "running", "address": "x"}])
