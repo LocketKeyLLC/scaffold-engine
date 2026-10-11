@@ -3721,6 +3721,8 @@ async def submit_step(
             db=db, session_id=session_id, job_id=job_id, node_key=node_key,
             evidence=evidence,
         )
+    if committed_status == "committed":
+        await promote_learned_constraints(session_id=session_id, node_key=node_key, db=db)   # §17.1464
     return {
         "session_id": session_id,
         "node_key": node_key,
@@ -3736,6 +3738,49 @@ async def submit_step(
         "mirror_divergence": mirror_divergence,
         "reconciliation": reconciliation,  # §17.1043
     }
+
+
+_LEARNED_MAX = 6
+
+
+async def promote_learned_constraints(*, session_id: str, node_key: str, db) -> list[str]:
+    """§17.1464 — what a step learned about the world outlives the step.
+
+    Live (2026-10-10/11): ADD4's walkthrough learned that the operator's Spectrum router app reserves (and so
+    port-forwards) only devices the router leased an address to — Caddy had to move to DHCP first — and the rule
+    lived only in ADD4's progress recap, under CONSTRAINTS. When the plan later needed a second forward
+    (ADD152, the Palworld VM, fixed 192.168.1.106), nothing knew it: the operator hit the same wall ("the app
+    isn't showing an ip address for the vm and wont allow me to reserve it. Shouldn't the engine of adjusted its
+    plan…?"). On commit, the recap's CONSTRAINTS become session facts ("Learned on ADD4: …"), which every later
+    draft, walkthrough and plan reconcile reads. Fail-soft: never breaks the commit it follows."""
+    try:
+        row = (await db.execute(text(
+            "SELECT progress_recap FROM assist_steps WHERE session_id = :sid AND node_key = :nk"),
+            {"sid": session_id, "nk": node_key})).mappings().first()
+        recap = str((row or {}).get("progress_recap") or "")
+        lines: list[str] = []
+        cur = None
+        for ln in recap.splitlines():
+            st = ln.strip()
+            head = st.split(":", 1)[0].strip().upper() if ":" in st else ""
+            if head in ("GOAL", "DONE", "OPEN", "CONSTRAINTS", "NEXT", "CONTEXT"):
+                cur = head
+                rest = st.split(":", 1)[1].strip()
+                if cur == "CONSTRAINTS" and rest:
+                    lines.append(rest)
+                continue
+            if cur == "CONSTRAINTS" and st.startswith(("-", "•", "*")):
+                item = st.lstrip("-•* ").strip()
+                if item:
+                    lines.append(item)
+        facts = [f"Learned on {node_key}: {ln[:280]}" for ln in lines[:_LEARNED_MAX]]
+        if facts:
+            await set_environment(session_id=session_id, facts=facts, db=db)
+            logger.info("assist_learned_constraints_promoted sid=%s nk=%s n=%d", session_id, node_key, len(facts))
+        return facts
+    except Exception as exc:
+        logger.warning("assist_learned_constraints_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
+        return []
 
 
 async def _maybe_replan(

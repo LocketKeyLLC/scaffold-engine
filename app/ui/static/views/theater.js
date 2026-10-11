@@ -1140,6 +1140,10 @@ export function renderTheater(container, jobId, ctx = {}) {
         el("div", { class: "summary-title", text: "Your turn — the run is waiting on you" }),
         el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
         d.engine_half ? el("div", { class: "decision-detail dim", text: "The engine did its part of this step. The rest is yours:" }) : null,
+        // §17.1464 — the operator's other steps in the same place, folded into this one trip
+        (Array.isArray(d.also) && d.also.length)
+          ? el("div", { class: "decision-detail", text: `Same trip — also covers ${d.also.map((o) => `${o.node_key} (${o.title || ""})`).join(", ")}. Each is recorded done only when its own check confirms it.` })
+          : null,
         el("div", { class: "md decision-walkthrough", html: mdToHtml(d.walkthrough || d.part || "") }),
         verify.length ? el("details", { class: "decision-verify" },
           el("summary", { text: `How the engine will check it (${verify.length}, read-only)` }),

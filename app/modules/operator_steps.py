@@ -94,6 +94,57 @@ def checks(node: Optional[dict]) -> list[str]:
             if _looks_like_command(c) and read_only_command(c.strip())]
 
 
+# §17.1464 — where the operator's part happens: the app or console they have to open.
+_SURFACE_RE = re.compile(r"\b(my spectrum app|tailscale(?: admin console| app)?|admin console|router app|[a-z][\w-]+ app)\b", re.I)
+
+
+def surfaces(node: Optional[dict]) -> set[str]:
+    return {m.group(1).lower() for m in _SURFACE_RE.finditer(operators_part(node) or "")}
+
+
+async def same_place_steps(db: AsyncSession, job_id: str, node: dict) -> list[dict]:
+    """§17.1464 — the operator's OTHER pending steps on the same app or console whose dependencies are done (or are
+    this step), so one trip covers them. Live: two router-app forwards (ADD4, ADD152) were two separate trips into the
+    My Spectrum app, the second hitting a rule the first had already learned."""
+    here = surfaces(node)
+    if not here:
+        return []
+    rows = (await db.execute(text("""
+        SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type
+          FROM dag_nodes n
+         WHERE n.job_id = :jid AND n.status = 'pending' AND n.node_key <> :nk
+           AND NOT EXISTS (
+               SELECT 1 FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) AS dep(k)
+                WHERE dep.k <> :nk AND NOT EXISTS (SELECT 1 FROM dag_nodes d WHERE d.job_id = :jid
+                                    AND d.node_key = dep.k AND d.status IN ('done', 'skipped')))
+         ORDER BY n.execution_order ASC
+    """), {"jid": job_id, "nk": node.get("node_key")})).mappings().all()
+    out = []
+    for r in rows:
+        other = dict(r)
+        if is_wholly_operators(other) and surfaces(other) & here:
+            out.append(other)
+    return out[:3]
+
+
+def relevant_facts(node: dict, facts: Optional[list]) -> list[str]:
+    """The session facts that share this step's place or two of its distinctive words."""
+    part = (operators_part(node) or _text(node)).lower()
+    here = surfaces(node)
+    _skip = {"their", "which", "there", "shoul", "would", "opera", "engin", "learn"}
+
+    def stems(t: str) -> set[str]:
+        return {w[:5] for w in re.findall(r"[a-z][a-z0-9-]{4,}", t)} - _skip
+    mine = stems(part)
+    out = []
+    for f in facts or []:
+        t = str(f if isinstance(f, str) else (f or {}).get("text") or "")
+        low = t.lower()
+        if any(s in low for s in here) or len(mine & stems(low)) >= 2:
+            out.append(t[:300])
+    return out[:8]
+
+
 async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending step whose remaining work is the operator's."""
     md = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
@@ -125,7 +176,8 @@ async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]
     return None
 
 
-async def _walkthrough(node: dict, part: str, upstream: str = "") -> str:
+async def _walkthrough(node: dict, part: str, upstream: str = "", facts: Optional[list[str]] = None,
+                       also: Optional[list[dict]] = None) -> str:
     """The operator's part as a walkthrough, grounded on a fresh search; '' when no model answers."""
     from app.config import settings
     from app import model_router
@@ -150,6 +202,12 @@ async def _walkthrough(node: dict, part: str, upstream: str = "") -> str:
     prompt = (f"Step {node.get('node_key')}: {node.get('title')}\n\nThe operator's part:\n{part}\n\n"
               f"The whole step, for context:\n{_text(node)[:3000]}\n\n"
               + (f"What earlier steps produced:\n{upstream[:2000]}\n\n" if upstream else "")
+              + ("WHAT THE ENGINE ALREADY LEARNED (follow it; if it means something must be done first, say so "
+                 "first):\n" + "\n".join(f"- {f}" for f in facts) + "\n\n" if facts else "")
+              + ("ALSO THE OPERATOR'S, IN THE SAME PLACE — fold these into the same walkthrough so it is ONE trip, "
+                 "each under its own heading with its step key:\n"
+                 + "\n".join(f"- {o.get('node_key')}: {o.get('title')} — {operators_part(o)[:600]}" for o in also)
+                 + "\n\n" if also else "")
               + (f"SOURCES (searched for: {query}):\n{src}" if src else "SOURCES: none found this time."))
     try:
         resp = await generate_until_nonempty(
@@ -162,9 +220,11 @@ async def _walkthrough(node: dict, part: str, upstream: str = "") -> str:
         return ""
 
 
-async def frame_operator(node: dict, *, upstream: str = "", last_check: str = "") -> dict:
+async def frame_operator(node: dict, *, upstream: str = "", last_check: str = "",
+                         facts: Optional[list] = None, also: Optional[list[dict]] = None) -> dict:
     part = operators_part(node) or _text(node)
-    walk = await _walkthrough(node, part, upstream)
+    also = list(also or [])
+    walk = await _walkthrough(node, part, upstream, relevant_facts(node, facts), also)
     if not walk:
         walk = f"## 👉 Do this next\n{part}\n\n(The engine could not write a fuller walkthrough this time.)"
     chk = checks(node)
@@ -173,6 +233,9 @@ async def frame_operator(node: dict, *, upstream: str = "", last_check: str = ""
         "question": f"Your turn — step {node.get('node_key')}: {node.get('title')}",
         "walkthrough": walk, "part": part, "verify": chk,
         "engine_half": bool(node.get("engine_half")),
+        # §17.1464 — the same trip: each folded step with its own part and checks
+        "also": [{"node_key": o.get("node_key"), "title": o.get("title"), "part": operators_part(o),
+                  "verify": checks(o)} for o in also],
         "last_check": last_check,
         "options": [
             {"id": "done", "label": "I've done it — check",
@@ -213,6 +276,7 @@ async def resolve_operator(db: AsyncSession, job_id: str, node_key: str, choice:
                         [v.get("verdict") for v in verdicts])
             return {"outcome": "not_yet", "node_key": node_key, "evidence": evidence,
                     "verdicts": verdicts}
+    also_done = await _resolve_also(db, job_id, waiting)
     out = ("## Done by the operator\n\n" + str(waiting.get("part") or "")
            + (f"\n\n## Checked on the machine\n```\n{evidence}\n```" if evidence else
               "\n\n(No machine check exists for this part; recorded on the operator's word.)"))
@@ -221,7 +285,37 @@ async def resolve_operator(db: AsyncSession, job_id: str, node_key: str, choice:
         "started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
         "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
         {"jid": job_id, "nk": node_key, "out": out})
-    return {"outcome": "done" if upd.rowcount else "node_gone", "node_status": "done", "evidence": evidence}
+    return {"outcome": "done" if upd.rowcount else "node_gone", "node_status": "done", "evidence": evidence,
+            "also_done": also_done}
+
+
+async def _resolve_also(db: AsyncSession, job_id: str, waiting: dict) -> list[str]:
+    """§17.1464 — each step folded into the same trip is done only when ITS checks confirm it."""
+    done: list[str] = []
+    for o in waiting.get("also") or []:
+        nk, chk = o.get("node_key"), list(o.get("verify") or [])
+        evidence = ""
+        if chk:
+            from app.modules import supervised_runs as sr
+            ch = await sr.channel(db)
+            if ch is None:
+                continue
+            pasted, _ran = await sr.run_verify(ch[0], chk, {})
+            verdicts = await sr._verify_verdicts(str(o.get("title") or nk), chk, pasted)
+            if not (verdicts and all(v.get("verdict") == "confirmed" for v in verdicts)):
+                continue
+            evidence = (pasted or "").strip()[:3000]
+        else:
+            continue                         # nothing to check it with: it keeps its own card
+        upd = await db.execute(text(
+            "UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), "
+            "started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
+            "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+            {"jid": job_id, "nk": nk, "out": "## Done by the operator (same trip)\n\n" + str(o.get("part") or "")
+                                                + f"\n\n## Checked on the machine\n```\n{evidence}\n```"})
+        if upd.rowcount:
+            done.append(str(nk))
+    return done
 
 
 async def hand_back_engine_half(db: AsyncSession, job_id: str, node: dict, run_result: dict) -> bool:
