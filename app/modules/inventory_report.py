@@ -49,6 +49,31 @@ def _listeners(ss: str) -> str:
     return ", ".join(sorted(seen, key=lambda x: (x.split("/")[1], int(x.split("/")[0]))))
 
 
+#: §17.1486 — the operating system's own units; what is left is what the machine is FOR
+_OS_UNITS = re.compile(
+    r"^(?:systemd-[\w@.-]+|dbus|cron|getty@.*|serial-getty@.*|console-getty|container-getty@.*|ssh|sshd|rsyslog|"
+    r"polkit|irqbalance|multipathd|networkd-dispatcher|qemu-guest-agent|snapd|udisks2|unattended-upgrades|"
+    r"postfix@.*|postfix|chrony|chronyd|ntp|ntpsec|atd|accounts-daemon|ModemManager|NetworkManager|"
+    r"wpa_supplicant|avahi-daemon|cups|lxcfs|apparmor|rpcbind|smartmontools|smartd|lvm2-.*|zfs-.*|"
+    r"user@\d+|packagekit|upower|thermald|fwupd|haveged|rngd|blk-availability|ksmtuned|iscsid|open-iscsi)$")
+
+
+def app_services(units: str) -> str:
+    """``palworld.service (PalWorld Dedicated Server), …`` — the running units that are not the OS's own.
+    Live, T38 wrote "The server runs in Docker" for VM 106, whose `palworld.service` is native SteamCMD."""
+    out = []
+    for ln in (units or "").splitlines():
+        parts = ln.split(None, 4)
+        if len(parts) < 4 or not parts[0].endswith(".service"):
+            continue
+        name = parts[0][: -len(".service")]
+        if _OS_UNITS.match(name):
+            continue
+        desc = parts[4].strip() if len(parts) > 4 else ""
+        out.append(f"{parts[0]}" + (f" ({desc[:60]})" if desc else ""))
+    return ", ".join(out[:8])
+
+
 def _kv(conf: str) -> dict[str, str]:
     return {k.strip(): v.strip() for k, v in (ln.split(":", 1) for ln in (conf or "").splitlines() if ":" in ln)}
 
@@ -88,13 +113,22 @@ async def measured_inventory(spec) -> list[dict]:
                    "status": status, "address": "", "how": how,
                    "devices": ", ".join(f"{k}={v}" for k, v in conf.items() if k.startswith(("hostpci", "mp"))),
                    "listens": ""}
-            if status == "running":
-                if kind == "ct":
-                    rec["address"] = ", ".join(_lan(await read(f"pct exec {gid} -- hostname -I")))
-                    rec["listens"] = _listeners(await read(f"pct exec {gid} -- ss -tulnH"))
-                elif conf.get("agent", "").startswith("1"):
-                    rec["address"] = ", ".join(_lan(await read(f"qm guest exec {gid} -- hostname -I")))
-                    rec["listens"] = _listeners(await read(f"qm guest exec {gid} -- ss -tulnH"))
+            inside = (f"pct exec {gid} --" if kind == "ct" else
+                      (f"qm guest exec {gid} --" if conf.get("agent", "").startswith("1") else ""))
+            if status == "running" and inside:
+                rec["address"] = ", ".join(_lan(await read(f"{inside} hostname -I")))
+                rec["listens"] = _listeners(await read(f"{inside} ss -tulnH"))
+                # §17.1486 — HOW it runs: its own services, its containers, its tunnels
+                units = await read(f"{inside} systemctl list-units --type=service --state=running --no-legend --plain")
+                rec["services"] = app_services(units)
+                rec["_inside"] = bool((units or "").strip())
+                if re.search(r"^docker\.service\s", units or "", re.M):
+                    names = [ln.strip() for ln in (await read(f"{inside} docker ps --format {{{{.Names}}}}={{{{.Image}}}}")
+                                                  ).splitlines() if "=" in ln]
+                    rec["containers"] = ", ".join(names[:8]) or "none running"
+                wg = re.findall(r"^(\S*wg\S*|\S*wireguard\S*)\s", await read(f"{inside} ip -br link") or "", re.M | re.I)
+                if wg:
+                    rec["tunnels"] = ", ".join(dict.fromkeys(wg))
             if not rec["address"]:
                 m = re.search(r"\bip=(\d[\d.]+)", net0 or conf.get("ipconfig0", ""))
                 rec["address"] = (m.group(1) + " (configured)") if m else ("unread" if status == "running" else "")
@@ -167,6 +201,16 @@ def inventory_block(inv: list[dict]) -> str:
             bits.append(f"devices {r['devices']}")
         if r.get("listens"):
             bits.append(f"listens on {r['listens']}")
+        if r.get("services"):
+            bits.append(f"runs {r['services']}")
+        if r.get("containers"):
+            bits.append(f"Docker containers {r['containers']}")
+        if r.get("tunnels"):
+            bits.append(f"WireGuard interface {r['tunnels']}")
+        if r.get("_inside") and not r.get("containers"):
+            bits.append("no Docker")                 # only where its services were actually read
+        elif r.get("kind") != "host" and r.get("status") == "running" and not r.get("_inside"):
+            bits.append("services not read (no way inside)")
         if r.get("firewall"):
             bits.append(f"firewall {r['firewall']}")
         if r.get("groups"):
