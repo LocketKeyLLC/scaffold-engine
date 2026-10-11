@@ -300,6 +300,13 @@ async def job_environment(db, job_id: str) -> dict:
     if decisions:
         env = dict(env or {})
         env["facts"] = decisions + [f for f in (env.get("facts") or []) if f not in decisions]
+    try:                                    # §17.1480 — a fact the engine already corrected reads as corrected
+        from app.modules.assist_inventory import rereconcile_facts
+        if env and env.get("facts"):
+            env = dict(env)
+            env["facts"] = rereconcile_facts(env["facts"], env)
+    except Exception:
+        pass
     return env
 
 

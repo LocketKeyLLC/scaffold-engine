@@ -321,7 +321,9 @@ def test_a_fact_is_reconciled_against_the_records_before_it_is_stored():
     env = _env()
     fact = "The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129."
     stored, update = inv.reconcile_fact(fact, env)
-    assert stored == ("The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129 "
+    # §17.1480 — the reading LEADS, the operator's words are kept in quotes (T38 read the first clause as fact)
+    assert stored == ("VM 110 (ai-vm) (MAC b4:af:15) is at 192.168.1.129 — not the Proxmox host. The operator's words: "
+                      "\"The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129\" "
                       "[engine: MAC b4:af:15 is VM 110 (ai-vm) per its config, not the Proxmox host; so 192.168.1.129 is VM 110 (ai-vm)'s address].")
     assert update == {"110": {"kind": "vm", "attrs": {"ip": "192.168.1.129"}, "devices": {}, "source": "fact reconciled (b4:af:15)"}}
     # consistent facts pass untouched; an address they state still becomes structure

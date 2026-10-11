@@ -30,7 +30,9 @@ _UPSTREAM_RE = re.compile(r"reverse_proxy\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})"
 _HANDLE_RE = re.compile(r"handle_path\s+/([\w-]+)/\*\s*\{\s*reverse_proxy\s+(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5})")
 _DOMAIN_RE = re.compile(r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?:org|com|net|dev|io|me|xyz|app))\b", re.IGNORECASE)
 _WAN_RE = re.compile(r"\b(?:WAN|public)\s+(?:IPv4|IP)\s+(?:is|=|:)\s*(\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
-_HOST_RE = re.compile(r"\b(?:Proxmox host|the host|root@pve|pve)\b", re.IGNORECASE)
+# §17.1480 — and a bare "Proxmox" naming a machine ("a reserved IP for Proxmox with MAC b4:af:15"), not its features
+_HOST_RE = re.compile(r"\b(?:Proxmox host|the host|root@pve|pve|Proxmox(?!\s+(?:VE|web|firewall|cluster|backup|GUI|UI|"
+                      r"console|API|repo|version|subscription)))\b", re.IGNORECASE)
 _BOUND_IP_RE = re.compile(
     r"(?:\b(?:is at|has (?:the )?IP(?: address)?|IP(?: address)? (?:is|=|of)|address (?:is|=)|inet|reachable at|listening at|→)\s*"
     r"(\d{1,3}(?:\.\d{1,3}){3})\b)", re.IGNORECASE)
@@ -473,7 +475,26 @@ def ingress_footer(issues: list[dict[str, Any]], topology: dict) -> str:
 # are kept, the engine's reading is appended.
 # ---------------------------------------------------------------------------
 
-_FACT_IP_RE = re.compile(r"\b(?:has|is at|IP(?: address)?(?: is)?|address(?: is)?)\s*(\d{1,3}(?:\.\d{1,3}){3})\b", re.IGNORECASE)
+_FACT_IP_RE = re.compile(r"\b(?:has|is at|mapped to|reserved (?:as|at)|IP(?: address)?(?: is)?|address(?: is)?)\s*"
+                         r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.IGNORECASE)
+
+
+_OLD_NOTE_RE = re.compile(r"\s*\[engine: MAC [^\]]*\]\.?\s*$")
+
+
+def rereconcile_facts(facts: list, environment: dict | None) -> list:
+    """§17.1480 — a fact stored with an older engine note is read again under today's rule, so the ledger every
+    reader sees corrects itself (the stored row is left as it was)."""
+    out = []
+    for f in facts or []:
+        t = str(f)
+        if "[engine: MAC" in t and not t.startswith(("VM ", "CT ")):
+            try:
+                t = reconcile_fact(_OLD_NOTE_RE.sub("", t), environment)[0] or t
+            except Exception:
+                pass
+        out.append(t)
+    return out
 
 
 def reconcile_fact(fact: str, environment: dict | None) -> tuple[str, dict | None]:
@@ -515,6 +536,12 @@ def reconcile_fact(fact: str, environment: dict | None) -> tuple[str, dict | Non
         note += f"; so {ip} is {label}'s address"
         update = {owner["id"]: {"kind": owner.get("kind") or "vm", "attrs": {"ip": ip}, "devices": {},
                                 "source": f"fact reconciled ({frag})"}}
+    if claimed_host:
+        # §17.1480 — the reading leads when the words name the wrong machine. Live: "The router already has a
+        # reserved IP for Proxmox with MAC b4:af:15 mapped to 192.168.1.129 [engine: MAC b4:af:15 is VM 110 …]" —
+        # T38's write-up read the first clause and documented the Proxmox host at 192.168.1.129.
+        lead = f"{label} (MAC {frag})" + (f" is at {ip_m.group(1)}" if ip_m else "") + " — not the Proxmox host"
+        return f"{lead}. The operator's words: \"{text_value.rstrip('.')}\" [engine:{note.split('[engine:', 1)[1]}].", update
     return text_value.rstrip(".") + note + "].", update
 
 

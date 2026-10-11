@@ -407,6 +407,22 @@ def _job_environment(job: dict | None) -> dict:
     return env if isinstance(env, dict) else {}
 
 
+async def _node_ledger(job_id: str, job: dict | None) -> dict:
+    """§17.1480 — the ledger a node's output is checked against: the assist session's (facts, decisions, pins),
+    the same one the drafter reads, else the job row's. Live: T38's documentation was checked against the job row
+    (0 facts; the session held 40), so the measured Palworld address 192.168.1.44 was "unsupported" and stripped
+    on regeneration. Fail-soft to the job row."""
+    try:
+        from app.modules.runbook_inputs import job_environment
+        async with async_session() as _db:
+            env = await job_environment(_db, job_id)
+        if env:
+            return env
+    except Exception as exc:
+        logger.warning("node_ledger_failed job=%s err=%r", job_id, exc)
+    return _job_environment(job)
+
+
 async def _orphan_diagnostic(db: AsyncSession, job_id: str) -> dict:
     """Build the diagnostic payload for an "already executing" 409.
 
@@ -1997,7 +2013,7 @@ async def execute_next_node(
         output, _evidence_report = await verify_node_output(
             output, need=_node_need, sources=_node_sources, brief=brief,
             input_text=job.get("input_text"), task_text=node_task_text_for(node_snapshot),
-            environment=_job_environment(job),   # §17.1175 — the real ledger
+            environment=await _node_ledger(job_id, job),   # §17.1175/§17.1480 — the real ledger
             upstream_text="\n".join(
                 (v[0] if isinstance(v, tuple) else str(v)) for v in upstream_outputs.values()),
             upstream_flagged=_upstream_flagged, tool=tool, node_key=node_key,
@@ -2242,7 +2258,11 @@ async def execute_next_node(
         # surface it. On pass/skipped we pass None — _set_node_status COALESCEs
         # so historical reasons stay readable in audits but aren't re-injected
         # (the retry-time read path is gated by retry_count).
-        verify_reason_for_db = reason if final_status == "failed" else None
+        # §17.1480 — a pass CLEARS the failure reason: COALESCE kept the PREVIOUS attempt's rejection, so T38 showed
+        # "The output contains no documentation … the required deliverable is completely missing" while recorded
+        # done at confidence 0.92. Every reader treats this column as WHY IT FAILED (retry feedback, the run page's
+        # failure_reason), so "" — which COALESCE keeps and every reader reads as none — not a pass note.
+        verify_reason_for_db = reason if final_status == "failed" else ""
         # §17.854 (audit A1) — only persist if the node is STILL 'running'. An
         # orphaned serial executor (its run outlived a client-disconnect cancel)
         # would otherwise overwrite the cleanup task's 'running → failed' mark
