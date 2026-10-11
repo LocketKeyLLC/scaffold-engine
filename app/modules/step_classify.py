@@ -289,6 +289,13 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
             obs = _LEADING_OBSERVE_RE.match(title)
             if svc and obs and _MACHINE_CRITERION_RE.search(text):
                 return True, f"observe:{obs.group('verb').lower()} service:{svc.group(1).lower()}"
+            # §17.1474 — and a check of the WHOLE build names no one service. Live, T37 "Validate entire build"
+            # (tool LLM, a checkpoint) was hands-on only while a single-guest template wrongly fit it; once
+            # §17.1473 made it host-side it ran as a model task, answered from the upstream outputs, ran nothing,
+            # and was failed as "INSTRUCTIONS, not work".
+            from app.modules.runbook_templates import _WHOLE_SYSTEM_RE
+            if _WHOLE_SYSTEM_RE.search(title) or _WHOLE_SYSTEM_RE.search(text):
+                return True, "observe:whole-build"
         except Exception:
             pass
         return False, ""
