@@ -1,0 +1,33 @@
+[OPTIONS]
+enable: 1
+policy_in: DROP
+
+[group management]
+IN ACCEPT -p tcp -dport 22 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 8006 -source 192.168.1.0/24
+IN DROP
+
+[group media]
+IN ACCEPT -p tcp -dport 8096 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 8920 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 9696 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 7878 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 8989 -source 192.168.1.0/24
+IN DROP
+
+[group game]
+IN ACCEPT -p udp -dport 8211 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 25575 -source 192.168.1.0/24
+IN DROP
+
+[group ai]
+IN ACCEPT -p tcp -dport 22 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 8888 -source 192.168.1.0/24
+IN ACCEPT -p tcp -dport 6006 -source 192.168.1.0/24
+IN DROP
+
+[group dmz]
+IN ACCEPT -p tcp -dport 80
+IN ACCEPT -p tcp -dport 443
+IN ACCEPT -p udp -dport 443
+IN DROP
