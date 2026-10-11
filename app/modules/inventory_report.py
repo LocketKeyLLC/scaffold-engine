@@ -171,8 +171,10 @@ def inventory_block(inv: list[dict]) -> str:
         lines.append("- " + " · ".join(bits))
     return ("\n\nTHE BUILD AS IT STANDS — read off the machines at " + when + " (read-only). Every machine, "
             "address, port and service you state must come from this list, the engine's measured facts or the "
-            "upstream outputs. Where a fact or an upstream output disagrees with this list, THIS LIST IS NEWER AND "
-            "WINS (do not report as pending what it shows in place). Anything you cannot source from them, write "
+            "upstream outputs. Where a fact, an upstream output OR A NOTE IN THIS STEP'S OWN TEXT (a \"[Plan "
+            "update …]\" written before the work was done) disagrees with this list about what exists or is in "
+            "place, THIS LIST IS NEWER AND WINS — do not report as pending, missing or still to be created what it "
+            "shows in place. Anything you cannot source from them, write "
             "as \"not verified\" — never fill it from the original plan or general knowledge, and never describe "
             "planned work as done:\n"
             + "\n".join(lines))

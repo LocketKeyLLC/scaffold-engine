@@ -2868,6 +2868,12 @@ async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) ->
     text_value = str(output or "")
     if not text_value.strip() or "## Executed on" in text_value:
         return None                      # it really ran; nothing to judge here
+    # §17.1484 — a DOCUMENT's commands are its content. Live, T38 "Document architecture and setup" came back whole
+    # (8,203 chars, every machine from the inventory) and was failed "this step produced INSTRUCTIONS, not work"
+    # for the maintenance section's `pct exec 120 -- caddy validate …`. A step that CHECKS the build still runs.
+    from app.modules.inventory_report import _DOC_RE
+    if _DOC_RE.search(str((node or {}).get("title") or "")):
+        return None
     try:
         from app.modules.step_classify import step_is_hands_on
         cmds = runbook_commands(text_value)
