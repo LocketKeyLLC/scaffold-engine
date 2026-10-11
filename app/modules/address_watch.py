@@ -99,7 +99,7 @@ async def carry(db, job_id: str, node_key: str, moved: list[dict], guests: dict[
         for n in plan:
             if n["status"] == "done" and n["node_key"] != node_key and rx.search(str(n.get("output_text") or "")):
                 stale.append((n, m, label))
-    sess = (await db.execute(text("SELECT id FROM assist_sessions WHERE job_id = :jid ORDER BY created_at DESC LIMIT 1"),
+    sess = (await db.execute(text("SELECT id FROM assist_sessions WHERE job_id = :jid ORDER BY updated_at DESC LIMIT 1"),
                              {"jid": job_id})).scalar()
     reconciled = None
     if sess:
