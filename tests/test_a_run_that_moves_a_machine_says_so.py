@@ -108,3 +108,7 @@ def test_the_repoint_names_what_it_found(monkeypatch):
     cs = ["pct exec 111 -- sh -c \"grep -rIl x /etc\"", "qm guest exec 106 -- sh -c \"grep x\"", "grep -rIl x /etc/hosts"]
     assert asyncio.run(aw.where_it_is(object(), cs)) == [
         "LXC 111: /opt/control-panel-backend/palworld_settings_route.js", "LXC 111: /root/.ssh/known_hosts"]
+def test_a_pin_on_the_old_address_moves_with_it():
+    """§17.1472 — ADR1's <PALWORLD_IP> was prefilled 192.168.1.106 ("pinned as PALWORLD_IP") over the measured .44."""
+    subs = {"PALWORLD_IP": "192.168.1.106", "CADDY_IP": "192.168.1.127", "PALWORLD_PORT": "8211"}
+    assert aw.repin(subs, [{"old": "192.168.1.106", "new": "192.168.1.44"}]) == {"PALWORLD_IP": "192.168.1.44"}

@@ -60,11 +60,11 @@ def test_a_runbook_without_sections_uses_every_fence():
 
 def test_frame_offers_run_only_when_the_gate_is_clean():
     f = sr.frame_run(NODE, RUNBOOK, _spec(), POLICY)
-    assert f["kind"] == "run" and [o["id"] for o in f["options"]] == ["run", "myself", "skip"] and f["suggested"] == "run"
+    assert f["kind"] == "run" and [o["id"] for o in f["options"]] == ["run", "myself", "skip", "redraft"] and f["suggested"] == "run"
     assert f["commands"] == ["pct start 111", "pct set 111 --nameserver 192.168.1.1"] and f["refused"] == []
     assert f["verify"] == ["pct status 111", "pct exec 111 -- getent hosts example.org"] and f["runner"] == "pve-runner"
     f2 = sr.frame_run(NODE, RUNBOOK, _spec(), {"allow": ["pct start"], "sudo": False})
-    assert [o["id"] for o in f2["options"]] == ["myself", "skip"] and f2["suggested"] == "myself"
+    assert [o["id"] for o in f2["options"]] == ["myself", "skip", "redraft"] and f2["suggested"] == "myself"
     assert f2["refused"][0]["command"].startswith("pct set") and "cannot run it as written" in f2["question"]
 
 

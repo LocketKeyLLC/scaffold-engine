@@ -227,7 +227,7 @@ async def decide_endpoint(
             "error": "the machine does not show it done yet", "node_key": body.node_key,
             "evidence": outcome.get("evidence") or "", "verdicts": outcome.get("verdicts") or []})
     if outcome["outcome"] == "bad_choice":                     # §17.1186 — a run pause takes run | myself | skip
-        raise HTTPException(status_code=422, detail={"error": "choice must be one of run, myself, skip",
+        raise HTTPException(status_code=422, detail={"error": outcome.get("detail") or "choice must be one of run, myself, skip, redraft",
                                                      "choices": outcome.get("choices")})
     if outcome["outcome"] in ("not_runnable", "no_channel"):
         raise HTTPException(status_code=409, detail={

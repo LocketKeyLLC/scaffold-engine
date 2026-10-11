@@ -42,11 +42,11 @@ def test_placeholders_and_hints_are_found_in_order():
 
 def test_frame_gates_the_shape_and_asks_for_the_values():
     f = sr.frame_run({"node_key": "ADD26", "title": "Install the SSH key"}, RUNBOOK, _spec(), POLICY)
-    assert [o["id"] for o in f["options"]] == ["run", "myself", "skip"]        # the shape is allowed with dummy values
+    assert [o["id"] for o in f["options"]] == ["run", "myself", "skip", "redraft"]        # the shape is allowed with dummy values
     assert [i["name"] for i in f["inputs"]] == ["HOST_IP", "DNS_IP"] and "needs 2 values from you" in f["question"]
     assert f["commands"][0].endswith("aedefruscio@<HOST_IP>")                   # raw — the operator sees the placeholder
     f2 = sr.frame_run({"node_key": "x", "title": "x"}, RUNBOOK, _spec(), {"allow": ["pct set"], "sudo": False})
-    assert [o["id"] for o in f2["options"]] == ["myself", "skip"]              # a refused shape stays refused
+    assert [o["id"] for o in f2["options"]] == ["myself", "skip", "redraft"]              # a refused shape stays refused
 
 
 def test_values_are_checked_and_spliced():

@@ -5409,6 +5409,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                     "tradeoff": "the step counts as a plan, not as executed"})
     options.append({"id": "skip", "label": "Skip this step", "fit": "not needed on this machine",
                     "tradeoff": "steps that depend on it may not make sense"})
+    # §17.1472 — the operator can send the block back with what is wrong with it
+    options.append({"id": "redraft", "label": "Redraft it with my correction",
+                    "fit": "the block is wrong; say what in the note and the engine drafts the step again"})
     # §17.1271 — writing a file IS work the block does, so a step whose commands
     # are a single `python3 /tmp/x.py` plus the file it needs is a normal block.
     _has_work = bool(cmds or files)
