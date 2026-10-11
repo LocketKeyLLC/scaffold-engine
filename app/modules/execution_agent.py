@@ -2562,7 +2562,13 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         return None
     up_block = _format_upstream_block(upstream, target.get("node_key") or "") if upstream else ""
     if op_node is not None:
-        frame = await _ops.frame_operator(op_node, upstream=up_block)          # §17.1458
+        # §17.1464 — what the engine learned, and the operator's other steps in the same place (one trip)
+        from app.modules.runbook_inputs import job_environment
+        async with async_session() as db:
+            _op_env = await job_environment(db, job_id)
+            _also = await _ops.same_place_steps(db, job_id, op_node)
+        frame = await _ops.frame_operator(op_node, upstream=up_block, facts=(_op_env or {}).get("facts"),
+                                          also=_also)          # §17.1458
         logger.info("operator_step_parked job=%s node=%s engine_half=%s checks=%d", job_id,
                     op_node.get("node_key"), bool(op_node.get("engine_half")), len(frame.get("verify") or []))
         async with async_session() as db:

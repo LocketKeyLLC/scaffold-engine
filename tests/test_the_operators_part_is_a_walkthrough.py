@@ -106,7 +106,7 @@ def test_it_is_wired_end_to_end():
     sr = pathlib.Path("app/modules/supervised_runs.py").read_text()
     th = pathlib.Path("app/ui/static/views/theater.js").read_text()
     assert "op_node = await _ops.pending_operator_step(db, job_id)" in ea
-    assert "frame = await _ops.frame_operator(op_node, upstream=up_block)" in ea
+    assert "frame = await _ops.frame_operator(op_node, upstream=up_block, facts=" in ea   # §17.1464 adds facts/also
     assert 'if waiting.get("kind") == "yours":' in dp and "hand_back_engine_half(db, job_id" in dp
     assert "_ops.is_wholly_operators(node)" in sr and "_ops.ENGINE_HALF_DONE" in sr
     assert 'if (d && d.kind === "yours") return showOperatorStep(d);' in th
