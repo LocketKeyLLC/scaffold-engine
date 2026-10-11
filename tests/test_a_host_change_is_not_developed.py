@@ -63,3 +63,10 @@ def test_a_service_only_the_description_mentions_is_not_the_host():
     node = json.loads((FIX / "add151_node_2026_10_10.json").read_text())
     assert "jellyfin" in node["description"].lower() and "jellyfin" not in node["title"].lower()
     assert dv.host_for(node, [PANEL, RADARR, JELLYFIN, CADDY]) is None
+
+
+def test_a_step_that_configures_the_guest_is_not_a_service_build():
+    """§17.1465 — ADD154 (VM 106 to DHCP) was developed in the Palworld service's directory."""
+    node = json.loads((FIX / "add154_node_2026_10_11.json").read_text())
+    pal = st.ServiceTruth(guest="106", name="palworld", unit="palworld.service", workdir="/home/steam/palworld", vm=True)
+    assert dv.host_for(node, [pal, PANEL]) is None
