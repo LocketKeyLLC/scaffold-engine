@@ -639,7 +639,7 @@ def _brief_essentials(brief: dict) -> str:
         # did not re-ask — it built a control panel to a spec they had just said
         # they did not have. Split them: an answer is honoured, a non-answer is
         # a decision still owed to the operator.
-        from app.modules.unanswered import decision_brief, parse_feedback, unresolved
+        from app.modules.unanswered import parse_feedback
         pairs = parse_feedback(feedback)
         answered = [p for p in pairs if p["answered"]]
         if answered:
@@ -647,9 +647,12 @@ def _brief_essentials(brief: dict) -> str:
                          + "\n".join(f"Q: {p['question']}\nA: {p['answer']}" for p in answered)[:1200])
         elif not pairs:
             parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
-        note = decision_brief(unresolved(brief))
-        if note:
-            parts.append(note.strip())
+        # §17.1480 — the still-undecided items are NOT carried here. This block goes into every STEP's prompt
+        # (runbook drafts, node tasks), and `decision_brief` is a PLANNER instruction ("For each one emit a
+        # `decision` node"): live, T38 "Document architecture and setup" — the last step of a finished build —
+        # opened its document with "## Decision Nodes" for three questions the build had long settled (the GPU,
+        # the Proxmox version, the panel's stack). The planner inserts those nodes itself (§17.1218); a step that
+        # truly depends on one gets `ask_first_block` from `questions_for_step` below.
     return "\n\n".join(parts)
 
 

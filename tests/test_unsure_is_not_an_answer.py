@@ -122,7 +122,8 @@ def test_the_planner_no_longer_hears_a_non_answer_as_decided():
     blk = src[i:i + 1400]
     assert "unanswered import" in blk, blk
     assert 'p["answered"]' in blk, "only real answers may go under 'already decided'"
-    assert "decision_brief(unresolved(brief))" in blk, "the rest must be named as still owed"
+    # §17.1480 — the planner inserts the decision nodes; a STEP's prompt is never told to emit them
+    assert "decision_brief(" not in blk, "a step prompt must not carry the planner's 'emit a decision node'"
 
 
 def test_a_blob_in_an_unknown_shape_is_passed_through_whole():
