@@ -78,6 +78,37 @@ def _printf_lines(cmd: str) -> Optional[list[str]]:
     return [t for t in toks[2:]]
 
 
+_HEREDOC_WRITE_RE = re.compile(
+    r"\bcat\s*>\s*(/[^\s'\"<|;&)]+)\s*<<-?\s*(['\"]?)(\w+)\2[^\n]*\n([\s\S]*?)\n\3\s*(?:$|\n)")
+#: §17.1460 — a note the drafter left for a human, inside content it would write: `<PASTE THE FULL cluster.fw
+#: HERE, …>`. Live (ADD151, third block): that line was the whole new cluster.fw apart from three rules.
+_DRAFTER_NOTE_RE = re.compile(r"<[^<>\n]*\b(?:PASTE|HERE|FULL|REPLACE|INSERT|TODO|FILL|EXISTING|CURRENT)\b[^<>\n]*>")
+NOTE_MARKER = "a note the drafter left for a person"
+
+
+def heredoc_writes(cmd: str) -> list[tuple[str, list[str]]]:
+    """``[(path, lines)]`` for every `cat > PATH <<TAG … TAG` in a command."""
+    return [(m.group(1), m.group(4).split("\n")) for m in _HEREDOC_WRITE_RE.finditer(cmd or "")]
+
+
+def drafter_notes(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1460 — content that still carries a placeholder only a person could fill."""
+    out: list[dict] = []
+    for c in commands or []:
+        m = _DRAFTER_NOTE_RE.search(str(c))
+        if m:
+            out.append({"command": str(c), "why": (
+                f"this writes {NOTE_MARKER} — `{m.group(0)[:100]}` — into the file instead of the content it "
+                f"stands for. Run it and the file holds that note. Write the real lines (read the file first, "
+                f"then carry every line it keeps).")})
+    for f in files or []:
+        m = _DRAFTER_NOTE_RE.search(str((f or {}).get("content") or ""))
+        if m:
+            out.append({"command": f"(write {f.get('path')})", "why": (
+                f"the file carries {NOTE_MARKER} — `{m.group(0)[:100]}` — instead of the content it stands for.")})
+    return out
+
+
 def lost_lines(existing: str, new_lines: list[str]) -> list[str]:
     """Lines of `existing` the new content neither keeps nor EDITS. A line one of the new lines extends or
     shortens is an edit (`IN ACCEPT -p tcp -dport 80 -source 192.168.1.0/24` → `IN ACCEPT -p tcp -dport 80`)."""
@@ -120,11 +151,13 @@ async def destructive_rewrites(commands: list[str], spec, files: Optional[list[d
                     f"gives it a new address and loses its router reservation).")})
         if _IN_GUEST_RE.search(cmd):
             continue                    # a file inside a guest: the host cannot read it the same way
-        targets = [m.group(2) for m in _TEE_RE.finditer(cmd)] + [m.group(1) for m in _REDIRECT_RE.finditer(cmd)]
+        heredocs = dict(heredoc_writes(cmd))          # §17.1460 — `cat > FILE <<EOF … EOF` is a whole-file write too
+        targets = ([m.group(2) for m in _TEE_RE.finditer(cmd)] + [m.group(1) for m in _REDIRECT_RE.finditer(cmd)]
+                   + list(heredocs))
         for path in dict.fromkeys(targets):
             if path.startswith(("/tmp/", "/dev/", "/proc/")):
                 continue
-            new = _printf_lines(cmd)
+            new = heredocs.get(path) if path in heredocs else _printf_lines(cmd)
             if new is None:
                 continue
             ok, existing = await _probe(spec, f"cat {path}")
@@ -148,6 +181,7 @@ async def destructive_rewrites(commands: list[str], spec, files: Optional[list[d
             out.append({"command": f"(write {path})", "why": (
                 f"writing {path} replaces it, and {len(lost)} {FILE_MARKER} — e.g. `{lost[0][:120]}`. "
                 f"Write the whole file carrying every line it keeps.")})
+    out.extend(drafter_notes(commands, files))
     if out:
         logger.warning("rewrite_guard_refused n=%d first=%r", len(out), out[0]["command"][:120])
     return out

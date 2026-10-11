@@ -94,3 +94,32 @@ def test_it_is_wired_at_both_ends_and_registered():
     from app.modules import supervised_runs as sr
     for m in (rg.NET0_MARKER, rg.FILE_MARKER):
         assert m in sr._SHAPE_REFUSALS and sr._WHOSE_GAP[m] == "drafter"
+
+
+# §17.1460 — the third live ADD151 block: host-side heredoc writes, and a cluster.fw whose content was a note.
+BLOCK3 = json.loads(pathlib.Path("tests/fixtures/add151_block3_2026_10_11.json").read_text())
+CONF.update({
+    "pct config 102": "net0: name=eth0,bridge=vmbr0,gw=192.168.1.1,hwaddr=BC:24:11:D1:0B:06,ip=192.168.1.21/24,type=veth\n",
+    "qm config 110": "net0: virtio=BC:24:11:B4:AF:15,bridge=vmbr0\n",
+    "cat /etc/pve/firewall/120.fw": "[OPTIONS]\nenable: 1\n[RULES]\nGROUP dmz\n",
+})
+
+
+def test_the_note_in_cluster_fw_is_refused_and_the_rest_passes(machine):
+    out = _why(BLOCK3)
+    bad = [o for o in out if "cluster.fw" in o["command"]]
+    assert bad, "the cluster.fw write carrying <PASTE THE FULL cluster.fw HERE…> must be refused"
+    assert any(rg.NOTE_MARKER in o["why"] for o in bad) and any(rg.FILE_MARKER in o["why"] for o in bad)
+    assert not [o for o in out if "101.fw" in o["command"] or "120.fw" in o["command"]], \
+        "a per-guest file that keeps every line it had is fine"
+    assert not [o for o in out if o["command"].startswith(("pct set", "qm set"))], "every net0 now matches the machine"
+
+
+def test_a_placeholder_name_is_not_a_note():
+    assert rg.drafter_notes(["ssh aedefruscio@<HOST_IP> nvidia-smi", "curl http://<CURRENT_IP>:3001/"]) == []
+    assert rg.drafter_notes(["cat > /etc/x <<'EOF'\n<INSERT THE EXISTING LINES>\nEOF"])
+
+
+def test_the_note_marker_is_registered():
+    from app.modules import supervised_runs as sr
+    assert rg.NOTE_MARKER in sr._SHAPE_REFUSALS and sr._WHOSE_GAP[rg.NOTE_MARKER] == "drafter"
