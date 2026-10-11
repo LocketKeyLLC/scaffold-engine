@@ -226,5 +226,6 @@ async def hand_back_engine_half(db: AsyncSession, job_id: str, node: dict, run_r
         {"jid": job_id, "nk": node.get("node_key")})
     if not upd.rowcount:
         return False
-    logger.info("operator_step_engine_half_done job=%s node=%s", job_id, node.get("node_key"))
+    logger.info("operator_step_engine_half_done job=%s node=%s run=%s why=%r", job_id, node.get("node_key"),
+                (run_result or {}).get("outcome"), str((run_result or {}).get("reason") or "")[:160])
     return True
