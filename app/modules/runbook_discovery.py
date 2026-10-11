@@ -314,7 +314,13 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
     the store — reading a secret onto the screen to save a person typing it would
     trade one problem for a worse one.
     """
-    pend = [i for i in inputs if not (i.get("value") or "").strip() and not (i.get("suggestions") or [])]
+    # §17.1477 — a suggestion merely scraped from the step's text is not evidence about the machine; anything else
+    # (a pin, the map, a fact) stands ahead of a fresh read. Live, T37's <PANEL_IP> carried "192.168.1.0" and the host's
+    # Tailscale address from its text, so CT 111 (control-panel, 192.168.1.25) was never measured.
+    def _settled(i: dict) -> bool:
+        return bool((i.get("value") or "").strip()) or any(
+            str((s or {}).get("confidence") or "") != "step" for s in (i.get("suggestions") or []))
+    pend = [i for i in inputs if not _settled(i)]
     if not pend:
         return
     runner = getattr(spec, "name", "the runner") or "the runner"
