@@ -162,6 +162,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is the only field this rewrite of net0 may change",  # §17.1457
                    "lines it holds now would be lost",              # §17.1457
                    "lives on the Proxmox HOST, not inside a guest",  # §17.1459
+                   "a note the drafter left for a person",          # §17.1460
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -306,6 +307,7 @@ _WHOSE_GAP: dict[str, str] = {
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
     "lives on the Proxmox HOST, not inside a guest": "drafter",    # §17.1459 — write /etc/pve from the host
+    "a note the drafter left for a person": "drafter",             # §17.1460 — write the real content
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
