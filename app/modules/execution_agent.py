@@ -1688,6 +1688,13 @@ async def execute_next_node(
         # (parallel frontier, optimizer on by default) did not.
         _task_prompt = raw_prompt
         _grounding_blocks: list[str] = []
+        # §17.1481 — a step that documents or validates the build is given the build, read off the machines;
+        # attached verbatim after the optimizer like every grounding block, and counted as a source below.
+        from app.modules import inventory_report as _ir
+        async with async_session() as _idb:
+            _inventory_text = await _ir.block_for(node_snapshot, _idb)
+        if _inventory_text:
+            _grounding_blocks.append(_inventory_text.strip())
 
         # Grounding is gathered here and attached after the optimizer.
         project_goal = " ".join(brief.get("goals", [])) if brief else ""
@@ -2014,7 +2021,7 @@ async def execute_next_node(
             output, need=_node_need, sources=_node_sources, brief=brief,
             input_text=job.get("input_text"), task_text=node_task_text_for(node_snapshot),
             environment=await _node_ledger(job_id, job),   # §17.1175/§17.1480 — the real ledger
-            upstream_text="\n".join(
+            upstream_text=(_inventory_text or "") + "\n".join(
                 (v[0] if isinstance(v, tuple) else str(v)) for v in upstream_outputs.values()),
             upstream_flagged=_upstream_flagged, tool=tool, node_key=node_key,
             regenerate=_regen_node,
