@@ -210,6 +210,18 @@ _READ_FORMS: dict = {
     "httpd": {"flags": {"-t", "-S", "-v", "-V", "-M"}},
     "sshd": {"flags": {"-t", "-T"}},
     "named-checkconf": {"flags": {"-z", "-p"}},
+    # §17.1476 — the BMC: a read is an exact leading-word FORM (`sel elist` reads, `sel clear` writes; `mc watchdog
+    # get` reads, `mc reset cold` resets the BMC). Live: ADD157/ADD158's only BMC check, `ipmitool mc watchdog get`,
+    # was not a read, so it was dropped from the verify and ADD158 refused "this block has no check at all".
+    "ipmitool": {"forms": (("sel",), ("sel", "list"), ("sel", "elist"), ("sel", "info"), ("sel", "time", "get"),
+                           ("sdr",), ("sdr", "list"), ("sdr", "elist"), ("sdr", "type"), ("sdr", "get"),
+                           ("sdr", "info"), ("mc", "info"), ("mc", "guid"), ("mc", "watchdog", "get"),
+                           ("mc", "selftest"), ("chassis", "status"), ("chassis", "restart_cause"),
+                           ("chassis", "poh"), ("fru",), ("fru", "print"), ("fru", "list"), ("sensor",),
+                           ("sensor", "list"), ("sensor", "get"), ("lan", "print"), ("user", "list"),
+                           ("power", "status"), ("dcmi", "power", "reading"))},
+    "ras-mc-ctl": {"flags": {"--errors", "--summary", "--status", "--layout", "--error-count", "--print-labels",
+                             "--guess-labels", "--mainboard"}},
 }
 
 
@@ -229,6 +241,12 @@ def read_form(argv) -> bool:
     if "flag_prefix" in rule:
         opts = [a for a in args if a.startswith("-")]
         return bool(opts) and all(a.startswith(rule["flag_prefix"]) for a in opts)
+    if "forms" in rule:
+        # §17.1476 — the whole sequence of words, flags not allowed (a flag can carry a host or a password)
+        if any(a.startswith("-") for a in args):
+            return False
+        return any(tuple(args[:len(f)]) == f and (len(args) == len(f) or f[-1] in ("type", "get", "list", "elist",
+                                                                                  "print")) for f in rule["forms"])
     return False
 
 
