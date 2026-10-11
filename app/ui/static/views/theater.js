@@ -143,6 +143,31 @@ export function renderTheater(container, jobId, ctx = {}) {
   const stageBody = el("div", { class: "stage-body md" });
   const logEl = el("div", { class: "theater-log" });
   const summaryEl = el("div", { class: "theater-summary hidden" });
+  // §17.1463 — the logins the engine holds for the operator, where they will look for them: ADD127 put the
+  // panel behind a password and nobody was ever told it ("How are they suppose to log in?").
+  const loginsEl = el("div", { class: "theater-logins" });
+  async function loadLogins() {
+    try {
+      const r = await api.get("/setup/secrets");
+      const mine = ((r && r.secrets) || []).filter((x) => x.for_operator);
+      if (!mine.length) { loginsEl.replaceChildren(); return; }
+      mount(loginsEl, el("div", { class: "card card-pad" },
+        el("div", { class: "summary-title", text: "Your logins" }),
+        el("p", { class: "sub", text: "Logins the engine set up for you. Reveal shows the password (recorded each time)." }),
+        ...mine.map((x) => {
+          const shown = el("code", { class: "secret-shown hidden" });
+          const btn = el("button", { class: "btn btn-sm", text: "Reveal" });
+          btn.addEventListener("click", async () => {
+            if (!shown.classList.contains("hidden")) { shown.textContent = ""; shown.classList.add("hidden"); btn.textContent = "Reveal"; return; }
+            try { const v = await api.post(`/setup/secrets/${encodeURIComponent(x.name)}/reveal`, {});
+                  shown.textContent = v.value || ""; shown.classList.remove("hidden"); btn.textContent = "Hide"; }
+            catch (e) { toast((e && (e.detail || e.message)) || "Could not reveal it", "err"); }
+          });
+          return el("div", { class: "row row-wrap" }, el("span", { text: x.hint || x.name }), shown, el("span", { class: "spacer" }), btn);
+        })));
+    } catch (e) { console.debug("your-logins: no card (not an admin key, or an older server)", e); }
+  }
+  loadLogins();
 
   const grid = el(
     "div",
@@ -152,6 +177,7 @@ export function renderTheater(container, jobId, ctx = {}) {
       "div",
       { class: "theater-center" },
       summaryEl,
+      loginsEl,
       el("div", { class: "card theater-panel stage-panel" }, el("div", { class: "panel-head" }, stageTitle), stageBody),
       el("div", { class: "card theater-panel log-panel" }, el("div", { class: "panel-head", text: "Event stream" }), logEl)
     )
