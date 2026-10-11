@@ -78,7 +78,8 @@ async def test_job_environment_prefers_the_sessions_ledger_then_the_job_row():
     db.execute = AsyncMock(return_value=sess)
     env = await ri.job_environment(db, "j")
     assert env["substitutions"]["JELLYFIN_IP"] == "192.168.1.20"
-    assert "assist_sessions WHERE job_id" in db.execute.await_args.args[0].text
+    # §17.1473 — the session's ledger is read FIRST; the done steps' decisions are read after it
+    assert "assist_sessions WHERE job_id" in db.execute.await_args_list[0].args[0].text
     none = MagicMock(); none.mappings.return_value.first.return_value = None
     job = MagicMock(); job.mappings.return_value.first.return_value = {"metadata": {"environment": {"facts": ["x"]}}}
     db.execute = AsyncMock(side_effect=[none, job])
