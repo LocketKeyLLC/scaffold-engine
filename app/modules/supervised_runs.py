@@ -5642,7 +5642,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         return {"outcome": "not_runnable", "refused": waiting.get("refused") or [],
                 "secrets_missing": waiting.get("secrets_missing") or []}
     commands = [str(c) for c in waiting.get("commands") or []]
-    verify_cmds = [str(c) for c in waiting.get("verify") or []]
+    verify_cmds = with_own_checks({"title": waiting.get("title"), "description": waiting.get("description")},
+                                  waiting.get("verify") or [])                   # §17.1470
     asked = list(waiting.get("inputs") or [])
     need = [i for i in asked if not i.get("secret")]
     secrets_asked = [i for i in asked if i.get("secret")]
@@ -7147,6 +7148,25 @@ def checks_can_witness_the_change(commands: list[str], verify: list[str],
             + ", and no check reads any of them back")
 
 
+def with_own_checks(node: Optional[dict], verify: list) -> list[str]:
+    """§17.1470 — the checks a step names after "Done when" always run, whatever the drafted block chose.
+
+    Live (2026-10-11): ADR1 ("Point what earlier steps set up at the new address of VM 106") named three greps that
+    must print nothing — inside VM 106, inside the panel's LXC 111, and on the host. The drafted verify list kept
+    only the host one and added three `systemctl is-active` reads; all four confirmed, the step was recorded
+    "already met", and the panel's palworld_settings_route.js still held `address: '192.168.1.106'`."""
+    from app.modules.operator_steps import checks
+    out = [str(c) for c in verify or []]
+    into = re.compile(r"^\s*(?:pct\s+exec|qm\s+guest\s+exec)\s+\d+")
+    # A bare check written for inside a guest (ADD84's `df -h /`) would read the HOST if run as written: only a
+    # check that says where it runs is added, or any check when the block has checks and all run on the host.
+    host_level = bool(out) and not any(into.match(c) for c in out)
+    for c in checks(node):
+        if c not in out and (into.match(c) or host_level):
+            out.append(c)
+    return out
+
+
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
     """§17.1302 — read the step's OWN verify checks off the machine before the
     block is parked. When every check confirms the step's goal, the step is
@@ -7167,7 +7187,7 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     against the step's title AND its "done when" text). `unknown` or
     `contradicted` anywhere → None, and the block is parked as before.
     """
-    verify_cmds = [str(c) for c in (frame or {}).get("verify") or []]
+    verify_cmds = with_own_checks(node, (frame or {}).get("verify") or [])        # §17.1470
     if not verify_cmds or not (frame or {}).get("commands"):
         return None
     # §17.1365 — a pre-pass means nothing when the checks could not have failed.
