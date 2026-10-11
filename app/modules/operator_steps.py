@@ -43,6 +43,15 @@ _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _DONE_WHEN_RE = re.compile(r"\bDone when\b", re.I)
 
 
+def _as_dict_md(v) -> dict:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (ValueError, TypeError):
+            return {}
+    return dict(v) if isinstance(v, dict) else {}
+
+
 def _text(node: Optional[dict]) -> str:
     return str((node or {}).get("description") or (node or {}).get("prompt_template") or "")
 
@@ -51,7 +60,7 @@ def operators_part(node: Optional[dict]) -> str:
     """The operator's part of a step, in the step's own words ('' when it has none)."""
     tool = str((node or {}).get("tool") or "").lower()
     body = _text(node)
-    if tool in ("human", "human_review"):
+    if tool == "human":   # §17.1461 — `human_review` is an optional review Auto mode may skip
         return body.strip()
     work = _DONE_WHEN_RE.split(body, 1)[0]
     hits = [s.strip() for s in _SENTENCE_RE.findall(work) if _OPERATORS_RE.search(s)]
@@ -61,7 +70,7 @@ def operators_part(node: Optional[dict]) -> str:
 def is_wholly_operators(node: Optional[dict]) -> bool:
     """Tagged for a human, or it names an operator part and gives the engine no command before 'Done when'."""
     tool = str((node or {}).get("tool") or "").lower()
-    if tool in ("human", "human_review"):
+    if tool == "human":   # §17.1461 — `human_review` is an optional review Auto mode may skip
         return True
     if not operators_part(node):
         return False
