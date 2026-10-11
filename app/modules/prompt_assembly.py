@@ -711,6 +711,19 @@ def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) 
     # Jellyfin/Radarr/Sonarr/Prowlarr at public URLs because its text still held the EARLIER plan note "each service
     # is reachable over public HTTPS" — under "this wins" — while ADD149's decision said only the panel is public.
     decisions = [str(f) for f in ((environment or {}).get("facts") or []) if str(f).startswith("Operator decision (")]
+    # §17.1478 — and what the engine has MEASURED about the machines this step touches. The runbook prompt carried
+    # no fact at all: live, T37 checked Caddy with `curl https://127.0.0.1:443` and the public name from inside the
+    # LAN — both 000 by design (Caddy answers only its site name; the router does not loop the public address back)
+    # — and was failed "not reachable", while `--resolve defrusciohomelab.duckdns.org:443:192.168.1.127` answers 401.
+    try:
+        from app.modules.operator_steps import relevant_facts
+        measured = [f for f in relevant_facts(node, [f for f in ((environment or {}).get("facts") or [])
+                                                     if not str(f).startswith("Operator decision (")])][:10]
+    except Exception:                      # a prompt must never fail to assemble
+        measured = []
+    if measured:
+        tail += ("\n\nWHAT THE ENGINE HAS MEASURED about the machines this step touches — use these addresses, "
+                 "names and test methods rather than guessing:\n" + "\n".join(f"- {f}" for f in measured))
     if decisions:
         tail += ("\n\nTHE OPERATOR'S DECISIONS — made after parts of this step's text were written. Where one "
                  "disagrees with the step's text above, the DECISION wins and the older text is obsolete; do not "

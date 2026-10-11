@@ -138,14 +138,17 @@ def relevant_facts(node: dict, facts: Optional[list]) -> list[str]:
 
     def stems(t: str) -> set[str]:
         return {w[:5] for w in re.findall(r"[a-z][a-z0-9-]{4,}", t)} - _skip
-    mine = stems(part)
-    out = []
-    for f in facts or []:
+    mine = stems(part + " " + str((node or {}).get("title") or "").lower())
+    scored = []
+    for i, f in enumerate(facts or []):
         t = str(f if isinstance(f, str) else (f or {}).get("text") or "")
         low = t.lower()
-        if any(s in low for s in here) or len(mine & stems(low)) >= 2:
-            out.append(t[:300])
-    return out[:8]
+        shared = len(mine & stems(low))
+        if any(s in low for s in here) or shared >= 2:
+            # §17.1478 — the most to do with this step first; ties keep the ledger's newest-last order reversed,
+            # so a long step's newest measurements are not the ones cut by the cap
+            scored.append((-(shared + (5 if any(s in low for s in here) else 0)), -i, t[:300]))
+    return [t for _a, _b, t in sorted(scored)][:8]
 
 
 async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]:

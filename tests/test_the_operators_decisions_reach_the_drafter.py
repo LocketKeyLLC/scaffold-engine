@@ -64,3 +64,27 @@ def test_a_guess_from_the_text_does_not_stop_a_measurement(monkeypatch):
     out = asyncio.run(rd.discover_inputs(ins, [], Spec()))
     assert out[0]["value"] == "192.168.1.25", out[0]
     assert out[1]["value"] == "" and out[1]["suggestions"][0]["value"] == "192.168.1.127", "the map stays ahead"
+
+
+SNI = ("Measured 2026-10-11: Caddy in CT 120 (192.168.1.127) answers HTTPS only for its site name "
+       "defrusciohomelab.duckdns.org (SNI). Test it from the LAN with curl -sk --resolve "
+       "defrusciohomelab.duckdns.org:443:192.168.1.127 https://defrusciohomelab.duckdns.org/ (answers 401).")
+HAIRPIN = ("Measured 2026-10-11: from inside the LAN https://defrusciohomelab.duckdns.org/ does not answer (000): the "
+           "router does not loop its public address back to the LAN (no hairpin NAT).")
+
+
+def test_the_engines_measurements_reach_the_drafter():
+    """§17.1478 — T37 tested Caddy by IP and the public name from the LAN (both 000 by design) and was failed."""
+    noise = [f"LXC container {n} has a firewall bridge fwbr{n}i0" for n in range(101, 115)]
+    env = {"facts": noise + [SNI, HAIRPIN] + ri.operator_decisions(STEPS)}
+    prompt = pa.build_base_prompt(T37, {}, env)
+    block = prompt[prompt.index("WHAT THE ENGINE HAS MEASURED"):prompt.index("THE OPERATOR'S DECISIONS")]
+    assert "--resolve defrusciohomelab.duckdns.org:443:192.168.1.127" in block and "no hairpin NAT" in block
+    assert "Operator decision (" not in block, "decisions have their own section"
+
+
+def test_the_most_relevant_facts_survive_the_cap():
+    from app.modules.operator_steps import relevant_facts
+    many = [f"Caddy proxy service public HTTPS note {i}" for i in range(20)]
+    picked = relevant_facts(T37, many + [SNI])
+    assert SNI[:300] in picked
