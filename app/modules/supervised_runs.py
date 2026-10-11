@@ -163,6 +163,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "lines it holds now would be lost",              # §17.1457
                    "lives on the Proxmox HOST, not inside a guest",  # §17.1459
                    "a note the drafter left for a person",          # §17.1460
+                   "is run as a READ, unprivileged",                # §17.1462
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is a value the engine READS",                   # §17.1384
@@ -308,6 +309,7 @@ _WHOSE_GAP: dict[str, str] = {
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
     "lives on the Proxmox HOST, not inside a guest": "drafter",    # §17.1459 — write /etc/pve from the host
     "a note the drafter left for a person": "drafter",             # §17.1460 — write the real content
+    "is run as a READ, unprivileged": "drafter",                   # §17.1462 — | tee, not > FILE
     "answers JSON, and this hands that JSON to a text tool": "drafter",   # §17.1400
     "the engine writes a block's files on the Proxmox": "drafter",   # §17.1403
     "the rehearsal ran this block against copies of the real files": "drafter",   # §17.1409
@@ -2218,6 +2220,30 @@ def writing_segments(cmd: str) -> list[str]:
             seg = "test " + _t.group(1)
         if seg and not read_only_command(seg):
             out.append(seg)
+    return out
+
+
+_READ_HEAD_REDIRECT_RE = re.compile(r"^\s*(cat|echo|printf)\b[^\n|;&]*?(?<![<>&\d])>>?\s*['\"]?(/[^\s'\"|;&)]+)")
+
+
+def read_head_redirects_into_system(commands: list[str], policy: Optional[dict]) -> list[dict]:
+    """§17.1462 — `cat > /etc/… <<EOF` on a runner that elevates only WRITES. The runner classifies a line by its
+    head; `cat`/`echo`/`printf` are reads, run unprivileged, so the redirect cannot write a root-owned file.
+    Live (ADD151, 2026-10-11 02:03): the block stopped at `cat > /etc/pve/firewall/101.fw <<"EOF"` — "the runner
+    is unprivileged for READ commands (the write grant covers writes only)" — after its `python3` edit (a write
+    head, elevated) had already run."""
+    if not (policy or {}).get("sudo"):
+        return []
+    out: list[dict] = []
+    for c in commands or []:
+        m = _READ_HEAD_REDIRECT_RE.match(str(c))
+        if not m or m.group(2).startswith(("/tmp/", "/dev/", "/proc/")):
+            continue
+        out.append({"command": str(c), "why": (
+            f"`{m.group(1)} > {m.group(2)}` is run as a READ, unprivileged: the runner elevates a line by its "
+            f"head, and `{m.group(1)}` reads — so the redirect cannot write {m.group(2)} (Permission denied). "
+            f"Write it with the content on stdin to a WRITE: `printf '%s\\n' '<line>' … | tee {m.group(2)}` "
+            f"(tee runs as root).")})
     return out
 
 
@@ -5203,6 +5229,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
+    refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
