@@ -69,3 +69,28 @@ def test_it_is_wired_around_the_run():
     src = pathlib.Path("app/modules/supervised_runs.py").read_text()
     a = src.index("_aw_guests, _aw_before = await _aw.around_run(")
     assert a < src.index("UPDATE dag_nodes SET status = 'running'", a) < src.index("await _aw.after_run(db, spec, job_id, node_key")
+
+
+def test_what_builds_on_the_repointed_work_waits_for_it():
+    """§17.1468 — T37 (validation) was drafted ahead of ADR1."""
+    plan = [{"node_key": "ADD151", "status": "done", "depends_on": []},
+            {"node_key": "ADD152", "status": "pending", "depends_on": ["ADD154"]},
+            {"node_key": "ADD154", "status": "done", "depends_on": []},
+            {"node_key": "T37", "status": "pending", "depends_on": ["ADD152", "ADD151"]},
+            {"node_key": "T38", "status": "pending", "depends_on": ["T37"]}]
+    assert aw.waits_for_repoint(plan, {"ADD151"}) == ["T37", "T38"]
+    assert aw.waits_for_repoint(plan, {"ADD122"}) == []
+
+
+def test_the_repoint_names_a_check_for_each_place():
+    """§17.1468 — ADR1 was refused: "names no command the engine can run"."""
+    stale = [(json.loads(ln), {"id": "106", "old": "192.168.1.106", "new": "192.168.1.44"}, "VM 106 (palworld-server)")
+             for ln in (FIX / "adr1_stale_steps_2026_10_11.jsonl").read_text().splitlines()]
+    cs = aw.stale_checks(stale)
+    assert any(c.startswith("qm guest exec 106 -- sh -c \"grep -rIl") for c in cs), cs
+    assert any(c.startswith("pct exec 111 -- sh -c \"grep -rIl") for c in cs), cs
+    assert "grep -rIl -e '192.168.1.106' /etc/pve/firewall /etc/hosts 2>/dev/null; true" in cs
+    assert all("--exclude='*.bak*'" in c for c in cs if "exec" in c)
+    from app.modules import operator_steps as ops
+    desc = "Done when nothing still names it — each of these prints nothing: " + ", ".join(f"`{c}`" for c in cs)
+    assert ops.checks({"description": desc}) == cs
