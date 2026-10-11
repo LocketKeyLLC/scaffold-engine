@@ -97,7 +97,9 @@ def _step_ips(text: str, words: list[str]) -> list[str]:
     distinguishing word, or none within reach of an address, every address the
     step names is offered (the step is about them) and only a single one
     prefills."""
-    spans = [(m.start(), m.end(), m.group()) for m in _IP_RE.finditer(text or "")]
+    # §17.1477 — a network or broadcast address names no machine: T37's "192.168.1.0/24" was offered as <PANEL_IP>
+    spans = [(m.start(), m.end(), m.group()) for m in _IP_RE.finditer(text or "")
+             if not re.match(r"\d+\.\d+\.\d+\.(?:0|255)$", m.group())]
     ips = list(dict.fromkeys(ip for _s, _e, ip in spans))
     if not words or len(ips) < 2:
         return ips

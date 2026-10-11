@@ -5316,6 +5316,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # to the filler, which only closes it once the rule agrees it is closed. One
     # mechanism, not a special case: `_WHOSE_GAP` says whose gap each refusal is
     # and `_FILLERS` says what the engine does about the ones it owns.
+    # §17.1477 — a block that only READS changes nothing: its reads are its evidence, so they are its checks.
+    # Live, T37 "Validate entire build" — 25 reads across the host and every guest — and ADD158 (one
+    # `ipmitool mc watchdog get`) were refused "this block has no check at all".
+    if cmds and not verify and all(_reads_only(c) for c in cmds):
+        verify = list(cmds)
     if cmds and not verify:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
@@ -7196,6 +7201,12 @@ def checks_can_witness_the_change(commands: list[str], verify: list[str],
     return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
             + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
             + ", and no check reads any of them back")
+
+
+def _reads_only(cmd: str) -> bool:
+    from app.modules.assist_state_check import read_only_command
+    c = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(cmd or ""))     # a placeholder is a value, not a verb
+    return read_only_command(c)
 
 
 def with_own_checks(node: Optional[dict], verify: list) -> list[str]:

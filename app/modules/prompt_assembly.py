@@ -706,6 +706,15 @@ def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) 
         tail += ("\n\nWHAT THIS STEP MUST DO — from the plan, including any correction the "
                  "operator has made to it. This is the specification; where it disagrees with "
                  "the task line above, this wins:\n" + desc)
+    # §17.1477 — the operator's decisions, which outrank older notes in the step's own text. §17.1473 made them
+    # facts in `job_environment`, but this prompt carried only `profile`: live, T37 was drafted twice more testing
+    # Jellyfin/Radarr/Sonarr/Prowlarr at public URLs because its text still held the EARLIER plan note "each service
+    # is reachable over public HTTPS" — under "this wins" — while ADD149's decision said only the panel is public.
+    decisions = [str(f) for f in ((environment or {}).get("facts") or []) if str(f).startswith("Operator decision (")]
+    if decisions:
+        tail += ("\n\nTHE OPERATOR'S DECISIONS — made after parts of this step's text were written. Where one "
+                 "disagrees with the step's text above, the DECISION wins and the older text is obsolete; do not "
+                 "test, build or expect what a decision ruled out:\n" + "\n".join(f"- {d}" for d in decisions))
     # §17.1221 — the question belongs to the STEP, asked when the operator gets
     # here, not to the plan. This is the one place every step's guide and runbook
     # is assembled, so a step that depends on something undecided opens by asking
