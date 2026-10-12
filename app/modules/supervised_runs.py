@@ -5288,6 +5288,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # the key substitution and the host-tool gate see it (else it is refused as a
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
+    # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
+    # the gaps deterministically, instead of the model's lookup/add/true draft. Runs
+    # BEFORE the key reader so `<APP_API_KEY>` is filled in the guest it now runs in.
+    _comp_cmds, _comp_verify, _comp_notes = rewrite_completeness_check(node, cmds, verify, services, inventory)
+    if _comp_notes:
+        cmds, verify = _comp_cmds, _comp_verify
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -5315,7 +5321,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # configured" is `/{resource}/testall`, which needs no body. Repair it here, before
     # the §17.1378b refusal gate, so a connectivity-verify step runs instead of parking.
     cmds, verify, _test_notes = repair_empty_body_test_call(cmds, verify)
-    _mv_notes = list(_loop_notes) + list(_mv_notes) + _test_notes
+    _mv_notes = list(_comp_notes) + list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
     if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):
@@ -7207,6 +7213,96 @@ def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple
             "rewrote it to `/testall` (the UI's \"Test All\": every configured one, no body needed) so "
             "the check tests the connection instead of the empty object (§17.1501).")})
     return out_cmds, out_verify, notes
+
+
+#: §17.1504 — the deterministic completeness report, run inside the *arr guest so only
+#: the short summary crosses the runner channel (the full /series JSON is >20 KB — the
+#: runner's silent 20 000-char cap would truncate it; the pipe keeps it in the guest).
+#: Single-quoted Python strings only, so it sits inside `python3 -c "…"` unescaped.
+_COMPLETENESS_PY = (
+    "import sys,json\n"
+    "d=json.load(sys.stdin)\n"
+    "show=sys.argv[1].lower()\n"
+    "m=[s for s in d if (s.get('title') or '').lower()==show] or [s for s in d if show in (s.get('title') or '').lower()]\n"
+    "if not m:\n"
+    "    print('RESULT: NOT IN LIBRARY ('+sys.argv[1]+')'); sys.exit(0)\n"
+    "s=m[0]\n"
+    "print('SERIES: '+str(s.get('title') or ''))\n"
+    "miss=0\n"
+    "for se in sorted(s.get('seasons') or [], key=lambda x: x.get('seasonNumber') or 0):\n"
+    "    if (se.get('seasonNumber') or 0)==0: continue\n"
+    "    st=se.get('statistics') or {}\n"
+    "    have=int(st.get('episodeFileCount') or 0); avail=int(st.get('episodeCount') or 0); mi=max(0,avail-have); miss+=mi\n"
+    "    print('Season %d: have %d of %d%s' % (se.get('seasonNumber') or 0, have, avail, (' MISSING %d' % mi) if mi else ''))\n"
+    "print('RESULT: COMPLETE' if miss==0 else 'RESULT: MISSING %d episode(s)' % miss)\n"
+)
+#: the step whose work is "is this show complete in Sonarr/Radarr, and what is missing".
+_COMPLETENESS_RE = re.compile(r"complet(?:e|eness)|missing\s+episode", re.I)
+_SEASONS_RE = re.compile(r"\b(?:season|episode)s?\b", re.I)
+_SHOW_FROM_TITLE_RE = re.compile(r"\b(?:check|verify|confirm)\s+(.+?)\s+complet", re.I)
+_SHOW_FROM_PROMPT_RE = re.compile(r"\b(?:query\s+\w+\s+for|for)\s+(.+?)\s*(?:[.\n]|$)", re.I)
+_ARR_PORTS = {"sonarr": "8989", "radarr": "7878"}
+
+
+def _sq_payload(s: str) -> str:
+    """`s` as one single-quoted shell word."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _arr_guest(app: str, services: Optional[list], inventory: Optional[dict]) -> Optional[str]:
+    """The container id running ``app`` (sonarr/radarr), from the measured services
+    first, then the inventory names. None when neither names it."""
+    for s in services or []:
+        if app in str(getattr(s, "name", "") or "").lower() and getattr(s, "guest", ""):
+            return str(getattr(s, "guest"))
+    names = (inventory or {}).get("names") or {}
+    hits = [str(g) for g, nm in names.items() if app in re.sub(r"[^a-z0-9]", "", str(nm or "").lower())]
+    return hits[0] if len(hits) == 1 else None
+
+
+def rewrite_completeness_check(node: Optional[dict], commands: list[str], verify: list[str],
+                               services: Optional[list] = None,
+                               inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1504 — a "check <show> completeness" step reads the *arr library and reports
+    the gaps, deterministically, instead of whatever the model drafts for it.
+
+    Live (job c75d77fa, the five show steps): "Check Big Bang Theory completeness"
+    ("Query Sonarr for <show>. Compare existing episodes against all available
+    seasons/episodes. List any missing episodes.") drafted anything from a catalog
+    `series/lookup` (which proves nothing about the library) to an add-the-series POST
+    needing an external id to a `true` check — and a weak self-check let a hollow one
+    pass. The engine can do this exactly: GET the library's `/series` (with per-season
+    statistics), find the show, and print `have X of Y` per season and a COMPLETE /
+    MISSING N verdict. The read runs INSIDE the guest, so the >20 KB JSON never hits the
+    runner's 20 000-char cap; only the short report returns. The key is read on the
+    machine (§17.1503) by `<APP_API_KEY>`.
+
+    Replaces the step's commands AND checks when the step is a completeness check and the
+    *arr guest is known; otherwise leaves the draft untouched."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_COMPLETENESS_RE.search(text) and _SEASONS_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", text, re.I) else "sonarr"
+    gid = _arr_guest(app, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    m = _SHOW_FROM_TITLE_RE.search(text) or _SHOW_FROM_PROMPT_RE.search(str((node or {}).get("prompt_template") or ""))
+    show = re.sub(r'["\\]', "", (m.group(1).strip() if m else "")).strip()
+    if not show:
+        return list(commands or []), list(verify or []), []
+    port, keyname = _ARR_PORTS[app], f"{app.upper()}_API_KEY"
+    payload = (f'curl -s --fail-with-body -H "X-Api-Key: <{keyname}>" '
+               f'"http://127.0.0.1:{port}/api/v3/series" | python3 -c "{_COMPLETENESS_PY}" "{show}"')
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # the verify re-reads the library and shows the same verdict line — a real count,
+    # never a `true` (§17.1382): the SERIES/RESULT lines witness what the library holds.
+    check = (f"pct exec {gid} -- sh -c {_sq_payload(payload + ' | grep -E ' + chr(39) + '^(SERIES|RESULT):' + chr(39))}")
+    note = [{"why": (
+        f"drafted the completeness check from the engine's own shape (§17.1504): it reads {app}'s library "
+        f"`/series` inside guest {gid} and prints each season's `have X of Y` with a COMPLETE / MISSING verdict "
+        f"for \"{show}\" — the read stays in the guest so the full catalogue never hits the runner's 20 000-char "
+        f"cap, and the check witnesses real episode counts, not a lookup that proves nothing.")}]
+    return [run], [check], note
 
 
 def a_validating_endpoint_sent_an_empty_body(
