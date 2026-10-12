@@ -38,3 +38,11 @@ def test_waiting_for_something_is_not_undoing_it():
     from app.modules.assist_state_check import negative_evidence as ne
     assert ne("pct exec 120 -- systemctl is-active caddy", "inactive",
               "Wait until it has an address, then start Caddy") == "systemctl is-active says 'inactive'"
+
+
+def test_what_the_operator_reports_is_not_their_part():
+    """§17.1493 — the only two uses across every plan state what the operator said (ADD169's handed it to them)."""
+    for t in ("The operator reports the torrents look halted WITH several peers, so also print the states.",
+              "The operator reports both saved; read the router back to confirm."):
+        assert ops.operators_part({"tool": "Shell", "description": t}) == "", t
+    assert ops.operators_part({"tool": "Shell", "description": "Then the operator approves the route in the admin console."})

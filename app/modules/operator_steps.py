@@ -39,7 +39,9 @@ _OPERATORS_RE = re.compile(
     r"\b(?:is|are)\s+the\s+operator'?s\b|\bthe\s+operator'?s\s*(?:,|\(|own\s+(?:screen|phone|device|account|"
     r"browser|computer|laptop|hands|login)\b|part\b|to\s+do\b|action\b)|"
     r"\bin\s+their\s+own\s+account\b|\bin\s+(?:the\s+)?my\s+spectrum\s+app\b|\badmin\s+console\b|"
-    r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens|reports)\b",
+    # §17.1493 — not "reports": what the operator SAID is not a task for them ("The operator reports the torrents look
+    # halted WITH several peers" handed ADD169 — reading qBittorrent's API — to the operator)
+    r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens)\b",
     re.I)
 # §17.1468 — a sentence ends at punctuation followed by a space or the end; the dots inside `192.168.1.44`,
 # `defrusciohomelab.duckdns.org` or `106.fw` do not end it. Live (ADD152): the operator's part was cut to
