@@ -5300,6 +5300,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _q_notes:
         cmds, verify = _q_cmds, _q_verify
         _comp_notes = list(_comp_notes) + _q_notes
+    # §17.1510 — a "configure/organize the Jellyfin library" step gets the streaming-service
+    # layout (typed Movies/TV libraries, no mixed pile, a scan) deterministically.
+    _jf_cmds, _jf_verify, _jf_notes = rewrite_organize_jellyfin(node, cmds, verify, services, inventory)
+    if _jf_notes:
+        cmds, verify = _jf_cmds, _jf_verify
+        _comp_notes = list(_comp_notes) + _jf_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -7409,6 +7415,89 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
         f"and, for each show with missing monitored episodes, triggers a per-series search (SeriesSearch → "
         f"Prowlarr → qBittorrent) — except a show whose gap exceeds {_QUEUE_HOLD_THRESHOLD} episodes, which is "
         f"HELD and reported, since a whole-series backfill is the operator's explicit call.")}]
+    return [run], [check], note
+
+
+#: §17.1510 — give Jellyfin the Netflix-style layout: a typed Movies library at /media/movies,
+#: a typed TV Shows library at /media/tv, and no leftover "mixed" library over the /media root,
+#: then a scan so posters/metadata populate. Idempotent and reversible (library config only — it
+#: never touches media files). Single-quoted Python only; runs inside the guest; argv: KEY, [DRY].
+_ORGANIZE_JELLYFIN_PY = (
+    "import sys,json,urllib.request,urllib.parse\n"
+    "BASE='http://127.0.0.1:8096'\n"
+    "KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Emby-Token':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=10); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "def q(s): return urllib.parse.quote(str(s))\n"
+    "libs=api('/Library/VirtualFolders') or []\n"
+    "byname={l.get('Name'):l for l in libs}\n"
+    "desired=[('Movies','movies','/media/movies'),('Shows','tvshows','/media/tv')]\n"
+    "for name,ctype,path in desired:\n"
+    "    cur=byname.get(name)\n"
+    "    if cur and cur.get('CollectionType')==ctype and path in (cur.get('Locations') or []):\n"
+    "        print('OK: %s already %s -> %s' % (name,ctype,path)); continue\n"
+    "    try:\n"
+    "        if cur: api('/Library/VirtualFolders?name=%s&refreshLibrary=false' % q(name),'DELETE')\n"
+    "        if DRY:\n"
+    "            print('WOULD SET: %s -> %s (%s)' % (name,ctype,path)); continue\n"
+    "        api('/Library/VirtualFolders?name=%s&collectionType=%s&paths=%s&refreshLibrary=false' % (q(name),ctype,q(path)),'POST',{'LibraryOptions':{}})\n"
+    "        print('SET: %s -> %s (%s)' % (name,ctype,path))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED %s: %r' % (name,e))\n"
+    "for l in libs[:8]:\n"
+    "    nm=l.get('Name')\n"
+    "    if nm not in ('Movies','Shows') and '/media' in (l.get('Locations') or []):\n"
+    "        if DRY:\n"
+    "            print('WOULD REMOVE mixed library: %s' % nm); continue\n"
+    "        try:\n"
+    "            api('/Library/VirtualFolders?name=%s&refreshLibrary=false' % q(nm),'DELETE'); print('REMOVED mixed library: %s' % nm)\n"
+    "        except Exception as e:\n"
+    "            print('FAILED remove %s: %r' % (nm,e))\n"
+    "if not DRY:\n"
+    "    try: api('/Library/Refresh','POST'); print('RESULT: libraries typed (Movies/TV Shows); scan triggered')\n"
+    "    except Exception as e: print('RESULT: libraries set, scan trigger failed: %r' % e)\n"
+    "else: print('RESULT: dry run, nothing changed')\n"
+)
+#: the step that lays Jellyfin out like a streaming service.
+_ORGANIZE_RE = re.compile(r"\b(?:configure|organi[sz]e|arrange|set\s*up|lay\s*out)\b", re.I)
+_JELLYFIN_RE = re.compile(r"\bjellyfin\b|\blibrar(?:y|ies)\b", re.I)
+
+
+def rewrite_organize_jellyfin(node: Optional[dict], commands: list[str], verify: list[str],
+                              services: Optional[list] = None,
+                              inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1510 — a "configure/organize the Jellyfin library" step gives Jellyfin a
+    streaming-service layout deterministically: a typed Movies library at /media/movies, a
+    typed TV Shows library at /media/tv, no leftover mixed library over /media, and a scan.
+
+    Live (job c75d77fa): the operator found Jellyfin "not organized" — measured, its three
+    libraries (Media, Movies, Shows) had NO ContentType (all mixed) and a redundant Media
+    library over the /media root, so there was no clean Movies/TV split or poster wall. The
+    engine fixes it through Jellyfin's own VirtualFolders API (remove+re-add each library with
+    the right collectionType, drop the mixed one, refresh). Idempotent and reversible: library
+    config only, never media files. Runs inside the Jellyfin guest; key read on the machine
+    (§17.1382) via `<JELLYFIN_API_KEY>`."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    title = str((node or {}).get("title") or "")
+    if not (_ORGANIZE_RE.search(title) and _JELLYFIN_RE.search(text) and re.search(r"\bjellyfin\b", text, re.I)):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("jellyfin", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_ORGANIZE_JELLYFIN_PY}" "<JELLYFIN_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # read-only-safe verify (§17.1505): the VirtualFolders list answers for an authenticated read.
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "jellyfin libraries HTTP %{{http_code}}" -H "X-Emby-Token: $JELLYFIN_API_KEY" '
+             f'"http://127.0.0.1:8096/Library/VirtualFolders"')
+    note = [{"why": (
+        f"drafted the Jellyfin layout from the engine's own shape (§17.1510): inside guest {gid} it types the "
+        f"Movies library (movies → /media/movies) and the TV Shows library (tvshows → /media/tv), removes any "
+        f"leftover mixed library over /media, and triggers a scan so posters and metadata populate — through "
+        f"Jellyfin's own VirtualFolders API, library config only, no media files touched.")}]
     return [run], [check], note
 
 
