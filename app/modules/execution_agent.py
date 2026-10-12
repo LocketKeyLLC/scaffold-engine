@@ -220,6 +220,14 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
                 terminal = "failed"
             else:
                 terminal = "failed"  # safety default (Session 3 early-return etc.)
+                # §17.1492 — unless every step is finished: a run started after an approval ran the LAST step
+                # (resolve_run → decide restarts the run) finds nothing to do, emits pipeline_complete, and the
+                # job was left at running → "failed". Live, the home-lab job: 131 done, 61 skipped, none failed.
+                left = (await db.execute(text(
+                    "SELECT count(*) FILTER (WHERE status NOT IN ('done', 'skipped')) AS open, count(*) AS total "
+                    "FROM dag_nodes WHERE job_id = :jid"), {"jid": job_id})).mappings().first()
+                if left and int(left["total"] or 0) > 0 and int(left["open"] or 0) == 0:
+                    terminal = "completed"
             # §17.1107 (ledger S-4) — was SELECT status → if != running return →
             # unguarded UPDATE: a cancel or completion landing between the two
             # statements was overwritten with 'failed'. One guarded claim now.
