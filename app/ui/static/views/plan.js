@@ -54,6 +54,12 @@ export function renderPlan(container, jobId, opts = {}) {
   let byKey = {};
   let jobStatus = null;
   let selectedKey = null;
+  // §17.1513 — the live automation view: the frame the engine is parked on (awaiting a
+  // decision), and the poll that recolours the graph while the job is still being worked.
+  let parked = null;
+  let firstLoad = true;
+  let pollTimer = null;
+  const LIVE_STATUSES = new Set(["executing", "running", "awaiting_decision", "researching", "planning"]);
 
   const warning = el("div", { class: "plan-warning hidden" });
   // UX overhaul — the toolbar is the plan's verbs only: how to start (the
@@ -164,11 +170,17 @@ export function renderPlan(container, jobId, opts = {}) {
   // ── Load ─────────────────────────────────────────────────────────
   async function load() {
     try {
-      const res = await api.get(`/nodes/${jobId}`);
+      // §17.1513 — also read the job for the awaiting_decision frame (what the engine is
+      // parked on), so the graph can mark it and the drawer can show what it will do.
+      const [res, job] = await Promise.all([
+        api.get(`/nodes/${jobId}`),
+        jobStore.get(jobId, { fresh: true }).catch(() => null),
+      ]);
       if (disposed) return;
       nodes = res.nodes || [];
       byKey = Object.fromEntries(nodes.map((n) => [n.node_key, n]));
-      jobStatus = res.job_status;
+      jobStatus = res.job_status || (job && job.status) || jobStatus;
+      parked = (job && job.metadata && job.metadata.awaiting_decision) || null;
       const ran = nodes.filter((n) => n.status !== "pending");
       if (ran.length) {
         warning.classList.remove("hidden");
@@ -180,14 +192,32 @@ export function renderPlan(container, jobId, opts = {}) {
       } else {
         warning.classList.add("hidden");
       }
-      graph.render(nodes);
-      if (selectedKey && byKey[selectedKey]) {
+      graph.render(nodes, { parked: parked && parked.node_key });
+      // §17.1513 — open the drawer only on the FIRST load. A poll tick must never re-open it:
+      // that would clobber a step the operator is editing. The graph recolours live; clicking a
+      // node (re)reads its current status and frame.
+      if (firstLoad && selectedKey && byKey[selectedKey]) {
         graph.setSelected(selectedKey);
         openEditDrawer(byKey[selectedKey]);
       }
+      firstLoad = false;
+      armPoll();
     } catch (e) {
       if (!disposed) mount(canvas, errorPanel(e, () => load()));
     }
+  }
+
+  // §17.1513 — while the job is still being worked, re-poll so the graph recolours as nodes
+  // move pending → running → done/failed and the parked node tracks the engine. Stops itself
+  // once the job is no longer live; paused while the tab is hidden (like the hub header poll).
+  function armPoll() {
+    if (pollTimer || disposed) return;
+    if (!LIVE_STATUSES.has(String(jobStatus || ""))) return;
+    pollTimer = setInterval(() => {
+      if (disposed || document.hidden) return;
+      if (!LIVE_STATUSES.has(String(jobStatus || ""))) { clearInterval(pollTimer); pollTimer = null; return; }
+      load();
+    }, 4000);   // registered in tests/test_spa_poll_modal_wiring.py
   }
 
   // ── The step editor: read first, edit second ─────────────────────────
@@ -235,10 +265,37 @@ export function renderPlan(container, jobId, opts = {}) {
     return { node: el("div", {}, input, datalist), read: () => input.value.trim() };
   }
 
+  function parkedPanel(node) {
+    // §17.1513 — when the engine is parked on this node, show what it is about to do and
+    // let the operator act. The decide verbs live on the Run stage, which this routes to.
+    if (!parked || parked.node_key !== node.node_key) return null;
+    const cmds = (parked.commands || []).map((c) => (typeof c === "string" ? c : c.command)).filter(Boolean);
+    const refused = (parked.refused || []).map((r) => (r && r.why) || "").filter(Boolean);
+    const opts = (parked.options || []).map((o) => (o && (o.label || o.id)) || "").filter(Boolean);
+    return el("div", { class: "card card-pad step-parked" },
+      el("div", { class: "row" }, el("span", { class: "tag warn", text: "⏸ the engine is waiting here" }),
+        parked.kind ? el("span", { class: "tag mono", text: String(parked.kind) }) : null),
+      el("p", { class: "step-parked-q", text: parked.question || parked.title || "Awaiting your decision." }),
+      parked.suggested ? el("p", { class: "dim", text: `Engine suggests: ${parked.suggested}` }) : null,
+      cmds.length
+        ? el("details", { class: "brief-details" }, el("summary", {}, `${cmds.length} command(s) it will run`),
+            el("pre", { class: "md-pre", text: cmds.join("\n") }))
+        : null,
+      refused.length
+        ? el("details", { class: "brief-details" }, el("summary", {}, `${refused.length} thing(s) it refused to run`),
+            el("pre", { class: "md-pre", text: refused.join("\n\n") }))
+        : null,
+      opts.length ? el("p", { class: "dim", text: `Choices: ${opts.join(" · ")}` }) : null,
+      el("button", { class: "btn btn-sm btn-primary", text: "Act on this step →",
+        title: "Open the run stage to approve, run, skip, or decide",
+        onClick: () => { window.location.hash = `#/job/${jobId}/run`; } }));
+  }
+
   function readView(node) {
     const deps = node.depends_on || [];
     const tool = TOOL_LABELS[node.tool] || node.tool || "LLM";
     return el("div", { class: "step-read" },
+      parkedPanel(node),
       el("div", { class: "row row-wrap step-read-tags" },
         statusBadge(node.status),
         el("span", { class: "tag", text: tool }),
@@ -504,6 +561,7 @@ export function renderPlan(container, jobId, opts = {}) {
 
   return () => {
     disposed = true;
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     document.removeEventListener("click", onDocClick);
     graph.destroy();
   };

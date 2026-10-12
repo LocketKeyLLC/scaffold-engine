@@ -92,8 +92,13 @@ export function stageFor(job) {
   if (GATE_STATUSES.has(st)) return "approve";
   if (st === "completed") return "output";
   if (["researching", "planning", "executing"].includes(st)) return "plan";
+  // §17.1513 — an AUTO-mode job that is running or parked on a decision opens on the live
+  // DAG, not the theater: the graph IS the automation surface (it polls, recolours, and
+  // lets the operator act on the parked node). Assist states keep the walkthrough (run);
+  // blocked/failed keep the run stage so the walkthrough offer is there.
+  if (st === "running" || st === "awaiting_decision") return "plan";
   if (st === "cancelled") return nodes > 0 ? "plan" : "idea";
-  return "run";   // running, assisted_*, awaiting_assist, blocked, failed, aggregating
+  return "run";   // assisted_*, awaiting_assist, blocked, failed, aggregating
 }
 
 /** Pure: which stages are open to click. Reached stages always; ahead only

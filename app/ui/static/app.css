@@ -699,7 +699,13 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .node.st-skipped { opacity: 0.55; }
 .node.st-skipped .node-accent { fill: var(--text-faint); }
 .node.st-pending .node-accent { fill: var(--purple); }
+/* §17.1513 — the node the engine is parked on (awaiting the operator) stands out and pulses. */
+.node.parked .node-box { stroke: var(--warn); stroke-width: 2.4; animation: nodepulse 1.4s ease-in-out infinite; }
+.node.parked .node-accent { fill: var(--warn); }
 @keyframes nodepulse { 0%,100% { stroke-opacity: 1; } 50% { stroke-opacity: 0.4; } }
+/* §17.1513 — the "engine is waiting here" panel in the node drawer. */
+.step-parked { border: 1px solid rgba(210,153,34,0.45); margin-bottom: 10px; }
+.step-parked .step-parked-q { font-weight: 600; margin: 6px 0; }
 
 /* Node detail drawer */
 .dag-drawer {
