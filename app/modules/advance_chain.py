@@ -260,9 +260,13 @@ async def resume_stranded_planning(*, older_than_minutes: Optional[int] = None,
             except ValueError:
                 pass
         assist = bool(marker.get("assist", False))
-        logger.warning("advance_chain_resume job_id=%s stranded_in=planning marker_phase=%s",
-                       jid, marker.get("phase"))
-        await start_advance_chain(jid, assist=assist, source="resume")
+        # §17.1498 — the marker records BOTH choices the operator made at the
+        # gate; a resume that carried only `assist` planned an auto-mode job and
+        # then left it idle in `executing` (the Run page showed a plan and no run).
+        execute = bool(marker.get("execute", False))
+        logger.warning("advance_chain_resume job_id=%s stranded_in=planning marker_phase=%s "
+                       "assist=%s execute=%s", jid, marker.get("phase"), assist, execute)
+        await start_advance_chain(jid, assist=assist, execute=execute, source="resume")
         resumed.append(jid)
     return resumed
 

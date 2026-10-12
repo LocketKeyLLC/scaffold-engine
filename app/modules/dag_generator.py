@@ -1703,23 +1703,33 @@ async def generate_dag(
     # wait on it. A prompt instruction was not enough: §17.686 has asked planners
     # for a configure-step-per-install since long before this operator's media
     # stack was installed and never configured.
+    # §17.1498 — `normalized` is still the planner's vocabulary (id/name/type);
+    # the backstop speaks the row vocabulary, so the translation lives in ONE
+    # place (`decisions_for_tasks`). Nothing is inserted into the live list until
+    # the edges and the graph check have accepted the result: the first live
+    # brief with an open question no step touched inserted a row-shaped node,
+    # raised on the edge build, swallowed it, and handed the half-inserted list
+    # to the leaf computation — `KeyError('id')`, job stranded in `planning`.
     try:
-        from app.modules.unanswered import ensure_decisions
-        _asks = ensure_decisions(normalized, brief or {})
+        from app.modules.unanswered import decisions_for_tasks
+        _asks = decisions_for_tasks(normalized, brief_data)
         if _asks:
-            _by = {n.get("node_key"): n for n in normalized}
+            _candidate = [dict(t) for t in normalized]
+            _by = {t["id"]: t for t in _candidate}
             for _a in _asks:
                 for _w in _a.pop("_waiters", []):
                     _n = _by.get(_w)
-                    if _n is not None and _a["node_key"] not in (_n.get("depends_on") or []):
-                        _n["depends_on"] = list(_n.get("depends_on") or []) + [_a["node_key"]]
-                normalized.insert(0, _a)             # decisions come first
-            edges = _build_edges(normalized)
-            graph_errors, warnings = _validate_graph(normalized, edges)
+                    if _n is not None and _a["id"] not in (_n.get("depends_on") or []):
+                        _n["depends_on"] = list(_n.get("depends_on") or []) + [_a["id"]]
+            _candidate = list(_asks) + _candidate        # decisions come first
+            _edges = _build_edges(_candidate)
+            graph_errors, _graph_warnings = _validate_graph(_candidate, _edges)
+            normalized, edges = _candidate, _edges
+            warnings.extend(w for w in _graph_warnings if w not in warnings)
             logger.warning("plan_decisions_inserted job=%s n=%d keys=%s", job_id, len(_asks),
-                           [a["node_key"] for a in _asks])
+                           [a["id"] for a in _asks])
             for _a in _asks:
-                warnings.append(f"{_a['node_key']} inserted: the operator could not answer this "
+                warnings.append(f"{_a['id']} inserted: the operator could not answer this "
                                 f"and steps were being planned around it")
     except Exception as exc:                        # never block a plan on this
         logger.warning("ensure_decisions_failed job=%s err=%r", job_id, exc)
