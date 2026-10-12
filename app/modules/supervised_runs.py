@@ -7220,10 +7220,15 @@ def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple
 #: runner's silent 20 000-char cap would truncate it; the pipe keeps it in the guest).
 #: Single-quoted Python strings only, so it sits inside `python3 -c "…"` unescaped.
 _COMPLETENESS_PY = (
-    "import sys,json\n"
+    "import sys,json,re\n"
     "d=json.load(sys.stdin)\n"
-    "show=sys.argv[1].lower()\n"
-    "m=[s for s in d if (s.get('title') or '').lower()==show] or [s for s in d if show in (s.get('title') or '').lower()]\n"
+    "show=sys.argv[1].lower().strip()\n"
+    "ini=lambda t: ''.join(w[0] for w in re.findall(r'[A-Za-z0-9]+', t or '')).lower()\n"
+    # §17.1506 — exact title, then substring, then INITIALISM: a step titled 'Check HIMYM
+    # completeness' must find 'How I Met Your Mother' in the library (its initials are himym).
+    "m=([s for s in d if (s.get('title') or '').lower()==show]\n"
+    "   or [s for s in d if show and show in (s.get('title') or '').lower()]\n"
+    "   or [s for s in d if show and ini(s.get('title') or '')==show.replace(' ','')])\n"
     "if not m:\n"
     "    print('RESULT: NOT IN LIBRARY ('+sys.argv[1]+')'); sys.exit(0)\n"
     "s=m[0]\n"
@@ -7237,7 +7242,15 @@ _COMPLETENESS_PY = (
     "print('RESULT: COMPLETE' if miss==0 else 'RESULT: MISSING %d episode(s)' % miss)\n"
 )
 #: the step whose work is "is this show complete in Sonarr/Radarr, and what is missing".
-_COMPLETENESS_RE = re.compile(r"complet(?:e|eness)|missing\s+episode", re.I)
+#: §17.1507 — "completeness"/"complete", NOT a bare "missing episode": the latter also
+#: appears in the ACTION steps ("Queue missing episodes", "Consolidate missing episodes
+#: list") that this read must NOT hijack. "completion" (Monitor downloads completion) does
+#: not match `complet(?:e|eness)`.
+_COMPLETENESS_RE = re.compile(r"\bcomplet(?:e|eness)\b", re.I)
+#: §17.1507 — an action the step DOES, not a state it READS: these steps change the
+#: library (queue/add/search/…) and are the model's to draft, never a completeness read.
+_COMPLETENESS_ACTION_RE = re.compile(
+    r"\b(?:queue|add|download|grab|import|search|trigger|fetch|request|monitor|consolidate|set)\b", re.I)
 _SEASONS_RE = re.compile(r"\b(?:season|episode)s?\b", re.I)
 _SHOW_FROM_TITLE_RE = re.compile(r"\b(?:check|verify|confirm)\s+(.+?)\s+complet", re.I)
 _SHOW_FROM_PROMPT_RE = re.compile(r"\b(?:query\s+\w+\s+for|for)\s+(.+?)\s*(?:[.\n]|$)", re.I)
@@ -7280,7 +7293,10 @@ def rewrite_completeness_check(node: Optional[dict], commands: list[str], verify
     Replaces the step's commands AND checks when the step is a completeness check and the
     *arr guest is known; otherwise leaves the draft untouched."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
-    if not (_COMPLETENESS_RE.search(text) and _SEASONS_RE.search(text)):
+    title = str((node or {}).get("title") or "")
+    # §17.1507 — only a CHECK, never an action step. "Queue missing episodes" matched the
+    # old detector on "missing episode" and was hijacked into a read that queued nothing.
+    if not (_COMPLETENESS_RE.search(text) and _SEASONS_RE.search(text)) or _COMPLETENESS_ACTION_RE.search(title):
         return list(commands or []), list(verify or []), []
     app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", text, re.I) else "sonarr"
     gid = _arr_guest(app, services, inventory)

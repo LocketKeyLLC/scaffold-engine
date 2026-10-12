@@ -77,6 +77,26 @@ def test_the_parser_reports_completeness_on_realistic_series_json():
     assert "RESULT: MISSING 15 episode(s)" in out.stdout
 
 
+def test_an_abbreviated_title_resolves_by_initials():
+    """§17.1506 — a step titled 'Check HIMYM completeness' must find 'How I Met Your
+    Mother' in the library (its word-initials are himym). Live, T21 recorded NOT IN
+    LIBRARY for a show that is present and missing 9."""
+    import json
+    lib = [{"title": "How I Met Your Mother", "seasons": [
+        {"seasonNumber": 1, "statistics": {"episodeCount": 22, "episodeFileCount": 22}},
+        {"seasonNumber": 6, "statistics": {"episodeCount": 24, "episodeFileCount": 15}},
+    ]}]
+    out = subprocess.run(["python3", "-c", _COMPLETENESS_PY, "HIMYM"],
+                         input=json.dumps(lib), capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "SERIES: How I Met Your Mother" in out.stdout
+    assert "RESULT: MISSING 9 episode(s)" in out.stdout
+    # the full title still matches directly
+    out2 = subprocess.run(["python3", "-c", _COMPLETENESS_PY, "How I Met Your Mother"],
+                          input=json.dumps(lib), capture_output=True, text=True)
+    assert "RESULT: MISSING 9 episode(s)" in out2.stdout
+
+
 def test_a_show_not_in_the_library_is_reported_not_failed():
     import json
     out = subprocess.run(["python3", "-c", _COMPLETENESS_PY, "Firefly"],
@@ -88,6 +108,20 @@ def test_a_non_completeness_step_is_left_to_the_model():
     node = {"title": "Install Radarr", "prompt_template": "apt-get install radarr"}
     out, _, notes = rewrite_completeness_check(node, ["x"], ["y"], SERVICES, INV)
     assert out == ["x"] and not notes
+
+
+def test_an_action_step_is_not_hijacked_into_a_read():
+    """§17.1507 — the queue/consolidate/monitor steps mention "missing episodes" but DO
+    something; the completeness read must not hijack them. Live, "Queue missing episodes
+    in Sonarr" was turned into a NOT-IN-LIBRARY read and recorded done having queued nothing."""
+    for title, prompt in [
+        ("Queue missing episodes in Sonarr", "POST a MissingEpisodeSearch for each season with gaps"),
+        ("Consolidate missing episodes list", "Gather the per-show missing episodes into one list"),
+        ("Monitor downloads completion", "Watch the queue until the missing episodes finish"),
+    ]:
+        node = {"title": title, "prompt_template": prompt}
+        out, _, notes = rewrite_completeness_check(node, ["model draft"], ["chk"], SERVICES, INV)
+        assert out == ["model draft"] and not notes, f"{title!r} must be left to the model"
 
 
 def test_it_does_not_fire_without_a_known_arr_guest():
