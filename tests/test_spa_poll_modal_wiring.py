@@ -41,6 +41,9 @@ POLL_REGISTRY: dict[tuple[str, str], dict] = {
     ("approvals.js", "setInterval(pollStatus, 2500)"): {"guard": "no-remount", "renders": False, "opens_modal": False},
     ("assist.js", "setInterval(paintStatus, 1000)"): {"guard": "no-remount", "renders": False, "opens_modal": False},
     ("job_hub.js", "const timer = setInterval(tick, 4000)"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
+    # §17.1513 — the live DAG automation view re-polls to recolour nodes; it opens the drawer only
+    # on first load (never on a tick), so a poll cannot clobber a step the operator is editing.
+    ("plan.js", "pollTimer = setInterval(() => {"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
     ("assist.js", "idlePoll = setInterval"): {"guard": "announce-once", "renders": True, "opens_modal": True},
     ("app.js", "attentionTimer = setInterval"): {"guard": "no-remount", "renders": False, "opens_modal": False},
     ("app.js", "healthTimer = setInterval"): {"guard": "document.hidden", "renders": True, "opens_modal": False},

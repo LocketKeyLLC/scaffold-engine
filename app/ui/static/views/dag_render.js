@@ -133,7 +133,7 @@ export function createGraphCanvas(canvas) {
     nodeEls.forEach((g) => g.classList.remove("sel"));
   }
 
-  function draw(data) {
+  function draw(data, parkedKey) {
     const { coords, byKey } = data;
     svgRoot = svg("svg", { class: "dag-svg", width: "100%", height: "100%" });
     // arrow marker
@@ -161,7 +161,10 @@ export function createGraphCanvas(canvas) {
     const gNodes = svg("g", { class: "nodes" });
     for (const n of Object.values(byKey)) {
       const c = coords[n.node_key];
-      const g = svg("g", { class: `node st-${n.status}`, transform: `translate(${c.x},${c.y})` });
+      // §17.1513 — the node the engine is parked on (awaiting a decision/approval) is marked
+      // `parked` so the live DAG shows at a glance where the engine is waiting for the operator.
+      const parked = parkedKey && n.node_key === parkedKey ? " parked" : "";
+      const g = svg("g", { class: `node st-${n.status}${parked}`, transform: `translate(${c.x},${c.y})` });
       g.dataset.key = n.node_key;
       g.append(svg("rect", { class: "node-box", width: NW, height: NH, rx: 9 }));
       g.append(svg("rect", { class: "node-accent", width: 5, height: NH, rx: 2 }));
@@ -234,9 +237,9 @@ export function createGraphCanvas(canvas) {
   }
 
   return {
-    render(nodes) {
+    render(nodes, opts = {}) {
       LAYOUT = layout(nodes || []);
-      draw(LAYOUT);
+      draw(LAYOUT, opts.parked);
       if (selected && LAYOUT.byKey[selected]) setSelected(selected);
       return LAYOUT;
     },

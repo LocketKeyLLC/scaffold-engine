@@ -75,7 +75,10 @@ test("#/job/:id opens on the stage the job is AT", () => {
   assert.equal(stageFor(j("researching")), "plan");
   assert.equal(stageFor(j("planning")), "plan");
   assert.equal(stageFor(j("executing")), "plan");
-  for (const s of ["running", "assisted_running", "assisted_paused", "awaiting_assist", "awaiting_decision", "blocked", "failed"]) assert.equal(stageFor(j(s)), "run", s);
+  // §17.1513 — auto-mode active (running / parked on a decision) opens on the live DAG
+  for (const s of ["running", "awaiting_decision"]) assert.equal(stageFor(j(s)), "plan", s);
+  // assist states and the stopped states keep the run stage (walkthrough / theater)
+  for (const s of ["assisted_running", "assisted_paused", "awaiting_assist", "blocked", "failed"]) assert.equal(stageFor(j(s)), "run", s);
   assert.equal(stageFor(j("completed")), "output");
   assert.equal(stageFor(j("cancelled", { node_count: 0 })), "idea");
   assert.equal(stageFor(j("cancelled")), "plan");
