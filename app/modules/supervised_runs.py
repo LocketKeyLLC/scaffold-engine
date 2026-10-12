@@ -5288,6 +5288,16 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # the key substitution and the host-tool gate see it (else it is refused as a
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
+    # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
+    # inside that guest (measured port→guest map), BEFORE the key reader and the
+    # §17.1368 refusal gate, so the call reaches the service instead of parking.
+    _loop_notes: list[dict] = []
+    if services:
+        try:
+            from app.modules import service_truth as _st_fix
+            cmds, verify, _loop_notes = _st_fix.send_loopback_into_its_guest(cmds, verify, services)
+        except Exception as exc:
+            logger.warning("loopback_repair_failed err=%r", exc)
     # §17.1500 — a readable (non-stored) service key the drafter wrote as `$NAME`
     # becomes the `<NAME>` placeholder in the guest's own shell, so the reader below
     # fills it. A stored secret's `$NAME` is left for the runner to inject.
@@ -5305,7 +5315,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # configured" is `/{resource}/testall`, which needs no body. Repair it here, before
     # the §17.1378b refusal gate, so a connectivity-verify step runs instead of parking.
     cmds, verify, _test_notes = repair_empty_body_test_call(cmds, verify)
-    _mv_notes = list(_mv_notes) + _test_notes
+    _mv_notes = list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
     if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):

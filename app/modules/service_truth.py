@@ -1096,6 +1096,83 @@ def _sh_functions(text: str) -> list:
 
 
 
+#: §17.1502 — a loopback target with a literal port: `http://127.0.0.1:9696`,
+#: `localhost:8080`, `http://[::1]:7878`. The port is what names the guest.
+_LOOPBACK_LITERAL_PORT_RE = re.compile(
+    r"(?:https?://)?(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]):(\d{2,5})\b")
+
+
+def _sq_word(s: str) -> str:
+    """`s` as one single-quoted shell word (close/escape/reopen each quote)."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def send_loopback_into_its_guest(
+        commands: list[str], verify: list[str], services: list,
+) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1502 — a host-side command that reaches a guest's port on loopback is
+    wrapped to run INSIDE that guest, using the port→guest map the engine measured.
+
+    Live (job c75d77fa T5v2, 2026-10-12): the "Verify testable" step drafted
+    `curl -s "http://localhost:9696/api/v1/indexer" -H "X-Api-Key: $(cat
+    /var/lib/prowlarr/config.xml | grep …)"` as a HOST command. Prowlarr listens
+    inside guest 102, not on the host loopback, so `loopback_on_the_host`
+    (§17.1368) refused it — and its own config read is inside that guest too. The
+    engine measured which guest owns 9696, so it repairs the target instead of
+    parking: the whole command runs in guest 102, where both the port and the
+    config live.
+
+    Narrow and provable: a SINGLE command, not already reaching a guest
+    (`pct exec` / `qm guest exec` / `ssh`), whose literal loopback port(s) all
+    belong to ONE measured guest. Anything ambiguous (two guests' ports, a port
+    in a variable) is left to the §17.1368 refusal."""
+    if not services:
+        return list(commands or []), list(verify or []), []
+    by_port: dict = {}
+    for s in services:
+        for p in (getattr(s, "ports", ()) or ()):
+            by_port.setdefault(str(p), s)
+    if not by_port:
+        return list(commands or []), list(verify or []), []
+
+    moved: set = set()
+
+    def fix(seq: list[str]) -> tuple[list[str], int]:
+        out, n = [], 0
+        for c in seq or []:
+            line = str(c)
+            if ("\n" in line
+                    or re.search(r"(?<![\w.-])(?:pct\s+exec|qm\s+guest\s+exec)\s+\d", line)
+                    or re.search(r"(?<![\w.-])ssh\b", line)):
+                out.append(c)                   # multi-line, or already reaches a guest
+                continue
+            ports = {m.group(1) for m in _LOOPBACK_LITERAL_PORT_RE.finditer(line)}
+            guest_ports = [p for p in ports if p in by_port]
+            if not guest_ports:
+                out.append(c)
+                continue
+            guests = {getattr(by_port[p], "guest", "") for p in guest_ports}
+            if len(guests) != 1 or not next(iter(guests)):
+                out.append(c)                   # ambiguous or no guest id: leave it to the refusal
+                continue
+            svc = by_port[guest_ports[0]]
+            prefix = in_guest(getattr(svc, "guest", ""), bool(getattr(svc, "vm", False)))
+            out.append(f"{prefix} sh -c {_sq_word(line)}")
+            n += 1
+            moved.add(f"{getattr(svc, 'name', '?')}:{guest_ports[0]} (guest {getattr(svc, 'guest', '?')})")
+        return out, n
+
+    out_cmds, nc = fix(commands)
+    out_verify, nv = fix(verify)
+    notes: list[dict] = []
+    if nc or nv:
+        notes.append({"why": (
+            "a connectivity check reached a service on the HOST's loopback, but the engine measured that "
+            "port inside a guest (" + "; ".join(sorted(moved)) + "); wrapped the call to run inside that "
+            "guest, where both the port and its config live (§17.1502).")})
+    return out_cmds, out_verify, notes
+
+
 def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
                          services: list) -> list[dict]:
     r"""§17.1368 — a block running ON THE HOST reaching a guest's port on loopback.
