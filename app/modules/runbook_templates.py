@@ -614,6 +614,28 @@ def subject_gid(node: dict, truth=None) -> Optional[str]:
     return subject_guest(node) or (str(getattr(truth, "gid", "") or "") or None)
 
 
+_SECRET_REF_IN_TEXT_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,63})\b|\b(?:stored\s+secret|secret)\s+`?([A-Z][A-Z0-9_]{2,63})\b")
+_CREDENTIAL_USE_RE = re.compile(r"\b(?:log\s*in|login|sign\s*in|auth(?:enticate)?|password@-|--password|-u\s+\w+:|"
+                                r"api\s*key|X-Api-Key|Authorization)\b", re.I)
+_SECRET_AS_FILE_RE = re.compile(r"SECRET_FILES|\b(?:config(?:uration)?|conf)\s+(?:file\s+)?(?:is|from|holds)\b.*\bsecret\b|"
+                                r"\.(?:conf|key|pem|json|env)\b[^.\n]{0,40}\bsecret\b", re.I)
+
+
+def logs_in_with_a_stored_secret(node: dict) -> bool:
+    """§17.1495 — does this step's work log in to something with a value the engine stores as a secret?
+
+    The runner hands a stored secret only to a HOST command whose text names it; every guest template runs its
+    work INSIDE the guest, where the value is empty. Live, ADD170 (qBittorrent's port through its Web API, login
+    as admin with MASS_PASSWORD) was drafted from run_in_container three times and refused three times; ADD169, the
+    same login with no template, ran first time: `pct exec 105 -- sh -c '… password@- …' <<< "$MASS_PASSWORD"`. A
+    secret that is a FILE's content (a WireGuard config) stays with the template's SECRET_FILES (§17.1489)."""
+    from app.modules.runbook_inputs import secret_name
+    text = _text(node)
+    work = re.split(r"\bDone when\b", text, maxsplit=1, flags=re.I)[0]
+    names = {g for m in _SECRET_REF_IN_TEXT_RE.finditer(work) for g in m.groups() if g and secret_name(g)}
+    return bool(names) and bool(_CREDENTIAL_USE_RE.search(work)) and not _SECRET_AS_FILE_RE.search(work)
+
+
 def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
     """The first template whose ``applies`` holds for this step and this
     measured guest; None means today's model-written path."""
@@ -623,9 +645,13 @@ def select_template(node: dict, truth, services: Optional[list] = None) -> Optio
         return None
     if not subject_gid(node, truth):
         return None
+    login = logs_in_with_a_stored_secret(node)       # §17.1495 — the login runs from the host, on stdin
     for t in TEMPLATES:
         try:
             if t.applies(node, truth):
+                # only the general in-guest templates: an OS install or a console read carries its own secrets
+                if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+                    return None
                 return t
         except Exception:
             continue
