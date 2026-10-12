@@ -5306,6 +5306,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _cs_notes:
         cmds, verify = _cs_cmds, _cs_verify
         _comp_notes = list(_comp_notes) + _cs_notes
+    # §17.1516 — "deploy FlareSolverr": create its own LXC (host) and run the official Docker
+    # container inside it, deterministically (the plan had only the decision, not the deploy step).
+    _fs_cmds, _fs_verify, _fs_notes = rewrite_deploy_flaresolverr(node, cmds, verify, services, inventory)
+    if _fs_notes:
+        cmds, verify = _fs_cmds, _fs_verify
+        _comp_notes = list(_comp_notes) + _fs_notes
     # §17.1510 — a "configure/organize the Jellyfin library" step gets the streaming-service
     # layout (typed Movies/TV libraries, no mixed pile, a scan) deterministically.
     _jf_cmds, _jf_verify, _jf_notes = rewrite_organize_jellyfin(node, cmds, verify, services, inventory)
@@ -7495,6 +7501,80 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
         f"grabbed again) and removeFromClient=true (drops the partials from qBittorrent), then triggers "
         f"MissingEpisodeSearch to pull better-seeded releases — two API calls, no per-item loop.")}]
     return [run], [check], note
+
+
+#: §17.1516 — deploy FlareSolverr as its OWN new LXC (operator decision ASK1), so Prowlarr can
+#: route its Cloudflare-gated indexers through it. Measured slot on this homelab (2026-10-12):
+#: containers 101-105/111/120/130 exist → next free id 107; LAN .20-.25 taken → .26 free; bridge
+#: vmbr0, gw .1, template local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst, rootfs local-lvm,
+#: all media CTs carry nesting=1. FlareSolverr's official image bundles Chromium, so the reliable
+#: path is a Debian LXC running the official container (nesting=1,keyctl=1 for Docker). Idempotent:
+#: the create is skipped if 107 already exists; the container is replaced, not duplicated.
+_FS_VMID = "107"
+_FS_IP = "192.168.1.26"
+_FS_TEMPLATE = "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
+#: the host prologue: create (if absent) + start + wait-running + let the network settle. One host
+#: command, well inside the 180 s budget (create is quick, boot is the only wait).
+_FS_CREATE = (
+    "sh -c '"
+    f"if pct status {_FS_VMID} >/dev/null 2>&1; then echo \"CT {_FS_VMID} already exists: $(pct status {_FS_VMID})\"; "
+    f"else pct create {_FS_VMID} {_FS_TEMPLATE} "
+    "--hostname flaresolverr --cores 2 --memory 1024 --swap 512 "
+    "--rootfs local-lvm:8 "
+    f"--net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip={_FS_IP}/24,type=veth "
+    "--features nesting=1,keyctl=1 --unprivileged 1 --onboot 1 --start 1 && echo \"created CT " + _FS_VMID + "\"; fi; "
+    f"pct status {_FS_VMID} | grep -q running || pct start {_FS_VMID}; "
+    f"n=0; while [ $n -lt 24 ]; do pct status {_FS_VMID} | grep -q running && break; n=$((n+1)); sleep 5; done; "
+    f"pct exec {_FS_VMID} -- getent hosts deb.debian.org >/dev/null 2>&1 || sleep 5; "
+    f"echo \"CT {_FS_VMID} $(pct status {_FS_VMID})\"'"
+)
+#: the in-guest install (NO single quotes — the executor re-wraps a `pct exec … bash -c '…'` into the
+#: §17.1317 detached systemd unit, so a long apt + get.docker.com + image pull is polled across the
+#: wait phases rather than cut by one command's budget). Replaces any old container, waits for :8191.
+_FS_INSTALL_BODY = (
+    "export DEBIAN_FRONTEND=noninteractive; "
+    "apt-get update; apt-get install -y curl ca-certificates; "
+    "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh; "
+    "systemctl enable --now docker; "
+    "docker rm -f flaresolverr 2>/dev/null || true; "
+    "docker run -d --name flaresolverr --restart unless-stopped -p 8191:8191 "
+    "-e LOG_LEVEL=info ghcr.io/flaresolverr/flaresolverr:latest; "
+    "n=0; while [ $n -lt 45 ]; do curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1 && break; n=$((n+1)); sleep 4; done; "
+    "if curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1; then echo \"FlareSolverr ready on 8191\"; "
+    "else echo \"FAILED: flaresolverr not responding on 8191\"; docker logs flaresolverr 2>&1 | tail -30; exit 1; fi"
+)
+_FS_INSTALL = f"pct exec {_FS_VMID} -- bash -c '{_FS_INSTALL_BODY}'"
+_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc|service|deploy|install)\b", re.I)
+
+
+def rewrite_deploy_flaresolverr(node: Optional[dict], commands: list[str], verify: list[str],
+                                services: Optional[list] = None,
+                                inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1516 — "deploy FlareSolverr" done deterministically, as its own new LXC.
+
+    The plan carried only the ASK1 decision ("how should FlareSolverr run") and no step that
+    actually stands it up. This capability fires on a "deploy/install/create FlareSolverr" step and
+    produces the real deploy: a host-side `pct create` of container 107 (the measured next-free id,
+    .26 on vmbr0) then the official FlareSolverr Docker container inside it. The install is a single
+    `pct exec … bash -c '…'`, which the executor re-wraps into the §17.1317 detached systemd unit, so
+    the long apt + Docker install + image pull is polled across the wait phases, not cut by one
+    command's budget. Idempotent: the create is skipped when 107 exists, and the container is replaced
+    rather than duplicated. Verify reads :8191 through the read-only channel (no python3/`$()`)."""
+    title = str((node or {}).get("title") or "")
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_FLARESOLVERR_RE.search(title) or _FLARESOLVERR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    run = [_FS_CREATE, _FS_INSTALL]
+    check = [(f'pct exec {_FS_VMID} -- curl -s -o /dev/null -w "flaresolverr HTTP %{{http_code}}" '
+              f"http://127.0.0.1:8191/")]
+    note = [{"why": (
+        f"drafted the FlareSolverr deploy from the engine's own shape (§17.1516): the plan had only the "
+        f"decision on how it should run, not a step that stands it up. On the host it creates container "
+        f"{_FS_VMID} (the measured next-free id, {_FS_IP} on vmbr0, Debian 12, nesting+keyctl for Docker) if "
+        f"it does not already exist, then inside it runs the official FlareSolverr Docker container on :8191 — "
+        f"the long install is polled across the wait phases as a detached unit. Re-runnable: the create is "
+        f"skipped when {_FS_VMID} exists and the container is replaced, not duplicated.")}]
+    return run, check, note
 
 
 #: §17.1510 — give Jellyfin the Netflix-style layout: a typed Movies library at /media/movies,
