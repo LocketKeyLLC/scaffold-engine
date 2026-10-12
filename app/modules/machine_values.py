@@ -275,6 +275,124 @@ def read_on_the_machine(commands: list[str], verify: list[str],
     return out_cmds, out_verify, notes
 
 
+#: §17.1499 — the OUTER guest-exec wrapper on a drafted command.
+_GUEST_EXEC_HEAD = re.compile(r"^(\s*)(pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\s+--\s+(.*)$", re.S)
+
+
+def _close_paren(s: str, open_at: int) -> int:
+    """Index of the `)` that closes the `$(` whose `(` is at ``open_at``,
+    counting nested parens and skipping quoted spans the way a shell does.
+    ``-1`` if it never closes."""
+    depth = 0
+    i = open_at
+    in_sq = in_dq = False
+    while i < len(s):
+        ch = s[i]
+        if in_sq:
+            if ch == "'":
+                in_sq = False
+        elif in_dq:
+            if ch == '"':
+                in_dq = False
+        elif ch == "'":
+            in_sq = True
+        elif ch == '"':
+            in_dq = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _unwrap_same_guest_subs(rest: str, gid: str) -> tuple[str, bool]:
+    """Strip a redundant inner ``pct exec GID --`` / ``qm guest exec GID --`` from
+    inside every ``$( … )`` in ``rest`` whose guest id is ``gid`` — the context
+    already IS that guest. Returns ``(rewritten, changed)``."""
+    inner = re.compile(r"^(pct\s+exec|qm\s+guest\s+exec)\s+" + re.escape(gid) + r"\s+--\s+", re.S)
+    out, i, changed = [], 0, False
+    while i < len(rest):
+        j = rest.find("$(", i)
+        if j < 0:
+            out.append(rest[i:])
+            break
+        close = _close_paren(rest, j + 1)
+        if close < 0:                       # unbalanced — leave the tail untouched
+            out.append(rest[i:])
+            break
+        out.append(rest[i:j + 2])           # up to and including "$("
+        body = rest[j + 2:close]
+        m = inner.match(body.lstrip())
+        if m:
+            body = body.lstrip()[m.end():]
+            changed = True
+        out.append(body)
+        out.append(")")
+        i = close + 1
+    return "".join(out), changed
+
+
+def fold_redundant_nested_guest_exec(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1499 — a ``$(pct exec GID -- …)`` nested inside a command that already
+    runs in guest ``GID`` is the drafter avoiding nested quotes, and it is wrong
+    two ways: the gate refuses the inner ``pct`` as a host tool run in a guest
+    (`host_only_inside_a_guest`), and even allowed it would run in the HOST shell
+    that expands the outer command's ``$( … )`` BEFORE ``pct exec`` is invoked —
+    unprivileged, off the wrong machine.
+
+    Live (job c75d77fa T3v2, 2026-10-12): the Jellyfin-token read was drafted as
+    ``pct exec 101 -- curl … -H "X-Emby-Token: $(pct exec 101 -- python3 -c '…')" …``
+    although the drafter was shown both ``<JELLYFIN_API_KEY>`` and the canonical
+    ``pct exec 101 -- sh -c 'curl … $(python3 -c …) …'`` form (§17.1382). It
+    sidestepped the quoting by pulling the read out into its own ``pct exec``.
+
+    The fold is mechanical and provable: the inner guest context EQUALS the
+    outer one, so the inner wrapper is redundant — strip it, and promote the
+    guest command to a single ``sh -c`` payload so the ``$( … )`` is evaluated by
+    the guest's shell (where the read belongs and runs privileged). The result
+    is byte-for-byte the form the engine already endorses; `read_on_the_machine`
+    and every gate then see an ordinary single-guest command."""
+    def fold(seq: list[str]) -> tuple[list[str], int]:
+        out, n = [], 0
+        for c in seq or []:
+            m = _GUEST_EXEC_HEAD.match(str(c))
+            if not m:
+                out.append(c)
+                continue
+            indent, tool, gid, rest = m.groups()
+            # Already an `sh -c '…'` payload: unwrap in place; the substitution
+            # is already guest-evaluated, so no re-wrap is needed.
+            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            if sh:
+                payload, changed = _unwrap_same_guest_subs(sh.group(1), gid)
+                if changed:
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    n += 1
+                else:
+                    out.append(c)
+                continue
+            new_rest, changed = _unwrap_same_guest_subs(rest, gid)
+            if changed:
+                out.append(f"{indent}{tool} {gid} -- sh -c {_sq(new_rest)}")
+                n += 1
+            else:
+                out.append(c)
+        return out, n
+
+    out_cmds, nc = fold(commands)
+    out_verify, nv = fold(verify)
+    notes: list[dict] = []
+    if nc or nv:
+        notes.append({"why": (
+            "folded a nested `$(pct exec … )` that the drafter put inside a command already running in that "
+            "same guest into the guest's own shell (`sh -c '… $( … ) …'`): the inner wrapper was redundant and "
+            "would have run the read on the host, unprivileged, off the wrong machine (§17.1499).")})
+    return out_cmds, out_verify, notes
+
+
 # ── §17.1333: what the ENGINE knows about itself ──────────────────────────────
 #: `<SCAFFOLD_ENGINE_URL>`, `<ENGINE_IP>`, `<SCAFFOLD_ENGINE_HOST>` — the engine's
 #: own address on the operator's network. Never a name holding a credential.
