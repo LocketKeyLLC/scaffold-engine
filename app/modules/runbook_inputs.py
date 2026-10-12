@@ -211,7 +211,7 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
         # §17.1189 — a name whose every word is generic (``CONTAINER_IP``,
         # ``HOST_IP``) has nothing to match on, and an ADDRESS drawn from an
         # unrelated fact is a different machine or network: on the real session
-        # this offered 67.240.32.243 — the public address of the operator's
+        # this offered 198.51.100.7 — the public address of the operator's
         # DuckDNS domain, learned from a `getent hosts` fact — as a candidate
         # container IP. An id or a port from an unmatched fact is still an id
         # or a port on this host, so those stay on offer (with their source).

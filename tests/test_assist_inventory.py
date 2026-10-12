@@ -101,8 +101,8 @@ def _env():
         "facts": [
             "Proxmox host vmbr0 is configured static 192.168.1.156/24, gateway 192.168.1.1, bridge-ports nic3.",
             "Container listeners: CT 101 on 0.0.0.0:8096, CT 111 on *:3001, CT 120 on *:443 and *:80; CT 105 has no listener.",
-            "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect' against 67.240.32.243.",
-            "Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243.",
+            "The ACME challenge for homelab-demo.duckdns.org fails with 'Timeout during connect' against 198.51.100.7.",
+            "Spectrum router (SAX1V1K) WAN IPv4 is 198.51.100.7.",
             "VM 106 (palworld-server) status is stopped; VM 110 (ai-vm) status is running.",
             "The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129.",
             "No vm-100 LVs exist, confirming VM 100 is fully removed.",
@@ -127,7 +127,7 @@ def test_map_joins_id_name_ip_mac_ports_and_status():
 
 def test_map_names_the_entry_point_and_the_ingress_path():
     sm = inv.build_system_map(_env())
-    assert sm["ingress"] == {"domain": "defrusciohomelab.duckdns.org", "wan": "67.240.32.243",
+    assert sm["ingress"] == {"domain": "homelab-demo.duckdns.org", "wan": "198.51.100.7",
                              "entry_id": "120", "entry_ip": "192.168.1.26", "upstreams": {}}
     text = inv.render_system_map(_env())
     assert "router port-forward TCP 80,443 → 192.168.1.26 = CT 120 (caddy-proxy), MAC BC:24:11:AC:C9:06" in text
@@ -159,7 +159,7 @@ def test_map_is_the_first_thing_after_the_pins_in_the_environment_block():
 
 def test_goal_keywords_never_carry_hostnames_ips_or_urls():
     from app.modules.assist_research_lib import _goal_keywords
-    kws = _goal_keywords("External HTTPS to https://defrusciohomelab.duckdns.org times out from cellular; host at 192.168.1.26", 6)
+    kws = _goal_keywords("External HTTPS to https://homelab-demo.duckdns.org times out from cellular; host at 192.168.1.26", 6)
     assert "org times" not in kws and not any("duckdns" in k or "192.168" in k for k in kws)
     assert "times out" in kws
 
@@ -413,13 +413,13 @@ def test_ingress_gate_uses_the_turns_focus():
 
 def test_screen_paste_detector_and_surface_fact_check():
     from app.modules.assist_screens import looks_like_screen_paste, surface_fact_present
-    screen = "Spectrum Logo\nYour Spectrum Router Info\nDownload the My Spectrum app to manage your WiFi Network settings, such as:\n\n    Customize your network name and password.\n    Manage devices connected to your network.\n    Change advanced settings like DNS, port forwarding and more.\n\nInternet Status\nConnected\nIPv4\n67.240.32.243\nModel\nSAX1V1K\n"
+    screen = "Spectrum Logo\nYour Spectrum Router Info\nDownload the My Spectrum app to manage your WiFi Network settings, such as:\n\n    Customize your network name and password.\n    Manage devices connected to your network.\n    Change advanced settings like DNS, port forwarding and more.\n\nInternet Status\nConnected\nIPv4\n198.51.100.7\nModel\nSAX1V1K\n"
     assert looks_like_screen_paste(screen)
     assert not looks_like_screen_paste("root@pve:~# pct exec 120 -- ip -4 addr show eth0 | grep inet\n    inet 192.168.1.26/24 brd 192.168.1.255 scope global eth0\nroot@pve:~# \n" * 3)
     assert not looks_like_screen_paste("i was able to do the port forwarding. however the container cannot reserve an ip address.")
     assert not looks_like_screen_paste("one\ntwo\nthree")                     # too short to be a screen
     assert surface_fact_present("The router page at 192.168.1.1 shows status only; port forwarding is changed in the My Spectrum app.")
-    assert not surface_fact_present("Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243.")
+    assert not surface_fact_present("Spectrum router (SAX1V1K) WAN IPv4 is 198.51.100.7.")
     import pathlib
     src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_memory.py").read_text(encoding="utf-8")
     block = src[src.index("§17.1087 — a SCREEN paste must yield"):src.index("assist_surface_fact_pass_failed")]
@@ -442,7 +442,7 @@ def test_dominant_products_and_class_query_on_a_business_job():
     assert cq.startswith("QuickBooks Online") and "greyed out" in cq and "recurring invoices" in cq
     assert len(cq.split()) == len({t.lower() for t in cq.split()})            # no duplicated tokens
     # a hardware job still gets its vendor from the notes/facts, and nothing generic is a "product"
-    env2 = {"facts": ["Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243.", "In the Spectrum app the operator does not see 192.168.1.26.",
+    env2 = {"facts": ["Spectrum router (SAX1V1K) WAN IPv4 is 198.51.100.7.", "In the Spectrum app the operator does not see 192.168.1.26.",
                       "VM 106 (palworld-server) status is stopped; VM 110 (ai-vm) status is running.", "The Proxmox host is at 192.168.1.156."]}
     assert dominant_products(env2) == ["Spectrum"]
     assert dominant_products({}) == [] and dominant_products({"facts": ["one mention of Netgear only"]}) == []
@@ -473,12 +473,12 @@ def test_blocking_facts_pick_the_steps_they_invalidate_and_skip_status_facts():
 def test_write_ledger_records_the_tee_chunked_rewrite_and_truncate():
     from app.modules.assist_files import parse_file_writes
     reply = ("pct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n"
-             "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\ndefrusciohomelab.duckdns.org {\nEOF\n"
+             "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\nhomelab-demo.duckdns.org {\nEOF\n"
              "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\n    reverse_proxy /jellyfin/* 192.168.1.20:8096\nEOF\n"
              "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\n}\nEOF\n")
     w = parse_file_writes(reply)
     r = w["/etc/caddy/Caddyfile"]
-    assert r["lines"] == 3 and r["expected"] == len("defrusciohomelab.duckdns.org {\n    reverse_proxy /jellyfin/* 192.168.1.20:8096\n}\n".encode())
+    assert r["lines"] == 3 and r["expected"] == len("homelab-demo.duckdns.org {\n    reverse_proxy /jellyfin/* 192.168.1.20:8096\n}\n".encode())
     assert parse_file_writes("pct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n")["/etc/caddy/Caddyfile"]["expected"] == 0
     assert parse_file_writes("cat > /tmp/x <<E\nab\nE\ncat >> /tmp/x <<E\ncd\nE\n")["/tmp/x"]["expected"] == 6   # redirect form unchanged
 
@@ -487,7 +487,7 @@ def _ingress_unmet_env():
     return {"system_state": {"120": {"kind": "ct", "attrs": {"hostname": "caddy-proxy"},
                                      "devices": {"net0": "name=eth0,bridge=vmbr0,ip=192.168.1.26/24,hwaddr=BC:24:11:AC:C9:06"}, "source": "pct config 120"}},
             "facts": ["Container listeners: CT 120 on *:443 and *:80.",
-                      "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect (likely firewall problem)' against 67.240.32.243.",
+                      "The ACME challenge for homelab-demo.duckdns.org fails with 'Timeout during connect (likely firewall problem)' against 198.51.100.7.",
                       "The LXC container (caddy-proxy, CT 120) cannot reserve an IP address on the Spectrum router, which is required to set up port forwarding for it.",
                       "The Caddyfile in LXC 120 validates successfully ('Valid configuration')."]}
 

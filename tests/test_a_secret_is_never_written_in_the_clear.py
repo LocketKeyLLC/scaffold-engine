@@ -3,7 +3,7 @@ it in a delivered file is refused.
 
 Live, 2026-10-08, ADD127: the operator's PANEL_PASSWORD went to the engine's encrypted store (the policy's
 `held` list); §17.1426 read only the runner's own `secrets` list, so the marker was never offered -- and
-the model wrote `Environment=PANEL_PASSWORD=defrusciohomelab.duckdns.org` (the public domain, as the
+the model wrote `Environment=PANEL_PASSWORD=homelab-demo.duckdns.org` (the public domain, as the
 password, in the clear). Read before approval; not approved.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ FIX = pathlib.Path(__file__).parent / "fixtures"
 ADD127 = json.loads((FIX / "add127_node_2026_10_08.json").read_text())
 CREDS = {"PANEL_PASSWORD": dv.RUNNER_HELD}
 LIVE_UNIT = ("[Service]\nExecStart=/usr/bin/node server.js\nEnvironment=NODE_ENV=production\n"
-             "Environment=PANEL_PASSWORD=defrusciohomelab.duckdns.org\n")
+             "Environment=PANEL_PASSWORD=homelab-demo.duckdns.org\n")
 
 
 def test_the_live_unit_is_refused():

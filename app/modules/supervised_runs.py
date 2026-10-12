@@ -3064,7 +3064,7 @@ def public_dns_to_private_address(commands: list[str]) -> list[dict]:
     only the LAN can reach.
 
     Live (ADD128, 2026-10-10): the drafted block for "fix Caddy's DNS and get a certificate" carried
-    `curl "https://www.duckdns.org/update?domains=defrusciohomelab&token=<DUCKDNS_TOKEN>&ip=192.168.1.127"` —
+    `curl "https://www.duckdns.org/update?domains=homelab-demo&token=<DUCKDNS_TOKEN>&ip=192.168.1.127"` —
     Caddy's LAN address — next to the correct `…&ip=` (DuckDNS fills in the caller's public address). Run, it
     would have taken the domain off the internet and made the certificate it was for impossible to issue.
     """
@@ -4242,7 +4242,7 @@ def invented_email_in_files(commands: list[str], files: Optional[list[dict]], en
                             node: Optional[dict]) -> list[dict]:
     """§17.1307 — an e-mail address in written content that appears in no fact,
     no pin and not in the step's own text was made up. Live, ADD88's Caddyfile
-    opened with `email aedefruscio@defrusciohomelab.duckdns.org` -- the operator's
+    opened with `email aedefruscio@homelab-demo.duckdns.org` -- the operator's
     account name glued to their DuckDNS domain, a mailbox that does not exist,
     handed to the ACME CA as the contact. A contact address is the operator's to
     give: `<ACME_EMAIL>` on the frame, or leave the option out."""
@@ -4503,7 +4503,7 @@ def placeholder_values_in_files(commands: list[str], files: Optional[list[dict]]
     """§17.1306 — `admin@example.com` in a file the block writes is not a value,
     it is the model saying it had none. Live, ADD88's Caddyfile came back as
     `{ email admin@example.com } :80 { respond "Caddy is running" }` while the
-    facts named `defrusciohomelab.duckdns.org` and the step named five
+    facts named `homelab-demo.duckdns.org` and the step named five
     reverse-proxy blocks. A placeholder written to disk is a config that is
     wrong on purpose; the honest forms are the real value or a `<NAME>` the
     operator fills on the frame."""

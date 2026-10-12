@@ -565,7 +565,7 @@ def values_put_into_html_attributes(files: dict[str, str]) -> list[dict]:
 
 def a_secret_written_in_the_clear(files: dict[str, str], creds: Optional[dict[str, str]]) -> list[dict]:
     """§17.1427 — a literal value assigned to a secret the runner holds. Live, ADD127's unit file said
-    `Environment=PANEL_PASSWORD=defrusciohomelab.duckdns.org`: the model, never shown the marker, invented
+    `Environment=PANEL_PASSWORD=homelab-demo.duckdns.org`: the model, never shown the marker, invented
     the panel's password -- the public domain name -- and wrote it in the clear. Only the marker (filled at
     delivery) or a lookup (`process.env.X`, `$X`) may stand where the value goes."""
     names = [n for n, r in (creds or {}).items() if r == RUNNER_HELD]

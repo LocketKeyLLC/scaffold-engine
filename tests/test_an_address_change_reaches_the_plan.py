@@ -41,7 +41,7 @@ def test_add128s_description_is_corrected_everywhere_it_names_the_old_address():
     body = "\n".join(ln for ln in new.splitlines() if not ln.lstrip().startswith(pr.PROVENANCE_PREFIX))
     import re
     assert not re.search(r"192\.168\.1\.26(?!\d)", body), "no old address left in the step's own text"
-    assert "--resolve defrusciohomelab.duckdns.org:443:192.168.1.127" in body
+    assert "--resolve homelab-demo.duckdns.org:443:192.168.1.127" in body
     assert "(caddy-proxy, 192.168.1.127)" in body
     assert "192.168.1.25:3001" in body, "another machine's address is untouched"
 
@@ -115,7 +115,7 @@ def test_a_note_corrects_the_step_it_was_written_on(monkeypatch):
         db=db, session_id="613dd1df-4c92-43f7-a35f-c9519add5701", job_id="55f68b7f-2ced-4e13-a1bc-812320df56f8",
         note_text="caddy (ct 120) is at 192.168.1.127, not 192.168.1.26.", note_kind="note", node_key="ADD128"))
     assert rec and [u["node_key"] for u in rec["node_updates"]] == ["ADD128"]
-    assert "--resolve defrusciohomelab.duckdns.org:443:192.168.1.127" in rec["node_updates"][0]["prompt_template"]
+    assert "--resolve homelab-demo.duckdns.org:443:192.168.1.127" in rec["node_updates"][0]["prompt_template"]
     assert pr.render_note(rec).startswith("🔁 **Plan updated from your note** — the correction has been applied to this step")
 
 

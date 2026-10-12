@@ -117,7 +117,7 @@ def test_an_address_does_not_end_the_sentence():
     node = {"tool": "Shell", "description": (
         "Friends can join. The rest is the operator's, in the My Spectrum app (Services → Router → Advanced "
         "Settings → Port Forwarding & IP Reservations): reserve 192.168.1.44 for that MAC, then Add Port Assignment "
-        "UDP 8211 → 192.168.1.44:8211. Friends connect to defrusciohomelab.duckdns.org:8211.\n\nDone when `grep x`")}
+        "UDP 8211 → 192.168.1.44:8211. Friends connect to homelab-demo.duckdns.org:8211.\n\nDone when `grep x`")}
     part = ops.operators_part(node)
     assert part.endswith("UDP 8211 → 192.168.1.44:8211."), part
     assert "reserve 192.168.1.44 for that MAC" in part and "Friends can join" not in part

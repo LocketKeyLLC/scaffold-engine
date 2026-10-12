@@ -665,7 +665,7 @@ def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
     low = " ".join((goal_terms or "").lower().split())
     # §17.1083 — hostnames, IPs and URLs are the operator's own, never search
     # terms; and a dotted name must not be split into tokens that then pair
-    # across the dot. Live: "defrusciohomelab.duckdns.org times out" became
+    # across the dot. Live: "homelab-demo.duckdns.org times out" became
     # the phrase "org times", and the query
     # "external https org times times out host fails cellular…" found a
     # dictionary page for "external".

@@ -111,7 +111,7 @@
 "node_key": "ADD37",
 "title": "Set nameserver 192.168.1.1 on container 101",
 "status": "skipped",
-"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver via `pct set 101 -nameserver 192.168.1.1`. Done when `pct config 101` shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. `pct exec 101 -- getent hosts defrusciohomelab.duckdns.org` returns an address)."
+"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver via `pct set 101 -nameserver 192.168.1.1`. Done when `pct config 101` shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. `pct exec 101 -- getent hosts homelab-demo.duckdns.org` returns an address)."
 },
 {
 "node_key": "ADD38",
@@ -141,7 +141,7 @@
 "node_key": "ADD45",
 "title": "Set nameserver 192.168.1.1 in container 101's config",
 "status": "done",
-"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver by setting the nameserver in its Proxmox config (pct set 101 --nameserver 192.168.1.1). Done when pct config 101 shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. pct exec 101 -- getent hosts defrusciohomelab.duckdns.org returns an address)."
+"description": "Configure container 101 (jellyfin) to use 192.168.1.1 as its DNS nameserver by setting the nameserver in its Proxmox config (pct set 101 --nameserver 192.168.1.1). Done when pct config 101 shows nameserver 192.168.1.1 and the container can resolve a hostname (e.g. pct exec 101 -- getent hosts homelab-demo.duckdns.org returns an address)."
 },
 {
 "node_key": "ADD46",
@@ -417,7 +417,7 @@
 "node_key": "ADD128",
 "title": "Proxmox host: expose the panel outside the house behind authentication (reverse proxy + TLS)",
 "status": "pending",
-"description": "On the Proxmox host, install/configure Caddy as a TLS reverse proxy in front of the panel so the operator reaches it from outside via a domain (defrusciohomelab.duckdns.org), keeping the panel's own authentication as the only gate; document in plain words what the operator types on their phone and what must stay running. On container 111. Done when `pct exec 111 -- curl -fsS http://127.0.0.1:PORT/health || true` shows it.\n\n[Engine split of ADD100 \u2014 8 of 8]"
+"description": "On the Proxmox host, install/configure Caddy as a TLS reverse proxy in front of the panel so the operator reaches it from outside via a domain (homelab-demo.duckdns.org), keeping the panel's own authentication as the only gate; document in plain words what the operator types on their phone and what must stay running. On container 111. Done when `pct exec 111 -- curl -fsS http://127.0.0.1:PORT/health || true` shows it.\n\n[Engine split of ADD100 \u2014 8 of 8]"
 },
 {
 "node_key": "ADD110",

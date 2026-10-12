@@ -717,7 +717,7 @@ def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) 
     # §17.1478 — and what the engine has MEASURED about the machines this step touches. The runbook prompt carried
     # no fact at all: live, T37 checked Caddy with `curl https://127.0.0.1:443` and the public name from inside the
     # LAN — both 000 by design (Caddy answers only its site name; the router does not loop the public address back)
-    # — and was failed "not reachable", while `--resolve defrusciohomelab.duckdns.org:443:192.168.1.127` answers 401.
+    # — and was failed "not reachable", while `--resolve homelab-demo.duckdns.org:443:192.168.1.127` answers 401.
     try:
         from app.modules.operator_steps import relevant_facts
         measured = [f for f in relevant_facts(node, [f for f in ((environment or {}).get("facts") or [])

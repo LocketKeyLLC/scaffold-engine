@@ -32,7 +32,7 @@ _ENV = {"facts": ["LXC container 105 (download-client) exists and is running",
                   "Worked at T37: pct status 120 → status: running",
                   "The attempt to write the Caddyfile failed with EOF",   # history → dropped
                   "cluster.fw security group 'game' has IN ACCEPT udp dport 8211"],
-        "substitutions": {"DOMAIN": "defrusciohomelab.duckdns.org", "PVE_IP": "192.168.1.156"}}
+        "substitutions": {"DOMAIN": "homelab-demo.duckdns.org", "PVE_IP": "192.168.1.156"}}
 
 
 def _res_first(row):
@@ -63,7 +63,7 @@ async def test_build_claims_shapes_ids_kinds_and_order_from_live_rows():
     assert by["S:T9"]["text"] == "step completed: Download the Debian template"   # no recap, no evidence → title fallback
     assert by["F:1"]["kind"] == "fact" and "node_key" not in by["F:1"]
     assert by["F:3"]["text"].startswith("cluster.fw security group")               # the history fact was filtered, numbering is dense
-    assert by["K:DOMAIN"] == {"id": "K:DOMAIN", "kind": "pin", "text": "DOMAIN = defrusciohomelab.duckdns.org"}
+    assert by["K:DOMAIN"] == {"id": "K:DOMAIN", "kind": "pin", "text": "DOMAIN = homelab-demo.duckdns.org"}
     assert out["job_id"] == "j1" and out["current_node_key"] == "ADD13" and out["environment"] is _ENV
 
 

@@ -60,7 +60,7 @@
  },
  "facts": [
   "Container listeners: CT 101 on 0.0.0.0:8096, CT 120 on *:443 and *:80.",
-  "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect' against 67.240.32.243.",
-  "Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243."
+  "The ACME challenge for homelab-demo.duckdns.org fails with 'Timeout during connect' against 198.51.100.7.",
+  "Spectrum router (SAX1V1K) WAN IPv4 is 198.51.100.7."
  ]
 }

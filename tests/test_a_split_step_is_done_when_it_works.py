@@ -36,7 +36,7 @@ def test_every_live_check_is_presence_only(check):
 
 @pytest.mark.parametrize("check", [
     "pct exec 111 -- curl -s http://127.0.0.1:3001/api/palworld/settings",
-    "curl -s -o /dev/null -w '%{http_code}' https://defrusciohomelab.duckdns.org/",
+    "curl -s -o /dev/null -w '%{http_code}' https://homelab-demo.duckdns.org/",
     "pct exec 111 -- sh -c 'curl -fsS http://127.0.0.1:3001/health'",
 ])
 def test_a_check_that_calls_something_is_not(check):

@@ -19,7 +19,7 @@ AGENT = "Worked: `qm agent 106 ping` → QEMU guest agent is not running"
 RUNNER = ("The local runner (pve-runner) refuses mutation verbs such as 'apt' and systemctl subcommands/flags "
           "(e.g. 'systemctl enable --now').")
 CT120 = ("ENGINE MEASURED 2026-10-08 (ADD128 ran): container 120 (caddy-proxy, 192.168.1.26) is running; Caddy is "
-         "active in it and serves defrusciohomelab.duckdns.org (Jellyfin/Prowlarr/Radarr/Sonarr routes, the "
+         "active in it and serves homelab-demo.duckdns.org (Jellyfin/Prowlarr/Radarr/Sonarr routes, the "
          "control panel as the fallback); its DNS works. The only missing piece is the router forwarding TCP "
          "80/443 to 192.168.1.26 -- Let's Encrypt: \"Timeout during connect (likely firewall problem)\".")
 # the live ledger's order (oldest first): VM 106 stopped, then its DNS measured
