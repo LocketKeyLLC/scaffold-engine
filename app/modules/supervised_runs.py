@@ -5834,6 +5834,23 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     # §17.1466 — the addresses of the guests this block touches, read before it runs
     from app.modules import address_watch as _aw
     _aw_guests, _aw_before = await _aw.around_run(spec, runnable, waiting.get("files") or [])
+    # §17.1271 — the files this block needs, written first and each one with its
+    # own signed approval. They come BEFORE the commands because the commands are
+    # what run them, and a failure to write stops the block exactly as a failed
+    # command does: the records share one shape and one sequence.
+    _files = [{"path": f["path"], "content": f["content"]}
+              for f in (waiting.get("files") or []) if (f or {}).get("path")]
+    # §17.1280 — the values the operator supplied (or the machine answered) go
+    # into the files as well as the commands; a placeholder left over is a
+    # problem to report, never bytes on disk.
+    # §17.1496 — and it is decided BEFORE the node is claimed: this return used to
+    # come after the claim's commit, so the caller's rollback undid nothing, the
+    # node sat at `running` under a job still awaiting the decision, and every
+    # later "run" answered `node_gone` until the orphan reaper reset it -- and
+    # then the same loop again. A refusal must leave the node where it found it.
+    _files, _left = fill_files(_files, values)
+    if _left:
+        return {"outcome": "inputs_missing", "problems": _left, "inputs": asked}
     claimed = await db.execute(
         text("UPDATE dag_nodes SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
              "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
@@ -5850,18 +5867,6 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if refs:
         from app.modules import runner_secrets as _rs
         secret_env = await _rs.values_for(db, refs)
-    # §17.1271 — the files this block needs, written first and each one with its
-    # own signed approval. They come BEFORE the commands because the commands are
-    # what run them, and a failure to write stops the block exactly as a failed
-    # command does: the records share one shape and one sequence.
-    _files = [{"path": f["path"], "content": f["content"]}
-              for f in (waiting.get("files") or []) if (f or {}).get("path")]
-    # §17.1280 — the values the operator supplied (or the machine answered) go
-    # into the files as well as the commands; a placeholder left over is a
-    # problem to report, never bytes on disk.
-    _files, _left = fill_files(_files, values)
-    if _left:
-        return {"outcome": "inputs_missing", "problems": _left, "inputs": asked}
     logger.warning("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",
                    job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
     executed = await _sw.write_files_on(spec, _files) if _files else []
@@ -7436,3 +7441,37 @@ def _as_dict(v: Any) -> dict:
         except (ValueError, TypeError):
             return {}
     return dict(v) if isinstance(v, dict) else {}
+
+
+async def settle_interrupted(job_id: str, node_key: str, exc: BaseException) -> bool:
+    """§17.1496 — a run that died AFTER the node was claimed is recorded, not stranded.
+
+    `resolve_run` commits the claim (`pending -> running`) before anything reaches the
+    machine, so that a second "run" cannot double-write. Everything after that commit
+    used to be unguarded: a secret-store error, a runner exception, the client
+    disconnecting from `POST /decide` (Starlette cancels the handler) or a restart
+    mid-run left the node at `running` under a job still `awaiting_decision` -- the
+    frame kept offering "Run", "run" answered `node_gone`, and the orphan reaper's
+    reset re-offered a block that may already have run on the machine.
+
+    The honest record is `failed` with the reason: the operator reads what happened,
+    checks the machine, and `reset`s the node when it is safe to offer the block
+    again. Uses its OWN session: the caller's may be the thing that broke. Never
+    raises; returns whether the node moved."""
+    from app.database import async_session
+    reason = (f"interrupted after the node was claimed ({type(exc).__name__}: "
+              f"{' '.join(str(exc).split())[:200] or 'no detail'}) -- part of the block may have run; "
+              f"check the machine, then reset the node to offer the block again")
+    try:
+        async with async_session() as db:
+            res = await db.execute(
+                text("UPDATE dag_nodes SET status = 'failed', last_verification_reason = :why, updated_at = NOW() "
+                     "WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
+                {"jid": job_id, "nk": node_key, "why": reason})
+            await db.commit()
+        moved = bool(res.rowcount)
+    except Exception as settle_exc:              # the DB itself is down: the log line is all there is
+        logger.error("supervised_run_interrupted_unsettled job=%s node=%s err=%r", job_id, node_key, settle_exc)
+        return False
+    logger.error("supervised_run_interrupted job=%s node=%s moved=%s why=%s", job_id, node_key, moved, reason)
+    return moved

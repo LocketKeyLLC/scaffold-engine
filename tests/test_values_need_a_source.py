@@ -99,4 +99,4 @@ def test_every_frame_in_the_pause_carries_the_upstream_block():
     src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert body.count("supervised_runs.frame_run(") >= 8 and body.count("upstream=up_block") >= body.count("supervised_runs.frame_run(")
+    assert body.count("to_thread(supervised_runs.frame_run, ") >= 8 and body.count("upstream=up_block") >= body.count("to_thread(supervised_runs.frame_run, ")

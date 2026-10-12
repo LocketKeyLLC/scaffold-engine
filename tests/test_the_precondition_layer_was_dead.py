@@ -42,7 +42,7 @@ from app.modules.runbook_preconditions import unmet
 def _pre_for_source() -> str:
     src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     i = src.index("async def _pre_for(")
-    return src[i:src.index("frame = supervised_runs.frame_run(", i)]
+    return src[i:src.index("frame = await asyncio.to_thread(supervised_runs.frame_run, ", i)]
 
 
 def test_the_call_site_binds_against_the_real_signature():

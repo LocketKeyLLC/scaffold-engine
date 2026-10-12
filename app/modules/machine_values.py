@@ -162,12 +162,40 @@ def _for_context(value: str, command: str, placeholder: str) -> str:
     `'\''` — close, a literal quote, reopen — which is what `_sq` does for a
     whole word.
     """
-    before = command.split(placeholder)[0]
-    # an ODD number of single quotes before the placeholder means it sits inside
-    # a single-quoted word.
-    if before.count("'") % 2 == 0:
+    if not in_single_quotes(command, placeholder):
         return value
     return value.replace("'", "'\\''")
+
+
+def in_single_quotes(command: str, placeholder: str) -> bool:
+    """§17.1496 — does the placeholder sit inside a single-quoted word? An ODD number of
+    single quotes before it means it does. That is the only position where a `$(…)`
+    read pasted in its place reaches the GUEST's shell: bare, or inside double quotes,
+    the HOST shell expands it first, where the file does not exist, and the header goes
+    out empty (the §17.1342 401, re-created)."""
+    before = str(command or "").split(placeholder)[0]
+    # Walk the quote state the way the HOST shell does: a `"` inside '…' is a character,
+    # a `'` inside "…" is a character (`sh -c "curl -H 'X-Api-Key: <KEY>' …"` is a
+    # double-quoted word, and the host expands what is in it), and a backslash outside
+    # single quotes escapes the next character.
+    in_sq = in_dq = False
+    i = 0
+    while i < len(before):
+        ch = before[i]
+        if in_sq:
+            if ch == "'":
+                in_sq = False
+        elif ch == "\\":
+            i += 1
+        elif in_dq:
+            if ch == '"':
+                in_dq = False
+        elif ch == "'":
+            in_sq = True
+        elif ch == '"':
+            in_dq = True
+        i += 1
+    return in_sq
 
 
 def read_on_the_machine(commands: list[str], verify: list[str],
@@ -210,9 +238,16 @@ def read_on_the_machine(commands: list[str], verify: list[str],
         # in that guest reads the key there, with no `pct` in the substitution; a host
         # command is left alone, because the host form cannot work (see `read`).
         hit = False
+        host_expands = False
         for seq in (out_cmds, out_verify):
             for i, c in enumerate(seq):
                 if ph in c and addresses_guest(c, gid):
+                    if not in_single_quotes(c, ph):
+                        # §17.1496 — `pct exec 103 -- curl -H "X-Api-Key: <KEY>" …` names the
+                        # guest, but the HOST shell would expand the pasted `$(cat …)` before
+                        # pct ever ran: the file is not on the host, the header goes out empty.
+                        host_expands = True
+                        continue
                     # §17.1386 — the read is inserted into a payload that is
                     # usually `sh -c '…'`, and a single quote in the read closes
                     # that payload. §17.1342 avoided it by writing the *arr
@@ -225,6 +260,12 @@ def read_on_the_machine(commands: list[str], verify: list[str],
         if not hit:
             logger.info("machine_values: %s needs the call to run inside guest %s -- left as an input",
                         name, gid)
+            if host_expands:
+                notes.append({"why": (
+                    f"<{name}> is readable inside guest {gid} ({r.app} keeps it in {r.where} there), but the "
+                    f"command does not carry it in a single-quoted `sh -c '…'` payload, so the read would run "
+                    f"on the host, where that file does not exist. Put the whole call inside "
+                    f"`pct exec {gid} -- sh -c '…'` with the placeholder between the single quotes.")})
             continue
         notes.append({"why": (
             f"read {name} inside guest {gid} instead of asking: {r.app} keeps it in {r.where} there, and "

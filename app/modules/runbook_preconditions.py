@@ -30,6 +30,8 @@ import logging
 import re
 from typing import Any, Optional
 
+from app.modules.runbook_inputs import INSTALL_OS_RE   # §17.1496 — the §17.1297 definition, shared, not a greedy copy
+
 logger = logging.getLogger("scaffold")
 
 #: `pct exec 111 -- …`, `qm set 106 --scsi0 …`. The verb may be absent
@@ -1000,7 +1002,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # §17.1290b — the step that INSTALLS the OS is the one step the empty disk
     # does not block: live, ADD117 (cloud image + cloud-init) was refused for
     # the very condition it exists to end, because its script sshes in after.
-    installs_os = bool(re.search(r"\binstall\b.*\b(?:ubuntu|debian|operating system|os\b|server \d\d\.\d\d)", subject, re.I)) \
+    installs_os = bool(INSTALL_OS_RE.search(subject)) \
         or any(re.search(r"\bqm\s+importdisk\b|\bqm\s+disk\s+import\b|local-lvm:cloudinit|--cicustom\b", t) for t in texts)
     for gid in subjects:
         if installs_os:
@@ -1013,7 +1015,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
         names = ", ".join(d["name"] for d in mine)
         installed = next((f"{n.get('node_key')} · {str(n.get('title'))[:50]}" for n in plan or []
                           if (n.get("status") or "") == "done"
-                          and re.search(r"\binstall\b.*\b(?:ubuntu|debian|os|server)\b", str(n.get("title") or ""), re.I)
+                          and INSTALL_OS_RE.search(str(n.get("title") or ""))      # §17.1496 — the one definition
                           and (gid in str(n.get("title") or "") or _norm((inv.get("names") or {}).get(gid, "")) in _norm(str(n.get("title") or "")))), "")
         isos = ", ".join((inv.get("isos") or [])[:3]) or "none found in /var/lib/vz/template/iso"
         out.append({"command": _first_line_with(texts, _SSH_RE) or f"ssh into {gid}", "why": (

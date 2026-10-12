@@ -234,7 +234,9 @@ async def test_resolve_decision_dispatches_a_run_pause_and_records_the_result():
 
 def test_executor_wiring():
     pause = inspect.getsource(ea._pause_for_decision)
-    assert "supervised_runs.channel(db)" in pause and "pending_hands_on(db, job_id)" in pause and "frame_run(" in pause
+    assert "supervised_runs.channel(db)" in pause and "pending_hands_on(db, job_id)" in pause
+    # §17.1496 — every frame is drawn OFF the event loop (frame_run forks mypy / bash -n)
+    assert "to_thread(supervised_runs.frame_run, " in pause and "supervised_runs.frame_run(" not in pause
     assert "draft_runbook(" in pause and 'logger.warning("supervised_run_parked' in pause
     serial = inspect.getsource(ea.execute_all_nodes)
     assert "_hands_on_peek(node)" in serial and 'status in ("stale", "needs_approval")' in serial

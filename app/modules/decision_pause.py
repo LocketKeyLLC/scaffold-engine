@@ -29,7 +29,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Optional, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -185,7 +185,7 @@ async def frame_decision(node: dict, *, brief: str = "", upstream: str = "") -> 
 
 # ── park / resolve ──────────────────────────────────────────────────────
 
-async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, frame: dict) -> dict:
+async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, frame: dict) -> Optional[dict]:
     """Write the question on the job, move it to ``awaiting_decision`` and
     return the SSE payload. The node stays ``pending`` — nothing was claimed."""
     asked = {
@@ -203,6 +203,16 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
     )
     ok = await transition(db, job_id, to=STATUS, expected_from=("running", "executing"),
                           reason=f"decision:{node['node_key']}")
+    if not ok:
+        # §17.1496 — the job moved while the frame was being drawn (an operator cancel
+        # during the minutes of model calls): the guard held, but the question used to
+        # be committed anyway -- a cancelled job carrying a live `awaiting_decision`
+        # frame it can never answer (`decide` 409s on a non-waiting job). Nothing is
+        # written; the executor's next read sees the job's real status.
+        await db.rollback()
+        logger.warning("decision_pause_park_refused job=%s node=%s (the job is no longer running)",
+                       job_id, node["node_key"])
+        return None
     await db.commit()
     logger.info("decision_pause_parked job=%s node=%s framed=%s options=%d transitioned=%s",
                 job_id, node["node_key"], frame.get("framed"), len(frame.get("options") or []), ok)
@@ -277,8 +287,15 @@ async def resolve_decision(
     elif waiting.get("kind") == "run":
         # §17.1186 — a hands-on step parked with its commands: run / myself / skip
         from app.modules import supervised_runs
-        res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")), waiting,
-                                                inputs=inputs)
+        try:
+            res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")),
+                                                    waiting, inputs=inputs)
+        except BaseException as exc:
+            # §17.1496 — the run claimed the node and then died (runner error, the client
+            # dropping this request, a restart): record it on the node before the error
+            # goes up, so nothing is left at `running` under a job still waiting.
+            await supervised_runs.settle_interrupted(job_id, node_key, exc)
+            raise
         if res["outcome"] in ("bad_choice", "not_runnable", "no_channel", "node_gone", "inputs_missing"):
             await db.rollback()
             return {"outcome": res["outcome"], "current_status": job["status"], "waiting_on": node_key, **{k: v for k, v in res.items() if k != "outcome"}}
