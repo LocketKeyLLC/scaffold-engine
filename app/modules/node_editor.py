@@ -266,6 +266,26 @@ async def _audit(
     )
 
 
+async def _drop_engine_half_marks(db: AsyncSession, job_id: str, keys: list[str]) -> list[str]:
+    """§17.1493 — a reset step is the engine's to try again, so its "the rest is the operator's" mark goes.
+
+    Live, ADD169: a failed login was handed to the operator as `engine_half_done` (a sentence in the step
+    misread as their part); the step was edited and reset, and the mark — which every hand-off site honours
+    without asking how old it is — sent it straight back to them. Only that mark is dropped; an approval
+    keeps its own staleness rule (§17.1245)."""
+    from app.modules.operator_steps import ENGINE_HALF_DONE
+    decided = (await db.execute(
+        text("SELECT metadata->'decisions' FROM jobs WHERE id = :j"), {"j": job_id})).scalar()
+    if not isinstance(decided, dict):
+        return []
+    gone = [k for k in keys if isinstance(decided.get(k), dict) and decided[k].get("result") == ENGINE_HALF_DONE]
+    for k in gone:
+        await db.execute(
+            text("UPDATE jobs SET metadata = metadata #- ARRAY['decisions', :k]::text[] WHERE id = :j"),
+            {"j": job_id, "k": k})
+    return gone
+
+
 async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
     """Reset nodes to pending — and write down what they were first.
 
@@ -695,6 +715,7 @@ async def reset_node(
     downstream = all_downstream if cascade else set()
     reset_keys = sorted({node_key} | downstream)
     await _reset_keys(db, job_id, reset_keys)
+    await _drop_engine_half_marks(db, job_id, reset_keys)
     await _reopen_job(db, job_id)
     await _audit(
         db, job_id, node_key, "reset",
