@@ -5288,8 +5288,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # the key substitution and the host-tool gate see it (else it is refused as a
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
+    # §17.1500 — a readable (non-stored) service key the drafter wrote as `$NAME`
+    # becomes the `<NAME>` placeholder in the guest's own shell, so the reader below
+    # fills it. A stored secret's `$NAME` is left for the runner to inject.
+    _stored_names = {str(x) for x in ((policy or {}).get("secrets") or [])} \
+        | {str(x) for x in ((policy or {}).get("held") or [])}
+    cmds, verify, _var_notes = _mv.read_a_readable_key_written_as_a_var(cmds, verify, _stored_names)
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
-    _mv_notes = list(_fold_notes) + list(_mv_notes)
+    _mv_notes = list(_fold_notes) + list(_var_notes) + list(_mv_notes)
     # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
     # safe in a written file too, so files are filled here.
     cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
