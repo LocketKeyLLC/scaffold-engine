@@ -5294,6 +5294,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _comp_cmds, _comp_verify, _comp_notes = rewrite_completeness_check(node, cmds, verify, services, inventory)
     if _comp_notes:
         cmds, verify = _comp_cmds, _comp_verify
+    # §17.1508 — a "queue/search the missing episodes" step triggers Sonarr's per-series
+    # search for each show's gap, holding a whole-series backfill above a threshold.
+    _q_cmds, _q_verify, _q_notes = rewrite_queue_missing(node, cmds, verify, services, inventory)
+    if _q_notes:
+        cmds, verify = _q_cmds, _q_verify
+        _comp_notes = list(_comp_notes) + _q_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -7324,6 +7330,80 @@ def rewrite_completeness_check(node: Optional[dict], commands: list[str], verify
         f"`/series` inside guest {gid} and prints each season's `have X of Y` with a COMPLETE / MISSING verdict "
         f"for \"{show}\" — the read stays in the guest so the full catalogue never hits the runner's 20 000-char "
         f"cap, and the check witnesses real episode counts, not a lookup that proves nothing.")}]
+    return [run], [check], note
+
+
+#: §17.1508 — queue each show's MISSING monitored episodes for download, holding any show
+#: whose gap exceeds a threshold (a whole-series backfill the operator must ask for by name).
+#: Single-quoted Python only; runs inside the guest; argv: KEY, THRESHOLD, [DRY].
+_QUEUE_MISSING_PY = (
+    "import sys,json,urllib.request\n"
+    "BASE='http://127.0.0.1:8989'\n"
+    "KEY=sys.argv[1]; TH=int(sys.argv[2]); DRY=len(sys.argv)>3 and sys.argv[3]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body else None)\n"
+    "    return json.load(urllib.request.urlopen(r,timeout=30))\n"
+    "series=api('/api/v3/series')[:200]\n"
+    "for s in series:\n"
+    "    st=s.get('statistics') or {}\n"
+    "    miss=(st.get('episodeCount') or 0)-(st.get('episodeFileCount') or 0)\n"
+    "    t=s.get('title') or ''\n"
+    "    if miss<=0:\n"
+    "        print('COMPLETE: '+t); continue\n"
+    "    if miss>TH:\n"
+    "        print('HELD: %s (%d missing, exceeds %d -- search it by name to backfill the whole show)' % (t,miss,TH)); continue\n"
+    "    if DRY:\n"
+    "        print('WOULD SEARCH: %s (%d episodes)' % (t,miss)); continue\n"
+    # §17.1274 — one dead tracker/timeout must not abort the whole loop: each search is guarded.
+    "    try:\n"
+    "        api('/api/v3/command','POST',{'name':'SeriesSearch','seriesId':s.get('id')})\n"
+    "        print('SEARCHING: %s (%d episodes)' % (t,miss))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to queue %s: %r' % (t,e))\n"
+)
+#: the step that triggers downloads of the missing episodes.
+_QUEUE_RE = re.compile(r"\b(?:queue|search|download|grab|fetch|backfill)\b", re.I)
+_MISSING_RE = re.compile(r"\bmissing\b", re.I)
+#: §17.1508 — a show whose gap is at least this many episodes is HELD: a whole-series
+#: backfill (e.g. Power Rangers' ~972) is the operator's explicit call, not an auto-trigger.
+_QUEUE_HOLD_THRESHOLD = 100
+
+
+def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: list[str],
+                          services: Optional[list] = None,
+                          inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1508 — a "queue/search the missing episodes" step triggers Sonarr's per-series
+    search for each show's monitored-missing episodes, deterministically, holding any show
+    whose gap exceeds `_QUEUE_HOLD_THRESHOLD` (a whole-series backfill the operator asks for
+    by name).
+
+    Live (job c75d77fa): the LLM "Consolidate missing episodes list" step returned a refusal,
+    so the queue behind it never ran; the completeness checks already know exactly what is
+    missing. This skips the flaky consolidation: Sonarr itself knows the gaps, so the engine
+    reads `/series`, and for each show with missing monitored episodes below the threshold
+    POSTs `SeriesSearch` (which feeds Prowlarr → qBittorrent); a larger gap is reported HELD.
+    Runs inside the guest; the key is read on the machine (§17.1503) via `<APP_API_KEY>`."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    title = str((node or {}).get("title") or "")
+    if not (_QUEUE_RE.search(title) and _MISSING_RE.search(text) and _SEASONS_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", title, re.I) else "sonarr"
+    gid = _arr_guest(app, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    port, keyname = _ARR_PORTS[app], f"{app.upper()}_API_KEY"
+    payload = (f'python3 -c "{_QUEUE_MISSING_PY}" "<{keyname}>" "{_QUEUE_HOLD_THRESHOLD}"')
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # read-only-safe verify (§17.1505): the command endpoint answers for an authenticated read.
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "{app} command API HTTP %{{http_code}}" -H "X-Api-Key: ${keyname}" '
+             f'"http://127.0.0.1:{port}/api/v3/command"')
+    note = [{"why": (
+        f"drafted the queue from the engine's own shape (§17.1508): it reads {app}'s library inside guest {gid} "
+        f"and, for each show with missing monitored episodes, triggers a per-series search (SeriesSearch → "
+        f"Prowlarr → qBittorrent) — except a show whose gap exceeds {_QUEUE_HOLD_THRESHOLD} episodes, which is "
+        f"HELD and reported, since a whole-series backfill is the operator's explicit call.")}]
     return [run], [check], note
 
 
