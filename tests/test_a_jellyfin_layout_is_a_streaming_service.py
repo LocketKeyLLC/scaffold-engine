@@ -45,12 +45,16 @@ def test_the_step_is_rewritten_to_the_jellyfin_api_in_the_guest():
     assert "/Library/VirtualFolders" in run and "<JELLYFIN_API_KEY>" in run and "X-Emby-Token" in run
 
 
-def test_the_verify_is_read_only_safe():
+def test_the_verify_reads_content_types_off_the_filesystem_and_is_read_only_safe():
+    """§17.1511 — the verify must not use the Jellyfin key (readable-not-stored → the
+    §17.1500 rewrite turns `$JELLYFIN_API_KEY` into a `$(python3 …)` read the read-only
+    channel refuses). It greps the content types off options.xml instead — no key, no
+    interpreter, no command substitution — and that directly witnesses the typed layout."""
     from app.modules.assist_state_check import read_only_command
     _, verify, _ = rewrite_organize_jellyfin(NODE, ["x"], ["true"], SERVICES, INV)
     v = verify[0]
-    assert v != "true" and "python3" not in v and "$(" not in v
-    assert "/Library/VirtualFolders" in v and read_only_command(v)
+    assert v != "true" and "python3" not in v and "$(" not in v and "JELLYFIN_API_KEY" not in v
+    assert "ContentType" in v and "options.xml" in v and read_only_command(v)
 
 
 def test_the_key_fills_and_the_command_parses():
