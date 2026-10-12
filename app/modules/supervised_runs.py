@@ -1660,9 +1660,9 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
     failed 401 instead. The model cannot reason its way here because the rule is
     internal to the runner, so the engine has to say it.
 
-    The remedy is one prefix: `NAME="$NAME" python3 /tmp/x.py`, which puts the
-    reference in the command text where the runner looks, without the value ever
-    appearing in the block.
+    The remedy is a trailing reference: `python3 /tmp/x.py # $NAME`, which puts it in
+    the command text where the runner looks, without the value ever appearing in the
+    block. (§17.1494 — not the `NAME="$NAME"` prefix this once taught: sudo logs it.)
     """
     cmds = [str(c) for c in (commands or [])]
     wanted: dict[str, set] = {}          # script path -> secret names it reads
@@ -1702,9 +1702,11 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
             out.append({"command": c, "why": (
                 f"this runs {path}, which reads {', '.join(missing)} from its environment — and the "
                 f"runner only passes a stored value into a command that MENTIONS it, so the script "
-                f"starts with no such variable and fails. Put the reference in this command: "
-                f'`{first}="${first}" {"bash" if path.endswith(".sh") else "python3"} {path}`. The value still never appears in the block; '
-                f"the runner expands it on the machine.")})
+                f"starts with no such variable and fails. Put the reference in this command as a trailing "
+                # §17.1494 — never the `NAME="$NAME" cmd` prefix this used to teach: elevated, sudo logs every
+                # `NAME=value` it is handed (§17.1429); `# $NAME` is the reference the runner reads and sends
+                f'comment: `{"bash" if path.endswith(".sh") else "python3"} {path} # ${first}`. The value still never '
+                f"appears in the block; the runner expands it inside its root shell.")})
     return out
 
 
@@ -4402,6 +4404,18 @@ def unit_from_installed_package(unit: str, block: str) -> bool:
     return stem in pkgs or bool(set(_PACKAGE_UNITS.get(stem, ())) & pkgs)
 
 
+def secret_is_file_content(script: str, name: str) -> bool:
+    """§17.1494 — is ``$NAME`` written INTO a file (a config to place), rather than used as a credential?
+
+    Live, ADD170 (qBittorrent's port through its Web API): the login password in an in-guest script drew the
+    §17.1489 advice to list it in SECRET_FILES — with `/etc/wireguard/wg0.conf` as the example."""
+    ref = rf"\$\{{?{re.escape(name)}\b"
+    for ln in (script or "").splitlines():
+        if re.search(ref, ln) and re.search(r"(?:>>?\s*[\"']?/|\btee\b|\bcat\s*>|\bdd\s+of=)", ln):
+            return True
+    return False
+
+
 #: §17.1488 — a stored secret named inside a script that runs INSIDE a guest
 _IN_GUEST_SECRET_MARKER = "is read inside the guest, where the runner never sends it"
 
@@ -4422,6 +4436,17 @@ def secret_inside_a_guest_script(files: Optional[list[dict]], secret_names: set[
                 gid, vm = m.group(2), m.group(1) == "vm"
                 into = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c 'umask 077; cat > <PATH>'" if vm else
                         f"pct exec {gid} -- sh -c 'umask 077; cat > <PATH>'")
+                if not secret_is_file_content(body.group(1), name):
+                    # §17.1494 — a password for a login is not a file to write: the call itself runs from the host
+                    run = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c '…'" if vm else f"pct exec {gid} -- sh -c '…'")
+                    out.append({"command": f"(inside {'VM' if vm else 'CT'} {gid}) ${name}", "why": (
+                        f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. It is a credential, not a "
+                        f"file's content, so do not use the in-guest template for this call: run it from the HOST as "
+                        f"its own command, `{run} <<< \"${name}\"`, and have the program read it from stdin (curl "
+                        f"`--data-urlencode password@-`, after `tr -d \"\\n\"` to drop the newline `<<<` adds) — the "
+                        f"value crosses on stdin, expanded inside the runner's root shell, and never appears in the "
+                        f"block or a process list.")})
+                    continue
                 out.append({"command": f"(inside {'VM' if vm else 'CT'} {gid}) ${name}", "why": (
                     f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. Do not drop the work: name the "
                     f"file in the template's SECRET_FILES (`<path inside the guest> {name}`, e.g. "

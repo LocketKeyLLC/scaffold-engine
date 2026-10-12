@@ -541,7 +541,7 @@ def test_the_live_failure_is_caught():
     assert len(got) == 1
     why = got[0]["why"]
     assert "PROWLARR_API_KEY" in why
-    assert 'PROWLARR_API_KEY="$PROWLARR_API_KEY" python3 /tmp/add_indexers.py' in why
+    assert 'python3 /tmp/add_indexers.py # $PROWLARR_API_KEY' in why
     assert "never appears in the block" in why
 
 
