@@ -54,7 +54,8 @@ def test_the_verify_reads_content_types_off_the_filesystem_and_is_read_only_safe
     _, verify, _ = rewrite_organize_jellyfin(NODE, ["x"], ["true"], SERVICES, INV)
     v = verify[0]
     assert v != "true" and "python3" not in v and "$(" not in v and "JELLYFIN_API_KEY" not in v
-    assert "ContentType" in v and "options.xml" in v and read_only_command(v)
+    # §17.1512 — witnesses the real type marker (<type>.collection), not options.xml ContentType
+    assert ".collection" in v and "/var/lib/jellyfin/root/default/" in v and read_only_command(v)
 
 
 def test_the_key_fills_and_the_command_parses():
