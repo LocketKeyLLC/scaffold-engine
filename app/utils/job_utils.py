@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.job_state import ERROR_SUMMARY_MAX as _ERROR_SUMMARY_MAX, transition
+from app.modules.job_state import ERROR_SUMMARY_MAX as _ERROR_SUMMARY_MAX, transition  # tests read the alias
 
 logger = logging.getLogger("scaffold.jobs")
 

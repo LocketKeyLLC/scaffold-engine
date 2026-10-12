@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from typing import Optional
 
 logger = logging.getLogger("scaffold.rehearsal")
@@ -89,7 +90,9 @@ def listing_command(in_guest: str, wd: str) -> str:
     listing was 317 lines of it and the read channel cut it off at `/opt/` before `scaffold-kit/` --
     the files the step works on can be the ones that never arrive. (`-prune` with parentheses is
     refused by the read-only channel; `-not -path` is not -- both measured.)"""
-    return (f'{in_guest} find {wd} -maxdepth 3 -type f -size -256k '
+    # §17.1496 — a measured path is a VALUE, quoted as a shell word (`shlex.quote` leaves a plain
+    # path untouched); a workdir with a space became `find /opt/my app` and two "No such file"s.
+    return (f'{in_guest} find {shlex.quote(wd)} -maxdepth 3 -type f -size -256k '
             f'-not -path "*/node_modules/*" -not -path "*/.git/*"')
 
 
@@ -97,7 +100,7 @@ async def _cat(spec, gid: str, vm: bool, path: str) -> Optional[str]:
     from app.modules import service_truth as st
     if not path or path.endswith("/"):
         return None
-    ok, out = await st._probe(spec, f"{st.in_guest(gid, vm)} cat {path}")
+    ok, out = await st._probe(spec, f"{st.in_guest(gid, vm)} cat {shlex.quote(path)}")
     if not ok or _CAT_ERROR_RE.match(str(out or "").strip()):
         return None
     return out
@@ -268,14 +271,25 @@ def refusal_from(report: Optional[dict]) -> list[dict]:
 def _acceptance_refusal(report: dict) -> list[dict]:
     """§17.1417 — the sandbox ran the delivery, started the service, and sent the step's own request."""
     bad = [a for a in report.get("accept") or [] if not a.get("ok")]
-    if not bad:
-        return []
     bits: list[str] = []
     # the step's own request also runs in the block, and in here it always fails (`curl -f` on the error
     # about the unreachable API): that is not the version's fault, and the answer below says what it got
     urls = [str(a.get("url") or "") for a in report.get("accept") or []]
     failed = [c for c in report.get("commands") or [] if c.get("exit")
               and not any(u and u.split("://", 1)[-1].split("/", 1)[-1] in str(c.get("command") or "") for u in urls)]
+    if not bad and not failed:
+        return []
+    if not bad:
+        # §17.1496 — the delivery itself exited non-zero and the sandbox then started the OLD code,
+        # whose existing routes answered: that answered for nothing. A developed step whose
+        # `deliver.sh` dies (live: the runner-held credential no sandbox has) was passed as
+        # "rehearsed" without the version ever running.
+        c = failed[0]
+        return [{"command": "(rehearsal)", "why": (
+            f"{MARK} (read off the machines just now) and ran the delivery, which did not finish: "
+            f"`{c.get('command', '')[:90]}` exited {c.get('exit')}: "
+            f"{' '.join(str(c.get('out') or '').split())[-220:]}. The service that answered the step's "
+            f"request was the code already there, not this version.")}]
     if failed:
         c = failed[0]
         bits.append(f"`{c.get('command', '')[:90]}` exited {c.get('exit')}: "
@@ -321,7 +335,8 @@ def score(report: Optional[dict]) -> int:
         urls = [str(a.get("url") or "").split("://", 1)[-1].split("/", 1)[-1] for a in report["accept"]]
         fails = sum(1 for c in report.get("commands") or [] if c.get("exit")
                     and not any(u and u in str(c.get("command") or "") for u in urls))
-        return 0 if not bad else 1000 * fails + sum(5000 if not a.get("status") else 3000 for a in bad)
+        # §17.1496 — a delivery that exited non-zero is never a pass, whatever the old code answered
+        return (1000 * fails) if not bad else 1000 * fails + sum(5000 if not a.get("status") else 3000 for a in bad)
     rt = report.get("roundtrip") or {}
     if rt.get("ok"):
         return 0

@@ -2828,6 +2828,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         async def _rehearse_or_nothing(rb: str, files: list) -> list[dict]:
             if not _rh_target and not _rh_accept:
                 return []
+            if not (rb or "").strip() and not files:
+                # §17.1496 — a developed step's runbook is EMPTY until a version exists; the
+                # first frame used to rehearse that nothing (a sandbox run, up to 41 reads,
+                # and a "nothing serves that route" refusal about a version not yet drafted).
+                return []
             try:
                 if not _rh_seeds:
                     if _rh_target:
@@ -2903,7 +2908,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 files = {p: c for p, c in files.items() if p not in kit}
                 rb = develop.render_delivery(run_node, host, {**files, **kit}, checks,
                                              develop.acceptance_checks(run_node), creds)
-                fr = supervised_runs.frame_run(run_node, rb, spec, policy, env=_env,
+                fr = await asyncio.to_thread(supervised_runs.frame_run, run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
@@ -2922,7 +2927,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     break
                 current, evidence = best[2], develop.evidence_of(best[1])
             if best is None:
-                logger.warning("develop_gave_nothing job=%s node=%s", job_id, _nk_dev)
+                logger.warning("develop_gave_nothing job=%s node=%s why=%s", job_id, _nk_dev, evidence[:300])
+                # §17.1496 — the frame says WHY there is nothing to run; it used to park with
+                # no commands and no refusal, the reasons living only in these log lines.
+                empty_frame["refused"] = list(empty_frame.get("refused") or []) + develop.nothing_refusal(evidence)
                 return empty_frame
             logger.warning("develop_done job=%s node=%s score=%s", job_id, _nk_dev, best[0])
             return best[1]
@@ -2964,7 +2972,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _reading.gap("what the machine contradicts",
                              f"the precondition layer raised {type(exc).__name__} and judged nothing")
                 return []
-        frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
+        frame = await asyncio.to_thread(supervised_runs.frame_run, run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
         if _developed and _dev_host is not None:
@@ -3026,7 +3034,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
             retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env, truth=_truth, services=_services)
             if retry:
-                second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
+                second = await asyncio.to_thread(supervised_runs.frame_run, run_node, retry, spec, policy, env=_env,
                                                    preconditions=await _pre_for(retry), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                 if second["commands"] and not second["refused"]:
@@ -3084,7 +3092,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                             again = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix2,
                                                                         spec=spec, environment=_env, truth=_truth, services=_services)
                             if again:
-                                third = supervised_runs.frame_run(run_node, again, spec, policy, env=_env,
+                                third = await asyncio.to_thread(supervised_runs.frame_run, run_node, again, spec, policy, env=_env,
                                                                   preconditions=await _pre_for(again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                 if third["commands"] and not third["refused"]:
@@ -3114,7 +3122,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                                        retry_note=fix3, spec=spec,
                                                                                        environment=_env, truth=_truth, services=_services)
                                             if last:
-                                                fourth = supervised_runs.frame_run(run_node, last, spec, policy, env=_env,
+                                                fourth = await asyncio.to_thread(supervised_runs.frame_run, run_node, last, spec, policy, env=_env,
                                                                                    preconditions=await _pre_for(last), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                                 if fourth["commands"] and not fourth["refused"]:
@@ -3177,7 +3185,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     spec=spec, environment=_env, truth=_truth, services=_services)
                 if not _rb:
                     continue
-                _fr = supervised_runs.frame_run(run_node, _rb, spec, policy, env=_env,
+                _fr = await asyncio.to_thread(supervised_runs.frame_run, run_node, _rb, spec, policy, env=_env,
                                                 preconditions=await _pre_for(_rb), upstream=up_block,
                                                 units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                 inventory=_inv, engine_address=_eaddr, services=_services)
@@ -3219,7 +3227,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                    job_id, run_node.get("node_key"), len(runbook or ""))
                     _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env, truth=_truth, services=_services)
                     if _api:
-                        _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
+                        _apif = await asyncio.to_thread(supervised_runs.frame_run, run_node, _api, spec, policy, env=_env,
                                                           preconditions=await _pre_for(_api), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                         # §17.1211's lesson: only ever trade UP. An empty frame
@@ -3250,7 +3258,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _vb = await supervised_runs.draft_runbook(run_node, _brief, up_block,
                                                          retry_note=_nv, spec=spec, environment=_env, truth=_truth, services=_services)
                 if _vb:
-                    _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
+                    _vf = await asyncio.to_thread(supervised_runs.frame_run, run_node, _vb, spec, policy, env=_env,
                                                    preconditions=await _pre_for(_vb), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # §17.1211's rule — only ever trade UP: the redraft must keep
@@ -3275,7 +3283,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _wr = await supervised_runs.draft_runbook(run_node, _brief, up_block,
                                                           retry_note=_ro, spec=spec, environment=_env, truth=_truth, services=_services)
                 if _wr:
-                    _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
+                    _wrf = await asyncio.to_thread(supervised_runs.frame_run, run_node, _wr, spec, policy, env=_env,
                                                      preconditions=await _pre_for(_wr), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # only trade UP: a redraft that still only reads is no better
@@ -3302,7 +3310,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _again = await supervised_runs.draft_runbook(
                     run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env, truth=_truth, services=_services)
                 if _again:
-                    _third = supervised_runs.frame_run(run_node, _again, spec, policy,
+                    _third = await asyncio.to_thread(supervised_runs.frame_run, run_node, _again, spec, policy,
                                                        env=_env, preconditions=await _pre_for(_again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                     # §17.1211's lesson in miniature: never replace a working

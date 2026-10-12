@@ -139,8 +139,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quick:
         # ── semgrep (network: rules) ──
+        # §17.1496 — the exclusions mirror the Makefile's SEMGREP_EXCLUDES (reasons there).
         rc, out = sh(["semgrep", "scan", "--config", "p/python", "--config", "p/security-audit",
                       "--exclude-rule", "python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text",
+                      "--exclude-rule", "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+                      "--exclude-rule", "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
                       "--metrics=off", "--quiet", "--json", "app"], timeout=1200)
         try:
             j = json.loads(out[out.index("{"):]); res = j.get("results", [])

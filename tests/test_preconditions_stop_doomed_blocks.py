@@ -183,7 +183,7 @@ def test_the_check_runs_before_the_frame_is_built():
     assert "preconditions=_pre)" not in src, "a draft framed against the FIRST draft's preconditions"
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert body.count("preconditions=await _pre_for(") == body.count("supervised_runs.frame_run("), \
+    assert body.count("preconditions=await _pre_for(") == body.count("to_thread(supervised_runs.frame_run, "), \
         "every frame_run in the pause must carry its own draft's preconditions"
     assert "files=_f, node=run_node, inventory=_inv" in body
 

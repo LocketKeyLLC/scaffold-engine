@@ -759,8 +759,21 @@ lint-dockerfile: ## §17.1057 — hadolint over the Dockerfile
 image-layers: ## §17.1057 — dive efficiency report for the prod image (CI mode, no TUI)
 	CI=true dive scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} $(ARGS)
 
-sast: ## §17.1057 — semgrep with the community Python + security rulesets over app/ (network: downloads the rules)
-	semgrep scan --config p/python --config p/security-audit --exclude-rule python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text --error --metrics=off app $(ARGS)
+sast: ## §17.1057 — semgrep with the community Python + security rulesets over app/ (network: downloads the rules). §17.1496: needs mcp<2 in the devtools venv (semgrep 1.177 imports mcp.server.fastmcp).
+	semgrep scan --config p/python --config p/security-audit $(SEMGREP_EXCLUDES) --error --metrics=off app $(ARGS)
+
+# §17.1496 — rules reviewed and excluded with the reason on record:
+#  - avoid-sqlalchemy-text: every text() query is bound (§17.1057).
+#  - python-logger-credential-disclosure: keys on the WORD secret/token/credential in a
+#    log FORMAT STRING. Reviewed all 12 hits: each logs a secret's NAME, kind or count
+#    (runner_secrets, secrets.py, engine_setup, runbook_discovery, assist_turns), never a
+#    value. The real guard is tests/test_a_secret_is_never_written_in_the_clear.py and
+#    the ingest-time redaction (§17.1061).
+#  - insecure-hash-algorithm-sha1: both uses are content keys (rag_pipeline dedup key,
+#    engine_setup recipe fingerprint), not integrity or auth.
+SEMGREP_EXCLUDES = --exclude-rule python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text \
+	--exclude-rule python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure \
+	--exclude-rule python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
 
 load-smoke: ## §17.1057 — locust, headless, model-free endpoints only: 5 users for 15 s against localhost:8000
 	SCAFFOLD_API_KEY=$$(grep -E '^(SCAFFOLD_)?API_KEY=' .env | head -1 | cut -d= -f2-) \

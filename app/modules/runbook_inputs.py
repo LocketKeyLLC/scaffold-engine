@@ -26,6 +26,15 @@ _CIDR_RE = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3})/(\d{1,2})\b")
 _PORT_RE = re.compile(r"(?:\bport\s+|:)(\d{2,5})\b", re.I)
 _ID_RE = re.compile(r"\b(?:VM|CT|LXC|container|vmid|ctid)\s*(\d{3,5})\b", re.I)
 _SECRET_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
+#: §17.1297 — an OS install is the VERB and the OS within one short span ("Install Ubuntu 22.04 on VM 106",
+#: "install an operating system"), not any step whose text has "install" somewhere and "Ubuntu" elsewhere:
+#: ADD65 "Verify QEMU Guest Agent responds on VM 106" was templated as an OS install. §17.1496 — ONE
+#: definition: machine_truth (which REOPENS a guest's finished work after a reinstall) and
+#: runbook_preconditions (which waives the empty-disk refusal for an install) kept the greedy copy, so
+#: "Install qemu-guest-agent in the Ubuntu VM 106" recorded done reset every earlier in-guest step.
+INSTALL_OS_RE = re.compile(
+    r"\b(?:re)?install(?:ing|ed)?\s+(?:the\s+|an?\s+|a\s+fresh\s+)?(?:ubuntu|debian|operating system|os\b|cloud image|"
+    r"ubuntu server \d\d\.\d\d|server \d\d\.\d\d)", re.I)
 #: §17.1275 — a PUBLIC key is public material: masking it, encrypting it and
 #: refusing to suggest it only stops the operator seeing what was installed.
 _GUEST_MENTION_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*\d{3,5}\b", re.I)

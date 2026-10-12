@@ -11,8 +11,18 @@
 #
 # Crontab entry (8am UTC = 4am EST/EDT, 1st of Jan/Apr/Jul/Oct). cron has
 # no ~ expansion, so the path must be absolute — point it at your checkout:
-#   0 8 1 1,4,7,10 *  /path/to/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
-# 08:00 UTC (verified via `crontab -l`).
+#   0 8 1 1,4,7,10 *  /path/to/scaffold-engine/scripts/quarterly_calibration_pr.sh
+# 08:00 UTC (verified via `crontab -l`). The script keeps its own durable log
+# at logs/quarterly_calibration.log under the checkout (§17.1496) — a
+# `>> /tmp/...` redirect in the crontab is lost on the next reboot, which is
+# exactly how the 2026-10-01 pre-flight exit vanished.
+#
+# §17.1496 — the script works in a throwaway `git worktree`, never in the
+# operator's checkout: a dirty tree at 04:00 local no longer aborts the run,
+# and the checkout is never left on the calibration branch. Every exit before
+# the success leg — pre-flight included — emits `calibration.failed` with the
+# reason, so /health.calibration says WHY instead of the watchdog's mute
+# `calibration.no_fire`.
 #
 # Run manually any time to test:
 #   bash scripts/quarterly_calibration_pr.sh
@@ -23,6 +33,30 @@ set -euo pipefail
 # point straight at the script without needing `cd` first.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Durable log (gitignored logs/): everything below is tee'd here as well as
+# to whatever cron captures.
+LOG_DIR="${SCAFFOLD_CALIBRATION_LOG_DIR:-$REPO_ROOT/logs}"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_DIR/quarterly_calibration.log") 2>&1
+echo "[calibration] $(date -u +%Y-%m-%dT%H:%M:%SZ) start (pid $$)"
+
+json_str() {
+    # JSON-encode one string for an alert payload.
+    python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+# One EXIT trap owns every temporary thing (PR body file, worktree).
+PR_BODY_FILE=""
+WORKTREE=""
+cleanup() {
+    [ -n "$PR_BODY_FILE" ] && rm -f "$PR_BODY_FILE"
+    if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
+        git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
+    fi
+    return 0
+}
+trap cleanup EXIT
 
 # ── X.26: emit alerts on start / success / failure ──────────────────
 # Routes through the orchestrator container's CLI so the alert lands in
@@ -61,22 +95,26 @@ on_err() {
 trap on_err ERR
 
 # ── 0. Pre-flight checks ────────────────────────────────────────────────────
+# A pre-flight exit is a FAILURE the operator must hear about: it emits
+# `calibration.failed` (stage=preflight) before exiting. Until §17.1496 these
+# exits were silent — the watchdog then reported `calibration.no_fire`, which
+# reads as "cron never ran" when cron did run and the script declined.
 
-if ! command -v gh >/dev/null 2>&1; then
-    echo "ERROR: gh CLI not on PATH. Install it (https://cli.github.com/) then retry." >&2
+preflight_fail() {
+    local reason="$1"
+    echo "ERROR: ${reason}" >&2
+    emit_alert "calibration.failed" "critical" \
+        "Quarterly calibration pre-flight failed: ${reason}" \
+        "$(printf '{"stage":"preflight","reason":%s}' "$(json_str "$reason")")"
     exit 2
-fi
-if ! gh auth status >/dev/null 2>&1; then
-    echo "ERROR: gh CLI is not authenticated. Run: gh auth login" >&2
-    exit 2
-fi
+}
 
-# Refuse to run with a dirty working tree — the script is supposed to land
-# a clean placeholder commit, not bundle in whatever else is in flight.
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "ERROR: working tree has uncommitted changes. Commit or stash before running." >&2
-    exit 2
-fi
+command -v gh >/dev/null 2>&1 \
+    || preflight_fail "gh CLI not on PATH (cron's PATH is /usr/bin:/bin — install gh there or set PATH in the crontab)"
+gh auth status >/dev/null 2>&1 \
+    || preflight_fail "gh CLI is not authenticated in this environment (a keyring-backed login needs a session bus; use GH_TOKEN in the crontab or gh auth login --insecure-storage)"
+command -v jq >/dev/null 2>&1 \
+    || preflight_fail "jq not on PATH (the PR body builder needs it)"
 
 # ── 1. Compute YYYY-Q[N] label from today's UTC date ───────────────────────
 
@@ -91,9 +129,15 @@ emit_alert "calibration.started" "info" \
     "Quarterly calibration ${LABEL} kicking off (${TS_TODAY} UTC)" \
     "$(printf '{"label":"%s","date":"%s"}' "$LABEL" "$TS_TODAY")"
 
-# ── 2. Sync main + branch ───────────────────────────────────────────────────
+# ── 2. Sync main + branch (in a throwaway worktree) ───────────────────────
 
 git fetch origin main --quiet
+
+# All git work happens in a detached worktree of origin/main: the operator's
+# checkout can be dirty or on any branch and is never touched.
+WORKTREE="$(mktemp -d -t quarterly-calibration-wt.XXXXXX)"
+git worktree add --detach --quiet "$WORKTREE" origin/main
+cd "$WORKTREE"
 
 BRANCH="calibration/${LABEL}"
 # If the branch already exists locally OR on the remote, append -rerun-N.
@@ -107,7 +151,7 @@ if git show-ref --quiet "refs/heads/${BRANCH}" \
     BRANCH="${BRANCH}-rerun${SUFFIX}"
     echo "[calibration] base branch existed; using ${BRANCH}"
 fi
-git checkout -b "${BRANCH}" origin/main --quiet
+git checkout -b "${BRANCH}" --quiet
 
 # ── 3. Read prior baseline + append placeholder via Python ─────────────────
 
@@ -187,8 +231,7 @@ PRIOR_MRR=$(prior_field "mean_mrr")
 PRIOR_TS=$(prior_field "ts")
 PRIOR_HARNESS=$(prior_field "harness")
 
-PR_BODY_FILE=$(mktemp -t quarterly-calibration-body.XXXXXX.md)
-trap 'rm -f "$PR_BODY_FILE"' EXIT
+PR_BODY_FILE=$(mktemp -t quarterly-calibration-body.XXXXXX.md)   # removed by cleanup (EXIT trap)
 
 cat > "$PR_BODY_FILE" <<MD
 **Quarterly RAG calibration — ${LABEL}**

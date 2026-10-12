@@ -32,9 +32,8 @@ _TEMPLATE_MARK_RE = re.compile(r"<!-- runbook-template: ([a-z_]+) -->")
 #: §17.1297 — the OS install is the VERB and the OS within one short span ("Install Ubuntu 22.04 on VM 106",
 #: "install an operating system"), not any step whose text has "install" somewhere and "Ubuntu" elsewhere:
 #: ADD65 "Verify QEMU Guest Agent responds on VM 106" was templated as an OS install.
-_INSTALL_OS_RE = re.compile(
-    r"\b(?:re)?install(?:ing|ed)?\s+(?:the\s+|an?\s+|a\s+fresh\s+)?(?:ubuntu|debian|operating system|os\b|cloud image|"
-    r"ubuntu server \d\d\.\d\d|server \d\d\.\d\d)", re.I)
+#: §17.1496 — the one definition lives in runbook_inputs (shared with machine_truth + runbook_preconditions).
+from app.modules.runbook_inputs import INSTALL_OS_RE as _INSTALL_OS_RE  # noqa: E402
 #: host-side work ON a guest — the drafter's normal path handles these (a `qm set`, a resize, a start)
 _HOST_SIDE_RE = re.compile(
     # §17.1304 — `resize` alone matched "resize2fs" in a step done INSIDE the guest (ADD84) and
@@ -300,7 +299,7 @@ RUN_IN_VM_VIA_AGENT = Template(
     run=['bash /tmp/in_vm_{GID}_agent.sh start', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh last'],   # §17.1317 — start, then wait x7, then last
     # §17.1304 — the inside check ALONE: `qm agent ping` prints nothing, and a check that cannot speak to the
     # goal is an `unknown` that keeps §17.1302 from recording an already-met step.
-    verify=['qm guest exec {GID} -- bash -c "{VERIFY_INSIDE}"'],
+    verify=['qm guest exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1496 — the check is escaped for this double-quoted slot at render
     risk="Runs this step's commands as root inside VM {GID} through its guest agent.",
 )
 
@@ -400,7 +399,7 @@ RUN_IN_CONTAINER = Template(
             Param("SECRET_FILES", "default", "", "")],
     files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n{SECRET_FILES_WRITE}    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c \'bash /root/.scaffold_step.sh; echo \\$? > /root/.scaffold_step.rc\'" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    # §17.1490 -- the exit code of the step ITSELF, saved by the unit: `--collect` discards a FAILED unit, and systemctl then\n    # reports the defaults (Result=success, ExecMainStatus=0) -- live, the ADD160 apt 404 was reported "finished (exit 0)".\n    code="$(ginfo "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d \'[:space:]\')"\n    result=""\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi\n    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
     run=['bash /tmp/in_ct_{GID}.sh start{SECRET_REFS}', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh last'],   # §17.1317
-    verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent)
+    verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent); §17.1496 — escaped at render
     risk="Runs this step's commands as root inside container {GID}.",
 )
 
@@ -708,18 +707,33 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
     return vals
 
 
-_SECRET_FILE_LINE_RE = re.compile(r"^\s*`?(/[\w./@+-]+)\s+\$?\{?([A-Z][A-Z0-9_]{1,63})\}?`?\s*$")
+_SECRET_FILE_LINE_RE = re.compile(r"^\s*`?(/[\w./@+-]+)\s+\$?\{?([A-Z][A-Z0-9_]{2,63})\}?`?\s*$")
 
 
 _SECRET_REF_NEAR_PATH_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,63})\}?[^\n]{0,160}?\bto\s+`?(/[\w./@+-]+)")
+#: §17.1496 — the shell's own variables are never a stored secret
+_SHELL_ENV_NAMES = frozenset({"HOME", "PATH", "USER", "PWD", "SHELL", "TERM", "LANG", "UID", "GID", "HOSTNAME",
+                              "LOGNAME", "EDITOR", "TMPDIR", "OLDPWD", "IFS"})
 
 
 def secret_files_from_text(node: Optional[dict]) -> str:
     """§17.1489 — "write the stored AirVPN config ($AIRVPN_WG_CONF, never as a literal) to /etc/wireguard/wg0.conf"
-    → `/etc/wireguard/wg0.conf AIRVPN_WG_CONF`: a stored secret the step tells the engine to write to a file."""
+    → `/etc/wireguard/wg0.conf AIRVPN_WG_CONF`: a stored secret the step tells the engine to write to a file.
+
+    §17.1496 — every line here becomes a truncating `cat > PATH <<< "$NAME"` in the helper's start phase,
+    so a `$NAME` that is NOT a stored secret must not become one: a public key (`$PANEL_PUBKEY` -- the
+    runner injects nothing, the root shell expands it empty, authorized_keys became one newline) and a
+    shell variable with a path after it (`copy $HOME/.ssh/id_rsa.pub to …` would have written `/root`
+    into the file). The write itself now refuses an empty value (`secret_file_parts`), so a name the
+    runner does not hold fails the start phase aloud instead of emptying the file."""
+    from app.modules.runbook_inputs import _PUBLIC_RE
     text = " ".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
     out = []
     for m in _SECRET_REF_NEAR_PATH_RE.finditer(text):
+        if _PUBLIC_RE.search(m.group(1)) or m.group(1) in _SHELL_ENV_NAMES:
+            continue
+        if text[m.end(1):m.end(1) + 2].rstrip("}")[:1] == "/":    # `$HOME/…`: a path, not a value
+            continue
         line = f"{m.group(2).rstrip('.,;:')} {m.group(1)}"
         if line not in out:
             out.append(line)
@@ -742,6 +756,9 @@ def secret_file_parts(spec: str) -> tuple[str, str]:
             continue
         path, name = m.group(1), m.group(2)
         d = path.rsplit("/", 1)[0] or "/"
+        # §17.1496 — a value the runner did not inject expands EMPTY here, and `cat >` would then
+        # truncate the file to a newline; the write refuses first, with the name in the record.
+        writes.append(f"    [ -n \"${{{name}:-}}\" ] || {{ echo \"FAILED: the runner holds no {name} for {path}\"; exit 1; }}\n")
         writes.append(f"    pct exec \"$GID\" -- sh -c 'umask 077; mkdir -p {d}; cat > {path}' <<< \"${name}\" "
                       f"|| {{ echo \"FAILED: writing {path} into $GID\"; exit 1; }}\n")
         names.append(name)
@@ -868,6 +885,14 @@ FREE_PARAM_SYSTEM = (
 _GUEST_WRAPPER_RE = re.compile(
     r"^\s*(?:sudo\s+)?(?:pct\s+exec\s+\d+|qm\s+guest\s+exec\s+\d+|lxc-attach\s+-n\s+\d+)(?:\s+--?[\w-]+(?:\s+\S+)?)*\s+--\s+", re.I)
 _SHELL_C_RE = re.compile(r"^\s*(?:bash|sh)\s+-c\s+(['\"])(.*)\1\s*$", re.S)
+
+
+def escape_for_double_quotes(check: str) -> str:
+    """§17.1496 — a model-written check made safe inside a `bash -c "…"` word on the host:
+    backslash, double quote, dollar and backtick are the only characters the host shell
+    reads inside double quotes; escaped, the guest's bash sees the check exactly as drawn."""
+    return (str(check or "").replace("\\", "\\\\").replace('"', '\\"')
+            .replace("$", "\\$").replace("`", "\\`"))
 
 
 def strip_guest_wrappers(text: str) -> str:
@@ -1155,7 +1180,12 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                 check2 = strip_guest_wrappers(model_fence((getattr(resp2, "text", "") or "").strip())).split("\n", 1)[0].strip()
                 if check2 and not check_looks_where_the_work_went(out.get("REMOTE_COMMANDS", ""), check2):
                     check = check2
-            out[p.name] = check
+            # §17.1496 — the slot is `bash -c "…"` on the HOST, and the model's check went in RAW:
+            # `grep -q "ListenPort = 51820" wg0.conf` word-split into `bash -c "grep -q ListenPort"
+            # = "51820 wg0.conf"` (grep read stdin, exited 1, and an already-met step was not
+            # recorded); `awk '{print $5}'` lost its `$5` to the host. Escaped for a double-quoted
+            # word -- the four characters bash expands there -- the check reaches the guest whole.
+            out[p.name] = escape_for_double_quotes(check)
         else:
             _text_in = repair_apt_state_first(bootstrap_steamcmd_first(keep_a_copy_before_overwrites(fenced)))
             # §17.1343 — the grep that ended ADD130 was a line INSIDE this script, not a

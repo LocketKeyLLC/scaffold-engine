@@ -271,6 +271,9 @@ def render_delivery(node: Optional[dict], host: Host, files: dict[str, str], che
     secret_files = [p for p, c in files.items() if _MARK_RE.search(c or "")]
     if secret_files:
         sh.append("trap " + shlex.quote("rm -f " + " ".join(shlex.quote(staged(p)) for p in secret_files)) + " EXIT")
+        # §17.1496 — the staged copy is about to hold the real key: owner-only BEFORE the fill, not
+        # only on the guest's copy after the push. /tmp is sticky, not private, and a SIGKILL skips the trap.
+        sh.append("chmod 600 " + " ".join(shlex.quote(staged(p)) for p in secret_files))
         for name in sorted({n for p in secret_files for n in _MARK_RE.findall(files[p])}):
             read = (credentials or {}).get(name)
             if not read:
@@ -757,3 +760,16 @@ def score(frame: dict, report: Optional[dict]) -> int:
 
 def evidence_of(frame: dict) -> str:
     return "\n".join(f"- {' '.join(str(r.get('why') or '').split())[:1500]}" for r in frame.get("refused") or [])
+
+
+def nothing_refusal(evidence: str) -> list[dict]:
+    """§17.1496 — the refusal a developed step parks with when no round produced a version to run.
+
+    It used to park with no commands AND no refusal: "Run" greyed out and nothing to read, the
+    per-round reasons (no files, every path outside the service directory, a refused shape)
+    living only in log lines. The last round's reason is what the operator sees."""
+    why = " ".join(str(evidence or "").split()).lstrip("- ").strip() or "every round came back with no files"
+    return [{"command": "(develop)", "why": (
+        f"{ROUNDS} rounds of drafting produced no version the engine could deliver. The last round: "
+        f"{why[:600]}. Nothing ran. Redraft with a note that says what the version must contain, "
+        f"or split the step.")}]

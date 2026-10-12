@@ -51,7 +51,9 @@ def parse_net0(config: str) -> tuple[Optional[str], Optional[str]]:
     br = _BRIDGE_RE.search(line)
     return (mac.group(1).lower() if mac else None), (br.group(1) if br else None)
 _AGENT_CFG_RE = re.compile(r"^agent:\s*(\d)", re.M)
-_INSTALL_OS_RE = re.compile(r"\binstall\b.*\b(?:ubuntu|debian|os|operating system|server \d\d\.\d\d)\b", re.I)
+#: §17.1496 — the §17.1297 definition, shared: this module's greedy copy reopened a guest's finished
+#: work when "Install qemu-guest-agent in the Ubuntu VM 106" was recorded done.
+from app.modules.runbook_inputs import INSTALL_OS_RE as _INSTALL_OS_RE  # noqa: E402
 #: §17.1313 — commands that reach the internet by NAME from inside the guest
 _NET_FETCH_RE = re.compile(r"(?<![\w-])(?:apt-get|apt|aptitude|dnf|yum|zypper|apk|pip3?|npm|pnpm|yarn|gem|cargo|go\s+install|curl|wget|git\s+clone|snap|add-apt-repository|pveam\s+download)(?![\w-])")
 
@@ -219,7 +221,11 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
             t.name = hm.group(1) if hm else ""
         t.reads[("pct" if t.kind == "ct" else "qm") + " config"] = qm_config[:600]
     if t.mac and neigh:
-        hit = next((ln for ln in neigh.split("\n") if t.mac in ln.lower()), "")
+        # §17.1496 — the IPv4 entry, wherever `ip neigh` lists it: a `fe80::…` line carries the
+        # same lladdr and, taken first, became the guest's "address" that every ssh target was
+        # then measured against.
+        _lines = [ln for ln in neigh.split("\n") if t.mac in ln.lower()]
+        hit = next((ln for ln in _lines if re.match(r"\s*\d{1,3}(?:\.\d{1,3}){3}\s", ln)), _lines[0] if _lines else "")
         t.address = hit.split()[0] if hit else None
         t.reads["ip neigh"] = hit or "(no entry for the MAC)"
     if t.mac and fdb is not None and fdb != "":

@@ -311,6 +311,11 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         if isinstance(st, dict) and isinstance(st.get("result"), str):
             raw = st["result"]
         pol = json.loads(raw)
+        if not isinstance(pol, dict):
+            # §17.1496 — a reply that parses but is not an object (a list, a string,
+            # null) used to raise TypeError OUTSIDE this try at `pol[...] = ...`:
+            # uncached, so every mount of the policy 500'd until the runner changed.
+            raise ValueError(f"policy reply is {type(pol).__name__}, not an object")
     except Exception as exc:
         logger.warning("supervised_policy_unavailable runner=%s err=%r", getattr(spec, "name", "?"), exc)
         _policy_cache[name] = (time.monotonic() + 60.0, None)
