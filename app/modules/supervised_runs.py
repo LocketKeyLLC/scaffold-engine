@@ -5283,7 +5283,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # key off the disk is now a check the engine can fill, so it is kept and
     # filled rather than dropped.
     from app.modules import machine_values as _mv
+    # §17.1499 — fold a redundant `$(pct exec GID … )` the drafter nested inside a
+    # command already running in guest GID back into the guest's own shell, BEFORE
+    # the key substitution and the host-tool gate see it (else it is refused as a
+    # `pct` run inside a guest, and the read would run on the host unprivileged).
+    cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
+    _mv_notes = list(_fold_notes) + list(_mv_notes)
     # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
     # safe in a written file too, so files are filled here.
     cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
