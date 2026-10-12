@@ -593,7 +593,8 @@ def test_the_channel_rules_state_the_runners_injection_rule():
     """The rule is internal to the runner, so nothing but the prompt can say it —
     which is why §17.1247's feedback could not get the model there."""
     assert "does not inherit a stored value" in sr.CHANNEL_RULES
-    assert 'NAME="$NAME" python3 /tmp/x.py' in sr.CHANNEL_RULES
+    assert 'python3 /tmp/x.py # $NAME' in sr.CHANNEL_RULES
+    assert '`NAME="$NAME" python3' not in sr.CHANNEL_RULES      # §17.1494 — the prefix sudo logs is not taught
 
 
 def test_the_channel_rules_show_HOW_to_write_a_script_safely():

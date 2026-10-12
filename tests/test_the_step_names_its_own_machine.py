@@ -299,7 +299,7 @@ def test_a_bash_file_is_syntax_checked_and_its_secret_must_be_passed():
     found = sr.file_writes_will_not_work(bad)
     assert found and "not valid bash" in found[0]["why"]
     missing = sr.script_secret_not_passed(["bash /tmp/a.sh"], good)
-    assert missing and 'MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh' in missing[0]["why"]
+    assert missing and 'bash /tmp/a.sh # $MASS_PASSWORD' in missing[0]["why"]
     assert sr.script_secret_not_passed(['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/a.sh'], good) == []
 
 
