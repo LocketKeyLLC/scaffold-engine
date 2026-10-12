@@ -11,6 +11,13 @@
 # runtime toolchain Verilator-generated C++ needs (g++, make, perl).
 
 ARG VERILATOR_VERSION=v5.024
+# §17.1497 — how many parallel g++ jobs the Verilator compile may run. Empty
+# (the default) means `nproc`. On the operator's laptop the -O3 compile at -j8
+# and -j3 segfaulted g++ five times in five different files (host RAM, not the
+# code: identical source and compiler built clean at -j1), so compose takes
+# VERILATOR_MAKE_JOBS and passes it here — no legacy builder, no cpuset needed:
+#   VERILATOR_MAKE_JOBS=1 docker compose --profile sandbox build scaffold-verilator
+ARG MAKE_JOBS=
 
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 1: builder — clones + builds Verilator from upstream source.
@@ -22,6 +29,7 @@ ARG VERILATOR_VERSION=v5.024
 FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS builder
 
 ARG VERILATOR_VERSION
+ARG MAKE_JOBS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -40,7 +48,7 @@ RUN git clone --depth 1 --branch "${VERILATOR_VERSION}" \
 WORKDIR /build/verilator
 RUN autoconf \
     && ./configure --prefix=/usr/local \
-    && make -j "$(nproc)" \
+    && make -j "${MAKE_JOBS:-$(nproc)}" \
     && make install \
     && rm -f /usr/local/bin/verilator_bin_dbg
 
