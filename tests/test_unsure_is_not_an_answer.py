@@ -200,10 +200,57 @@ def test_the_generator_inserts_and_rewires_before_validating():
     import inspect
     from app.modules import dag_generator as dg
     src = inspect.getsource(dg)
-    assert "ensure_decisions(normalized, brief or {})" in src
-    assert 'normalized.insert(0, _a)' in src, "a decision must come before what waits on it"
-    assert src.index("ensure_decisions(normalized") < src.index("plan_coverage import uncovered"), \
+    assert "decisions_for_tasks(normalized, brief_data)" in src, \
+        "§17.1498 — the planner's list is id/name/type; it must go through the adapter"
+    assert "ensure_decisions(normalized" not in src, "the row-shaped backstop must never see the planner's list"
+    assert "_candidate = list(_asks) + _candidate" in src, "a decision must come before what waits on it"
+    assert src.index("decisions_for_tasks(normalized") < src.index("plan_coverage import uncovered"), \
         "rewire before the coverage warning reads the plan"
+
+
+# ── §17.1498 — the backstop in the planner's own vocabulary ──────────────
+
+PLANNER_TASKS = [
+    {"id": "T1", "name": "Verify the media pipeline", "type": "action", "depends_on": [], "tool": "LLM"},
+    {"id": "T2", "name": "Organize the media library", "type": "action", "depends_on": ["T1"], "tool": "LLM"},
+]
+
+
+def test_a_planner_shaped_list_gets_a_planner_shaped_decision():
+    """The live crash: a question no step touches, on the list the planner
+    actually holds. The node that comes back must persist and edge like any
+    draw task — `id`, `name`, `type`, `notes`, `depends_on`, `tool`."""
+    from app.modules.dag_generator import _build_edges, _validate_graph
+    brief = {"ambiguities": ["Whether backups should go offsite"]}
+    added = ua.decisions_for_tasks(PLANNER_TASKS, brief)
+    assert len(added) == 1
+    a = added[0]
+    assert a["id"] == "ASK1" and a["type"] == "decision" and a["tool"] == "LLM"
+    assert a["name"].startswith("Decide with the operator:") and "offsite" in a["name"]
+    assert "not expected to know the technology" in a["notes"]
+    assert a["_waiters"] == []
+    plan = list(added) + PLANNER_TASKS
+    edges = _build_edges(plan)                      # raised KeyError('id') before
+    errors, _ = _validate_graph(plan, edges)
+    assert errors == []
+    referenced = {d for t in plan for d in t.get("depends_on", [])}
+    assert {t["id"] for t in plan if t["id"] not in referenced} == {"ASK1", "T2"}
+
+
+def test_the_planner_shaped_list_is_read_for_waiters_and_cover():
+    """Before §17.1498 the adapter did not exist, so a planner decision never
+    counted as covering (no `node_type`) and no step ever waited (no `title`)."""
+    brief = {"ambiguities": ["Which movies and TV shows do you want added?"]}
+    touching = PLANNER_TASKS + [{"id": "T3", "name": "Add the requested movies and TV shows",
+                                 "type": "action", "depends_on": ["T2"], "tool": "LLM"}]
+    assert ua.decisions_for_tasks(touching, brief) == [], "the step asks on arrival (§17.1221)"
+    covered = PLANNER_TASKS + [{"id": "D1", "name": "Decide which movies and shows to add",
+                                "type": "decision", "depends_on": [], "tool": "LLM"}]
+    assert ua.decisions_for_tasks(covered, brief) == [], "the planner already wrote the decision"
+
+
+def test_a_non_dict_entry_does_not_break_the_backstop():
+    assert ua.decisions_for_tasks(PLANNER_TASKS + ["junk"], {"ambiguities": ["Whether backups go offsite"]})
 
 
 # ── §17.1221 — the question arrives with the step ────────────────────────

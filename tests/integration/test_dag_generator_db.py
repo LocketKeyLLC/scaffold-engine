@@ -57,6 +57,33 @@ async def test_generate_dag_writes_nodes_and_transitions_status(db_session, inse
     assert all(r["status"] == "pending" for r in rows)
 
 
+async def test_an_open_question_no_step_touches_becomes_a_decision_row(db_session, insert_job):
+    """§17.1498 — the production path, not the helper. Live (job c75d77fa,
+    2026-10-12) a brief with six open ambiguities crashed `generate_dag` with
+    KeyError('id') on every resume; the only test of the backstop was a
+    source-string check that the call existed."""
+    job_id = await insert_job(status="planning", refined_brief={
+        "title": "Test", "description": "Test brief", "goals": ["g"],
+        "ambiguities": ["Whether backups should go offsite"],
+    })
+    with patch("app.modules.dag_generator.model_router.generate",
+               new=AsyncMock(return_value=_FakeResp(json.dumps(_VALID_DAG)))):
+        result = await generate_dag(job_id, db_session)
+
+    assert result["status"] == "executing", result
+    rows = (await db_session.execute(
+        text("SELECT node_key, node_type, title, execution_order, prompt_template FROM dag_nodes "
+             "WHERE job_id = :j ORDER BY execution_order"),
+        {"j": job_id},
+    )).mappings().all()
+    keys = [r["node_key"] for r in rows]
+    assert keys[0] == "ASK1" and set(keys) == {"ASK1", "T1", "T2", "T3"}
+    ask = rows[0]
+    assert ask["node_type"] == "decision"
+    assert "offsite" in ask["title"] and "not expected to know the technology" in (ask["prompt_template"] or "")
+    assert any("ASK1 inserted" in w for w in result["warnings"])
+
+
 async def test_generate_dag_rejects_when_dag_already_exists(db_session, insert_job):
     """If a dag_node already exists for the job, generate_dag returns 409.
 

@@ -244,6 +244,47 @@ def ensure_decisions(nodes: list[dict], brief: dict, *, key_prefix: str = "ASK")
     return added
 
 
+def decisions_for_tasks(tasks: list[dict], brief: dict, *, key_prefix: str = "ASK") -> list[dict]:
+    """§17.1498 — `ensure_decisions` for the PLANNER's task vocabulary.
+
+    The planner carries a draw as ``{"id", "name", "type", …}`` until it is
+    persisted; `ensure_decisions` reads and writes the ``dag_nodes`` row shape
+    (``node_key`` / ``title`` / ``node_type``). The generator called the latter
+    on the former since §17.1220, so the step-matching read nothing (no
+    ``title`` → no waiters, no ``node_type`` → no planner decision ever counted
+    as covering) and the row-shaped node it inserted crashed the edge build on
+    ``t["id"]`` — the first live brief with an open question no step touched
+    (job c75d77fa, 2026-10-12) stranded in `planning` on every resume.
+
+    This is the ONE translation. It never raises for the same reason
+    `ensure_decisions` never does: an adapter that throws would hide the
+    question all over again.
+    """
+    rows = []
+    for t in tasks or []:
+        if not isinstance(t, dict):
+            continue
+        rows.append({
+            "node_key": str(t.get("id") or ""),
+            "title": str(t.get("name") or ""),
+            "node_type": "decision" if str(t.get("type") or "").lower() == "decision" else "task",
+        })
+    out: list[dict] = []
+    for a in ensure_decisions(rows, brief, key_prefix=key_prefix):
+        out.append({
+            "id": a["node_key"],
+            "name": a["title"],
+            "type": "decision",
+            "inputs": [],
+            "outputs": ["the operator's choice, in their own words"],
+            "depends_on": [],
+            "tool": "LLM",
+            "notes": a["description"],
+            "_waiters": list(a.get("_waiters") or []),
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # §17.1221 — ask at the NODE, not in the plan.
 #

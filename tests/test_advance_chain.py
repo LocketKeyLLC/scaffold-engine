@@ -135,6 +135,9 @@ async def test_resume_sweep_starts_stranded_jobs_and_leaves_fresh_markers_alone(
         {"id": "s-old", "metadata": {"advance_chain": {"phase": "planning", "updated_at": old, "assist": True}}},
         {"id": "s-fresh", "metadata": {"advance_chain": {"phase": "planning", "updated_at": fresh}}},
         {"id": "s-none", "metadata": {}},
+        # §17.1498 — an auto-mode approval that crashed in planning (job c75d77fa): the
+        # resume must carry `execute`, or the replanned job never runs.
+        {"id": "s-auto", "metadata": {"advance_chain": {"phase": "error", "updated_at": old, "execute": True}}},
     ]
 
     class _Res:
@@ -149,12 +152,13 @@ async def test_resume_sweep_starts_stranded_jobs_and_leaves_fresh_markers_alone(
     started = []
 
     async def fake_start(job_id, **kw):
-        started.append((job_id, kw.get("assist"), kw.get("source")))
+        started.append((job_id, kw.get("assist"), kw.get("execute"), kw.get("source")))
         return {"started": True}
     monkeypatch.setattr(ac, "start_advance_chain", fake_start)
     resumed = await ac.resume_stranded_planning(older_than_minutes=3)
-    assert resumed == ["s-old", "s-none"]
-    assert started == [("s-old", True, "resume"), ("s-none", False, "resume")]
+    assert resumed == ["s-old", "s-none", "s-auto"]
+    assert started == [("s-old", True, False, "resume"), ("s-none", False, False, "resume"),
+                       ("s-auto", False, True, "resume")]
 
 
 def test_the_spa_no_longer_runs_the_chain_itself():
