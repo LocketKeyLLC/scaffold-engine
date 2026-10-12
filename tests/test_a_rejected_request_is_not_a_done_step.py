@@ -541,7 +541,7 @@ def test_the_live_failure_is_caught():
     assert len(got) == 1
     why = got[0]["why"]
     assert "PROWLARR_API_KEY" in why
-    assert 'PROWLARR_API_KEY="$PROWLARR_API_KEY" python3 /tmp/add_indexers.py' in why
+    assert 'python3 /tmp/add_indexers.py # $PROWLARR_API_KEY' in why
     assert "never appears in the block" in why
 
 
@@ -593,7 +593,8 @@ def test_the_channel_rules_state_the_runners_injection_rule():
     """The rule is internal to the runner, so nothing but the prompt can say it —
     which is why §17.1247's feedback could not get the model there."""
     assert "does not inherit a stored value" in sr.CHANNEL_RULES
-    assert 'NAME="$NAME" python3 /tmp/x.py' in sr.CHANNEL_RULES
+    assert 'python3 /tmp/x.py # $NAME' in sr.CHANNEL_RULES
+    assert '`NAME="$NAME" python3' not in sr.CHANNEL_RULES      # §17.1494 — the prefix sudo logs is not taught
 
 
 def test_the_channel_rules_show_HOW_to_write_a_script_safely():

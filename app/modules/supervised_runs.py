@@ -887,7 +887,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
     printf '%s\\n' "import json, urllib.request" "cfg = open('/tmp/config.xml').read()" "key = cfg.split('<ApiKey>')[1].split('<')[0]" "print(key[:4])" | tee /tmp/x.py
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
-- A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
+- A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it as a trailing comment: `python3 /tmp/x.py # $NAME` (never a `NAME="$NAME"` prefix — sudo logs it). A password a CALL needs (a login) is fed to that call on stdin from the host instead: `pct exec <id> -- sh -c 'tr -d "\\n" | curl … --data-urlencode password@- …' <<< "$NAME"`.
 - ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
@@ -1660,9 +1660,9 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
     failed 401 instead. The model cannot reason its way here because the rule is
     internal to the runner, so the engine has to say it.
 
-    The remedy is one prefix: `NAME="$NAME" python3 /tmp/x.py`, which puts the
-    reference in the command text where the runner looks, without the value ever
-    appearing in the block.
+    The remedy is a trailing reference: `python3 /tmp/x.py # $NAME`, which puts it in
+    the command text where the runner looks, without the value ever appearing in the
+    block. (§17.1494 — not the `NAME="$NAME"` prefix this once taught: sudo logs it.)
     """
     cmds = [str(c) for c in (commands or [])]
     wanted: dict[str, set] = {}          # script path -> secret names it reads
@@ -1702,9 +1702,11 @@ def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = 
             out.append({"command": c, "why": (
                 f"this runs {path}, which reads {', '.join(missing)} from its environment — and the "
                 f"runner only passes a stored value into a command that MENTIONS it, so the script "
-                f"starts with no such variable and fails. Put the reference in this command: "
-                f'`{first}="${first}" {"bash" if path.endswith(".sh") else "python3"} {path}`. The value still never appears in the block; '
-                f"the runner expands it on the machine.")})
+                f"starts with no such variable and fails. Put the reference in this command as a trailing "
+                # §17.1494 — never the `NAME="$NAME" cmd` prefix this used to teach: elevated, sudo logs every
+                # `NAME=value` it is handed (§17.1429); `# $NAME` is the reference the runner reads and sends
+                f'comment: `{"bash" if path.endswith(".sh") else "python3"} {path} # ${first}`. The value still never '
+                f"appears in the block; the runner expands it inside its root shell.")})
     return out
 
 
@@ -4402,6 +4404,18 @@ def unit_from_installed_package(unit: str, block: str) -> bool:
     return stem in pkgs or bool(set(_PACKAGE_UNITS.get(stem, ())) & pkgs)
 
 
+def secret_is_file_content(script: str, name: str) -> bool:
+    """§17.1494 — is ``$NAME`` written INTO a file (a config to place), rather than used as a credential?
+
+    Live, ADD170 (qBittorrent's port through its Web API): the login password in an in-guest script drew the
+    §17.1489 advice to list it in SECRET_FILES — with `/etc/wireguard/wg0.conf` as the example."""
+    ref = rf"\$\{{?{re.escape(name)}\b"
+    for ln in (script or "").splitlines():
+        if re.search(ref, ln) and re.search(r"(?:>>?\s*[\"']?/|\btee\b|\bcat\s*>|\bdd\s+of=)", ln):
+            return True
+    return False
+
+
 #: §17.1488 — a stored secret named inside a script that runs INSIDE a guest
 _IN_GUEST_SECRET_MARKER = "is read inside the guest, where the runner never sends it"
 
@@ -4422,6 +4436,17 @@ def secret_inside_a_guest_script(files: Optional[list[dict]], secret_names: set[
                 gid, vm = m.group(2), m.group(1) == "vm"
                 into = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c 'umask 077; cat > <PATH>'" if vm else
                         f"pct exec {gid} -- sh -c 'umask 077; cat > <PATH>'")
+                if not secret_is_file_content(body.group(1), name):
+                    # §17.1494 — a password for a login is not a file to write: the call itself runs from the host
+                    run = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c '…'" if vm else f"pct exec {gid} -- sh -c '…'")
+                    out.append({"command": f"(inside {'VM' if vm else 'CT'} {gid}) ${name}", "why": (
+                        f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. It is a credential, not a "
+                        f"file's content, so do not use the in-guest template for this call: run it from the HOST as "
+                        f"its own command, `{run} <<< \"${name}\"`, and have the program read it from stdin (curl "
+                        f"`--data-urlencode password@-`, after `tr -d \"\\n\"` to drop the newline `<<<` adds) — the "
+                        f"value crosses on stdin, expanded inside the runner's root shell, and never appears in the "
+                        f"block or a process list.")})
+                    continue
                 out.append({"command": f"(inside {'VM' if vm else 'CT'} {gid}) ${name}", "why": (
                     f"`${name}` {_IN_GUEST_SECRET_MARKER}: it would be empty there. Do not drop the work: name the "
                     f"file in the template's SECRET_FILES (`<path inside the guest> {name}`, e.g. "
