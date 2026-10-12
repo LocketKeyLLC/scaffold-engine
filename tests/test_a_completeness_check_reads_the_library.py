@@ -39,10 +39,16 @@ def test_the_step_is_rewritten_to_read_the_library_in_the_guest():
     assert "-X POST" not in run and "/test" not in run, "a read, not an add or a validating POST"
 
 
-def test_the_check_is_not_a_no_op():
+def test_the_check_is_read_only_safe_and_not_a_no_op():
+    """§17.1505 — the verify runs through the read-only channel, which refuses `python3`
+    and command substitution (§17.1390). It is a plain authenticated library read whose
+    HTTP code witnesses the read works — never a `true`, no interpreter, no `$( … )`."""
+    from app.modules.assist_state_check import read_only_command
     _, verify, _ = rewrite_completeness_check(NODE, ["x"], ["true"], SERVICES, INV)
-    assert verify and verify[0] != "true"
-    assert "SERIES" in verify[0] and "RESULT" in verify[0], "the check witnesses real counts"
+    v = verify[0]
+    assert v != "true" and "python3" not in v and "$(" not in v
+    assert "/api/v3/series" in v and "$SONARR_API_KEY" in v and "http_code" in v.lower()
+    assert read_only_command(v), "the read-only verify channel must accept the check"
 
 
 def test_the_key_fills_from_the_guest_and_the_command_parses():

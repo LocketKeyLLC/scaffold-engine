@@ -7294,9 +7294,15 @@ def rewrite_completeness_check(node: Optional[dict], commands: list[str], verify
     payload = (f'curl -s --fail-with-body -H "X-Api-Key: <{keyname}>" '
                f'"http://127.0.0.1:{port}/api/v3/series" | python3 -c "{_COMPLETENESS_PY}" "{show}"')
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
-    # the verify re-reads the library and shows the same verdict line — a real count,
-    # never a `true` (§17.1382): the SERIES/RESULT lines witness what the library holds.
-    check = (f"pct exec {gid} -- sh -c {_sq_payload(payload + ' | grep -E ' + chr(39) + '^(SERIES|RESULT):' + chr(39))}")
+    # §17.1505 — the verify runs through the READ-ONLY channel, which refuses `python3`
+    # and command substitution (§17.1390), so it cannot be the parsed report. It is a
+    # plain authenticated read of the same library: `http_200` witnesses that the read
+    # the RUN depends on actually answers (not a `true` — it needs this machine's {app}
+    # up and a valid key), and the RUN's own output carries the per-season verdict. The
+    # stored key `${keyname}` is host-expanded (run_verify injects it); no `$( … )`.
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "{app} library HTTP %{{http_code}}" -H "X-Api-Key: ${keyname}" '
+             f'"http://127.0.0.1:{port}/api/v3/series"')
     note = [{"why": (
         f"drafted the completeness check from the engine's own shape (§17.1504): it reads {app}'s library "
         f"`/series` inside guest {gid} and prints each season's `have X of Y` with a COMPLETE / MISSING verdict "
