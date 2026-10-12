@@ -414,18 +414,30 @@ def read_a_readable_key_written_as_a_var(
     named it the wrong way.
 
     For a command that runs in a guest (`pct exec GID --` / `qm guest exec GID --`),
-    a reference to a key `readable_for` recognises AND which is NOT a stored secret
-    is rewritten to `<NAME>`, and — unless the command already carries it in a
-    single-quoted `sh -c '…'` payload — the guest command is promoted to one such
-    payload, so `read_on_the_machine` (next) fills it where the guest expands it.
-    A STORED secret's `$NAME` is left alone: the runner injects it, and it works.
+    a reference to a key `readable_for` recognises is rewritten to `<NAME>`, and —
+    unless the command already carries it in a single-quoted `sh -c '…'` payload —
+    the guest command is promoted to one such payload, so `read_on_the_machine`
+    (next) fills it where the guest expands it.
+
+    §17.1503 — the stored/readable split is about POSITION, not the key. On the
+    HOST a stored secret's `$NAME` is left alone: the runner injects it into the
+    process it starts, and it expands. But INSIDE a single-quoted `sh -c '…'`
+    payload the host cannot expand it (single quotes) and the guest has no such
+    variable (the injection is on the host), so even a STORED-and-readable key
+    (the *arr keys) must be read on the machine there. Live (job c75d77fa T20):
+    `pct exec 104 -- sh -c 'curl … -H "X-Api-Key: $SONARR_API_KEY" …'` expanded to
+    an empty header and the gate refused it. So the guest-payload branch wants any
+    readable key; the host branch wants only a readable NON-stored one.
     """
     stored_up = {str(s).upper() for s in (stored or set())}
 
-    def _wanted(name: str) -> bool:
+    def _wanted_host(name: str) -> bool:
         return name.upper() not in stored_up and readable_for(name) is not None
 
-    def _normalise(text: str) -> tuple[str, bool]:
+    def _wanted_in_guest(name: str) -> bool:
+        return readable_for(name) is not None          # §17.1503 — stored or not: the injection does not reach here
+
+    def _normalise(text: str, wanted) -> tuple[str, bool]:
         changed = False
 
         def repl(m: "re.Match") -> str:
@@ -433,7 +445,7 @@ def read_a_readable_key_written_as_a_var(
             name = m.group(1) or m.group(2) or m.group(3)
             if m.group(1) is not None:          # already `<NAME>`
                 return m.group(0)
-            if _wanted(name):
+            if wanted(name):
                 changed = True
                 return f"<{name}>"
             return m.group(0)
@@ -449,20 +461,20 @@ def read_a_readable_key_written_as_a_var(
                 continue
             indent, tool, gid, rest = m.groups()
             sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
-            if sh:                              # already a guest-shell payload: just normalise inside it
-                payload, changed = _normalise(sh.group(1))
+            if sh:                              # a guest-shell payload: read ANY readable key here
+                payload, changed = _normalise(sh.group(1), _wanted_in_guest)
                 if changed:
                     out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
                     n += 1
                 else:
                     out.append(c)
                 continue
-            new_rest, changed = _normalise(rest)
+            new_rest, changed = _normalise(rest, _wanted_host)
             # Promote to a guest shell whenever a readable (non-stored) placeholder is
             # present — whether it arrived as `$NAME`, `${NAME}` or already `<NAME>` —
             # so `read_on_the_machine` fills it where the guest expands it. This closes
             # the loop on every form the drafter tried for the same read.
-            readable_ph = [nm for nm in re.findall(r"<([A-Z][A-Z0-9_]{2,40})>", new_rest) if _wanted(nm)]
+            readable_ph = [nm for nm in re.findall(r"<([A-Z][A-Z0-9_]{2,40})>", new_rest) if _wanted_host(nm)]
             if readable_ph:
                 out.append(f"{indent}{tool} {gid} -- sh -c {_sq(new_rest)}")
                 n += 1
