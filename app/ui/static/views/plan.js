@@ -265,30 +265,103 @@ export function renderPlan(container, jobId, opts = {}) {
     return { node: el("div", {}, input, datalist), read: () => input.value.trim() };
   }
 
+  // §17.1514 — decide right on the node: POST /jobs/{id}/decide, then re-poll so the
+  // node flips and the parked marker moves. Mirrors the run stage's decide verbs
+  // (run / myself / skip / redraft for a hands-on step; the options for a decision node).
+  async function sendDecide(nodeKey, choice, label, { note, inputs, btns } = {}) {
+    (btns || []).forEach((b) => { if (b) b.disabled = true; });
+    try {
+      const res = await api.post(`/jobs/${jobId}/decide`, {
+        node_key: nodeKey, choice,
+        note: (note && note.trim()) || null,
+        inputs: inputs && Object.keys(inputs).length ? inputs : null,
+      });
+      const why = String(res.reason || "").split("\n").find((l) => l.trim()) || "";
+      toast(res.outcome === "ran" ? `${nodeKey} ran — continuing.`
+          : res.outcome === "failed" ? `${nodeKey} stopped${why ? ": " + why.slice(0, 140) : " — see the node output."}`
+          : res.outcome === "redraft" ? `${nodeKey} sent back with your correction.`
+          : res.outcome === "runbook" ? `${nodeKey} kept as a runbook for you.`
+          : `${nodeKey} ${res.node_status || label} — continuing.`,
+        res.outcome === "failed" ? "warn" : "ok");
+      closeDrawer();
+      await load();
+    } catch (e) {
+      const dt = (e && e.detail) || {};
+      const probs = Array.isArray(dt.problems) ? " — " + dt.problems.map((p) => `<${p.name}>: ${p.why}`).join("; ") : "";
+      toast(`Could not record it: ${dt.error || (e && e.detail) || (e && e.message)}${probs}`, "err");
+      (btns || []).forEach((b) => { if (b) b.disabled = false; });
+    }
+  }
+
   function parkedPanel(node) {
-    // §17.1513 — when the engine is parked on this node, show what it is about to do and
-    // let the operator act. The decide verbs live on the Run stage, which this routes to.
+    // §17.1513/1514 — when the engine is parked on this node, show what it is about to do
+    // AND let the operator decide here, without leaving the graph.
     if (!parked || parked.node_key !== node.node_key) return null;
+    const nodeKey = parked.node_key;
     const cmds = (parked.commands || []).map((c) => (typeof c === "string" ? c : c.command)).filter(Boolean);
     const refused = (parked.refused || []).map((r) => (r && r.why) || "").filter(Boolean);
-    const opts = (parked.options || []).map((o) => (o && (o.label || o.id)) || "").filter(Boolean);
+    const options = Array.isArray(parked.options) ? parked.options : [];
+    const inputFields = Array.isArray(parked.inputs) ? parked.inputs : [];
+    const isRun = String(parked.kind || "") === "run" || cmds.length > 0;
+
+    const note = el("textarea", { class: "input decision-note", rows: "2",
+      placeholder: isRun ? "Anything the engine should know, or what to fix for a redraft (optional)" : "Answer in your own words (optional)" });
+
+    // §17.1187 — the <NAME> values the runbook needs: one field each, prefilled from pins.
+    const fields = new Map();
+    const inputRows = inputFields.map((i) => {
+      const f = el("input", { class: "input decision-input", type: i.secret ? "password" : "text", placeholder: i.name, autocomplete: "off" });
+      if (i.value) f.value = i.value;
+      fields.set(i.name, f);
+      return el("label", { class: "decision-input-row" }, el("span", { class: "mono decision-input-name", text: `<${i.name}>` }), f,
+        i.hint ? el("span", { class: "dim faint", text: i.hint }) : null);
+    });
+    const collectInputs = () => { const v = {}; for (const [n, f] of fields) if (f.value.trim()) v[n] = f.value.trim(); return v; };
+    const missingInputs = () => inputFields.filter((i) => !(fields.get(i.name) && fields.get(i.name).value.trim()));
+
+    let actionRow;
+    if (isRun) {
+      const canRun = cmds.length > 0 && refused.length === 0;
+      const runBtn = el("button", { class: "btn btn-sm btn-primary", text: `Run it${parked.runner ? " through " + parked.runner : ""}` });
+      const selfBtn = el("button", { class: "btn btn-sm", text: "I'll do it myself" });
+      const skipBtn = el("button", { class: "btn btn-sm btn-ghost", text: "Skip" });
+      const redraftBtn = el("button", { class: "btn btn-sm btn-ghost", text: "↺ Redraft with my note", title: "Write what is wrong in the note, then press this." });
+      const btns = [runBtn, selfBtn, skipBtn, redraftBtn];
+      const gate = () => { runBtn.disabled = !canRun || missingInputs().length > 0; };
+      inputFields.length && fields.forEach((f) => f.addEventListener("input", gate));
+      gate();
+      runBtn.onclick = () => { if (missingInputs().length) { toast(`Fill ${missingInputs().map((i) => "<" + i.name + ">").join(", ")} first.`, "warn"); return; } sendDecide(nodeKey, "run", "ran", { note: note.value, inputs: collectInputs(), btns }); };
+      selfBtn.onclick = () => sendDecide(nodeKey, "myself", "kept as a runbook", { note: note.value, btns });
+      skipBtn.onclick = () => sendDecide(nodeKey, "skip", "skipped", { note: note.value, btns });
+      redraftBtn.onclick = () => { if (!note.value.trim()) { toast("Write what is wrong in the note first.", "warn"); note.focus(); return; } sendDecide(nodeKey, "redraft", "redrafting", { note: note.value, btns }); };
+      actionRow = el("div", { class: "row row-wrap decision-actions" }, runBtn, selfBtn, skipBtn, redraftBtn);
+    } else {
+      // A decision node: each option is a choice; a free-text answer is also allowed.
+      const answerBtn = el("button", { class: "btn btn-sm", text: "Answer in my own words" });
+      answerBtn.onclick = () => { if (!note.value.trim()) { toast("Type your answer in the box first.", "warn"); note.focus(); return; } sendDecide(nodeKey, note.value.trim(), "decided", { btns: [answerBtn] }); };
+      const optBtns = options.map((o) => {
+        const label = (o && (o.label || o.id)) || "";
+        const b = el("button", { class: "btn btn-sm btn-primary", text: label, title: (o && o.tradeoff) || "" });
+        b.onclick = () => sendDecide(nodeKey, (o && o.id) || label, "decided", { note: note.value, btns: [b] });
+        return b;
+      });
+      actionRow = el("div", { class: "row row-wrap decision-actions" }, ...optBtns, answerBtn);
+    }
+
     return el("div", { class: "card card-pad step-parked" },
       el("div", { class: "row" }, el("span", { class: "tag warn", text: "⏸ the engine is waiting here" }),
         parked.kind ? el("span", { class: "tag mono", text: String(parked.kind) }) : null),
       el("p", { class: "step-parked-q", text: parked.question || parked.title || "Awaiting your decision." }),
       parked.suggested ? el("p", { class: "dim", text: `Engine suggests: ${parked.suggested}` }) : null,
       cmds.length
-        ? el("details", { class: "brief-details" }, el("summary", {}, `${cmds.length} command(s) it will run`),
-            el("pre", { class: "md-pre", text: cmds.join("\n") }))
+        ? el("details", { class: "brief-details" }, el("summary", {}, `${cmds.length} command(s) it will run`), el("pre", { class: "md-pre", text: cmds.join("\n") }))
         : null,
       refused.length
-        ? el("details", { class: "brief-details" }, el("summary", {}, `${refused.length} thing(s) it refused to run`),
-            el("pre", { class: "md-pre", text: refused.join("\n\n") }))
+        ? el("details", { class: "brief-details" }, el("summary", {}, `${refused.length} thing(s) it refused to run`), el("pre", { class: "md-pre", text: refused.join("\n\n") }))
         : null,
-      opts.length ? el("p", { class: "dim", text: `Choices: ${opts.join(" · ")}` }) : null,
-      el("button", { class: "btn btn-sm btn-primary", text: "Act on this step →",
-        title: "Open the run stage to approve, run, skip, or decide",
-        onClick: () => { window.location.hash = `#/job/${jobId}/run`; } }));
+      inputRows.length ? el("div", { class: "decision-inputs" }, ...inputRows) : null,
+      note,
+      actionRow);
   }
 
   function readView(node) {
