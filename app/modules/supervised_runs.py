@@ -7489,10 +7489,12 @@ def rewrite_organize_jellyfin(node: Optional[dict], commands: list[str], verify:
         return list(commands or []), list(verify or []), []
     payload = f'python3 -c "{_ORGANIZE_JELLYFIN_PY}" "<JELLYFIN_API_KEY>"'
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
-    # read-only-safe verify (§17.1505): the VirtualFolders list answers for an authenticated read.
-    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
-             f'-w "jellyfin libraries HTTP %{{http_code}}" -H "X-Emby-Token: $JELLYFIN_API_KEY" '
-             f'"http://127.0.0.1:8096/Library/VirtualFolders"')
+    # §17.1511 — the verify reads the content types off the FILESYSTEM, not the API: Jellyfin's
+    # key is readable-not-stored, so `$JELLYFIN_API_KEY` in a check gets turned into the in-guest
+    # `$(python3 …)` read (§17.1500) that the read-only verify channel refuses (§17.1390). After
+    # the API types a library, its `options.xml` holds the `<ContentType>`, so grepping those and
+    # listing the library folders witnesses the result directly — no key, no interpreter, no `$( )`.
+    check = (f"pct exec {gid} -- sh -c {_sq_payload('grep -h -o ' + chr(34) + '<ContentType>[^<]*</ContentType>' + chr(34) + ' /var/lib/jellyfin/root/default/*/options.xml 2>/dev/null; echo ---libraries---; ls -1 /var/lib/jellyfin/root/default/')}")
     note = [{"why": (
         f"drafted the Jellyfin layout from the engine's own shape (§17.1510): inside guest {gid} it types the "
         f"Movies library (movies → /media/movies) and the TV Shows library (tvshows → /media/tv), removes any "
