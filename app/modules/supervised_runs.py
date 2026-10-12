@@ -5300,6 +5300,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # safe in a written file too, so files are filled here.
     cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
     _mv_notes = list(_mv_notes) + _ea_notes
+    # §17.1501 — an empty-body POST to an *arr `/{resource}/test` validates the whole
+    # resource and fails on its required fields; the standard "test everything
+    # configured" is `/{resource}/testall`, which needs no body. Repair it here, before
+    # the §17.1378b refusal gate, so a connectivity-verify step runs instead of parking.
+    cmds, verify, _test_notes = repair_empty_body_test_call(cmds, verify)
+    _mv_notes = list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
     if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):
@@ -7133,6 +7139,64 @@ def _body_carries_nothing(line: str) -> bool:
     except Exception:
         return False                       # unparseable: not our judgment
     return isinstance(obj, dict) and set(k.lower() for k in obj) <= {"id"}
+
+
+#: §17.1501 — *arr resources that expose a `/{resource}/testall` beside `/{resource}/test`
+#: (the UI's "Test All"): it tests every CONFIGURED one and needs no request body. The
+#: resources a media-stack connectivity step actually tests. A resource NOT here is left
+#: for the §17.1378b refusal, because inventing a `/testall` it may not have is worse.
+_TESTALL_RESOURCES = frozenset({
+    "downloadclient", "indexer", "notification", "importlist", "application", "applications",
+    "indexerproxy",
+})
+_TEST_ENDPOINT_RE = re.compile(r"(/api/v\d+/(\w+))/test\b")
+#: the `-d/--data…` flag together with its one quoted-or-bare argument, to delete.
+_DATA_FLAG_WITH_ARG_RE = re.compile(
+    r"\s*(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])\s*(?:'[^']*'|\"[^\"]*\"|\S+)")
+
+
+def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1501 — rewrite an empty-body POST to an *arr `/{resource}/test` into
+    `/{resource}/testall` with the body removed.
+
+    Live (job c75d77fa T3v2, 2026-10-12): the "Verify testable" step drafted
+    `curl … -X POST … -d '{}' …/api/v3/downloadclient/test` four times. A `/test`
+    endpoint validates the whole object, so an empty body fails on the resource's
+    required fields (`'Name' must not be empty`, …) — §17.1378b refuses it and
+    tells the drafter to GET the object and POST it. For a connectivity CHECK the
+    simpler, exactly-right form is `/{resource}/testall`: it tests every configured
+    client/indexer and takes no body, which is what the arr UI's "Test All" calls.
+    So the engine repairs the drafter's own mistake instead of parking the step.
+
+    Only resources known to carry `/testall` are repaired; anything else is left to
+    the §17.1378b refusal, because inventing an endpoint is worse than refusing."""
+    repaired: set[str] = set()
+
+    def fix(seq: list[str]) -> tuple[list[str], int]:
+        out, n = [], 0
+        for c in seq or []:
+            line = str(c)
+            m = _TEST_ENDPOINT_RE.search(line)
+            if not m or m.group(2).lower() not in _TESTALL_RESOURCES or not _body_carries_nothing(line):
+                out.append(c)
+                continue
+            fixed = line[:m.start()] + m.group(1) + "/testall" + line[m.end():]
+            fixed = _DATA_FLAG_WITH_ARG_RE.sub("", fixed)
+            out.append(fixed)
+            n += 1
+            repaired.add(m.group(2).lower())
+        return out, n
+
+    out_cmds, nc = fix(commands)
+    out_verify, nv = fix(verify)
+    notes: list[dict] = []
+    if nc or nv:
+        notes.append({"why": (
+            "a connectivity check POSTed an empty body to an *arr `/" + "`, `/".join(sorted(repaired))
+            + "/test` endpoint, which validates the whole object and fails on its required fields; "
+            "rewrote it to `/testall` (the UI's \"Test All\": every configured one, no body needed) so "
+            "the check tests the connection instead of the empty object (§17.1501).")})
+    return out_cmds, out_verify, notes
 
 
 def a_validating_endpoint_sent_an_empty_body(
