@@ -789,6 +789,10 @@ services:
     build:
       context: ./docker/verilator
       dockerfile: Dockerfile
+      args:
+        # §17.1497 — parallel g++ jobs for the Verilator compile; empty = nproc.
+        # VERILATOR_MAKE_JOBS=1 when the -O3 compile segfaults g++ on this host.
+        MAKE_JOBS: ${VERILATOR_MAKE_JOBS:-}
     container_name: scaffold-verilator
     logging: *default-logging
     mem_limit: 512m
