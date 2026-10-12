@@ -21,7 +21,7 @@ import subprocess
 
 from app.modules import machine_values as mv
 
-INV = {"names": {"101": "jellyfin", "103": "radarr"}}
+INV = {"names": {"101": "jellyfin", "102": "prowlarr", "103": "radarr", "104": "sonarr"}}
 STORED = {"RADARR_API_KEY", "SONARR_API_KEY", "PROWLARR_API_KEY", "MASS_PASSWORD"}
 
 
@@ -84,6 +84,35 @@ def test_checks_are_rewritten_too():
     _, verify, notes = mv.read_a_readable_key_written_as_a_var(
         [], ['pct exec 101 -- curl -s -H "X-Emby-Token: $JELLYFIN_API_KEY" http://127.0.0.1:8096/x'], STORED)
     assert verify[0].startswith("pct exec 101 -- sh -c '") and notes
+
+
+def test_a_stored_readable_key_inside_a_guest_payload_is_read_there():
+    r"""§17.1503 — a stored *arr key inside a single-quoted `sh -c '…'` payload cannot
+    be injected (host injection does not reach the guest shell), so it is read from the
+    service's own config INSIDE that guest. Live (job c75d77fa T20)."""
+    cmd = ("pct exec 104 -- sh -c 'curl -s --fail-with-body -H \"X-Api-Key: $SONARR_API_KEY\" "
+           "\"http://127.0.0.1:8989/api/v3/series/lookup?term=big%20bang%20theory\"'")
+    c, _, _ = mv.read_a_readable_key_written_as_a_var([cmd], [], STORED)
+    c, _, _ = mv.read_on_the_machine(c, [], INV)
+    out = c[0]
+    assert "$SONARR_API_KEY" not in out, "the stored key must not be left unexpanded in a guest shell"
+    assert "/var/lib/sonarr/config.xml" in out and "$(cat" in out, "read from its own config in the guest"
+    assert subprocess.run(["bash", "-n", "-c", out], capture_output=True, text=True).returncode == 0
+
+
+def test_a_stored_readable_key_on_the_host_is_still_injected():
+    r"""§17.1503 — on the HOST (double-quoted, not a single-quoted payload) the runner
+    injects the stored key, so it is left as `$NAME`; only the guest-payload position reads."""
+    cmd = 'pct exec 104 -- curl -s -H "X-Api-Key: $SONARR_API_KEY" http://127.0.0.1:8989/api/v3/series'
+    out, _, notes = mv.read_a_readable_key_written_as_a_var([cmd], [], STORED)
+    assert out == [cmd] and not notes
+
+
+def test_a_stored_non_readable_secret_in_a_guest_payload_is_left_alone():
+    # MASS_PASSWORD is a secret but not an *arr/Jellyfin key the engine can read — not this path.
+    cmd = "pct exec 105 -- sh -c 'curl -d \"p=$MASS_PASSWORD\" http://127.0.0.1:8080/x'"
+    out, _, notes = mv.read_a_readable_key_written_as_a_var([cmd], [], STORED)
+    assert out == [cmd] and not notes
 
 
 def test_frame_run_runs_the_rewrite_before_the_reader():
