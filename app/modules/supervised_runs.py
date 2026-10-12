@@ -5300,6 +5300,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _q_notes:
         cmds, verify = _q_cmds, _q_verify
         _comp_notes = list(_comp_notes) + _q_notes
+    # §17.1515 — "remove the stalled downloads and re-search": bulk-clear the dead queue items
+    # (blocklist) and trigger MissingEpisodeSearch, deterministically.
+    _cs_cmds, _cs_verify, _cs_notes = rewrite_clear_stalled(node, cmds, verify, services, inventory)
+    if _cs_notes:
+        cmds, verify = _cs_cmds, _cs_verify
+        _comp_notes = list(_comp_notes) + _cs_notes
     # §17.1510 — a "configure/organize the Jellyfin library" step gets the streaming-service
     # layout (typed Movies/TV libraries, no mixed pile, a scan) deterministically.
     _jf_cmds, _jf_verify, _jf_notes = rewrite_organize_jellyfin(node, cmds, verify, services, inventory)
@@ -7415,6 +7421,79 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
         f"and, for each show with missing monitored episodes, triggers a per-series search (SeriesSearch → "
         f"Prowlarr → qBittorrent) — except a show whose gap exceeds {_QUEUE_HOLD_THRESHOLD} episodes, which is "
         f"HELD and reported, since a whole-series backfill is the operator's explicit call.")}]
+    return [run], [check], note
+
+
+#: §17.1515 — clear the stalled (no-seeder / errored) downloads and re-search. ONE GET of the
+#: Sonarr queue, ONE bulk DELETE (removeFromClient + blocklist, so the dead release is not grabbed
+#: again), then MissingEpisodeSearch so Sonarr re-grabs better-seeded releases. Two API calls, no
+#: loop (the bulk endpoint clears all at once — within the 180 s budget). Single-quoted Python only.
+_CLEAR_STALLED_PY = (
+    "import sys,json,urllib.request\n"
+    "BASE='http://127.0.0.1:8989'; KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=30); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "q=api('/api/v3/queue?pageSize=2000&includeUnknownSeriesItems=true') or {}\n"
+    "recs=q.get('records') or []\n"
+    "def stalled(r):\n"
+    # §17.1515 — target a DEAD download (no seeders), not an import problem. An importBlocked/
+    # importPending item downloaded fine and is stuck on naming — blocklisting it would discard a
+    # good file and re-grab. Match only stall/no-connection/no-files signals.
+    "    state=str(r.get('trackedDownloadState') or '').lower()\n"
+    "    if state in ('importblocked','importpending','importing'): return False\n"
+    "    blob=(json.dumps(r.get('statusMessages') or [])+' '+str(r.get('errorMessage') or '')).lower()\n"
+    "    return ('stall' in blob) or ('no connection' in blob) or ('no files found' in blob) or ('no peers' in blob)\n"
+    "ids=[r.get('id') for r in recs if stalled(r) and r.get('id') is not None]\n"
+    "print('STALLED: %d of %d queue items' % (len(ids), len(recs)))\n"
+    "if DRY:\n"
+    "    print('WOULD REMOVE %d (blocklist) then re-search' % len(ids)); sys.exit(0)\n"
+    "if ids:\n"
+    "    try:\n"
+    "        api('/api/v3/queue/bulk?removeFromClient=true&blocklist=true&skipRedownload=false','DELETE',{'ids':ids})\n"
+    "        print('REMOVED %d stalled (blocklisted)' % len(ids))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED bulk remove: %r' % e)\n"
+    "try:\n"
+    "    api('/api/v3/command','POST',{'name':'MissingEpisodeSearch'}); print('RE-SEARCH: MissingEpisodeSearch triggered')\n"
+    "except Exception as e:\n"
+    "    print('RE-SEARCH failed: %r' % e)\n"
+    "print('RESULT: cleared %d stalled, re-search running' % len(ids))\n"
+)
+_CLEAR_STALLED_RE = re.compile(r"\b(?:clear|remove|purge|cancel|clean)\b.*\b(?:stalled|stuck|dead|failed)\b|\bstalled\b.*\b(?:download|torrent|queue)\b", re.I)
+
+
+def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: list[str],
+                          services: Optional[list] = None,
+                          inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1515 — "remove the stalled downloads and re-search" done deterministically.
+
+    Live (job aefaef87): 120 of 238 Sonarr queue items were "stalled with no connections"
+    (dead releases, no seeders). The engine clears them through Sonarr's own queue API — a
+    single bulk DELETE with `blocklist=true` so the same dead release is not re-grabbed, and
+    `removeFromClient=true` so the partial files are dropped from qBittorrent — then triggers
+    `MissingEpisodeSearch` so Sonarr pulls better-seeded releases. Two API calls, no loop (the
+    bulk endpoint clears all at once, inside the 180 s budget). Runs inside the Sonarr guest;
+    key read on the machine (§17.1503) via `<SONARR_API_KEY>`."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    title = str((node or {}).get("title") or "")
+    if not _CLEAR_STALLED_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("sonarr", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_CLEAR_STALLED_PY}" "<SONARR_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "sonarr queue API HTTP %{{http_code}}" -H "X-Api-Key: $SONARR_API_KEY" '
+             f'"http://127.0.0.1:8989/api/v3/queue?pageSize=1"')
+    note = [{"why": (
+        f"drafted the clear-stalled from the engine's own shape (§17.1515): inside guest {gid} it reads the "
+        f"Sonarr queue, bulk-removes every stalled/errored item with blocklist=true (so the dead release is not "
+        f"grabbed again) and removeFromClient=true (drops the partials from qBittorrent), then triggers "
+        f"MissingEpisodeSearch to pull better-seeded releases — two API calls, no per-item loop.")}]
     return [run], [check], note
 
 
