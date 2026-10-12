@@ -21,7 +21,7 @@ ENV = {
     },
     "facts": [
         "LXC 103 (radarr) is running: net0 eth0 on vmbr0 gw 192.168.1.1 ip 192.168.1.22/24.",
-        "pct exec 101 -- getent hosts defrusciohomelab.duckdns.org returns 67.240.32.243 (DNS resolution works).",
+        "pct exec 101 -- getent hosts homelab-demo.duckdns.org returns 198.51.100.7 (DNS resolution works).",
         "ssh aedefruscio@192.168.1.127 nvidia-smi from the Proxmox host fails with 'No route to host'.",
         "The control-panel backend listens on port 3001 inside container 111.",
     ],
@@ -109,7 +109,7 @@ REAL_SHAPED_ENV = {
     },
     # the real ledger's shape: a DNS fact carrying the operator's PUBLIC address
     "facts": [
-        {"text": "pct exec 101 -- getent hosts defrusciohomelab.duckdns.org returns 67.240.32.243 (DNS resolution works)."},
+        {"text": "pct exec 101 -- getent hosts homelab-demo.duckdns.org returns 198.51.100.7 (DNS resolution works)."},
         {"text": "The ai-vm guest answers on 192.168.1.127."},
     ],
 }
@@ -118,10 +118,10 @@ REAL_SHAPED_ENV = {
 def test_a_public_address_is_not_offered_as_a_container_ip():
     """`CONTAINER_IP` reduces to NO distinguishing words (both are generic),
     and the fact filter used to wave those through: on the operator's real
-    session the engine offered 67.240.32.243 — the public address of their
+    session the engine offered 198.51.100.7 — the public address of their
     DuckDNS domain — as a candidate container IP."""
     values = [s["value"] for s in ri.suggest_for("CONTAINER_IP", REAL_SHAPED_ENV)]
-    assert "67.240.32.243" not in values, values
+    assert "198.51.100.7" not in values, values
     assert all(s["confidence"] != "fact" for s in ri.suggest_for("CONTAINER_IP", REAL_SHAPED_ENV))
     assert "192.168.1.26" in values          # the map still offers what it knows
 

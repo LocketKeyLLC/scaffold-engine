@@ -44,7 +44,7 @@ _OPERATORS_RE = re.compile(
     r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens)\b",
     re.I)
 # §17.1468 — a sentence ends at punctuation followed by a space or the end; the dots inside `192.168.1.44`,
-# `defrusciohomelab.duckdns.org` or `106.fw` do not end it. Live (ADD152): the operator's part was cut to
+# `homelab-demo.duckdns.org` or `106.fw` do not end it. Live (ADD152): the operator's part was cut to
 # "… Port Forwarding & IP Reservations): reserve 192." in the card's record.
 _SENTENCE_RE = re.compile(r"(?:[^.!?\n]|[.!?](?=[^\s.!?]))+(?:[.!?]+(?=\s|$)|$)")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")

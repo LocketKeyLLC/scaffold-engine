@@ -49,7 +49,7 @@ def test_a_guess_from_the_text_does_not_stop_a_measurement(monkeypatch):
 
     from app.modules import runbook_discovery as rd
     reads = {"pct list": "VMID Status Lock Name\n111 running control-panel\n120 running caddy-proxy\n",
-             "pct exec 111 -- hostname -I": "192.168.1.25 2603:7081::1\n"}
+             "pct exec 111 -- hostname -I": "192.168.1.25 2001:db8::1\n"}
 
     async def read(spec, cmd):
         return reads.get(cmd, "")
@@ -67,9 +67,9 @@ def test_a_guess_from_the_text_does_not_stop_a_measurement(monkeypatch):
 
 
 SNI = ("Measured 2026-10-11: Caddy in CT 120 (192.168.1.127) answers HTTPS only for its site name "
-       "defrusciohomelab.duckdns.org (SNI). Test it from the LAN with curl -sk --resolve "
-       "defrusciohomelab.duckdns.org:443:192.168.1.127 https://defrusciohomelab.duckdns.org/ (answers 401).")
-HAIRPIN = ("Measured 2026-10-11: from inside the LAN https://defrusciohomelab.duckdns.org/ does not answer (000): the "
+       "homelab-demo.duckdns.org (SNI). Test it from the LAN with curl -sk --resolve "
+       "homelab-demo.duckdns.org:443:192.168.1.127 https://homelab-demo.duckdns.org/ (answers 401).")
+HAIRPIN = ("Measured 2026-10-11: from inside the LAN https://homelab-demo.duckdns.org/ does not answer (000): the "
            "router does not loop its public address back to the LAN (no hairpin NAT).")
 
 
@@ -79,7 +79,7 @@ def test_the_engines_measurements_reach_the_drafter():
     env = {"facts": noise + [SNI, HAIRPIN] + ri.operator_decisions(STEPS)}
     prompt = pa.build_base_prompt(T37, {}, env)
     block = prompt[prompt.index("WHAT THE ENGINE HAS MEASURED"):prompt.index("THE OPERATOR'S DECISIONS")]
-    assert "--resolve defrusciohomelab.duckdns.org:443:192.168.1.127" in block and "no hairpin NAT" in block
+    assert "--resolve homelab-demo.duckdns.org:443:192.168.1.127" in block and "no hairpin NAT" in block
     assert "Operator decision (" not in block, "decisions have their own section"
 
 
@@ -94,7 +94,7 @@ def test_a_value_prefilled_from_a_guess_is_still_measured(monkeypatch):
 
     from app.modules import runbook_discovery as rd
     reads = {"pct list": "VMID Status Lock Name\n111 running control-panel\n",
-             "pct exec 111 -- hostname -I": "192.168.1.25 2603:7081::1\n"}
+             "pct exec 111 -- hostname -I": "192.168.1.25 2001:db8::1\n"}
 
     async def read(spec, cmd):
         return reads.get(cmd, "")

@@ -454,11 +454,11 @@ def test_owned_hosts_come_from_the_operators_ledger_only():
     class). `owned_hosts` reads the ledger and nothing else, so widening it to
     addresses the ledger names cannot reach a source's host.
     """
-    env = {"facts": ["Caddy serves defrusciohomelab.duckdns.org on 192.168.1.20"],
+    env = {"facts": ["Caddy serves homelab-demo.duckdns.org on 192.168.1.20"],
            "substitutions": {"PVE": "pve.home.arpa", "N": "5"}, "profile": "root@pve"}
     notes = [{"text": "the router admin page is at router.local"}]
     hosts = ev.owned_hosts(env, notes)
-    assert {"defrusciohomelab.duckdns.org", "pve.home.arpa", "router.local"} <= hosts
+    assert {"homelab-demo.duckdns.org", "pve.home.arpa", "router.local"} <= hosts
     assert "192.168.1.20" in hosts          # §17.1175 — the operator's own machine
     assert "5" not in hosts                 # a substitution VALUE is not an address
     assert ev.owned_hosts({}, None) == set()
@@ -484,8 +484,8 @@ def test_a_host_named_only_by_a_source_is_still_not_owned():
 def test_a_url_on_an_owned_host_is_credited_but_a_public_one_is_not():
     """Live: the fix draft's `https://…duckdns.org/panel/` was flagged because
     the exact URL was not in the ledger, though the domain is the operator's."""
-    owned = {"defrusciohomelab.duckdns.org"}
-    ans = ("curl -I https://defrusciohomelab.duckdns.org/panel/ and then "
+    owned = {"homelab-demo.duckdns.org"}
+    ans = ("curl -I https://homelab-demo.duckdns.org/panel/ and then "
            "curl -L https://github.com/Radarr/Radarr/releases/download/v9.9.9/x.tar.gz")
     found = unsupported_specifics(ans, "the source mentions github.com in passing", owned=owned)
     assert [f["value"] for f in found] == ["https://github.com/Radarr/Radarr/releases/download/v9.9.9/x.tar.gz"]
@@ -493,8 +493,8 @@ def test_a_url_on_an_owned_host_is_credited_but_a_public_one_is_not():
 
 @pytest.mark.asyncio
 async def test_verify_answer_takes_owned_hosts(no_judge, valves):
-    out, rep = await verify_answer("Open https://defrusciohomelab.duckdns.org/panel/ now.",
-                                   sources=[], corpus="", owned_hosts={"defrusciohomelab.duckdns.org"})
+    out, rep = await verify_answer("Open https://homelab-demo.duckdns.org/panel/ now.",
+                                   sources=[], corpus="", owned_hosts={"homelab-demo.duckdns.org"})
     assert not rep["annotated"]
 
 

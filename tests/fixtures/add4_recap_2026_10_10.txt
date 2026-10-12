@@ -13,4 +13,4 @@ NEXT: Get the router app to show an IP for bc:24:11:ac:c9:06 (now 192.168.1.127)
 CONTEXT:
 - Caddy proxy: CT 120, MAC bc:24:11:ac:c9:06, now DHCP 192.168.1.127/24 (was fixed 192.168.1.26).
 - Proxmox host: root@pve, 192.168.1.129.
-- Caddy serves defrusciohomelab.duckdns.org (Jellyfin/Prowlarr/Radarr/Sonarr + control panel fallback); DNS works; only router forwarding is missing.
+- Caddy serves homelab-demo.duckdns.org (Jellyfin/Prowlarr/Radarr/Sonarr + control panel fallback); DNS works; only router forwarding is missing.

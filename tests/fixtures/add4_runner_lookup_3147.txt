@@ -10,7 +10,7 @@ $ pct exec 120 -- ip a
     link/ether bc:24:11:ac:c9:06 brd ff:ff:ff:ff:ff:ff link-netnsid 0
     inet 192.168.1.127/24 brd 192.168.1.255 scope global dynamic eth0
        valid_lft 43165sec preferred_lft 43165sec
-    inet6 2603:7081:4e00:6ea:be24:11ff:feac:c906/64 scope global dynamic mngtmpaddr 
+    inet6 2001:db8:4e00:6ea:be24:11ff:feac:c906/64 scope global dynamic mngtmpaddr 
        valid_lft 604763sec preferred_lft 604763sec
     inet6 fd00:4cab:f8d1:5491:be24:11ff:feac:c906/64 scope global dynamic mngtmpaddr 
        valid_lft 604763sec preferred_lft 604763sec

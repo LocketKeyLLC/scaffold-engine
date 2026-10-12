@@ -18,7 +18,7 @@
   },
   "facts": [
    "Container listeners: CT 120 on *:443 and *:80.",
-   "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect' against 67.240.32.243.",
+   "The ACME challenge for homelab-demo.duckdns.org fails with 'Timeout during connect' against 198.51.100.7.",
    "CT 120 cannot reserve an IP on the Spectrum router, required for port forwarding.",
    "The Caddyfile in LXC 120 validates successfully ('Valid configuration')."
   ]
