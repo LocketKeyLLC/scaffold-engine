@@ -393,6 +393,97 @@ def fold_redundant_nested_guest_exec(commands: list[str], verify: list[str]) -> 
     return out_cmds, out_verify, notes
 
 
+#: §17.1500 — a readable key written as `$NAME`, `${NAME}` or a bare `<NAME>`
+#: outside a guest shell. One alternation, three groups.
+_KEY_REF_RE = re.compile(r"<([A-Z][A-Z0-9_]{2,40})>|\$\{([A-Z][A-Z0-9_]{2,40})\}|\$([A-Z][A-Z0-9_]{2,40})")
+
+
+def read_a_readable_key_written_as_a_var(
+        commands: list[str], verify: list[str], stored: Optional[set] = None,
+) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1500 — normalise a readable service key the drafter wrote as a shell
+    variable into the `<NAME>` placeholder the engine fills, and put it where the
+    GUEST shell will expand it.
+
+    Live (job c75d77fa T3v2, 2026-10-12, the draw after §17.1499): the Jellyfin
+    read came back as ``pct exec 101 -- curl … -H "X-Emby-Token: $JELLYFIN_API_KEY" …``.
+    The drafter reasoned by analogy from the *arr keys, which ARE stored and so
+    arrive as `$NAME` injected by the runner — but Jellyfin's key is READ, not
+    stored (§17.1382), so nothing sets that variable and the gate refuses it
+    (`$NAME` read, nothing sets it). The engine holds the read; the drafter just
+    named it the wrong way.
+
+    For a command that runs in a guest (`pct exec GID --` / `qm guest exec GID --`),
+    a reference to a key `readable_for` recognises AND which is NOT a stored secret
+    is rewritten to `<NAME>`, and — unless the command already carries it in a
+    single-quoted `sh -c '…'` payload — the guest command is promoted to one such
+    payload, so `read_on_the_machine` (next) fills it where the guest expands it.
+    A STORED secret's `$NAME` is left alone: the runner injects it, and it works.
+    """
+    stored_up = {str(s).upper() for s in (stored or set())}
+
+    def _wanted(name: str) -> bool:
+        return name.upper() not in stored_up and readable_for(name) is not None
+
+    def _normalise(text: str) -> tuple[str, bool]:
+        changed = False
+
+        def repl(m: "re.Match") -> str:
+            nonlocal changed
+            name = m.group(1) or m.group(2) or m.group(3)
+            if m.group(1) is not None:          # already `<NAME>`
+                return m.group(0)
+            if _wanted(name):
+                changed = True
+                return f"<{name}>"
+            return m.group(0)
+
+        return _KEY_REF_RE.sub(repl, text), changed
+
+    def fold(seq: list[str]) -> tuple[list[str], int]:
+        out, n = [], 0
+        for c in seq or []:
+            m = _GUEST_EXEC_HEAD.match(str(c))
+            if not m:
+                out.append(c)
+                continue
+            indent, tool, gid, rest = m.groups()
+            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            if sh:                              # already a guest-shell payload: just normalise inside it
+                payload, changed = _normalise(sh.group(1))
+                if changed:
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    n += 1
+                else:
+                    out.append(c)
+                continue
+            new_rest, changed = _normalise(rest)
+            # Promote to a guest shell whenever a readable (non-stored) placeholder is
+            # present — whether it arrived as `$NAME`, `${NAME}` or already `<NAME>` —
+            # so `read_on_the_machine` fills it where the guest expands it. This closes
+            # the loop on every form the drafter tried for the same read.
+            readable_ph = [nm for nm in re.findall(r"<([A-Z][A-Z0-9_]{2,40})>", new_rest) if _wanted(nm)]
+            if readable_ph:
+                out.append(f"{indent}{tool} {gid} -- sh -c {_sq(new_rest)}")
+                n += 1
+            elif changed:
+                out.append(f"{indent}{tool} {gid} -- {new_rest}")
+                n += 1
+            else:
+                out.append(c)
+        return out, n
+
+    out_cmds, nc = fold(commands)
+    out_verify, nv = fold(verify)
+    notes: list[dict] = []
+    if nc or nv:
+        notes.append({"why": (
+            "a service key the engine READS (not one the runner stores) was written as a shell variable; "
+            "rewrote it to the placeholder the engine fills and put the call in the guest's own shell, so the "
+            "read runs inside the guest where the key lives (§17.1500).")})
+    return out_cmds, out_verify, notes
+
+
 # ── §17.1333: what the ENGINE knows about itself ──────────────────────────────
 #: `<SCAFFOLD_ENGINE_URL>`, `<ENGINE_IP>`, `<SCAFFOLD_ENGINE_HOST>` — the engine's
 #: own address on the operator's network. Never a name holding a credential.
