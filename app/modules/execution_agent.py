@@ -78,6 +78,23 @@ from app.utils.llm_retry import chat_until_nonempty  # §17.465
 logger = logging.getLogger(__name__)
 
 
+#: §17.1538 — the guest a develop job deploys to: the one its brief names with a deploy/restart/
+#: rebuild/install verb (e.g. "Deploy changes to container 111"). A CodeGen node names no guest of
+#: its own, so this is how its build-target service gets measured (and then hosted by §17.1537).
+_DEPLOY_TARGET_RE = re.compile(
+    r"\b(?:deploy|redeploy|restart|rebuild|install)\w*\b[^.]{0,80}?"
+    r"\b(?:container|CT|LXC|VM|guest)\s*(\d{3,5})", re.I)
+
+
+def deploy_target_guest(brief: str) -> str:
+    """The guest id a develop brief names as its deploy target, or '' if none/ambiguous.
+
+    Unambiguous only: if the brief names more than one distinct deploy-target guest, return '' —
+    the per-step measurement should not guess which one a build node belongs to."""
+    hits = {m.group(1) for m in _DEPLOY_TARGET_RE.finditer(str(brief or ""))}
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
 def _sse_event(event: str, data: dict) -> str:
     """§17.568 — module-level SSE formatter (byte-identical to the nested
     `_sse` in execute_all_nodes) so `_run_parallel_frontier` can emit frames."""
@@ -2705,6 +2722,17 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                       if _named else {})
             # the step's own guest first, then the guests its services are in
             _order = ([_subj] if _subj else []) + [_where[n] for n in _named if n in _where] + _touch
+            # §17.1538 — a develop/CodeGen node ("Create CSS variables", "Restyle UI components")
+            # names no guest, so the measurement above finds no service and the develop flow has no
+            # host to deploy to — the code is generated and verified but the container is never
+            # written (live: control-panel job ae721781, every CodeGen node, CT 111 untouched). For
+            # a CodeGen node, also measure the JOB's deploy-target guest: the one the brief names
+            # with a deploy/restart/rebuild verb. Prepended so it survives the [:4] cap, and
+            # host_for (§17.1537) then resolves the build target among the measured services.
+            if str((run_node or {}).get("tool") or "").strip().lower() in ("codegen", "code"):
+                _bt = deploy_target_guest(str(_brief or ""))
+                if _bt:
+                    _order = [_bt] + _order
             _touch = list(dict.fromkeys(g for g in _order if g))
             for _g in _touch[:4]:
                 _state = _cts.get(_g) or _vms.get(_g)
