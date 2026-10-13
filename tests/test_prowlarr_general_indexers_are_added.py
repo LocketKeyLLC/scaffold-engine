@@ -34,17 +34,34 @@ NODE = {"title": "Add general TV indexers",
 def test_the_step_is_rewritten_to_the_schema_and_indexer_api_in_the_guest():
     cmds, verify, notes = rewrite_add_general_tv_indexers(NODE, ["<model>"], ["chk"], SERVICES, INV)
     assert notes and ("§17.1526" in notes[0]["why"] or "§17.1528" in notes[0]["why"])
-    assert len(cmds) == 1 and cmds[0].startswith("pct exec 102 -- sh -c '")
-    assert "/api/v1/indexer/schema" in cmds[0] and "<PROWLARR_API_KEY>" in cmds[0] and "python3" in cmds[0]
-    assert "/api/v1/indexerproxy" in cmds[0] and "/api/v1/tag" in cmds[0]
+    # cmd[0] prepares IPv4 preference; cmd[1] is the API add.
+    assert len(cmds) == 2
+    add = cmds[-1]
+    assert add.startswith("pct exec 102 -- sh -c '")
+    assert "/api/v1/indexer/schema" in add and "<PROWLARR_API_KEY>" in add and "python3" in add
+    assert "/api/v1/indexerproxy" in add and "/api/v1/tag" in add
+
+
+def test_the_first_command_makes_prowlarr_prefer_ipv4_then_restarts(monkeypatch):
+    # §17.1532 — FlareSolverr clears CF over IPv4; Prowlarr must stop preferring the tracker's IPv6
+    # (Prowlarr #2810). cmd[0] adds a gai.conf IPv4 precedence, best-effort disables IPv6, and
+    # restarts prowlarr so it re-resolves — before the add runs.
+    cmds, _, notes = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
+    ipv4 = cmds[0]
+    assert ipv4.startswith("pct exec 102 -- sh -c '")
+    assert "precedence ::ffff:0:0/96  100" in ipv4 and "/etc/gai.conf" in ipv4
+    assert "disable_ipv6=1" in ipv4 and "systemctl restart prowlarr" in ipv4
+    assert "n=0; while [ $n -lt 25 ]" in ipv4 and "$SECONDS" not in ipv4
+    assert "1532" in notes[0]["why"] and "IPv4" in notes[0]["why"]
 
 
 def test_the_key_fills_and_both_commands_parse():
     cmds, verify, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
     c, v, _ = mv.read_on_the_machine(cmds, verify, INV)
-    assert "<PROWLARR_API_KEY>" not in c[0] and "/var/lib/prowlarr/config.xml" in c[0]
-    assert subprocess.run(["bash", "-n", "-c", c[0]], capture_output=True, text=True).returncode == 0
-    assert subprocess.run(["bash", "-n", "-c", v[0]], capture_output=True, text=True).returncode == 0
+    # the API-add command (last) carries the key and gets it filled on the machine
+    assert "<PROWLARR_API_KEY>" not in c[-1] and "/var/lib/prowlarr/config.xml" in c[-1]
+    for cmd in c + v:   # every command (IPv4 prep, add, verify) is valid bash
+        assert subprocess.run(["bash", "-n", "-c", cmd], capture_output=True, text=True).returncode == 0
 
 
 def test_the_verify_is_read_only_safe_and_in_the_guest():
@@ -58,14 +75,14 @@ def test_the_verify_is_read_only_safe_and_in_the_guest():
 def test_the_loop_is_bounded_and_hang_safe_so_the_gates_are_clean():
     from app.modules.supervised_runs import loops_the_network_without_a_budget
     cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    assert "WANT[:10]" in cmds[0] and "timeout=12" in cmds[0]
-    assert "urllib.error.URLError, TimeoutError, OSError" in cmds[0]
-    assert loops_the_network_without_a_budget(cmds) == []
+    assert "WANT[:10]" in cmds[-1] and "timeout=12" in cmds[-1]
+    assert "urllib.error.URLError, TimeoutError, OSError" in cmds[-1]
+    assert loops_the_network_without_a_budget([cmds[-1]]) == []
 
 
 def test_the_fs_proxy_host_points_at_the_deployed_flaresolverr():
     cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    assert ("http://" + _FS_IP + ":8191/") in cmds[0]
+    assert ("http://" + _FS_IP + ":8191/") in cmds[-1]
 
 
 def test_it_classifies_by_shape_not_by_a_phrase_list():
@@ -73,8 +90,8 @@ def test_it_classifies_by_shape_not_by_a_phrase_list():
     # from the error SHAPE (an empty propertyName = availability), never a word list.
     from app.modules.supervised_runs import classifies_by_key_presence
     cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    assert "cloudflare" not in cmds[0].lower() and "is_availability" in cmds[0] and "propertyName" in cmds[0]
-    assert classifies_by_key_presence(cmds) == [], "no phrase-list classification remains"
+    assert "is_availability" in cmds[-1] and "propertyName" in cmds[-1]
+    assert classifies_by_key_presence([cmds[-1]]) == [], "no phrase-list classification remains"
 
 
 def test_the_curated_set_is_the_real_public_tv_names():
@@ -111,7 +128,10 @@ def _run(responses):
         sys.argv = ["-c", "thekey"]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            try:
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            except SystemExit:
+                pass          # §17.1533 — the script exits non-zero when nothing landed
         return buf.getvalue(), seen
 
 
@@ -201,6 +221,80 @@ def test_a_non_cloudflare_failure_is_reported_not_retried():
     })
     assert "FAILED: EZTV: " in out and "must not be empty" in out
     assert len([b for b in posts if b.get("name") == "EZTV"]) == 1, "a field-validation error is not retried via FlareSolverr"
+
+
+def test_adding_nothing_with_real_failures_exits_nonzero_for_the_engines_research():
+    # §17.1533 — a step that catches its own errors and exits 0 is recorded `done`, so the engine's
+    # failure-research (diagnose_failure → generate_fix, which reads the machine AND researches the
+    # web) never fires. When NOTHING asked-for landed and there were real failures, the script must
+    # exit non-zero so an unknown failure routes back into the engine's own research loop.
+    schema = [{"name": "1337x", "fields": [], "implementation": "Cardigann"}]
+
+    def post_fail(body):
+        return uerr.HTTPError("u", 400, "Bad", {}, io.BytesIO(
+            json.dumps([{"propertyName": "", "errorMessage": "blocked by CloudFlare Protection"}]).encode()))
+
+    responses = {
+        ("GET", "/api/v1/tag"): [{"id": 1, "label": "flaresolverr"}],
+        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr"}],
+        ("GET", "/api/v1/indexer/schema"): schema,
+        ("GET", "/api/v1/indexer"): [],
+        ("POST", "/api/v1/indexer"): post_fail,
+    }
+    seen = []
+
+    def fake(req, timeout=None):
+        m, u = req.get_method(), req.full_url
+        body = json.loads(req.data) if req.data else None
+        for (mm, suf), val in responses.items():
+            if mm == m and u.split("?")[0].endswith(suf):
+                v = val(body) if callable(val) else val
+                if isinstance(v, Exception):
+                    raise v
+                return io.BytesIO(json.dumps(v).encode())
+        return io.BytesIO(b"")
+
+    import sys as _sys
+    with mock.patch.object(ur, "urlopen", fake):
+        _sys.argv = ["-c", "k"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+    assert code == 1, "nothing added + real failures must exit non-zero so the engine researches it"
+    assert "RESULT: added 0" in buf.getvalue()
+
+
+def test_all_already_present_exits_zero():
+    # §17.1533 — a re-run where everything is already configured added 0 but is SUCCESS (idempotent).
+    import sys as _sys
+    responses_present = {
+        ("GET", "/api/v1/tag"): [{"id": 1, "label": "flaresolverr"}],
+        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr"}],
+        ("GET", "/api/v1/indexer/schema"): [{"name": "1337x", "fields": [], "implementation": "Cardigann"}],
+        ("GET", "/api/v1/indexer"): [{"name": "1337x"}],
+    }
+
+    def fake(req, timeout=None):
+        u = req.full_url
+        for (mm, suf), val in responses_present.items():
+            if mm == req.get_method() and u.split("?")[0].endswith(suf):
+                return io.BytesIO(json.dumps(val).encode())
+        return io.BytesIO(b"")
+
+    with mock.patch.object(ur, "urlopen", fake):
+        _sys.argv = ["-c", "k"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+    assert code == 0 and "already present" in buf.getvalue()
 
 
 def test_a_hang_on_a_post_is_recorded_not_fatal():

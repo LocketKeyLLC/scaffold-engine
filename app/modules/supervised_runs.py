@@ -7791,7 +7791,36 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "if skipped: print('SKIPPED: %s' % '; '.join(skipped))\n"
     "if failed: print('FAILED: %s' % '; '.join(failed))\n"
     "print('RESULT: added %d public indexer(s) (%d direct, %d via FlareSolverr)' % (len(added)+len(viafs),len(added),len(viafs)))\n"
+    # §17.1533 — if NOTHING the step was asked to add landed and there were real failures (not just
+    # ones already present), EXIT NON-ZERO. A capability that catches its own errors and exits 0 is
+    # recorded `done`, so the engine's failure-research (§17.1201 diagnose_failure → generate_fix,
+    # which reads the live machine AND researches the web) never engages — the operator finds the
+    # failure by hand instead of the engine finding the fix. An honest exit routes an unknown failure
+    # back into the engine's own research loop. (Partial success, or all-already-present, stays 0.)
+    "sys.exit(1 if (failed and not added and not viafs) else 0)\n"
 )
+#: §17.1532 — make Prowlarr resolve the trackers over IPv4 BEFORE adding Cloudflare-gated ones.
+#: Live + researched (Prowlarr issues #2810/#2572): FlareSolverr solves the challenge and grabs the
+#: clearance over the site's IPv4 address, but Prowlarr prefers the tracker's IPv6 address (1337x.to
+#: resolves to `2606:4700:…` first) and connects there, where that clearance does not apply — so
+#: FlareSolverr logs "Challenge solved!" yet Prowlarr reports "blocked by CloudFlare Protection".
+#: The documented fix is to stop Prowlarr preferring IPv6. In this bare LXC that is: glibc gai.conf
+#: precedence (prefer IPv4, which .NET's getaddrinfo honors), a best-effort sysctl disable (no-op in
+#: an unprivileged guest), then restart prowlarr so it re-resolves. Idempotent (the gai.conf line is
+#: added once). The wait uses a counter, not $SECONDS (§17.1522).
+def _prowlarr_prefer_ipv4(gid: str) -> str:
+    body = (
+        "grep -q 'precedence ::ffff:0:0/96  100' /etc/gai.conf 2>/dev/null || "
+        "printf 'precedence ::ffff:0:0/96  100\\n' >> /etc/gai.conf; "
+        "sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true; "
+        "sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true; "
+        "systemctl restart prowlarr >/dev/null 2>&1 || true; "
+        "n=0; while [ $n -lt 25 ]; do curl -s -o /dev/null http://127.0.0.1:9696/ && break; n=$((n+1)); sleep 3; done; "
+        "echo prowlarr-prefers-ipv4"
+    )
+    return f"pct exec {gid} -- sh -c {_sq_payload(body)}"
+
+
 #: add + (general/public/tv) indexers — a WRITE. Guarded off disable/remove/sync/inventory.
 _PROWLARR_ADD_RE = re.compile(r"\badd\b.{0,40}\b(?:general|public|tv|more|new)?\s*indexers?\b", re.I)
 _PROWLARR_ADD_NOT_RE = re.compile(r"\b(?:disable|remove|delete|sync|inventor|list|failing)\b", re.I)
@@ -7810,19 +7839,22 @@ def rewrite_add_general_tv_indexers(node: Optional[dict], commands: list[str], v
     if not gid:
         return list(commands or []), list(verify or []), []
     payload = f'python3 -c "{_PROWLARR_ADD_INDEXERS_PY}" "<PROWLARR_API_KEY>"'
+    # §17.1532 — IPv4 preference FIRST (restarts prowlarr), then the add; the clearance FlareSolverr
+    # grabs over IPv4 only applies when Prowlarr connects over IPv4.
+    ipv4 = _prowlarr_prefer_ipv4(gid)
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
     check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
              f'-w "prowlarr indexer API HTTP %{{http_code}}" -H "X-Api-Key: $PROWLARR_API_KEY" '
              f'"http://127.0.0.1:{_PROWLARR_PORT}/api/v1/indexer"')
     note = [{"why": (
-        f"drafted the add-indexers from the engine's own shape (§17.1526/1528): inside guest {gid} it ensures a "
-        f"FlareSolverr tag + indexer-proxy (host {_FS_IP}:8191 — operator decision T1: keep Cloudflare indexers by "
-        f"routing them through FlareSolverr), then for each general/TV PUBLIC no-login tracker this Prowlarr's "
-        f"catalog carries and that is not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs the catalog's "
-        f"own template; a Cloudflare refusal is retried WITH the flaresolverr tag so the test runs through the "
-        f"proxy. Idempotent, bounded, hang-safe — replacing the model's 24-command kitchen sink that re-did the "
-        f"whole job.")}]
-    return [run], [check], note
+        f"drafted the add-indexers from the engine's own shape (§17.1526/1528/1532): inside guest {gid} it makes "
+        f"Prowlarr prefer IPv4 (so FlareSolverr's IPv4 clearance applies — Prowlarr #2810), ensures a FlareSolverr "
+        f"tag + indexer-proxy (host {_FS_IP}:8191 — operator decision T1: keep Cloudflare indexers by routing them "
+        f"through FlareSolverr), then for each general/TV PUBLIC no-login tracker this Prowlarr's catalog carries and "
+        f"that is not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs the catalog's own template; a "
+        f"Cloudflare refusal is retried WITH the flaresolverr tag so the test runs through the proxy. Idempotent, "
+        f"bounded, hang-safe — replacing the model's 24-command kitchen sink that re-did the whole job.")}]
+    return [ipv4, run], [check], note
 
 
 #: §17.1516 — deploy FlareSolverr as its OWN new LXC (operator decision ASK1), so Prowlarr can
