@@ -35,6 +35,16 @@ def test_the_create_is_host_side_idempotent_and_nests_no_guest_exec():
     assert "pct exec" not in create, "the host create script must not nest a guest exec"
 
 
+def test_the_container_is_provisioned_with_2gb_and_recovers_an_existing_one():
+    # §17.1530 — 1 GB OOM-wedged FlareSolverr's Chromium (pct exec timed out on everything). The
+    # create provisions 2 GB, and an ALREADY-existing container is raised to 2 GB and force
+    # stop+started to apply the memory and clear a hung guest.
+    create = rewrite_deploy_flaresolverr(NODE, ["x"], ["y"])[0][0]
+    assert "--memory 2048" in create and "--swap 1024" in create and "--memory 1024" not in create
+    assert f"pct set {_FS_VMID} --memory 2048 --swap 1024" in create
+    assert f"pct stop {_FS_VMID}" in create and f"pct start {_FS_VMID}" in create
+
+
 def test_the_install_is_pushed_as_a_file_and_run_as_a_detached_unit():
     # §17.1518 — a long install cannot ride one `pct exec` (180 s budget); it is pushed as a file and
     # launched as a transient systemd unit, polled across the wait phases.
