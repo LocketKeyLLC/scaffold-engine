@@ -5318,6 +5318,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pi_notes:
         cmds, verify = _pi_cmds, _pi_verify
         _comp_notes = list(_comp_notes) + _pi_notes
+    # §17.1524 — "disable the failing indexers": PUT each failing indexer's own full object back
+    # with enable=false and forceSave=true, deterministically (the draft was an inert template).
+    _pd_cmds, _pd_verify, _pd_notes = rewrite_disable_failing_indexers(node, cmds, verify, services, inventory)
+    if _pd_notes:
+        cmds, verify = _pd_cmds, _pd_verify
+        _comp_notes = list(_comp_notes) + _pd_notes
     # §17.1516 — "deploy FlareSolverr": create its own LXC (host) and run the official Docker
     # container inside it, deterministically (the plan had only the decision, not the deploy step).
     _fs_cmds, _fs_verify, _fs_notes = rewrite_deploy_flaresolverr(node, cmds, verify, services, inventory)
@@ -7599,6 +7605,76 @@ def rewrite_inventory_prowlarr_indexers(node: Optional[dict], commands: list[str
         f"WITHOUT stopping prowlarr.service (it is a read), it GETs /api/v1/indexer and /api/v1/indexerstatus and "
         f"prints a table — id, name, enabled, protocol, privacy, and FAILING for any Prowlarr auto-disabled after "
         f"repeated failures — plus a summary; python3 parses in-guest (no jq), the key read on the machine.")}]
+    return [run], [check], note
+
+
+#: §17.1524 — "disable the failing Prowlarr indexers" done deterministically.
+#:
+#: Live (job aefaef87 T5): the drafter's frame carried an unfilled template — a PUT to
+#: `/api/v1/indexer/<INDEXER_ID>` with a body of `{"enable": false, "id": <INDEXER_ID>, "name":
+#: "<INDEXER_NAME>"}`. The id/name are never filled (so the call is inert), and even filled it is
+#: wrong twice over: an *arr PUT validates the WHOLE object (a three-field body is rejected on its
+#: missing required fields), and saving an indexer runs its connection test — which a FAILING
+#: indexer cannot pass, so the save is refused unless `?forceSave=true`. The engine does it exactly:
+#: inside the guest, GET the indexers + indexerstatus, and for each one Prowlarr has auto-disabled
+#: after repeated failures, PUT the indexer's OWN full object back with enable=false and
+#: forceSave=true (skip the doomed test). The key is read on the machine by `<PROWLARR_API_KEY>`.
+_PROWLARR_DISABLE_FAILING_PY = (
+    "import sys,json,urllib.request\n"
+    "BASE='http://127.0.0.1:" + _PROWLARR_PORT + "'; KEY=sys.argv[1]\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,"
+    "headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    d=urllib.request.urlopen(r,timeout=30).read()\n"
+    "    return json.loads(d) if d else None\n"
+    "idx=api('/api/v1/indexer') or []\n"
+    "try: st=api('/api/v1/indexerstatus') or []\n"
+    "except Exception: st=[]\n"
+    "failing={s.get('indexerId') for s in st}\n"
+    # only the ones still ENABLED need disabling; Prowlarr may already have disabled some itself.
+    "targets=[x for x in idx if x.get('id') in failing and x.get('enable')]\n"
+    "print('FAILING+ENABLED: %d of %d indexers' % (len(targets),len(idx)))\n"
+    "done=[]\n"
+    "for x in targets:\n"
+    # PUT the indexer's OWN full object (every required field already present), only flip enable.
+    "    x['enable']=False\n"
+    "    try:\n"
+    # §17.1524 — forceSave=true: saving runs the connection test, which a failing indexer cannot
+    # pass; without it the disable itself is refused.
+    "        api('/api/v1/indexer/%s?forceSave=true' % x['id'],'PUT',x)\n"
+    "        done.append(x.get('name')); print('DISABLED: %s (id %s)' % (x.get('name'),x.get('id')))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to disable %s (id %s): %r' % (x.get('name'),x.get('id'),e))\n"
+    "print('RESULT: disabled %d failing indexer(s)%s' % (len(done),(': '+', '.join(done)) if done else ''))\n"
+)
+#: disable + failing/dead on indexers — a WRITE. Guarded off add/remove so T6/T7 keep their path.
+_PROWLARR_DISABLE_RE = re.compile(r"\b(?:disable|turn\s*off|deactivat)\w*\b.{0,40}\b(?:failing|dead|broken|erroring)?\s*indexers?\b", re.I)
+_PROWLARR_DISABLE_NOT_RE = re.compile(r"\b(?:\badd\b|remove|delete|cloudflare|sync)\b", re.I)
+
+
+def rewrite_disable_failing_indexers(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1524 — disable the Prowlarr indexers that Prowlarr auto-disabled after repeated
+    failures, deterministically. Replaces the step's commands AND verify when the step is a
+    disable-failing-indexers write and the Prowlarr guest is known; otherwise untouched."""
+    title = str((node or {}).get("title") or "")
+    if not _PROWLARR_DISABLE_RE.search(title) or _PROWLARR_DISABLE_NOT_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("prowlarr", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_PROWLARR_DISABLE_FAILING_PY}" "<PROWLARR_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "prowlarr indexer API HTTP %{{http_code}}" -H "X-Api-Key: $PROWLARR_API_KEY" '
+             f'"http://127.0.0.1:{_PROWLARR_PORT}/api/v1/indexer"')
+    note = [{"why": (
+        f"drafted the disable-failing from the engine's own shape (§17.1524): inside guest {gid} it finds the "
+        f"indexers Prowlarr auto-disabled after repeated failures and PUTs each one's OWN full object back with "
+        f"enable=false and forceSave=true (an *arr PUT validates the whole object, and saving runs the connection "
+        f"test a failing indexer cannot pass) — replacing the drafter's inert `<INDEXER_ID>` template.")}]
     return [run], [check], note
 
 
