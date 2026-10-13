@@ -4363,6 +4363,12 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
                 continue                  # §17.1327 — the machine HAS it; that settles it
             if unit_from_installed_package(base, block):
                 continue                  # §17.1488 — the block installs the package that ships it
+            if re.search(rf"\bsystemd-run\b[^\n]*(?:--unit[= ]|-u\s+){re.escape(base)}\b", block):
+                continue                  # §17.1521 — a TRANSIENT unit this block starts with
+                                          # `systemd-run --unit <base>`: it is brought into being
+                                          # here (like §17.1344 for a guest id), so polling it with
+                                          # `systemctl is-active <base>` is not a reference to a unit
+                                          # that does not exist.
             if names_as_unit(held, base):
                 continue
             import difflib
