@@ -74,7 +74,7 @@ opentelemetry-api==1.45.0
 opentelemetry-sdk==1.45.0
 opentelemetry-exporter-otlp-proto-http==1.45.0
 opentelemetry-instrumentation-fastapi==0.66b0
-opentelemetry-instrumentation-httpx==0.66b0
+opentelemetry-instrumentation-httpx==0.66b1
 opentelemetry-instrumentation-asyncpg==0.66b0
 
 # §17.900 — Fernet symmetric encryption for provider API keys at rest
