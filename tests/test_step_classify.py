@@ -43,6 +43,20 @@ CODE = {"tool": "CodeGen", "title": "Build control panel backend",
         "prompt_template": "Write the Express backend. Done when `npm test` passes and `curl localhost:3001/health` returns 200."}
 
 
+def test_a_codegen_node_in_a_deploy_job_is_hands_on_so_it_develops():
+    # §17.1539 — a CodeGen node normally runs in the sandbox (verifies code, never deploys). In a
+    # job that deploys to a measured service, its build steps must go through the develop flow, so
+    # a CodeGen node is hands-on when develops_codegen is set (the job brief names a deploy target).
+    node = {"title": "Create CSS variables", "tool": "CodeGen",
+            "description": "Define CSS variables for the dark theme in the existing stylesheet."}
+    # self-contained artifact (no deploy target): unchanged — runs in the sandbox, not hands-on
+    on, why = step_is_hands_on(node, shell_backend=False, mcp_enabled=True, develops_codegen=False)
+    assert on is False
+    # deploy job: hands-on → routed to develop (and §17.1537 deploys it)
+    on, why = step_is_hands_on(node, shell_backend=False, mcp_enabled=True, develops_codegen=True)
+    assert on is True and why == "develop:codegen"
+
+
 def test_a_step_that_writes_to_a_machine_is_hands_on():
     on, why = step_is_hands_on(ADD88, shell_backend=False, mcp_enabled=True)
     assert on and why.startswith("writes:tee -a")

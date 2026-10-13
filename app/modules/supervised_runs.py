@@ -672,9 +672,14 @@ async def decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry:
 async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""
-    from app.modules.step_classify import step_is_hands_on
+    from app.modules.step_classify import step_is_hands_on, deploy_target_guest
     decided = _as_dict((await db.execute(
         text("SELECT metadata->'decisions' FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar())
+    # §17.1539 — the job's deploy target, so a CodeGen build node routes to DEVELOP (deploy) not
+    # the sandbox. Read the refined brief once; empty for a job that names no deploy target.
+    _brief_row = (await db.execute(
+        text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
+    _deploy_target = deploy_target_guest(str(_brief_row or ""))
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
@@ -712,16 +717,22 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
             continue
         if _ops.is_wholly_operators(node):
             continue
-        on, why = step_is_hands_on(node)
+        _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
+        on, why = step_is_hands_on(node, develops_codegen=_dc)
         if on and not why.startswith("tool:human"):
             node["hands_on_reason"] = why
             return node
     return None
 
 
-def is_hands_on_node(node: dict) -> bool:
-    from app.modules.step_classify import step_is_hands_on
-    on, why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+def is_hands_on_node(node: dict, brief: str = "") -> bool:
+    # §17.1539 — a CodeGen node in a job whose brief names a deploy target is a DEVELOP step
+    # (it must write files to that machine), so it is hands-on; a self-contained CodeGen artifact
+    # (no deploy target) is not. `brief` is threaded from the job so the peek can tell them apart.
+    from app.modules.step_classify import step_is_hands_on, deploy_target_guest
+    _n = dict(node) if hasattr(node, "keys") else {}
+    _dc = str(_n.get("tool") or "").strip().lower() == "codegen" and bool(deploy_target_guest(brief))
+    on, why = step_is_hands_on(_n, develops_codegen=_dc)
     return bool(on) and not why.startswith("tool:human")
 
 
