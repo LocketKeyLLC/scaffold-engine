@@ -72,6 +72,17 @@ def test_create_and_install_wordings_also_match():
         assert notes, t
 
 
+def test_the_create_runs_no_pct_exec_so_the_host_tool_gate_stays_clean():
+    # §17.1517 — a nested `pct exec` inside the host create script made the host-tool gate read the
+    # trailing `pct status` as running in the guest and refuse the whole frame. The create must be
+    # pure host tooling; the install command is the only guest-exec.
+    from app.modules.supervised_runs import host_only_inside_a_guest
+    cmds, _, _ = rewrite_deploy_flaresolverr(NODE, ["x"], ["y"])
+    assert "pct exec" not in cmds[0], "the host create script must not nest a guest exec"
+    assert cmds[1].startswith(f"pct exec {_FS_VMID} -- ")
+    assert not host_only_inside_a_guest(cmds), "the deploy must not trip host-tool-inside-a-guest"
+
+
 def test_frame_run_runs_the_deploy_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr
