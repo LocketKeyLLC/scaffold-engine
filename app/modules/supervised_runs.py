@@ -7990,7 +7990,12 @@ _FS_LAST = (
     "if [ \"$final\" = failed ] || { [ -n \"$ec\" ] && [ \"$ec\" != 0 ]; }; "
     "then echo FAILED-scaffold-fs-exit=$ec; exit 1; fi; echo scaffold-fs-finished-ok-exit=$ec'"
 )
-_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc|service|deploy|install)\b", re.I)
+# §17.1542 — fire ONLY on a genuine FlareSolverr CONTAINER deploy, never on a step that merely names
+# it as a service to add/surface. Dropped the "add" lead verb and the "service"/"deploy"/"install"
+# tail keywords: "Add FlareSolverr and Byparr services" (a control-panel FEATURE step, developed on
+# CT 111) matched both and was hijacked into a `pct create 107` deploy. Real deploy titles still
+# match via a deploy verb ("Deploy/Install/Create/Set up FlareSolverr") or a container/lxc tail.
+_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc)\b", re.I)
 
 
 #: §17.1535 — deploy Byparr, the Camoufox-based FlareSolverr drop-in (ghcr.io/thephaseless/byparr),
@@ -8062,7 +8067,10 @@ _BYPARR_LAST = (
     "if [ \"$final\" = failed ] || { [ -n \"$ec\" ] && [ \"$ec\" != 0 ]; }; "
     "then echo FAILED-scaffold-byparr-exit=$ec; exit 1; fi; echo scaffold-byparr-finished-ok-exit=$ec'"
 )
-_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add|wire)\b.*\bbyparr\b|\bbyparr\b.*\b(?:container|lxc|service|deploy|install|proxy)\b", re.I)
+# §17.1542 — same tightening for Byparr: a genuine container deploy only, not "add … Byparr
+# services". Dropped "add"/"wire" lead verbs and the "service"/"deploy"/"install"/"proxy" tail.
+# "Deploy byparr-proxy as a new LXC" still matches (deploy verb + "new LXC" tail).
+_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*\bbyparr\b|\bbyparr\b.*\b(?:container|lxc)\b", re.I)
 
 
 def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: list[str],
