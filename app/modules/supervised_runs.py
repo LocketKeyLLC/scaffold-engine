@@ -7586,19 +7586,22 @@ _FS_START = (
     "-p StandardError=append:/root/.fs.log bash /root/.fs_install.sh\"\n"
     "echo started-scaffold-fs'"
 )
-#: wait: poll the unit for ~150 s (inside the 180 s budget), then report its state. Repeated across
-#: several commands so the whole install + image pull is covered without any one command timing out.
+#: wait: poll the unit ~30×5 s = 150 s (inside the 180 s budget), then report its state. Repeated
+#: across several commands so the whole install + image pull is covered. §17.1522 — a COUNTER loop,
+#: not `$SECONDS`: the runner demands a value for every `$NAME`-shaped variable it does not itself set,
+#: and `$SECONDS` (a bash built-in) is refused "neither the engine sent nor the secrets file holds";
+#: a locally-assigned `n` is not demanded (the create's own loop proved it).
 _FS_WAIT = (
-    f"pct exec {_FS_VMID} -- bash -c 'd=$((SECONDS+150)); "
-    "while [ $SECONDS -lt $d ]; do st=$(systemctl is-active scaffold-fs 2>/dev/null); "
-    "case $st in active|activating|reloading|deactivating) sleep 5;; *) break;; esac; done; "
+    f"pct exec {_FS_VMID} -- bash -c 'n=0; while [ $n -lt 30 ]; do "
+    "st=$(systemctl is-active scaffold-fs 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) n=$((n+1)); sleep 5;; *) break;; esac; done; "
     "echo wait-state:$(systemctl is-active scaffold-fs 2>/dev/null)'"
 )
 #: last: finish waiting, print the tail of the log, and fail the step if the unit failed.
 _FS_LAST = (
-    f"pct exec {_FS_VMID} -- bash -c 'd=$((SECONDS+150)); "
-    "while [ $SECONDS -lt $d ]; do st=$(systemctl is-active scaffold-fs 2>/dev/null); "
-    "case $st in active|activating|reloading|deactivating) sleep 5;; *) break;; esac; done; "
+    f"pct exec {_FS_VMID} -- bash -c 'n=0; while [ $n -lt 30 ]; do "
+    "st=$(systemctl is-active scaffold-fs 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) n=$((n+1)); sleep 5;; *) break;; esac; done; "
     "tail -n 30 /root/.fs.log 2>/dev/null; "
     "final=$(systemctl is-active scaffold-fs 2>/dev/null); "
     "ec=$(systemctl show scaffold-fs -p ExecMainStatus --value 2>/dev/null); "

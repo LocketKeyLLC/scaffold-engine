@@ -61,6 +61,17 @@ def test_the_last_phase_fails_the_step_when_the_unit_failed():
     assert "ExecMainStatus" in last and "exit 1" in last and "is-active scaffold-fs" in last
 
 
+def test_the_wait_phases_use_a_counter_not_SECONDS():
+    # §17.1522 — the runner demands a value for every $NAME-shaped var it does not set; $SECONDS
+    # (a bash built-in) is refused "neither the engine sent nor the secrets file holds". The poll
+    # loops must use a locally-assigned counter instead.
+    cmds, _, _ = rewrite_deploy_flaresolverr(NODE, ["x"], ["y"])
+    waits_and_last = cmds[2:]
+    for c in waits_and_last:
+        assert "$SECONDS" not in c and "SECONDS" not in c, "no bash built-in the runner will demand"
+        assert "n=0; while [ $n -lt 30 ]" in c
+
+
 def test_every_command_and_the_verify_parse():
     cmds, verify, _ = rewrite_deploy_flaresolverr(NODE, ["x"], ["y"])
     for c in cmds + verify:
