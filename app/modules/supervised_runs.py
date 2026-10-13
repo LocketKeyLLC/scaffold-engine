@@ -5312,6 +5312,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _fs_notes:
         cmds, verify = _fs_cmds, _fs_verify
         _comp_notes = list(_comp_notes) + _fs_notes
+    # §17.1519 — "give container N a working nameserver": set the resolver host-side and reboot,
+    # instead of the drafter's in-guest apt (which cannot resolve because DNS is what is broken).
+    _ns_cmds, _ns_verify, _ns_notes = rewrite_set_container_nameserver(node, cmds, verify, services, inventory)
+    if _ns_notes:
+        cmds, verify = _ns_cmds, _ns_verify
+        _comp_notes = list(_comp_notes) + _ns_notes
     # §17.1510 — a "configure/organize the Jellyfin library" step gets the streaming-service
     # layout (typed Movies/TV libraries, no mixed pile, a scan) deterministically.
     _jf_cmds, _jf_verify, _jf_notes = rewrite_organize_jellyfin(node, cmds, verify, services, inventory)
@@ -7522,6 +7528,10 @@ _FS_CREATE = (
     "--hostname flaresolverr --cores 2 --memory 1024 --swap 512 "
     "--rootfs local-lvm:8 "
     f"--net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip={_FS_IP}/24,type=veth "
+    # §17.1519 — a nameserver, or the container inherits the host's Tailscale resolver
+    # (100.100.100.100) and cannot resolve public names, so apt/docker pulls hang. The working
+    # media CTs use the gateway; 1.1.1.1 is the fallback.
+    "--nameserver \"192.168.1.1 1.1.1.1\" "
     "--features nesting=1,keyctl=1 --unprivileged 1 --onboot 1 --start 1 && echo \"created CT " + _FS_VMID + "\"; fi; "
     f"pct status {_FS_VMID} | grep -q running || pct start {_FS_VMID}; "
     f"n=0; while [ $n -lt 24 ]; do pct status {_FS_VMID} | grep -q running && break; n=$((n+1)); sleep 5; done; "
@@ -7583,6 +7593,51 @@ _FS_LAST = (
     "then echo FAILED-scaffold-fs-exit=$ec; exit 1; fi; echo scaffold-fs-finished-ok-exit=$ec'"
 )
 _FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc|service|deploy|install)\b", re.I)
+
+
+_NAMESERVER_RE = re.compile(r"\b(?:name\s*server|nameserver|resolver|resolv\.conf|\bdns\b)\b", re.I)
+_NS_VERB_RE = re.compile(r"\b(?:give|set|fix|configure|repair|add|working|point|assign)\b", re.I)
+_NS_CT_RE = re.compile(r"\b(?:container|ct|lxc|guest)\s*#?\s*(\d{2,4})\b", re.I)
+
+
+def rewrite_set_container_nameserver(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1519 — "give container N a working nameserver", done host-side.
+
+    When a new LXC inherits the host's Tailscale resolver (100.100.100.100) it cannot resolve public
+    names, so apt/docker pulls hang (live: CT 107's install timed out twice). The engine's own
+    precondition machinery detects this and inserts a "give container N a working nameserver" step,
+    but drafts it to run INSIDE the guest — where DNS is exactly what is broken. The fix is host-side:
+    `pct set N --nameserver "192.168.1.1 1.1.1.1"` (the gateway the working media CTs use, with a
+    Cloudflare fallback) then a reboot so the running container regenerates resolv.conf. No `pct exec`
+    in the command (the host-tool gate, §17.1517); the verify resolves a public name inside the guest."""
+    title = str((node or {}).get("title") or "")
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_NAMESERVER_RE.search(title) and _NS_VERB_RE.search(title)):
+        if not (_NAMESERVER_RE.search(text) and _NS_VERB_RE.search(text)):
+            return list(commands or []), list(verify or []), []
+    m = _NS_CT_RE.search(title) or _NS_CT_RE.search(text)
+    gid = m.group(1) if m else None
+    if not gid and inventory:
+        # fall back to the step's subject guest when the title names no id
+        subj = (node or {}).get("subject") or (node or {}).get("guest")
+        gid = str(subj) if subj else None
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    run = [
+        f"sh -c 'pct set {gid} --nameserver \"192.168.1.1 1.1.1.1\"; "
+        f"pct status {gid} | grep -q running && pct reboot {gid}; "
+        f"n=0; while [ $n -lt 24 ]; do pct status {gid} | grep -q running && break; n=$((n+1)); sleep 5; done; "
+        f"sleep 8; echo \"CT {gid} nameserver set to 192.168.1.1 1.1.1.1 and rebooted\"'"
+    ]
+    check = [f"pct exec {gid} -- getent hosts deb.debian.org"]
+    note = [{"why": (
+        f"drafted the nameserver fix from the engine's own shape (§17.1519): the drafter put the fix inside "
+        f"guest {gid}, where DNS is exactly what is broken. On the HOST it sets the container's resolver to "
+        f"192.168.1.1 1.1.1.1 (the gateway the working media containers use, plus a Cloudflare fallback) and "
+        f"reboots it so resolv.conf regenerates. Verify resolves a public name inside the guest.")}]
+    return run, check, note
 
 
 def rewrite_deploy_flaresolverr(node: Optional[dict], commands: list[str], verify: list[str],
