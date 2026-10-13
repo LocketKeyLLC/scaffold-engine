@@ -7531,22 +7531,57 @@ _FS_CREATE = (
     "sleep 8; "
     f"echo \"CT {_FS_VMID} $(pct status {_FS_VMID})\"'"
 )
-#: the in-guest install (NO single quotes — the executor re-wraps a `pct exec … bash -c '…'` into the
-#: §17.1317 detached systemd unit, so a long apt + get.docker.com + image pull is polled across the
-#: wait phases rather than cut by one command's budget). Replaces any old container, waits for :8191.
+#: §17.1518 — the in-guest install script (apt + get.docker.com + the ~GB image pull). It is pushed
+#: into the guest as a FILE and run as a DETACHED systemd unit, because a raw `pct exec … <install>`
+#: runs synchronously and a long install is cut by the executor's 180 s command budget (live, the
+#: first attempt timed out mid-apt). Pushing a file keeps the script out of the shell-quoting layers.
+#: NO single quotes (it rides inside a single-quoted host `sh -c '…'` heredoc). Replaces any old
+#: container, then waits for :8191 inside the unit so the unit only finishes once FlareSolverr is up.
 _FS_INSTALL_BODY = (
-    "export DEBIAN_FRONTEND=noninteractive; "
-    "apt-get update; apt-get install -y curl ca-certificates; "
-    "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh; "
-    "systemctl enable --now docker; "
-    "docker rm -f flaresolverr 2>/dev/null || true; "
+    "export DEBIAN_FRONTEND=noninteractive\n"
+    "apt-get update\n"
+    "apt-get install -y curl ca-certificates\n"
+    "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh\n"
+    "systemctl enable --now docker\n"
+    "docker rm -f flaresolverr 2>/dev/null || true\n"
     "docker run -d --name flaresolverr --restart unless-stopped -p 8191:8191 "
-    "-e LOG_LEVEL=info ghcr.io/flaresolverr/flaresolverr:latest; "
-    "n=0; while [ $n -lt 45 ]; do curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1 && break; n=$((n+1)); sleep 4; done; "
-    "if curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1; then echo \"FlareSolverr ready on 8191\"; "
-    "else echo \"FAILED: flaresolverr not responding on 8191\"; docker logs flaresolverr 2>&1 | tail -30; exit 1; fi"
+    "-e LOG_LEVEL=info ghcr.io/flaresolverr/flaresolverr:latest\n"
+    "n=0; while [ $n -lt 45 ]; do curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1 && break; n=$((n+1)); sleep 4; done\n"
+    "if curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1; then echo FlareSolverr-ready-on-8191; "
+    "else echo FAILED-flaresolverr-not-up; docker logs flaresolverr 2>&1 | tail -30; exit 1; fi\n"
 )
-_FS_INSTALL = f"pct exec {_FS_VMID} -- bash -c '{_FS_INSTALL_BODY}'"
+#: start: write the script, push it into the guest, launch it as a transient systemd unit (NOT
+#: --collect, so the unit's ExecMainStatus is still readable after it finishes), then return at once.
+_FS_START = (
+    "sh -c 'cat > /tmp/fs_install.sh <<\"FSEOS\"\n"
+    + _FS_INSTALL_BODY
+    + "FSEOS\n"
+    f"pct push {_FS_VMID} /tmp/fs_install.sh /root/.fs_install.sh\n"
+    f"pct exec {_FS_VMID} -- bash -c \"systemctl stop scaffold-fs 2>/dev/null; "
+    "systemctl reset-failed scaffold-fs 2>/dev/null; rm -f /root/.fs.log; "
+    "systemd-run --unit scaffold-fs -p StandardOutput=append:/root/.fs.log "
+    "-p StandardError=append:/root/.fs.log bash /root/.fs_install.sh\"\n"
+    "echo started-scaffold-fs'"
+)
+#: wait: poll the unit for ~150 s (inside the 180 s budget), then report its state. Repeated across
+#: several commands so the whole install + image pull is covered without any one command timing out.
+_FS_WAIT = (
+    f"pct exec {_FS_VMID} -- bash -c 'd=$((SECONDS+150)); "
+    "while [ $SECONDS -lt $d ]; do st=$(systemctl is-active scaffold-fs 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) sleep 5;; *) break;; esac; done; "
+    "echo wait-state:$(systemctl is-active scaffold-fs 2>/dev/null)'"
+)
+#: last: finish waiting, print the tail of the log, and fail the step if the unit failed.
+_FS_LAST = (
+    f"pct exec {_FS_VMID} -- bash -c 'd=$((SECONDS+150)); "
+    "while [ $SECONDS -lt $d ]; do st=$(systemctl is-active scaffold-fs 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) sleep 5;; *) break;; esac; done; "
+    "tail -n 30 /root/.fs.log 2>/dev/null; "
+    "final=$(systemctl is-active scaffold-fs 2>/dev/null); "
+    "ec=$(systemctl show scaffold-fs -p ExecMainStatus --value 2>/dev/null); "
+    "if [ \"$final\" = failed ] || { [ -n \"$ec\" ] && [ \"$ec\" != 0 ]; }; "
+    "then echo FAILED-scaffold-fs-exit=$ec; exit 1; fi; echo scaffold-fs-finished-ok-exit=$ec'"
+)
 _FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc|service|deploy|install)\b", re.I)
 
 
@@ -7567,16 +7602,19 @@ def rewrite_deploy_flaresolverr(node: Optional[dict], commands: list[str], verif
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not (_FLARESOLVERR_RE.search(title) or _FLARESOLVERR_RE.search(text)):
         return list(commands or []), list(verify or []), []
-    run = [_FS_CREATE, _FS_INSTALL]
+    # §17.1518 — create (host), then the detached install polled across six wait phases + a last
+    # phase that fails the step if the unit failed. Six waits (~15 min) cover apt + the image pull.
+    run = [_FS_CREATE, _FS_START, _FS_WAIT, _FS_WAIT, _FS_WAIT, _FS_WAIT, _FS_WAIT, _FS_WAIT, _FS_LAST]
     check = [(f'pct exec {_FS_VMID} -- curl -s -o /dev/null -w "flaresolverr HTTP %{{http_code}}" '
               f"http://127.0.0.1:8191/")]
     note = [{"why": (
-        f"drafted the FlareSolverr deploy from the engine's own shape (§17.1516): the plan had only the "
+        f"drafted the FlareSolverr deploy from the engine's own shape (§17.1516/1518): the plan had only the "
         f"decision on how it should run, not a step that stands it up. On the host it creates container "
         f"{_FS_VMID} (the measured next-free id, {_FS_IP} on vmbr0, Debian 12, nesting+keyctl for Docker) if "
-        f"it does not already exist, then inside it runs the official FlareSolverr Docker container on :8191 — "
-        f"the long install is polled across the wait phases as a detached unit. Re-runnable: the create is "
-        f"skipped when {_FS_VMID} exists and the container is replaced, not duplicated.")}]
+        f"it does not already exist, then runs the official FlareSolverr Docker container on :8191 inside it. "
+        f"The long install (apt + image pull) runs as a DETACHED systemd unit polled across the wait phases, so "
+        f"it is not cut by one command's 180 s budget. Re-runnable: the create is skipped when {_FS_VMID} exists "
+        f"and the container is replaced, not duplicated.")}]
     return run, check, note
 
 
