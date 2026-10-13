@@ -221,7 +221,16 @@ def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
     """§17.1418 — a developed step needs a check of ITS feature. `done_checks` always adds the unit's
     `is-active`, which the delivery itself makes true; a step whose text names nothing else would be
     recorded done while its route answers a connection error. Live: ADD124 ("returns the engine's
-    /health with status healthy", in prose) was offered with `is-active` as its only check."""
+    /health with status healthy", in prose) was offered with `is-active` as its only check.
+
+    §17.1543 — the concern is a step whose ONLY proof is the unit's `is-active`, which the delivery
+    fakes by restarting it. A CodeGen node delivers FILE CONTENT: its proof is the delivered file
+    (the develop flow's own content gates judge it — §17.1414 dead-path / cleartext-secret /
+    html-attribute), and a UI build carries its own downstream verify nodes; a Vite-UI write does not
+    even restart the step's unit. So a CodeGen build node is exempt — refusing it for lacking an
+    `is-active`-style check parked every one with nothing to run (live: control-panel, T9/T12/…)."""
+    if str((node or {}).get("tool") or "").strip().lower() == "codegen":
+        return []
     if acceptance_checks(node) or len(done_checks(node, host)) > 1:
         return []
     return [{"command": "(the step's done-condition)", "why": (

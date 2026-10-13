@@ -344,3 +344,15 @@ def test_curl_gets_fail_once(cmd, expect):
 def test_the_pause_passes_the_acceptance_checks_to_the_delivery():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "develop.acceptance_checks(run_node)" in src
+
+
+def test_a_codegen_build_node_is_exempt_from_the_own_check_refusal():
+    # §17.1543 — the own-check gate stops a step proven only by `is-active` (faked by the restart).
+    # A CodeGen node delivers file CONTENT (judged by the develop content gates + the plan's verify
+    # nodes), so it is exempt — else every control-panel build node was refused for no own check.
+    codegen = {"title": "Create CSS variables", "tool": "CodeGen",
+               "description": "Define CSS variables for the dark theme in the stylesheet."}
+    assert dv.own_check_refusal(codegen, HOST) == []
+    # a non-CodeGen develop step with no own check is still refused (the §17.1418 behavior)
+    shell = {"title": "Wire the panel route", "description": "Add the route to server.js."}
+    assert dv.own_check_refusal(shell, HOST) != []
