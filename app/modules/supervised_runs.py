@@ -7783,6 +7783,9 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "        pb=dict(fs); pb['name']='Byparr'; pb['tags']=[tagid] if tagid else []\n"
     "        for f in pb.get('fields',[]):\n"
     "            if f.get('name')=='host': f['value']=FS_URL\n"
+    # §17.1536 — Byparr's CPU-only Camoufox solve takes 60-70 s; the proxy's default 60 s request
+    # timeout cuts it off, so Prowlarr sees "unreachable" though Byparr returns 200. Give it 180 s.
+    "            if f.get('name')=='requestTimeout': f['value']=180\n"
     "        _,perr=api('/api/v1/indexerproxy?forceSave=true','POST',pb)\n"
     "        print('PROXY: '+('added Byparr -> '+FS_URL if perr is None else 'FAILED '+str(perr)[:120].replace(chr(10),' ')))\n"
     "    else: print('PROXY: no FlareSolverr-compatible proxy schema')\n"
@@ -7790,25 +7793,32 @@ _PROWLARR_ADD_INDEXERS_PY = (
     # §17.1535 — a proxy already exists (it pointed at FlareSolverr); REPOINT its host at Byparr and
     # make sure it carries the flaresolverr tag, so the Cloudflare indexers route through Byparr.
     "    cur=next((f.get('value') for f in fsp.get('fields',[]) if f.get('name')=='host'),'')\n"
-    "    if cur!=FS_URL or (tagid and tagid not in (fsp.get('tags') or [])):\n"
+    "    curto=next((f.get('value') for f in fsp.get('fields',[]) if f.get('name')=='requestTimeout'),None)\n"
+    "    if cur!=FS_URL or curto!=180 or (tagid and tagid not in (fsp.get('tags') or [])):\n"
     "        for f in fsp.get('fields',[]):\n"
     "            if f.get('name')=='host': f['value']=FS_URL\n"
+    "            if f.get('name')=='requestTimeout': f['value']=180\n"
     "        if tagid and tagid not in (fsp.get('tags') or []): fsp['tags']=(fsp.get('tags') or [])+[tagid]\n"
     "        fsp['name']='Byparr'\n"
     "        _,uerr=api('/api/v1/indexerproxy/%s?forceSave=true' % fsp.get('id'),'PUT',fsp)\n"
-    "        print('PROXY: repointed to Byparr -> '+FS_URL+(' FAILED '+str(uerr)[:80] if uerr else ''))\n"
+    "        print('PROXY: repointed to Byparr -> '+FS_URL+' (timeout 180s)'+(' FAILED '+str(uerr)[:80] if uerr else ''))\n"
     "    else: print('PROXY: Byparr already configured')\n"
     "schema=(api('/api/v1/indexer/schema')[0]) or []\n"
     "existing=(api('/api/v1/indexer')[0]) or []\n"
     "have={(x.get('name') or '').lower() for x in existing}\n"
     "bydef={(s.get('name') or '').lower(): s for s in schema}\n"
     "added=[]; viafs=[]; skipped=[]; failed=[]\n"
-    # §17.1526 — bounded to a slice at a short per-request timeout so the batch fits the 180 s budget.
-    "for w in WANT[:10]:\n"
+    # §17.1536 — split present/absent/to-do up front. Byparr's CPU-only solve is 60-70 s each, so
+    # only a FEW fit one command's 180 s budget; add a small resumable batch and let a re-run take
+    # the next — an already-added tracker drops out of `todo`, so re-running advances, never repeats.
+    "todo=[]\n"
+    "for w in WANT:\n"
     "    wl=w.lower()\n"
-    "    if wl in have: skipped.append(w+' (already present)'); continue\n"
-    "    s=bydef.get(wl)\n"
-    "    if not s: skipped.append(w+' (not in schema)'); continue\n"
+    "    if wl in have: skipped.append(w+' (already present)')\n"
+    "    elif wl not in bydef: skipped.append(w+' (not in schema)')\n"
+    "    else: todo.append(w)\n"
+    "for w in todo[:2]:\n"
+    "    s=bydef[w.lower()]\n"
     "    body=dict(s); body['enable']=True\n"
     # Prowlarr requires an app-sync profile id > 0; 1 is the default "Standard" profile.
     "    if not body.get('appProfileId'): body['appProfileId']=1\n"
@@ -7821,14 +7831,16 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "        b2=dict(body); b2['tags']=[tagid]\n"
     "        _,err2=api('/api/v1/indexer?forceSave=true','POST',b2)\n"
     "        if err2 is None: viafs.append(w); continue\n"
-    "        failed.append('%s: %s' % (w, ('unreachable even via FlareSolverr' if is_availability(err2) else err2[:110].replace(chr(10),' '))))\n"
+    "        failed.append('%s: %s' % (w, ('unreachable even via the proxy' if is_availability(err2) else err2[:110].replace(chr(10),' '))))\n"
     "    else: failed.append('%s: %s' % (w, err[:120].replace(chr(10),' ')))\n"
+    "remaining=max(0, len(todo)-2)\n"
     "print('SCHEMA: %d definitions; EXISTING: %d indexers' % (len(schema),len(existing)))\n"
     "print('ADDED (direct): %d - %s' % (len(added), ', '.join(added) if added else 'none'))\n"
-    "print('ADDED (via FlareSolverr): %d - %s' % (len(viafs), ', '.join(viafs) if viafs else 'none'))\n"
+    "print('ADDED (via Byparr): %d - %s' % (len(viafs), ', '.join(viafs) if viafs else 'none'))\n"
     "if skipped: print('SKIPPED: %s' % '; '.join(skipped))\n"
     "if failed: print('FAILED: %s' % '; '.join(failed))\n"
-    "print('RESULT: added %d public indexer(s) (%d direct, %d via FlareSolverr)' % (len(added)+len(viafs),len(added),len(viafs)))\n"
+    "if remaining: print('REMAINING to add: %d (re-run this step to continue — Byparr solves are slow)' % remaining)\n"
+    "print('RESULT: added %d public indexer(s) (%d direct, %d via Byparr)' % (len(added)+len(viafs),len(added),len(viafs)))\n"
     # §17.1533 — if NOTHING the step was asked to add landed and there were real failures (not just
     # ones already present), EXIT NON-ZERO. A capability that catches its own errors and exits 0 is
     # recorded `done`, so the engine's failure-research (§17.1201 diagnose_failure → generate_fix,
