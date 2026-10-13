@@ -75,3 +75,21 @@ def test_frame_run_runs_the_nameserver_fix():
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr)
     assert "rewrite_set_container_nameserver(node, cmds, verify, services, inventory)" in src
+
+
+def test_frame_drops_the_stale_cannot_resolve_precondition_for_the_fixer():
+    # §17.1519 — the precondition was computed from the ORIGINAL in-guest apt draft (which matched
+    # the net-fetch pattern), before the rewrite replaced it with the host-side `pct set`. The fixer
+    # step must not be refused by the very condition it fixes.
+    from unittest.mock import MagicMock
+    from app.modules import supervised_runs as sr
+    runbook = ("## Run this\n```bash\npct exec 107 -- bash -c 'apt-get update'\n```\n"
+               "## Verify\n- `pct exec 107 -- getent hosts deb.debian.org`\n")
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    stale = [{"command": "apt-get update",
+              "why": "container 107 cannot resolve names: `getent hosts deb.debian.org` inside it printed nothing"}]
+    frame = sr.frame_run({"node_key": "ADD1", "title": "Give container 107 a working nameserver"},
+                         runbook, spec, {"allow": ["ANY"], "sudo": False, "helper": "22"},  # the live auto-mode channel
+                         preconditions=stale)
+    assert "run" in [o["id"] for o in frame["options"]], "the DNS fixer must be runnable"
+    assert not any("cannot resolve names" in str(r.get("why", "")) for r in frame.get("refused", []))

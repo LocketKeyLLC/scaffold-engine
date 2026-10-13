@@ -5410,7 +5410,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1348 — a variable nothing sets expands to nothing, and the command runs
     # with an empty value rather than failing loudly.
     _empty_vars = variables_nothing_sets(cmds, files, policy)
-    refused = list(refused) + list(preconditions or []) + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
+    # §17.1519 — a precondition is computed from the ORIGINAL drafted block (the in-guest apt), before
+    # the rewrites above replace it. When this step was rewritten to SET the nameserver host-side, a
+    # stale "cannot resolve names" precondition is self-contradictory — this step IS the remedy — so it
+    # is dropped rather than refusing the very step that fixes DNS.
+    _pre = list(preconditions or [])
+    if _ns_notes:
+        _pre = [p for p in _pre if "cannot resolve names" not in str((p or {}).get("why") or "")]
+    refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
