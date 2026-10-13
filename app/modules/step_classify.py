@@ -249,9 +249,21 @@ _DEPLOY_TARGET_RE = re.compile(
 
 
 def deploy_target_guest(brief: str) -> str:
-    """The guest id a develop brief names as its deploy target, or '' if none/ambiguous."""
-    hits = {m.group(1) for m in _DEPLOY_TARGET_RE.finditer(str(brief or ""))}
-    return next(iter(hits)) if len(hits) == 1 else ""
+    """The guest id a develop brief names as its deploy target, or '' if none/ambiguous.
+
+    §17.1540 — the STRICT MOST-FREQUENT guest among deploy-verb mentions, not "exactly one
+    distinct". A brief names its deploy target repeatedly ("Deploy changes to container 111",
+    "deploy via the runner to container 111", "code deployed to container 111") while a container it
+    merely SURFACES is mentioned once and can still fall inside a deploy verb's window ("Newly
+    deployed containers: FlareSolverr (container 107…"). Counting distinct guests called that
+    ambiguous and resolved nothing; the clear winner is the right answer. A genuine tie (two guests
+    at the same top count) stays '' — the engine must not guess which one a build node deploys to."""
+    from collections import Counter
+    hits = Counter(m.group(1) for m in _DEPLOY_TARGET_RE.finditer(str(brief or "")))
+    if not hits:
+        return ""
+    top, n = hits.most_common(1)[0]
+    return top if sum(1 for c in hits.values() if c == n) == 1 else ""
 
 
 def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabled: bool | None = None,
