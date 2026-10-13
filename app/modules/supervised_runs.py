@@ -5324,6 +5324,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pd_notes:
         cmds, verify = _pd_cmds, _pd_verify
         _comp_notes = list(_comp_notes) + _pd_notes
+    # §17.1526 — "add general-purpose public TV indexers": read the definition catalog and POST a
+    # curated set of public no-login trackers not already present, deterministically.
+    _pa_cmds, _pa_verify, _pa_notes = rewrite_add_general_tv_indexers(node, cmds, verify, services, inventory)
+    if _pa_notes:
+        cmds, verify = _pa_cmds, _pa_verify
+        _comp_notes = list(_comp_notes) + _pa_notes
     # §17.1516 — "deploy FlareSolverr": create its own LXC (host) and run the official Docker
     # container inside it, deterministically (the plan had only the decision, not the deploy step).
     _fs_cmds, _fs_verify, _fs_notes = rewrite_deploy_flaresolverr(node, cmds, verify, services, inventory)
@@ -7680,6 +7686,95 @@ def rewrite_disable_failing_indexers(node: Optional[dict], commands: list[str], 
         f"indexers Prowlarr auto-disabled after repeated failures and PUTs each one's OWN full object back with "
         f"enable=false and forceSave=true (an *arr PUT validates the whole object, and saving runs the connection "
         f"test a failing indexer cannot pass) — replacing the drafter's inert `<INDEXER_ID>` template.")}]
+    return [run], [check], note
+
+
+#: §17.1526 — "add general-purpose public TV indexers" done deterministically (operator decision
+#: ASK7: only PUBLIC indexers that need NO account/API key).
+#:
+#: Live (job aefaef87 T7): the model drafted a 24-command kitchen sink — setup_flaresolverr.sh,
+#: wire_flaresolverr.py, disable_failing ×5, remove_stalled_from_sonarr ×12, remove_stalled ×4 —
+#: re-doing every other step of the job (the whole job's RAG context bled into the node), with only
+#: one line (`add_public_indexers.py 0 5`) actually about T7, and the frame refused (pct create 107
+#: collision, an unclosed heredoc). The engine does exactly T7: inside the Prowlarr guest, read the
+#: definition catalog (`/api/v1/indexer/schema`) and the current indexers, and for each name in a
+#: curated set of well-known general/TV PUBLIC trackers not already present, POST the schema's own
+#: template with forceSave=true (skip the connection test — a Cloudflare-gated one is tested later
+#: through FlareSolverr). Idempotent (skips ones already there), bounded, errors reported per name.
+#: The key is read on the machine (§17.1503) by `<PROWLARR_API_KEY>`.
+#:
+#: The set: general-purpose, English-TV-relevant, public/no-login, and NOT already in the measured
+#: inventory of 49 (which was heavy on anime/foreign/adult). Matched case-insensitively against the
+#: catalog, so a name the catalog does not carry is reported "not in schema", never a hard failure.
+_PROWLARR_TV_INDEXERS = (
+    "1337x", "TorrentGalaxy", "LimeTorrents", "Torlock", "EZTV",
+    "GloTorrents", "BitSearch", "Solid Torrents", "TheRARBG",
+)
+_PROWLARR_ADD_INDEXERS_PY = (
+    "import sys,json,urllib.request,urllib.error\n"
+    "BASE='http://127.0.0.1:" + _PROWLARR_PORT + "'; KEY=sys.argv[1]\n"
+    "WANT=" + repr(list(_PROWLARR_TV_INDEXERS)) + "\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,"
+    "headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    try:\n"
+    "        d=urllib.request.urlopen(r,timeout=12).read()\n"
+    "        return (json.loads(d) if d else None, None)\n"
+    "    except urllib.error.HTTPError as e:\n"
+    "        return (None, e.read().decode('utf-8','replace'))\n"
+    "schema=(api('/api/v1/indexer/schema')[0]) or []\n"
+    "existing=(api('/api/v1/indexer')[0]) or []\n"
+    "have={(x.get('name') or '').lower() for x in existing}\n"
+    "bydef={(s.get('name') or '').lower(): s for s in schema}\n"
+    "added=[]; skipped=[]; failed=[]\n"
+    # §17.1526 — bounded to a slice at a short per-request timeout so the batch fits the 180 s budget.
+    "for w in WANT[:12]:\n"
+    "    wl=w.lower()\n"
+    "    if wl in have: skipped.append(w+' (already present)'); continue\n"
+    "    s=bydef.get(wl)\n"
+    "    if not s: skipped.append(w+' (not in schema)'); continue\n"
+    "    body=dict(s); body['enable']=True\n"
+    # Prowlarr requires an app-sync profile id > 0; 1 is the default "Standard" profile.
+    "    if not body.get('appProfileId'): body['appProfileId']=1\n"
+    "    res,err=api('/api/v1/indexer?forceSave=true','POST',body)\n"
+    "    if err is None: added.append(w)\n"
+    "    else: failed.append('%s: %s' % (w, err[:140].replace(chr(10),' ')))\n"
+    "print('SCHEMA: %d definitions; EXISTING: %d indexers' % (len(schema),len(existing)))\n"
+    "print('ADDED: %d - %s' % (len(added), ', '.join(added) if added else 'none'))\n"
+    "if skipped: print('SKIPPED: %s' % '; '.join(skipped))\n"
+    "if failed: print('FAILED: %s' % '; '.join(failed))\n"
+    "print('RESULT: added %d general/public indexer(s)' % len(added))\n"
+)
+#: add + (general/public/tv) indexers — a WRITE. Guarded off disable/remove/sync/inventory.
+_PROWLARR_ADD_RE = re.compile(r"\badd\b.{0,40}\b(?:general|public|tv|more|new)?\s*indexers?\b", re.I)
+_PROWLARR_ADD_NOT_RE = re.compile(r"\b(?:disable|remove|delete|sync|inventor|list|failing)\b", re.I)
+
+
+def rewrite_add_general_tv_indexers(node: Optional[dict], commands: list[str], verify: list[str],
+                                    services: Optional[list] = None,
+                                    inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1526 — add general-purpose public (no-login) TV indexers, deterministically. Replaces
+    the step's commands AND verify when the step is an add-indexers write and the Prowlarr guest
+    is known; otherwise leaves the draft untouched."""
+    title = str((node or {}).get("title") or "")
+    if not _PROWLARR_ADD_RE.search(title) or _PROWLARR_ADD_NOT_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("prowlarr", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_PROWLARR_ADD_INDEXERS_PY}" "<PROWLARR_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "prowlarr indexer API HTTP %{{http_code}}" -H "X-Api-Key: $PROWLARR_API_KEY" '
+             f'"http://127.0.0.1:{_PROWLARR_PORT}/api/v1/indexer"')
+    note = [{"why": (
+        f"drafted the add-indexers from the engine's own shape (§17.1526): inside guest {gid} it reads the "
+        f"Prowlarr definition catalog (/api/v1/indexer/schema) and the current indexers, and for each of a curated "
+        f"set of general/TV PUBLIC no-login trackers not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs "
+        f"the schema's own template with forceSave=true (a Cloudflare-gated one is tested later through "
+        f"FlareSolverr); idempotent, bounded, errors reported per name — replacing the model's 24-command kitchen "
+        f"sink that re-did the whole job.")}]
     return [run], [check], note
 
 
