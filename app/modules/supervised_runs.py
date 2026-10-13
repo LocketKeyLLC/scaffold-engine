@@ -7689,30 +7689,34 @@ def rewrite_disable_failing_indexers(node: Optional[dict], commands: list[str], 
     return [run], [check], note
 
 
-#: §17.1526 — "add general-purpose public TV indexers" done deterministically (operator decision
-#: ASK7: only PUBLIC indexers that need NO account/API key).
+#: §17.1526/1528 — "add general-purpose public TV indexers" done deterministically, routing the
+#: Cloudflare-gated ones through FlareSolverr (operator decisions ASK7 = PUBLIC/no-login only, and
+#: T1 = KEEP the Cloudflare indexers by routing them through FlareSolverr).
 #:
-#: Live (job aefaef87 T7): the model drafted a 24-command kitchen sink — setup_flaresolverr.sh,
-#: wire_flaresolverr.py, disable_failing ×5, remove_stalled_from_sonarr ×12, remove_stalled ×4 —
-#: re-doing every other step of the job (the whole job's RAG context bled into the node), with only
-#: one line (`add_public_indexers.py 0 5`) actually about T7, and the frame refused (pct create 107
-#: collision, an unclosed heredoc). The engine does exactly T7: inside the Prowlarr guest, read the
-#: definition catalog (`/api/v1/indexer/schema`) and the current indexers, and for each name in a
-#: curated set of well-known general/TV PUBLIC trackers not already present, POST the schema's own
-#: template with forceSave=true (skip the connection test — a Cloudflare-gated one is tested later
-#: through FlareSolverr). Idempotent (skips ones already there), bounded, errors reported per name.
-#: The key is read on the machine (§17.1503) by `<PROWLARR_API_KEY>`.
+#: Live (job aefaef87 T7): the model drafted a 24-command kitchen sink re-doing every other step of
+#: the job (the whole job's RAG context bled into the node), with one line actually about T7, and
+#: the frame refused. The first deterministic draft (§1526) then taught the engine two live facts:
+#:   (a) its curated names mostly did not exist in the catalog — of 659 definitions, this Prowlarr
+#:       carries 87 public-torrent ones, and the real general/TV names are the set below (measured);
+#:   (b) forceSave does NOT skip the connection test on an ADD, so a Cloudflare-gated tracker
+#:       (1337x, EZTV) cannot be added until its requests route through FlareSolverr — which is
+#:       exactly what T1 decided and the plan never had a step for.
+#: So the engine does the whole thing (§1528): inside the Prowlarr guest, ensure a `flaresolverr`
+#: tag and a FlareSolverr indexer-proxy (host = the deployed FlareSolverr) exist, then for each
+#: wanted public tracker not already configured, POST the catalog's own template; if the add is
+#: refused with a Cloudflare error, retry the POST WITH the flaresolverr tag so the connection test
+#: runs THROUGH FlareSolverr. Idempotent, bounded, hang-safe, errors reported per name. The key is
+#: read on the machine (§17.1503) by `<PROWLARR_API_KEY>`.
 #:
-#: The set: general-purpose, English-TV-relevant, public/no-login, and NOT already in the measured
-#: inventory of 49 (which was heavy on anime/foreign/adult). Matched case-insensitively against the
-#: catalog, so a name the catalog does not carry is reported "not in schema", never a hard failure.
+#: The set: the general/English-TV public (no-login) definitions this Prowlarr actually carries and
+#: that the measured inventory of 49 (heavy on anime/foreign/adult) did not already have.
 _PROWLARR_TV_INDEXERS = (
-    "1337x", "TorrentGalaxy", "LimeTorrents", "Torlock", "EZTV",
-    "GloTorrents", "BitSearch", "Solid Torrents", "TheRARBG",
+    "1337x", "EZTV", "LimeTorrents", "TorrentProject2", "kickasstorrents.to",
 )
 _PROWLARR_ADD_INDEXERS_PY = (
     "import sys,json,urllib.request,urllib.error\n"
     "BASE='http://127.0.0.1:" + _PROWLARR_PORT + "'; KEY=sys.argv[1]\n"
+    "FS_URL='http://192.168.1.26:8191/'\n"
     "WANT=" + repr(list(_PROWLARR_TV_INDEXERS)) + "\n"
     "def api(p,method='GET',body=None):\n"
     "    r=urllib.request.Request(BASE+p,method=method,"
@@ -7724,17 +7728,34 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "    except urllib.error.HTTPError as e:\n"
     "        return (None, e.read().decode('utf-8','replace'))\n"
     # §17.1527 — a tracker that does not answer raises URLError/TimeoutError/OSError, NOT an
-    # HTTPError; catch those too so a hang on one POST is recorded as unreachable and the batch
-    # keeps going, instead of dying mid-loop with no record of the rest.
+    # HTTPError; catch those too so a hang on one POST is recorded and the batch keeps going.
     "    except (urllib.error.URLError, TimeoutError, OSError) as e:\n"
     "        return (None, 'unreachable: %r' % e)\n"
+    # §17.1528 — ensure the FlareSolverr tag + indexer-proxy exist (T1: keep Cloudflare indexers by
+    # routing them through FlareSolverr). Idempotent: created once, reused after.
+    "tags=(api('/api/v1/tag')[0]) or []\n"
+    "tag=next((t for t in tags if (t.get('label') or '')=='flaresolverr'), None)\n"
+    "if not tag: tag=api('/api/v1/tag','POST',{'label':'flaresolverr'})[0]\n"
+    "tagid=(tag or {}).get('id')\n"
+    "prox=(api('/api/v1/indexerproxy')[0]) or []\n"
+    "if not any(p.get('implementation')=='FlareSolverr' for p in prox):\n"
+    "    psch=(api('/api/v1/indexerproxy/schema')[0]) or []\n"
+    "    fs=next((d for d in psch if d.get('implementation')=='FlareSolverr'), None)\n"
+    "    if fs:\n"
+    "        pb=dict(fs); pb['name']='FlareSolverr'; pb['tags']=[tagid] if tagid else []\n"
+    "        for f in pb.get('fields',[]):\n"
+    "            if f.get('name')=='host': f['value']=FS_URL\n"
+    "        _,perr=api('/api/v1/indexerproxy?forceSave=true','POST',pb)\n"
+    "        print('PROXY: '+('added FlareSolverr -> '+FS_URL if perr is None else 'FAILED '+str(perr)[:120].replace(chr(10),' ')))\n"
+    "    else: print('PROXY: FlareSolverr not in proxy schema')\n"
+    "else: print('PROXY: FlareSolverr already configured')\n"
     "schema=(api('/api/v1/indexer/schema')[0]) or []\n"
     "existing=(api('/api/v1/indexer')[0]) or []\n"
     "have={(x.get('name') or '').lower() for x in existing}\n"
     "bydef={(s.get('name') or '').lower(): s for s in schema}\n"
-    "added=[]; skipped=[]; failed=[]\n"
+    "added=[]; viafs=[]; skipped=[]; failed=[]\n"
     # §17.1526 — bounded to a slice at a short per-request timeout so the batch fits the 180 s budget.
-    "for w in WANT[:12]:\n"
+    "for w in WANT[:10]:\n"
     "    wl=w.lower()\n"
     "    if wl in have: skipped.append(w+' (already present)'); continue\n"
     "    s=bydef.get(wl)\n"
@@ -7743,13 +7764,21 @@ _PROWLARR_ADD_INDEXERS_PY = (
     # Prowlarr requires an app-sync profile id > 0; 1 is the default "Standard" profile.
     "    if not body.get('appProfileId'): body['appProfileId']=1\n"
     "    res,err=api('/api/v1/indexer?forceSave=true','POST',body)\n"
-    "    if err is None: added.append(w)\n"
-    "    else: failed.append('%s: %s' % (w, err[:140].replace(chr(10),' ')))\n"
+    "    if err is None: added.append(w); continue\n"
+    # §17.1528 — a Cloudflare refusal is retried THROUGH FlareSolverr (add the tag so the test uses
+    # the proxy); any other error is reported per name, never fatal.
+    "    if tagid and 'cloudflare' in err.lower():\n"
+    "        b2=dict(body); b2['tags']=[tagid]\n"
+    "        _,err2=api('/api/v1/indexer?forceSave=true','POST',b2)\n"
+    "        if err2 is None: viafs.append(w); continue\n"
+    "        failed.append('%s: %s' % (w, err2[:120].replace(chr(10),' ')))\n"
+    "    else: failed.append('%s: %s' % (w, err[:120].replace(chr(10),' ')))\n"
     "print('SCHEMA: %d definitions; EXISTING: %d indexers' % (len(schema),len(existing)))\n"
-    "print('ADDED: %d - %s' % (len(added), ', '.join(added) if added else 'none'))\n"
+    "print('ADDED (direct): %d - %s' % (len(added), ', '.join(added) if added else 'none'))\n"
+    "print('ADDED (via FlareSolverr): %d - %s' % (len(viafs), ', '.join(viafs) if viafs else 'none'))\n"
     "if skipped: print('SKIPPED: %s' % '; '.join(skipped))\n"
     "if failed: print('FAILED: %s' % '; '.join(failed))\n"
-    "print('RESULT: added %d general/public indexer(s)' % len(added))\n"
+    "print('RESULT: added %d public indexer(s) (%d direct, %d via FlareSolverr)' % (len(added)+len(viafs),len(added),len(viafs)))\n"
 )
 #: add + (general/public/tv) indexers — a WRITE. Guarded off disable/remove/sync/inventory.
 _PROWLARR_ADD_RE = re.compile(r"\badd\b.{0,40}\b(?:general|public|tv|more|new)?\s*indexers?\b", re.I)
@@ -7774,12 +7803,13 @@ def rewrite_add_general_tv_indexers(node: Optional[dict], commands: list[str], v
              f'-w "prowlarr indexer API HTTP %{{http_code}}" -H "X-Api-Key: $PROWLARR_API_KEY" '
              f'"http://127.0.0.1:{_PROWLARR_PORT}/api/v1/indexer"')
     note = [{"why": (
-        f"drafted the add-indexers from the engine's own shape (§17.1526): inside guest {gid} it reads the "
-        f"Prowlarr definition catalog (/api/v1/indexer/schema) and the current indexers, and for each of a curated "
-        f"set of general/TV PUBLIC no-login trackers not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs "
-        f"the schema's own template with forceSave=true (a Cloudflare-gated one is tested later through "
-        f"FlareSolverr); idempotent, bounded, errors reported per name — replacing the model's 24-command kitchen "
-        f"sink that re-did the whole job.")}]
+        f"drafted the add-indexers from the engine's own shape (§17.1526/1528): inside guest {gid} it ensures a "
+        f"FlareSolverr tag + indexer-proxy (host {_FS_IP}:8191 — operator decision T1: keep Cloudflare indexers by "
+        f"routing them through FlareSolverr), then for each general/TV PUBLIC no-login tracker this Prowlarr's "
+        f"catalog carries and that is not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs the catalog's "
+        f"own template; a Cloudflare refusal is retried WITH the flaresolverr tag so the test runs through the "
+        f"proxy. Idempotent, bounded, hang-safe — replacing the model's 24-command kitchen sink that re-did the "
+        f"whole job.")}]
     return [run], [check], note
 
 
