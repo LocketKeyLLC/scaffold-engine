@@ -7840,8 +7840,17 @@ _FS_TEMPLATE = "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
 _FS_CREATE = (
     "sh -c '"
     f"if pct status {_FS_VMID} >/dev/null 2>&1; then echo \"CT {_FS_VMID} already exists: $(pct status {_FS_VMID})\"; "
+    # §17.1530 — a container that already exists is RIGHT-SIZED and recovered: FlareSolverr bundles
+    # Chromium and 1 GB OOM-wedged the guest (pct exec timed out on everything), so raise it to 2 GB
+    # and force a clean stop+start — that applies the new memory AND clears a hung guest. stop is
+    # forceful after its timeout, which `pct reboot` is not when the guest cannot shut itself down.
+    f"pct set {_FS_VMID} --memory 2048 --swap 1024; "
+    f"pct stop {_FS_VMID} >/dev/null 2>&1 || true; "
+    f"n=0; while [ $n -lt 12 ]; do pct status {_FS_VMID} | grep -q stopped && break; n=$((n+1)); sleep 3; done; "
+    f"pct start {_FS_VMID}; "
     f"else pct create {_FS_VMID} {_FS_TEMPLATE} "
-    "--hostname flaresolverr --cores 2 --memory 1024 --swap 512 "
+    # §17.1530 — 2 GB/1 GB swap from the start: 1 GB could not hold FlareSolverr's Chromium.
+    "--hostname flaresolverr --cores 2 --memory 2048 --swap 1024 "
     "--rootfs local-lvm:8 "
     f"--net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip={_FS_IP}/24,type=veth "
     # §17.1519 — a nameserver, or the container inherits the host's Tailscale resolver
@@ -7854,7 +7863,7 @@ _FS_CREATE = (
     # §17.1517 — NO `pct exec` inside this host script: a nested guest-exec here made the host-tool
     # gate read everything after it (the final `pct status`) as running in the guest and refuse the
     # frame. A plain sleep lets the guest's network settle; the install command does its own waiting.
-    "sleep 8; "
+    "sleep 10; "
     f"echo \"CT {_FS_VMID} $(pct status {_FS_VMID})\"'"
 )
 #: §17.1518 — the in-guest install script (apt + get.docker.com + the ~GB image pull). It is pushed
