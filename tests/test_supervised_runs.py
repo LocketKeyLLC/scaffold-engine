@@ -77,8 +77,9 @@ async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps
     # belong to the CURRENT attempt, so it carries `at` and the node's updated_at
     # is older than it.
     _answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
-    r1 = MagicMock(); r1.scalar.return_value = {
-        "ADD50": {"by": "operator", "choice": "myself", "at": _answered.isoformat()}}
+    r1 = MagicMock(); r1.first.return_value = (
+        {"ADD50": {"by": "operator", "choice": "myself", "at": _answered.isoformat()}},
+        "")  # §17.1539 — (decisions, refined_brief); no deploy target in this brief
     r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
         {"node_key": "ADD50", "title": "Start container 111", "prompt_template": "Done when `pct status 111` reports running.",
          "depends_on": [], "tool": "LLM", "node_type": "task", "description": None, "retry_count": 0, "last_verification_reason": None},
@@ -239,7 +240,7 @@ def test_executor_wiring():
     assert "to_thread(supervised_runs.frame_run, " in pause and "supervised_runs.frame_run(" not in pause
     assert "draft_runbook(" in pause and 'logger.warning("supervised_run_parked' in pause
     serial = inspect.getsource(ea.execute_all_nodes)
-    assert "_hands_on_peek(node)" in serial and 'status in ("stale", "needs_approval")' in serial
+    assert "await _hands_on_peek(node, job_id)" in serial and 'status in ("stale", "needs_approval")' in serial
     par = inspect.getsource(ea._run_parallel_frontier)
     assert "exclude=held" in par and 'status == "needs_approval"' in par and "held.add(" in par
     claim = inspect.getsource(ea._claim_ready_nodes_sql)
@@ -875,8 +876,9 @@ async def test_a_SPENT_decision_no_longer_hides_a_node(monkeypatch):
     because their approval from the FAILED attempt was still on the job."""
     answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
     db = AsyncMock()
-    r1 = MagicMock(); r1.scalar.return_value = {
-        "ADD111": {"by": "operator", "choice": "run", "at": answered.isoformat()}}
+    r1 = MagicMock(); r1.first.return_value = (
+        {"ADD111": {"by": "operator", "choice": "run", "at": answered.isoformat()}},
+        "")  # §17.1539 — (decisions, refined_brief)
     r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
         {"node_key": "ADD111", "title": "Set up Pi-hole", "prompt_template": "Run `pct create 130 x`.",
          "depends_on": [], "tool": "LLM", "node_type": "task", "description": None,
