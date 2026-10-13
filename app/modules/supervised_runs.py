@@ -7525,7 +7525,10 @@ _FS_CREATE = (
     "--features nesting=1,keyctl=1 --unprivileged 1 --onboot 1 --start 1 && echo \"created CT " + _FS_VMID + "\"; fi; "
     f"pct status {_FS_VMID} | grep -q running || pct start {_FS_VMID}; "
     f"n=0; while [ $n -lt 24 ]; do pct status {_FS_VMID} | grep -q running && break; n=$((n+1)); sleep 5; done; "
-    f"pct exec {_FS_VMID} -- getent hosts deb.debian.org >/dev/null 2>&1 || sleep 5; "
+    # §17.1517 — NO `pct exec` inside this host script: a nested guest-exec here made the host-tool
+    # gate read everything after it (the final `pct status`) as running in the guest and refuse the
+    # frame. A plain sleep lets the guest's network settle; the install command does its own waiting.
+    "sleep 8; "
     f"echo \"CT {_FS_VMID} $(pct status {_FS_VMID})\"'"
 )
 #: the in-guest install (NO single quotes — the executor re-wraps a `pct exec … bash -c '…'` into the
