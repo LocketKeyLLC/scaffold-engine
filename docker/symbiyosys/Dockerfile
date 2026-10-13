@@ -18,7 +18,7 @@ ARG OSS_CAD_SUITE_ASSET=oss-cad-suite-linux-x64-20260512.tgz
 # files can be COPY'd selectively (we only need the install tree, not
 # the tarball or any partial download state).
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS fetcher
+FROM python:3.15.0rc3-slim@sha256:a3af3d230522dd52f7f2191b39e1892912dbcb0c8dee22afdec3dc83baf0f549 AS fetcher
 
 ARG OSS_CAD_SUITE_TAG
 ARG OSS_CAD_SUITE_ASSET
@@ -44,7 +44,7 @@ RUN curl -sSL -o /tmp/oss-cad-suite.tgz \
 # sidecars and the orchestrator. Copies the OSS CAD Suite tree from
 # the fetcher stage and exposes the FastAPI server on :8003.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
+FROM python:3.15.0rc3-slim@sha256:a3af3d230522dd52f7f2191b39e1892912dbcb0c8dee22afdec3dc83baf0f549 AS runtime
 
 ARG OSS_CAD_SUITE_TAG
 
