@@ -7731,6 +7731,17 @@ _PROWLARR_ADD_INDEXERS_PY = (
     # HTTPError; catch those too so a hang on one POST is recorded and the batch keeps going.
     "    except (urllib.error.URLError, TimeoutError, OSError) as e:\n"
     "        return (None, 'unreachable: %r' % e)\n"
+    # §17.1529 — classify a failed save by the error's SHAPE, never a phrase list (a phrase list is
+    # always one phrase short). An *arr 400 is a list of failures: a failure whose propertyName is
+    # EMPTY is an availability error (the tracker is unreachable — try it THROUGH FlareSolverr); a
+    # failure that NAMES a field is a bad request (report it, do not retry). A non-JSON body (a raw
+    # timeout) is treated as availability.
+    "def is_availability(err):\n"
+    "    try: items=json.loads(err)\n"
+    "    except Exception: return True\n"
+    "    if isinstance(items,dict): items=[items]\n"
+    "    if not isinstance(items,list) or not items: return True\n"
+    "    return all(not (i.get('propertyName') or '') for i in items if isinstance(i,dict))\n"
     # §17.1528 — ensure the FlareSolverr tag + indexer-proxy exist (T1: keep Cloudflare indexers by
     # routing them through FlareSolverr). Idempotent: created once, reused after.
     "tags=(api('/api/v1/tag')[0]) or []\n"
@@ -7765,13 +7776,14 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "    if not body.get('appProfileId'): body['appProfileId']=1\n"
     "    res,err=api('/api/v1/indexer?forceSave=true','POST',body)\n"
     "    if err is None: added.append(w); continue\n"
-    # §17.1528 — a Cloudflare refusal is retried THROUGH FlareSolverr (add the tag so the test uses
-    # the proxy); any other error is reported per name, never fatal.
-    "    if tagid and 'cloudflare' in err.lower():\n"
+    # §17.1528/1529 — an AVAILABILITY failure (empty propertyName: the tracker is unreachable,
+    # e.g. behind Cloudflare) is retried WITH the flaresolverr tag so the test runs through the
+    # proxy; a NAMED-field failure is a bad request, reported per name and never retried.
+    "    if is_availability(err) and tagid:\n"
     "        b2=dict(body); b2['tags']=[tagid]\n"
     "        _,err2=api('/api/v1/indexer?forceSave=true','POST',b2)\n"
     "        if err2 is None: viafs.append(w); continue\n"
-    "        failed.append('%s: %s' % (w, err2[:120].replace(chr(10),' ')))\n"
+    "        failed.append('%s: %s' % (w, ('unreachable even via FlareSolverr' if is_availability(err2) else err2[:110].replace(chr(10),' '))))\n"
     "    else: failed.append('%s: %s' % (w, err[:120].replace(chr(10),' ')))\n"
     "print('SCHEMA: %d definitions; EXISTING: %d indexers' % (len(schema),len(existing)))\n"
     "print('ADDED (direct): %d - %s' % (len(added), ', '.join(added) if added else 'none'))\n"

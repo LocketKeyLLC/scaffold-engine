@@ -68,6 +68,15 @@ def test_the_fs_proxy_host_points_at_the_deployed_flaresolverr():
     assert ("http://" + _FS_IP + ":8191/") in cmds[0]
 
 
+def test_it_classifies_by_shape_not_by_a_phrase_list():
+    # §17.1529 — the classify-by-phrase gate refuses `'cloudflare' in err`; the decision must come
+    # from the error SHAPE (an empty propertyName = availability), never a word list.
+    from app.modules.supervised_runs import classifies_by_key_presence
+    cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
+    assert "cloudflare" not in cmds[0].lower() and "is_availability" in cmds[0] and "propertyName" in cmds[0]
+    assert classifies_by_key_presence(cmds) == [], "no phrase-list classification remains"
+
+
 def test_the_curated_set_is_the_real_public_tv_names():
     names = {n.lower() for n in _PROWLARR_TV_INDEXERS}
     assert "1337x" in names and "eztv" in names and "limetorrents" in names
