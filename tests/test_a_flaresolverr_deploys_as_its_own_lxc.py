@@ -72,6 +72,17 @@ def test_the_deploy_does_not_trip_the_host_tool_gate():
     assert not host_only_inside_a_guest(cmds)
 
 
+def test_the_transient_unit_is_not_flagged_as_unknown():
+    # §17.1521 — the wait/last phases poll `systemctl is-active scaffold-fs`, a transient unit the
+    # start phase creates with `systemd-run --unit scaffold-fs`. The unit-name gate must exempt a
+    # unit the block itself brings into being, while still biting a genuinely unknown unit.
+    from app.modules.supervised_runs import unsourced_service_name
+    cmds, _, _ = rewrite_deploy_flaresolverr(NODE, ["x"], ["y"])
+    assert not unsourced_service_name(cmds, None, {}, NODE, units=["docker.service"])
+    bogus = ["pct exec 107 -- systemctl is-active nonexistent-xyz"]
+    assert unsourced_service_name(bogus, None, {}, {"title": "x"}, units=["docker.service"])
+
+
 def test_the_verify_reads_the_port_through_the_read_only_channel():
     from app.modules.assist_state_check import read_only_command
     verify = rewrite_deploy_flaresolverr(NODE, ["x"], ["true"])[1]
