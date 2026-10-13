@@ -1531,6 +1531,23 @@ async def execute_next_node(
             if _on:
                 logger.info("hands_on_step_as_runbook job=%s node=%s reason=%s", job_id, node_key, _why)
                 tool, tool_lower = "Shell", "shell"
+        # §17.1541 — a CodeGen node in a DEPLOY job builds software that must be WRITTEN to a machine,
+        # so it is routed to the develop/deploy path, not run in the sandbox code executor (which
+        # verifies code but never writes it to the host). This is the chokepoint BOTH the serial and
+        # the parallel-frontier paths reach for a claimed node — the peek-and-pause (§17.1539) only
+        # covers the serial path, so without this a parallel worker ran the build in the sandbox and
+        # the container was never touched (live: ae721781, CT 111 untouched every run). Rerouting to
+        # Shell hands it back for approval below, after which pending_hands_on (brief-aware) develops
+        # it and `develop.host_for` (§17.1537) delivers the files to the deploy target.
+        if tool_lower == "codegen":
+            from app.modules.step_classify import step_is_hands_on, deploy_target_guest
+            _rb = (await db.execute(
+                text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
+            if deploy_target_guest(str(_rb or "")):
+                _on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {}, develops_codegen=True)
+                if _on:
+                    logger.info("codegen_step_develops job=%s node=%s", job_id, node_key)
+                    tool, tool_lower = "Shell", "shell"
         # §17.1186 — a hands-on step reached with a runner whose write channel
         # is open is NOT written up as a runbook: it is handed back (pending)
         # for the operator's approval, which the loop collects once drained.

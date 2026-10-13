@@ -247,6 +247,9 @@ def test_executor_wiring():
     assert "AND NOT (n.node_key = ANY(:exclude))" in claim
     seam = inspect.getsource(ea.execute_next_node)
     assert "_hand_back_for_approval(db, job_id, node, tool)" in seam
+    # §17.1541 — a CodeGen node in a deploy job is rerouted to the develop/deploy path (Shell →
+    # handed back for approval), reached by BOTH the serial and parallel-frontier claim paths.
+    assert "codegen_step_develops" in seam and 'develops_codegen=True' in seam
     assert seam.index("hands_on_step_as_runbook") < seam.index("_hand_back_for_approval(") < seam.index("NotImplementedError(")
     hb = inspect.getsource(ea._hand_back_for_approval)
     assert '"status": "needs_approval"' in hb and "SET status = 'pending', started_at = NULL" in hb and "status = 'running'" in hb
