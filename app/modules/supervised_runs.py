@@ -5312,6 +5312,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _cs_notes:
         cmds, verify = _cs_cmds, _cs_verify
         _comp_notes = list(_comp_notes) + _cs_notes
+    # §17.1523 — "inventory the Prowlarr indexers": read /api/v1/indexer + /indexerstatus in-guest
+    # (no service stop, no jq) and print the table, deterministically.
+    _pi_cmds, _pi_verify, _pi_notes = rewrite_inventory_prowlarr_indexers(node, cmds, verify, services, inventory)
+    if _pi_notes:
+        cmds, verify = _pi_cmds, _pi_verify
+        _comp_notes = list(_comp_notes) + _pi_notes
     # §17.1516 — "deploy FlareSolverr": create its own LXC (host) and run the official Docker
     # container inside it, deterministically (the plan had only the decision, not the deploy step).
     _fs_cmds, _fs_verify, _fs_notes = rewrite_deploy_flaresolverr(node, cmds, verify, services, inventory)
@@ -7519,6 +7525,80 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
         f"Sonarr queue, bulk-removes every stalled/errored item with blocklist=true (so the dead release is not "
         f"grabbed again) and removeFromClient=true (drops the partials from qBittorrent), then triggers "
         f"MissingEpisodeSearch to pull better-seeded releases — two API calls, no per-item loop.")}]
+    return [run], [check], note
+
+
+#: §17.1523 — "inventory the Prowlarr indexers" done deterministically.
+#:
+#: Live (job aefaef87 T2): the drafter wrapped the read in the §17.1317 detached template but the
+#: in-guest script (1) `systemctl stop prowlarr.service` before curling its own API — it copied the
+#: machine-truth note "the service rewrites config.xml, stop it before editing" onto a READ-only
+#: inventory, so the API it then curls is dead and the inventory comes back empty; (2) parsed with
+#: `jq`, a dependency the guest need not carry; (3) the verify ran on the HOST against loopback 9696
+#: (the host does not listen there — §17.1368 refused it). The engine does this exactly: INSIDE the
+#: Prowlarr guest, without touching the service, GET `/api/v1/indexer` and `/api/v1/indexerstatus`
+#: and print a table (id, name, enabled, protocol, privacy, and FAILING from the status list) plus a
+#: one-line summary. python3 parses in the write channel (no jq); the key is read on the machine
+#: (§17.1503) by `<PROWLARR_API_KEY>`. The same read answers T3 "identify failing" — the FAILING
+#: column and the summary name them — so that step reuses this capability.
+_PROWLARR_PORT = "9696"
+_PROWLARR_INVENTORY_PY = (
+    "import sys,json,urllib.request\n"
+    "BASE='http://127.0.0.1:" + _PROWLARR_PORT + "'; KEY=sys.argv[1]\n"
+    "def api(p):\n"
+    "    r=urllib.request.Request(BASE+p,headers={'X-Api-Key':KEY})\n"
+    "    d=urllib.request.urlopen(r,timeout=30).read()\n"
+    "    return json.loads(d) if d else []\n"
+    "idx=api('/api/v1/indexer') or []\n"
+    # §17.1523 — indexerstatus lists only the indexers Prowlarr has auto-disabled after repeated
+    # failures (a disabledTill in the future). Its presence is the "failing" signal; the static
+    # indexer object has no such flag.
+    "try: st=api('/api/v1/indexerstatus') or []\n"
+    "except Exception: st=[]\n"
+    "failing={s.get('indexerId') for s in st}\n"
+    "print('INDEXERS: %d configured' % len(idx))\n"
+    "print('id\\tname\\tenabled\\tprotocol\\tprivacy\\tstate')\n"
+    "for x in sorted(idx,key=lambda a: a.get('id') or 0):\n"
+    "    state='FAILING' if x.get('id') in failing else 'ok'\n"
+    "    print('%s\\t%s\\t%s\\t%s\\t%s\\t%s' % (x.get('id'),x.get('name'),x.get('enable'),x.get('protocol'),x.get('privacy'),state))\n"
+    "nen=sum(1 for x in idx if x.get('enable'))\n"
+    "nfail=sum(1 for x in idx if x.get('id') in failing)\n"
+    "fn=[x.get('name') for x in idx if x.get('id') in failing]\n"
+    "print('SUMMARY: %d indexers, %d enabled, %d failing%s' % (len(idx),nen,nfail,(': '+', '.join(fn)) if fn else ''))\n"
+)
+#: inventory/enumerate verbs on indexers — a READ. "identify failing" is a read too (the FAILING
+#: column answers it). Guarded off the write verbs (disable/remove/add/sync/test) so T5/T6/T7/T9
+#: keep their own capabilities or the model draft.
+_PROWLARR_INVENTORY_RE = re.compile(r"\b(?:inventor|enumerat|list|catalog|audit|identif)\w*\b.{0,40}\b(?:failing\s+)?indexers?\b", re.I)
+_PROWLARR_INVENTORY_NOT_RE = re.compile(r"\b(?:disable|remove|delete|\badd\b|sync|test|cloudflare|protected)\b", re.I)
+
+
+def rewrite_inventory_prowlarr_indexers(node: Optional[dict], commands: list[str], verify: list[str],
+                                        services: Optional[list] = None,
+                                        inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1523 — inventory (and identify-failing) of the Prowlarr indexers, deterministically.
+
+    Replaces the step's commands AND verify when the step is a Prowlarr indexer inventory/identify
+    read and the Prowlarr guest is known; otherwise leaves the draft untouched."""
+    title = str((node or {}).get("title") or "")
+    if not _PROWLARR_INVENTORY_RE.search(title) or _PROWLARR_INVENTORY_NOT_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("prowlarr", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_PROWLARR_INVENTORY_PY}" "<PROWLARR_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # §17.1505 — the verify rides the READ-ONLY channel (no python3, no `$(`): a plain
+    # authenticated read of the same endpoint, witnessing that Prowlarr is up and the key
+    # is valid. The RUN's own output carries the table; this only proves the read answers.
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
+             f'-w "prowlarr indexer API HTTP %{{http_code}}" -H "X-Api-Key: $PROWLARR_API_KEY" '
+             f'"http://127.0.0.1:{_PROWLARR_PORT}/api/v1/indexer"')
+    note = [{"why": (
+        f"drafted the Prowlarr indexer inventory from the engine's own shape (§17.1523): inside guest {gid}, "
+        f"WITHOUT stopping prowlarr.service (it is a read), it GETs /api/v1/indexer and /api/v1/indexerstatus and "
+        f"prints a table — id, name, enabled, protocol, privacy, and FAILING for any Prowlarr auto-disabled after "
+        f"repeated failures — plus a summary; python3 parses in-guest (no jq), the key read on the machine.")}]
     return [run], [check], note
 
 
