@@ -59,6 +59,39 @@ def test_the_loop_is_bounded_so_the_budget_gate_is_clean():
     assert loops_the_network_without_a_budget(cmds) == []
 
 
+def test_a_hang_is_handled_inside_the_loop():
+    # §17.1527 — a tracker that does not answer raises URLError/TimeoutError/OSError (not
+    # HTTPError); api() must catch those so the batch is not killed mid-loop with no record.
+    cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
+    assert "urllib.error.URLError, TimeoutError, OSError" in cmds[0]
+
+    # exercise it: a POST that raises TimeoutError is recorded, not fatal
+    schema = [{"name": "1337x", "fields": [], "implementation": "Cardigann"},
+              {"name": "EZTV", "fields": [], "implementation": "Cardigann"}]
+    calls = {"n": 0}
+
+    def fake(req, timeout=None):
+        if req.full_url.endswith("/api/v1/indexer/schema"):
+            return io.BytesIO(json.dumps(schema).encode())
+        if req.full_url.endswith("/api/v1/indexer") and req.get_method() == "GET":
+            return io.BytesIO(json.dumps([]).encode())
+        if req.get_method() == "POST":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("timed out")
+            return io.BytesIO(json.dumps({"id": 5}).encode())
+        return io.BytesIO(b"")
+
+    with mock.patch.object(ur, "urlopen", fake):
+        import sys
+        sys.argv = ["-c", "k"]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+    out = buf.getvalue()
+    assert "FAILED: 1337x: unreachable" in out and "ADDED: 1 - EZTV" in out
+
+
 def test_the_curated_set_is_public_tv_general_and_excludes_whats_already_there():
     # ASK7 is public/no-login; the inventory already had Nyaa/TPB/YTS etc. The set targets the
     # general/TV gap and must not re-list ones the measured inventory already carried.

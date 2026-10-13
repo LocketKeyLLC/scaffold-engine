@@ -7723,6 +7723,11 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "        return (json.loads(d) if d else None, None)\n"
     "    except urllib.error.HTTPError as e:\n"
     "        return (None, e.read().decode('utf-8','replace'))\n"
+    # §17.1527 — a tracker that does not answer raises URLError/TimeoutError/OSError, NOT an
+    # HTTPError; catch those too so a hang on one POST is recorded as unreachable and the batch
+    # keeps going, instead of dying mid-loop with no record of the rest.
+    "    except (urllib.error.URLError, TimeoutError, OSError) as e:\n"
+    "        return (None, 'unreachable: %r' % e)\n"
     "schema=(api('/api/v1/indexer/schema')[0]) or []\n"
     "existing=(api('/api/v1/indexer')[0]) or []\n"
     "have={(x.get('name') or '').lower() for x in existing}\n"
