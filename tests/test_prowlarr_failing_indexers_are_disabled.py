@@ -108,6 +108,16 @@ def test_the_deploy_does_not_trip_the_host_tool_gate():
     assert not host_only_inside_a_guest(cmds + verify)
 
 
+def test_the_loop_is_bounded_so_the_budget_gate_is_clean():
+    # §17.1525 — the live frame was refused: the loop PUT once per item, which the
+    # network-loop gate treats as open-ended (one command = 180 s). The loop is bound to a
+    # slice with a short per-request timeout so a batch finishes well inside the budget.
+    from app.modules.supervised_runs import loops_the_network_without_a_budget
+    cmds, _, _ = rewrite_disable_failing_indexers(NODE, ["x"], ["y"], SERVICES, INV)
+    assert "targets[:15]" in cmds[0] and "timeout=10" in cmds[0]
+    assert loops_the_network_without_a_budget(cmds) == [], "the bounded batch must clear the gate"
+
+
 def test_non_disable_and_add_remove_steps_are_left_alone():
     for t in ("Inventory Prowlarr indexers", "Add general TV indexers", "Remove Cloudflare indexers",
               "Sync indexers to Sonarr", "Identify failing indexers"):

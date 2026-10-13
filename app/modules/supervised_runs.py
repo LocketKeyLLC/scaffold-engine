@@ -7626,7 +7626,9 @@ _PROWLARR_DISABLE_FAILING_PY = (
     "    r=urllib.request.Request(BASE+p,method=method,"
     "headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
     "data=json.dumps(body).encode() if body is not None else None)\n"
-    "    d=urllib.request.urlopen(r,timeout=30).read()\n"
+    # §17.1525 — a short per-request timeout so the bounded batch below cannot outlive the 180 s
+    # command budget even if every save hangs (15 saves x 10 s = 150 s < 180 s).
+    "    d=urllib.request.urlopen(r,timeout=10).read()\n"
     "    return json.loads(d) if d else None\n"
     "idx=api('/api/v1/indexer') or []\n"
     "try: st=api('/api/v1/indexerstatus') or []\n"
@@ -7636,7 +7638,10 @@ _PROWLARR_DISABLE_FAILING_PY = (
     "targets=[x for x in idx if x.get('id') in failing and x.get('enable')]\n"
     "print('FAILING+ENABLED: %d of %d indexers' % (len(targets),len(idx)))\n"
     "done=[]\n"
-    "for x in targets:\n"
+    # §17.1525 — the loop reaches the service once per item, so it is BOUND to a slice that fits the
+    # budget (the network-loop gate refuses an open-ended loop over whatever the API returns). The
+    # batch is resumable: a disabled indexer drops out of `targets`, so a re-run handles any overflow.
+    "for x in targets[:15]:\n"
     # PUT the indexer's OWN full object (every required field already present), only flip enable.
     "    x['enable']=False\n"
     "    try:\n"
