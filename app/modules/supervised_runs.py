@@ -673,13 +673,13 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""
     from app.modules.step_classify import step_is_hands_on, deploy_target_guest
-    decided = _as_dict((await db.execute(
-        text("SELECT metadata->'decisions' FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar())
-    # §17.1539 — the job's deploy target, so a CodeGen build node routes to DEVELOP (deploy) not
-    # the sandbox. Read the refined brief once; empty for a job that names no deploy target.
-    _brief_row = (await db.execute(
-        text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
-    _deploy_target = deploy_target_guest(str(_brief_row or ""))
+    # §17.1539 — read the decisions AND the refined brief in one query: the brief's deploy target is
+    # what makes a CodeGen build node route to DEVELOP (deploy) rather than the sandbox executor.
+    _jrow = (await db.execute(
+        text("SELECT metadata->'decisions', refined_brief FROM jobs WHERE id = :jid"),
+        {"jid": job_id})).first()
+    decided = _as_dict(_jrow[0] if _jrow else None)
+    _deploy_target = deploy_target_guest(str((_jrow[1] if _jrow else "") or ""))
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,

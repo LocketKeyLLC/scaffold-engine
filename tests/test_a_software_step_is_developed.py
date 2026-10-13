@@ -72,7 +72,12 @@ def test_deploy_target_guest_from_the_brief():
              "control-panel.service. Surface FlareSolverr (container 107) and Byparr (container 108).")
     assert deploy_target_guest(brief) == "111", "the deploy verb points at 111, not the surfaced 107/108"
     assert deploy_target_guest("just restyle it, no container named") == ""
-    # ambiguous (two distinct deploy targets) → refuse to guess
+    # §17.1540 — a surfaced container mentioned once inside a deploy-verb window must NOT make the
+    # real (repeated) target look ambiguous: 111 appears 3×, 107 once → 111 wins.
+    assert deploy_target_guest(
+        "Deploy changes to container 111. Deploy via the runner to container 111. "
+        "Newly deployed containers: FlareSolverr (container 107). Code deployed to container 111.") == "111"
+    # genuine tie (two targets at the same top count) → refuse to guess
     assert deploy_target_guest("deploy to container 111 and redeploy container 120") == ""
 
 
