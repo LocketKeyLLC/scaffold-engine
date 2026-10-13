@@ -11,7 +11,7 @@
 # read_only rootfs, exec tmpfs, mem/pids limits, no egress) is in
 # docker-compose.yml; the strong isolation upgrade is the gVisor `runsc`
 # runtime (operator step — see the §17.433 OVERVIEW entry).
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
+FROM python:3.15.0rc3-slim@sha256:a3af3d230522dd52f7f2191b39e1892912dbcb0c8dee22afdec3dc83baf0f549 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
