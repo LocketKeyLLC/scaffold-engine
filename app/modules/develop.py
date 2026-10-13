@@ -75,13 +75,20 @@ _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|
 _CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:validate|verify|check|test|audit|review|document)\b", re.I)
 
 
-def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
+def host_for(node: Optional[dict], services: Optional[list], brief: str = "") -> Optional[Host]:
     """The step builds software, and a measured service with a directory hosts it -- or None.
 
-    The service is the one on the step's own guest (`LXC 111: …`), else one the step names."""
+    The service is the one on the step's own guest (`LXC 111: …`), else one the step names,
+    else -- §17.1537 -- the single developable service the JOB BRIEF names as its build target."""
     from app.modules.step_decomposition import builds_a_capability
     text = _text(node)
-    if not builds_a_capability(text):
+    # §17.1537 — a node whose TOOL is CodeGen explicitly builds code; the text heuristic
+    # `builds_a_capability` misses generic titles ("Create CSS variables", "Restyle UI
+    # components"), so such a node was never developed and its generated files never deployed.
+    # The tool is ground truth; the later guards (checks/writes-up, host-level change, named-files)
+    # still keep a CodeGen node that is really a check or a host change out of the develop flow.
+    _is_codegen = str((node or {}).get("tool") or "").strip().lower() in ("codegen", "code")
+    if not builds_a_capability(text) and not _is_codegen:
         return None
     # §17.1454 — a step that checks or writes up the build does not build software. Live (T37 "Validate
     # entire build", 2026-10-10): its text names the control-panel backend it checks, so it was developed,
@@ -112,6 +119,22 @@ def host_for(node: Optional[dict], services: Optional[list]) -> Optional[Host]:
         low = title.lower()
         pick = next((s for s in cands if str(getattr(s, "name", "")).lower() in low
                      or str(s.workdir) in title), None)
+    if pick is None and str(brief or ""):
+        # §17.1537 — a build node that names no host of its OWN (a CodeGen title like "Create CSS
+        # variables" names neither the guest nor the service) still deploys to the JOB's build
+        # target: the single developable service the brief names, by its unit, its container id, or
+        # its workdir. Without this the files are generated and verified but never written to the
+        # machine. Live (control-panel job ae721781, 2026-10-13): every CodeGen node's host_for
+        # returned None, so the dark-theme/health-dashboard code was produced and passed
+        # verification while CT 111 was never touched. UNAMBIGUOUS only — exactly one candidate the
+        # brief names — so a job that touches two services never deploys one step to the wrong one.
+        b = str(brief)
+        named = [s for s in cands
+                 if (getattr(s, "unit", "") and str(s.unit) in b)
+                 or re.search(rf"\b(?:LXC|CT|VM|container|guest)\s*{re.escape(str(s.guest))}\b", b, re.I)
+                 or (getattr(s, "workdir", "") and str(s.workdir) in b)]
+        if len(named) == 1:
+            pick = named[0]
     if pick is None:
         return None
     # §17.1465 — a step whose named files all lie outside the service's directory is configuring the

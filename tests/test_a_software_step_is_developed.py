@@ -50,6 +50,29 @@ def test_a_step_that_is_not_software_in_a_service_directory_is_not(node, service
     assert dv.host_for(node, services) is None
 
 
+def test_a_build_node_without_a_named_host_falls_back_to_the_brief_target():
+    # §17.1537 — a CodeGen node titled generically ("Create CSS variables") names no host of its
+    # own; it must still deploy to the single developable service the JOB BRIEF names. Without this
+    # the files are developed + verified but never written to the machine (live: control-panel job).
+    node = {"title": "Create CSS variables", "tool": "CodeGen",
+            "description": "Modify the existing stylesheet to add CSS variables for the dark theme."}
+    # no brief → unchanged prior behavior: cannot resolve a host, so it is not developed.
+    assert dv.host_for(node, [PANEL, PAL]) is None
+    brief = ("Restyle the control panel. Deploy changes to container 111, rebuild the Vite UI and "
+             "restart control-panel.service in /opt/control-panel-backend.")
+    host = dv.host_for(node, [PANEL, PAL], brief=brief)
+    assert host is not None and (host.guest, host.unit) == ("111", "control-panel.service")
+
+
+def test_the_brief_fallback_refuses_to_guess_when_two_services_are_named():
+    # §17.1537 — UNAMBIGUOUS only: a brief that names two developable services does not resolve a
+    # host (never deploy a step to the wrong one).
+    node = {"title": "Create CSS variables", "tool": "CodeGen",
+            "description": "Modify the existing stylesheet to add CSS variables for the dark theme."}
+    brief = "work on container 111 (control-panel.service) and container 106 (palworld.service)"
+    assert dv.host_for(node, [PANEL, PAL], brief=brief) is None
+
+
 # ── what the model may write ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("path,ok", [

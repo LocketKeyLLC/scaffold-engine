@@ -2801,7 +2801,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # DEVELOPED against the real files, not drafted as one blind shell block.
         from app.modules import develop
         try:
-            _dev_host = develop.host_for(run_node, _services)
+            # §17.1537 — pass the brief so a build node that names no host of its own deploys to the
+            # job's single named build target (else its files are developed but never written out).
+            _dev_host = develop.host_for(run_node, _services, brief=str(_brief or ""))
         except Exception as exc:
             logger.warning("develop_host_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
             _dev_host = None
