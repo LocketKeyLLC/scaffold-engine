@@ -78,21 +78,10 @@ from app.utils.llm_retry import chat_until_nonempty  # §17.465
 logger = logging.getLogger(__name__)
 
 
-#: §17.1538 — the guest a develop job deploys to: the one its brief names with a deploy/restart/
-#: rebuild/install verb (e.g. "Deploy changes to container 111"). A CodeGen node names no guest of
-#: its own, so this is how its build-target service gets measured (and then hosted by §17.1537).
-_DEPLOY_TARGET_RE = re.compile(
-    r"\b(?:deploy|redeploy|restart|rebuild|install)\w*\b[^.]{0,80}?"
-    r"\b(?:container|CT|LXC|VM|guest)\s*(\d{3,5})", re.I)
-
-
-def deploy_target_guest(brief: str) -> str:
-    """The guest id a develop brief names as its deploy target, or '' if none/ambiguous.
-
-    Unambiguous only: if the brief names more than one distinct deploy-target guest, return '' —
-    the per-step measurement should not guess which one a build node belongs to."""
-    hits = {m.group(1) for m in _DEPLOY_TARGET_RE.finditer(str(brief or ""))}
-    return next(iter(hits)) if len(hits) == 1 else ""
+#: §17.1538/1539 — single source in step_classify (so supervised_runs' hands-on routing and the
+#: executor's service measurement agree on the job's deploy target). Re-exported here for callers
+#: and tests that import it from execution_agent.
+from app.modules.step_classify import deploy_target_guest  # noqa: E402
 
 
 def _sse_event(event: str, data: dict) -> str:
@@ -1276,7 +1265,7 @@ async def execute_next_node(
                 _peek = await _peek_next_node(job_id)
                 _ask_first = _peek is not None and (
                     str(_peek.get("node_type") or "") == "decision"
-                    or (settings.execution_supervised_runs_enabled and _hands_on_peek(_peek))
+                    or (settings.execution_supervised_runs_enabled and await _hands_on_peek(_peek, job_id))
                 )
             except Exception as exc:
                 # Logged as an error, not a debug line: a silent miss here is
@@ -3526,11 +3515,23 @@ async def _hand_back_for_operator(db: AsyncSession, job_id: str, node: dict, too
     return {"status": "needs_approval", "node_key": node_key, "title": node.get("title"), "tool": tool}
 
 
-def _hands_on_peek(node: dict) -> bool:
+async def _hands_on_peek(node: dict, job_id: str = "") -> bool:
     """§17.1186 — the peeked node does host work (never a `human` node, which
-    the executor skips on its own)."""
+    the executor skips on its own).
+
+    §17.1539 — reads the job's refined brief so a CodeGen build node in a deploy job is recognised
+    as hands-on (it must be routed to the develop path, not the sandbox). Cheap: one read, only when
+    a job_id is given and the node is CodeGen."""
     from app.modules import supervised_runs
-    return supervised_runs.is_hands_on_node(node)
+    brief = ""
+    if job_id and str((node or {}).get("tool") or "").strip().lower() == "codegen":
+        try:
+            async with async_session() as _db:
+                brief = str((await _db.execute(
+                    text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar() or "")
+        except Exception:
+            brief = ""
+    return supervised_runs.is_hands_on_node(node, brief=brief)
 
 
 def _brief_text(job: dict | None) -> str:
@@ -4035,7 +4036,7 @@ async def execute_all_nodes(
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
             if node is not None and (str(node.get("node_type") or "") == "decision"
-                                     or (settings.execution_supervised_runs_enabled and _hands_on_peek(node))):
+                                     or (settings.execution_supervised_runs_enabled and await _hands_on_peek(node, job_id))):
                 # §17.1184 — the operator's call, not the model's: ask and stop.
                 # §17.1186 — or a step that changes a machine: ask for approval.
                 _asked = await _pause_for_decision(job_id)

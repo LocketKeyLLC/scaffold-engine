@@ -239,9 +239,34 @@ def _parses(cmd: str) -> bool:
     return not f.parse_error and bool(f.commands)
 
 
-def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabled: bool | None = None) -> tuple[bool, str]:
+#: §17.1538/1539 — the guest a develop job deploys to: the one its brief names with a deploy/
+#: restart/rebuild/install verb (e.g. "Deploy changes to container 111"). A CodeGen build step
+#: names no guest of its own, so this (a) decides it is a develop/deploy step [§17.1539] and (b)
+#: gets its target service measured [§17.1538]. Unambiguous only.
+_DEPLOY_TARGET_RE = re.compile(
+    r"\b(?:deploy|redeploy|restart|rebuild|install)\w*\b[^.]{0,80}?"
+    r"\b(?:container|CT|LXC|VM|guest)\s*(\d{3,5})", re.I)
+
+
+def deploy_target_guest(brief: str) -> str:
+    """The guest id a develop brief names as its deploy target, or '' if none/ambiguous."""
+    hits = {m.group(1) for m in _DEPLOY_TARGET_RE.finditer(str(brief or ""))}
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabled: bool | None = None,
+                     develops_codegen: bool = False) -> tuple[bool, str]:
     """``(hands_on, reason)`` for one DAG node row (``tool``, ``node_type``,
-    ``title``, ``description``, ``prompt_template`` — any may be missing)."""
+    ``title``, ``description``, ``prompt_template`` — any may be missing).
+
+    §17.1539 — ``develops_codegen``: the job this node belongs to deploys to a measured service on
+    a machine (its brief names a deploy target). A ``CodeGen`` node is normally run by the sandbox
+    code executor, which verifies code but never writes it to that machine; for a deploy job the
+    build steps must go through the DEVELOP flow instead (read the live files, propose whole files,
+    DELIVER them to the host). So a CodeGen node in a deploy job is hands-on — it is routed to the
+    develop path, where `develop.host_for` (§17.1537) resolves the target and the files are written
+    out. Off by default, so a self-contained CodeGen artifact (no deploy target) still runs in the
+    sandbox exactly as before."""
     from app.config import settings
     tool = str((node or {}).get("tool") or "LLM").strip().lower()
     if shell_backend is None:
@@ -255,6 +280,10 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
         return True, "tool:shell"
     if tool == "mcp" and not mcp_enabled:
         return True, "tool:mcp"
+    # §17.1539 — a CodeGen node in a deploy job develops (and deploys) rather than running in the
+    # sandbox; this is checked BEFORE the executable-tools short-circuit that otherwise returns it.
+    if tool == "codegen" and develops_codegen:
+        return True, "develop:codegen"
     if tool in _EXECUTABLE_TOOLS or (tool == "shell" and shell_backend) or tool == "mcp":
         return False, ""
     # what the step DOES
