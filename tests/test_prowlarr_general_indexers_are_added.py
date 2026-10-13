@@ -74,7 +74,7 @@ def test_the_verify_is_read_only_safe_and_in_the_guest():
 def test_the_loop_is_bounded_and_hang_safe_so_the_gates_are_clean():
     from app.modules.supervised_runs import loops_the_network_without_a_budget
     cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    assert "WANT[:10]" in cmds[-1] and "timeout=12" in cmds[-1]
+    assert "todo[:2]" in cmds[-1] and "timeout=12" in cmds[-1]
     assert "urllib.error.URLError, TimeoutError, OSError" in cmds[-1]
     assert loops_the_network_without_a_budget([cmds[-1]]) == []
 
@@ -173,8 +173,8 @@ def test_the_tag_and_proxy_are_created_then_indexers_added_cf_via_flaresolverr()
     assert "PROXY: added Byparr" in out
     # 1337x added only on the retry carrying the tag; TorrentProject2 added directly
     assert "ADDED (direct): 1 - TorrentProject2" in out
-    assert "ADDED (via FlareSolverr): 1 - 1337x" in out
-    assert "RESULT: added 2 public indexer(s) (1 direct, 1 via FlareSolverr)" in out
+    assert "ADDED (via Byparr): 1 - 1337x" in out
+    assert "RESULT: added 2 public indexer(s) (1 direct, 1 via Byparr)" in out
     tagged_1337x = [b for b in posted_indexers if b.get("name") == "1337x" and b.get("tags") == [3]]
     assert tagged_1337x and tagged_1337x[0]["enable"] is True
 
