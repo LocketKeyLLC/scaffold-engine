@@ -79,9 +79,10 @@ def test_the_loop_is_bounded_and_hang_safe_so_the_gates_are_clean():
     assert loops_the_network_without_a_budget([cmds[-1]]) == []
 
 
-def test_the_fs_proxy_host_points_at_the_deployed_flaresolverr():
+def test_the_proxy_host_points_at_the_deployed_byparr():
+    # §17.1535 — the indexer proxy points at Byparr (FlareSolverr's drop-in), not FlareSolverr.
     cmds, _, _ = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    assert ("http://" + _FS_IP + ":8191/") in cmds[-1]
+    assert "http://192.168.1.27:8191/" in cmds[-1] and ("http://" + _FS_IP + ":8191/") not in cmds[-1]
 
 
 def test_it_classifies_by_shape_not_by_a_phrase_list():
@@ -168,8 +169,8 @@ def test_the_tag_and_proxy_are_created_then_indexers_added_cf_via_flaresolverr()
     # proxy created with the deployed host and the flaresolverr tag
     proxy_post = next(b for (m, u, b) in seen if m == "POST" and u.split("?")[0].endswith("/api/v1/indexerproxy"))
     host_field = next(f for f in proxy_post["fields"] if f["name"] == "host")
-    assert host_field["value"] == "http://%s:8191/" % _FS_IP and proxy_post["tags"] == [3]
-    assert "PROXY: added FlareSolverr" in out
+    assert host_field["value"] == "http://192.168.1.27:8191/" and proxy_post["tags"] == [3]
+    assert "PROXY: added Byparr" in out
     # 1337x added only on the retry carrying the tag; TorrentProject2 added directly
     assert "ADDED (direct): 1 - TorrentProject2" in out
     assert "ADDED (via FlareSolverr): 1 - 1337x" in out
@@ -178,16 +179,21 @@ def test_the_tag_and_proxy_are_created_then_indexers_added_cf_via_flaresolverr()
     assert tagged_1337x and tagged_1337x[0]["enable"] is True
 
 
-def test_an_existing_proxy_is_not_recreated():
+def test_an_existing_flaresolverr_proxy_is_repointed_to_byparr():
+    # §17.1535 — a proxy pointing at FlareSolverr is REPOINTED (PUT) to Byparr, not left as-is.
     out, seen = _run({
         ("GET", "/api/v1/tag"): [{"id": 3, "label": "flaresolverr"}],
-        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr"}],
+        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr", "tags": [],
+                                            "fields": [{"name": "host", "value": "http://192.168.1.26:8191/"}]}],
+        ("PUT", "/api/v1/indexerproxy/1"): {"id": 1},
         ("GET", "/api/v1/indexer/schema"): [{"name": "EZTV", "fields": [], "implementation": "Cardigann"}],
         ("GET", "/api/v1/indexer"): [],
         ("POST", "/api/v1/indexer"): {"id": 5, "name": "EZTV"},
     })
-    assert "PROXY: FlareSolverr already configured" in out
-    assert not any(m == "POST" and u.split("?")[0].endswith("/api/v1/indexerproxy") for (m, u, b) in seen)
+    assert "PROXY: repointed to Byparr" in out
+    put = next(b for (m, u, b) in seen if m == "PUT" and "/indexerproxy/1" in u)
+    host = next(f["value"] for f in put["fields"] if f["name"] == "host")
+    assert host == "http://192.168.1.27:8191/" and 3 in put["tags"]
     assert "ADDED (direct): 1 - EZTV" in out
 
 

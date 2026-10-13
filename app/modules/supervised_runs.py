@@ -5336,6 +5336,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _fs_notes:
         cmds, verify = _fs_cmds, _fs_verify
         _comp_notes = list(_comp_notes) + _fs_notes
+    # §17.1535 — "deploy Byparr" (FlareSolverr's Camoufox drop-in): same deploy shape, its own LXC.
+    _bp_cmds, _bp_verify, _bp_notes = rewrite_deploy_byparr(node, cmds, verify, services, inventory)
+    if _bp_notes:
+        cmds, verify = _bp_cmds, _bp_verify
+        _comp_notes = list(_comp_notes) + _bp_notes
     # §17.1519 — "give container N a working nameserver": set the resolver host-side and reboot,
     # instead of the drafter's in-guest apt (which cannot resolve because DNS is what is broken).
     _ns_cmds, _ns_verify, _ns_notes = rewrite_set_container_nameserver(node, cmds, verify, services, inventory)
@@ -7716,7 +7721,9 @@ _PROWLARR_TV_INDEXERS = (
 _PROWLARR_ADD_INDEXERS_PY = (
     "import sys,json,urllib.request,urllib.error\n"
     "BASE='http://127.0.0.1:" + _PROWLARR_PORT + "'; KEY=sys.argv[1]\n"
-    "FS_URL='http://192.168.1.26:8191/'\n"
+    # §17.1535 — the indexer proxy points at BYPARR (FlareSolverr's Camoufox drop-in), not
+    # FlareSolverr, because FlareSolverr can no longer clear these trackers (cookie-replay detection).
+    "FS_URL='http://192.168.1.27:8191/'\n"
     "WANT=" + repr(list(_PROWLARR_TV_INDEXERS)) + "\n"
     "def api(p,method='GET',body=None):\n"
     "    r=urllib.request.Request(BASE+p,method=method,"
@@ -7768,17 +7775,29 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "if not tag: tag=api('/api/v1/tag','POST',{'label':'flaresolverr'})[0]\n"
     "tagid=(tag or {}).get('id')\n"
     "prox=(api('/api/v1/indexerproxy')[0]) or []\n"
-    "if not any(p.get('implementation')=='FlareSolverr' for p in prox):\n"
+    "fsp=next((p for p in prox if p.get('implementation')=='FlareSolverr'), None)\n"
+    "if fsp is None:\n"
     "    psch=(api('/api/v1/indexerproxy/schema')[0]) or []\n"
     "    fs=next((d for d in psch if d.get('implementation')=='FlareSolverr'), None)\n"
     "    if fs:\n"
-    "        pb=dict(fs); pb['name']='FlareSolverr'; pb['tags']=[tagid] if tagid else []\n"
+    "        pb=dict(fs); pb['name']='Byparr'; pb['tags']=[tagid] if tagid else []\n"
     "        for f in pb.get('fields',[]):\n"
     "            if f.get('name')=='host': f['value']=FS_URL\n"
     "        _,perr=api('/api/v1/indexerproxy?forceSave=true','POST',pb)\n"
-    "        print('PROXY: '+('added FlareSolverr -> '+FS_URL if perr is None else 'FAILED '+str(perr)[:120].replace(chr(10),' ')))\n"
-    "    else: print('PROXY: FlareSolverr not in proxy schema')\n"
-    "else: print('PROXY: FlareSolverr already configured')\n"
+    "        print('PROXY: '+('added Byparr -> '+FS_URL if perr is None else 'FAILED '+str(perr)[:120].replace(chr(10),' ')))\n"
+    "    else: print('PROXY: no FlareSolverr-compatible proxy schema')\n"
+    "else:\n"
+    # §17.1535 — a proxy already exists (it pointed at FlareSolverr); REPOINT its host at Byparr and
+    # make sure it carries the flaresolverr tag, so the Cloudflare indexers route through Byparr.
+    "    cur=next((f.get('value') for f in fsp.get('fields',[]) if f.get('name')=='host'),'')\n"
+    "    if cur!=FS_URL or (tagid and tagid not in (fsp.get('tags') or [])):\n"
+    "        for f in fsp.get('fields',[]):\n"
+    "            if f.get('name')=='host': f['value']=FS_URL\n"
+    "        if tagid and tagid not in (fsp.get('tags') or []): fsp['tags']=(fsp.get('tags') or [])+[tagid]\n"
+    "        fsp['name']='Byparr'\n"
+    "        _,uerr=api('/api/v1/indexerproxy/%s?forceSave=true' % fsp.get('id'),'PUT',fsp)\n"
+    "        print('PROXY: repointed to Byparr -> '+FS_URL+(' FAILED '+str(uerr)[:80] if uerr else ''))\n"
+    "    else: print('PROXY: Byparr already configured')\n"
     "schema=(api('/api/v1/indexer/schema')[0]) or []\n"
     "existing=(api('/api/v1/indexer')[0]) or []\n"
     "have={(x.get('name') or '').lower() for x in existing}\n"
@@ -7843,8 +7862,9 @@ def rewrite_add_general_tv_indexers(node: Optional[dict], commands: list[str], v
     note = [{"why": (
         f"drafted the add-indexers from the engine's own shape (§17.1526/1528/1534): inside guest {gid} it makes "
         f"Prowlarr prefer IPv4 and restarts it via its OWN API so FlareSolverr's IPv4 clearance applies (Prowlarr "
-        f"#2810), ensures a FlareSolverr tag + indexer-proxy (host {_FS_IP}:8191 — operator decision T1: keep "
-        f"Cloudflare indexers by routing them through FlareSolverr), then for each general/TV PUBLIC no-login tracker "
+        f"#2810), ensures a FlareSolverr-type indexer-proxy pointed at BYPARR (host {_BYPARR_IP}:8191 — "
+        f"FlareSolverr's Camoufox drop-in, since FlareSolverr can no longer clear these trackers; operator "
+        f"decision T1: keep the Cloudflare indexers working), then for each general/TV PUBLIC no-login tracker "
         f"this Prowlarr's catalog carries and not already present ({', '.join(_PROWLARR_TV_INDEXERS)}) POSTs the "
         f"catalog's own template; a Cloudflare refusal is retried WITH the flaresolverr tag so the test runs through "
         f"the proxy. Idempotent, bounded, hang-safe; exits non-zero if nothing lands (§17.1533) so the engine "
@@ -7948,6 +7968,102 @@ _FS_LAST = (
     "then echo FAILED-scaffold-fs-exit=$ec; exit 1; fi; echo scaffold-fs-finished-ok-exit=$ec'"
 )
 _FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc|service|deploy|install)\b", re.I)
+
+
+#: §17.1535 — deploy Byparr, the Camoufox-based FlareSolverr drop-in (ghcr.io/thephaseless/byparr),
+#: as its OWN new LXC. The engine's own failure-research (§17.1201) on the T7 add diagnosed that
+#: FlareSolverr can no longer clear 1337x/EZTV/… — Cloudflare detects the solved-cookie replay — and
+#: recommended byparr-proxy, which both the engine and a web search landed on as the current fix.
+#: Byparr is a true drop-in: same port 8191, same `/v1` API, so Prowlarr's FlareSolverr indexer-proxy
+#: just points at it. Measured slot: next-free id 108, next-free LAN .27. Same shape as the
+#: FlareSolverr deploy (§17.1516/1530): 2 GB (Camoufox is a full Firefox), Docker via get.docker.com,
+#: the official image, detached install across wait phases, idempotent create + recover.
+_BYPARR_VMID = "108"
+_BYPARR_IP = "192.168.1.27"
+_BYPARR_CREATE = (
+    "sh -c '"
+    f"if pct status {_BYPARR_VMID} >/dev/null 2>&1; then echo \"CT {_BYPARR_VMID} already exists: $(pct status {_BYPARR_VMID})\"; "
+    f"pct set {_BYPARR_VMID} --memory 2048 --swap 1024; "
+    f"pct stop {_BYPARR_VMID} >/dev/null 2>&1 || true; "
+    f"n=0; while [ $n -lt 12 ]; do pct status {_BYPARR_VMID} | grep -q stopped && break; n=$((n+1)); sleep 3; done; "
+    f"pct start {_BYPARR_VMID}; "
+    f"else pct create {_BYPARR_VMID} {_FS_TEMPLATE} "
+    "--hostname byparr --cores 2 --memory 2048 --swap 1024 "
+    "--rootfs local-lvm:8 "
+    f"--net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip={_BYPARR_IP}/24,type=veth "
+    "--nameserver \"192.168.1.1 1.1.1.1\" "
+    "--features nesting=1,keyctl=1 --unprivileged 1 --onboot 1 --start 1 && echo \"created CT " + _BYPARR_VMID + "\"; fi; "
+    f"pct status {_BYPARR_VMID} | grep -q running || pct start {_BYPARR_VMID}; "
+    f"n=0; while [ $n -lt 24 ]; do pct status {_BYPARR_VMID} | grep -q running && break; n=$((n+1)); sleep 5; done; "
+    "sleep 10; "
+    f"echo \"CT {_BYPARR_VMID} $(pct status {_BYPARR_VMID})\"'"
+)
+_BYPARR_INSTALL_BODY = (
+    "export DEBIAN_FRONTEND=noninteractive\n"
+    "apt-get update\n"
+    "apt-get install -y curl ca-certificates\n"
+    "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh\n"
+    "systemctl enable --now docker\n"
+    "docker rm -f byparr 2>/dev/null || true\n"
+    "docker run -d --name byparr --restart unless-stopped -p 8191:8191 "
+    "ghcr.io/thephaseless/byparr:latest\n"
+    # Byparr pulls a full Camoufox browser on first run, so allow a longer readiness wait.
+    "n=0; while [ $n -lt 60 ]; do curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1 && break; n=$((n+1)); sleep 5; done\n"
+    "if curl -sf http://127.0.0.1:8191/ >/dev/null 2>&1; then echo Byparr-ready-on-8191; "
+    "else echo FAILED-byparr-not-up; docker logs byparr 2>&1 | tail -30; exit 1; fi\n"
+)
+_BYPARR_START = (
+    "sh -c 'cat > /tmp/byparr_install.sh <<\"BPEOS\"\n"
+    + _BYPARR_INSTALL_BODY
+    + "BPEOS\n"
+    f"pct push {_BYPARR_VMID} /tmp/byparr_install.sh /root/.byparr_install.sh\n"
+    f"pct exec {_BYPARR_VMID} -- bash -c \"systemctl stop scaffold-byparr 2>/dev/null; "
+    "systemctl reset-failed scaffold-byparr 2>/dev/null; rm -f /root/.byparr.log; "
+    "systemd-run --unit scaffold-byparr -p StandardOutput=append:/root/.byparr.log "
+    "-p StandardError=append:/root/.byparr.log bash /root/.byparr_install.sh\"\n"
+    "echo started-scaffold-byparr'"
+)
+_BYPARR_WAIT = (
+    f"pct exec {_BYPARR_VMID} -- bash -c 'n=0; while [ $n -lt 30 ]; do "
+    "st=$(systemctl is-active scaffold-byparr 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) n=$((n+1)); sleep 5;; *) break;; esac; done; "
+    "echo wait-state:$(systemctl is-active scaffold-byparr 2>/dev/null)'"
+)
+_BYPARR_LAST = (
+    f"pct exec {_BYPARR_VMID} -- bash -c 'n=0; while [ $n -lt 30 ]; do "
+    "st=$(systemctl is-active scaffold-byparr 2>/dev/null); "
+    "case $st in active|activating|reloading|deactivating) n=$((n+1)); sleep 5;; *) break;; esac; done; "
+    "tail -n 30 /root/.byparr.log 2>/dev/null; "
+    "final=$(systemctl is-active scaffold-byparr 2>/dev/null); "
+    "ec=$(systemctl show scaffold-byparr -p ExecMainStatus --value 2>/dev/null); "
+    "if [ \"$final\" = failed ] || { [ -n \"$ec\" ] && [ \"$ec\" != 0 ]; }; "
+    "then echo FAILED-scaffold-byparr-exit=$ec; exit 1; fi; echo scaffold-byparr-finished-ok-exit=$ec'"
+)
+_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up|add|wire)\b.*\bbyparr\b|\bbyparr\b.*\b(?:container|lxc|service|deploy|install|proxy)\b", re.I)
+
+
+def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: list[str],
+                          services: Optional[list] = None,
+                          inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1535 — "deploy Byparr" (FlareSolverr's Camoufox-based drop-in) as its own new LXC,
+    deterministically, the same way the FlareSolverr deploy works. Replaces the draft when the step
+    is a Byparr deploy; otherwise untouched."""
+    title = str((node or {}).get("title") or "")
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_BYPARR_RE.search(title) or _BYPARR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    run = [_BYPARR_CREATE, _BYPARR_START, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT,
+           _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_LAST]
+    check = [(f'pct exec {_BYPARR_VMID} -- curl -s -o /dev/null -w "byparr HTTP %{{http_code}}" '
+              f"http://127.0.0.1:8191/")]
+    note = [{"why": (
+        f"drafted the Byparr deploy from the engine's own shape (§17.1535): the engine's failure-research on the "
+        f"indexer-add found FlareSolverr can no longer clear these trackers (Cloudflare cookie-replay detection) "
+        f"and recommended Byparr, its Camoufox-based drop-in. On the host it creates container {_BYPARR_VMID} "
+        f"({_BYPARR_IP} on vmbr0, 2 GB, nesting+keyctl for Docker) if absent, then runs "
+        f"ghcr.io/thephaseless/byparr on :8191 inside it (same port/API as FlareSolverr, so Prowlarr's proxy just "
+        f"points at it). The install runs DETACHED across the wait phases; idempotent create + recover.")}]
+    return run, check, note
 
 
 _NAMESERVER_RE = re.compile(r"\b(?:name\s*server|nameserver|resolver|resolv\.conf|\bdns\b)\b", re.I)
