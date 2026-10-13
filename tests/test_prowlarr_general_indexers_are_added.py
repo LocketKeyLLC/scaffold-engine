@@ -34,25 +34,24 @@ NODE = {"title": "Add general TV indexers",
 def test_the_step_is_rewritten_to_the_schema_and_indexer_api_in_the_guest():
     cmds, verify, notes = rewrite_add_general_tv_indexers(NODE, ["<model>"], ["chk"], SERVICES, INV)
     assert notes and ("§17.1526" in notes[0]["why"] or "§17.1528" in notes[0]["why"])
-    # cmd[0] prepares IPv4 preference; cmd[1] is the API add.
-    assert len(cmds) == 2
-    add = cmds[-1]
+    assert len(cmds) == 1
+    add = cmds[0]
     assert add.startswith("pct exec 102 -- sh -c '")
     assert "/api/v1/indexer/schema" in add and "<PROWLARR_API_KEY>" in add and "python3" in add
     assert "/api/v1/indexerproxy" in add and "/api/v1/tag" in add
 
 
-def test_the_first_command_makes_prowlarr_prefer_ipv4_then_restarts(monkeypatch):
-    # §17.1532 — FlareSolverr clears CF over IPv4; Prowlarr must stop preferring the tracker's IPv6
-    # (Prowlarr #2810). cmd[0] adds a gai.conf IPv4 precedence, best-effort disables IPv6, and
-    # restarts prowlarr so it re-resolves — before the add runs.
+def test_it_prefers_ipv4_and_restarts_prowlarr_via_its_own_api(monkeypatch):
+    # §17.1534 — FlareSolverr clears CF over IPv4; Prowlarr must stop preferring the tracker's IPv6
+    # (Prowlarr #2810). The script adds a gai.conf IPv4 precedence and restarts Prowlarr through its
+    # OWN API (not systemctl — that unit is not in this frame's measured-unit list) so it re-reads
+    # gai.conf, then adds.
     cmds, _, notes = rewrite_add_general_tv_indexers(NODE, ["x"], ["y"], SERVICES, INV)
-    ipv4 = cmds[0]
-    assert ipv4.startswith("pct exec 102 -- sh -c '")
-    assert "precedence ::ffff:0:0/96  100" in ipv4 and "/etc/gai.conf" in ipv4
-    assert "disable_ipv6=1" in ipv4 and "systemctl restart prowlarr" in ipv4
-    assert "n=0; while [ $n -lt 25 ]" in ipv4 and "$SECONDS" not in ipv4
-    assert "1532" in notes[0]["why"] and "IPv4" in notes[0]["why"]
+    add = cmds[0]
+    assert "precedence ::ffff:0:0/96  100" in add and "/etc/gai.conf" in add
+    assert "/api/v1/system/restart" in add and "/ping" in add
+    assert "systemctl" not in add, "must not use systemctl (unsourced-unit gate); restart via the API"
+    assert "1534" in notes[0]["why"] and "IPv4" in notes[0]["why"]
 
 
 def test_the_key_fills_and_both_commands_parse():
