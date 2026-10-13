@@ -34,7 +34,11 @@ logger = logging.getLogger("scaffold")
 NET0_MARKER = "is the only field this rewrite of net0 may change"
 FILE_MARKER = "lines it holds now would be lost"
 
-_NET0_SET_RE = re.compile(r"\b(pct|qm)\s+set\s+(\d{3,5})\b[^\n]*?\s-{1,2}net0[\s=]+('[^']*'|\"[^\"]*\"|\S+)")
+# §17.1531 — the gap between `set N` and `--net0` must stay WITHIN the one statement: `[^\n;]`,
+# not `[^\n]`. A single-line script like `pct set 107 --memory 2048; …; else pct create 107 …
+# --net0 …` otherwise lets a memory-only `pct set` reach across the `;` and claim the `--net0` of a
+# LATER, different command (here a `pct create`), and the guard refuses a rewrite that never was.
+_NET0_SET_RE = re.compile(r"\b(pct|qm)\s+set\s+(\d{3,5})\b[^\n;]*?\s-{1,2}net0[\s=]+('[^']*'|\"[^\"]*\"|\S+)")
 _TEE_RE = re.compile(r"\btee\s+(?!-a\b|--append\b)((?:-\S+\s+)*)(/[^\s'\"|;&)]+)")
 _REDIRECT_RE = re.compile(r"(?<![>0-9&])>\s*(/[^\s'\"|;&)]+)")
 _IN_GUEST_RE = re.compile(r"\b(?:pct\s+exec|qm\s+guest\s+exec)\s+\d+")

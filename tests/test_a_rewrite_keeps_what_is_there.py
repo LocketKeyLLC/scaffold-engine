@@ -86,6 +86,31 @@ def test_blindness_refuses_nothing(monkeypatch):
     assert _why(BLOCK) == []
 
 
+def test_a_memory_set_does_not_absorb_a_later_commands_net0(monkeypatch):
+    # §17.1531 — a one-line recovery script: `pct set 107 --memory 2048; …; else pct create 107
+    # … --net0 …`. The memory-only `pct set` must NOT reach across the `;` and claim the `--net0`
+    # of the later `pct create` (a different statement), or the guard refuses a rewrite that is not
+    # there. (The `pct create` branch only runs when 107 does NOT exist — it has no prior net0.)
+    conf107 = ("net0: name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,"
+               "hwaddr=BC:24:11:2B:19:74,ip=192.168.1.26/24,type=veth\n")
+
+    async def _probe(spec, command):
+        return (True, conf107) if command == "pct config 107" else (False, "")
+    import app.modules.service_truth as st
+    monkeypatch.setattr(st, "_probe", _probe)
+
+    recover = ("sh -c 'if pct status 107 >/dev/null 2>&1; then echo exists; "
+               "pct set 107 --memory 2048 --swap 1024; pct stop 107 || true; pct start 107; "
+               "else pct create 107 tmpl --net0 name=eth0,bridge=vmbr0,firewall=1,"
+               "gw=192.168.1.1,ip=192.168.1.26/24,type=veth --start 1; fi'")
+    assert _why([recover]) == [], "a memory-only pct set must not be read as a net0 rewrite of a later create"
+
+    # and a GENUINE net0 rewrite that drops the MAC is still refused
+    bad = ["pct set 107 --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp"]
+    out = _why(bad)
+    assert out and rg.NET0_MARKER in out[0]["why"]
+
+
 def test_it_is_wired_at_both_ends_and_registered():
     pre = pathlib.Path("app/modules/runbook_preconditions.py").read_text()
     run = pathlib.Path("app/modules/supervised_runs.py").read_text()
