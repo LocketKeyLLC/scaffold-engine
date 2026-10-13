@@ -128,7 +128,10 @@ def _run(responses):
         sys.argv = ["-c", "thekey"]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            try:
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            except SystemExit:
+                pass          # §17.1533 — the script exits non-zero when nothing landed
         return buf.getvalue(), seen
 
 
@@ -218,6 +221,80 @@ def test_a_non_cloudflare_failure_is_reported_not_retried():
     })
     assert "FAILED: EZTV: " in out and "must not be empty" in out
     assert len([b for b in posts if b.get("name") == "EZTV"]) == 1, "a field-validation error is not retried via FlareSolverr"
+
+
+def test_adding_nothing_with_real_failures_exits_nonzero_for_the_engines_research():
+    # §17.1533 — a step that catches its own errors and exits 0 is recorded `done`, so the engine's
+    # failure-research (diagnose_failure → generate_fix, which reads the machine AND researches the
+    # web) never fires. When NOTHING asked-for landed and there were real failures, the script must
+    # exit non-zero so an unknown failure routes back into the engine's own research loop.
+    schema = [{"name": "1337x", "fields": [], "implementation": "Cardigann"}]
+
+    def post_fail(body):
+        return uerr.HTTPError("u", 400, "Bad", {}, io.BytesIO(
+            json.dumps([{"propertyName": "", "errorMessage": "blocked by CloudFlare Protection"}]).encode()))
+
+    responses = {
+        ("GET", "/api/v1/tag"): [{"id": 1, "label": "flaresolverr"}],
+        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr"}],
+        ("GET", "/api/v1/indexer/schema"): schema,
+        ("GET", "/api/v1/indexer"): [],
+        ("POST", "/api/v1/indexer"): post_fail,
+    }
+    seen = []
+
+    def fake(req, timeout=None):
+        m, u = req.get_method(), req.full_url
+        body = json.loads(req.data) if req.data else None
+        for (mm, suf), val in responses.items():
+            if mm == m and u.split("?")[0].endswith(suf):
+                v = val(body) if callable(val) else val
+                if isinstance(v, Exception):
+                    raise v
+                return io.BytesIO(json.dumps(v).encode())
+        return io.BytesIO(b"")
+
+    import sys as _sys
+    with mock.patch.object(ur, "urlopen", fake):
+        _sys.argv = ["-c", "k"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+    assert code == 1, "nothing added + real failures must exit non-zero so the engine researches it"
+    assert "RESULT: added 0" in buf.getvalue()
+
+
+def test_all_already_present_exits_zero():
+    # §17.1533 — a re-run where everything is already configured added 0 but is SUCCESS (idempotent).
+    import sys as _sys
+    responses_present = {
+        ("GET", "/api/v1/tag"): [{"id": 1, "label": "flaresolverr"}],
+        ("GET", "/api/v1/indexerproxy"): [{"id": 1, "implementation": "FlareSolverr"}],
+        ("GET", "/api/v1/indexer/schema"): [{"name": "1337x", "fields": [], "implementation": "Cardigann"}],
+        ("GET", "/api/v1/indexer"): [{"name": "1337x"}],
+    }
+
+    def fake(req, timeout=None):
+        u = req.full_url
+        for (mm, suf), val in responses_present.items():
+            if mm == req.get_method() and u.split("?")[0].endswith(suf):
+                return io.BytesIO(json.dumps(val).encode())
+        return io.BytesIO(b"")
+
+    with mock.patch.object(ur, "urlopen", fake):
+        _sys.argv = ["-c", "k"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(_PROWLARR_ADD_INDEXERS_PY, {"__name__": "__main__"})
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+    assert code == 0 and "already present" in buf.getvalue()
 
 
 def test_a_hang_on_a_post_is_recorded_not_fatal():

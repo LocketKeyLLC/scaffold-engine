@@ -7791,6 +7791,13 @@ _PROWLARR_ADD_INDEXERS_PY = (
     "if skipped: print('SKIPPED: %s' % '; '.join(skipped))\n"
     "if failed: print('FAILED: %s' % '; '.join(failed))\n"
     "print('RESULT: added %d public indexer(s) (%d direct, %d via FlareSolverr)' % (len(added)+len(viafs),len(added),len(viafs)))\n"
+    # §17.1533 — if NOTHING the step was asked to add landed and there were real failures (not just
+    # ones already present), EXIT NON-ZERO. A capability that catches its own errors and exits 0 is
+    # recorded `done`, so the engine's failure-research (§17.1201 diagnose_failure → generate_fix,
+    # which reads the live machine AND researches the web) never engages — the operator finds the
+    # failure by hand instead of the engine finding the fix. An honest exit routes an unknown failure
+    # back into the engine's own research loop. (Partial success, or all-already-present, stays 0.)
+    "sys.exit(1 if (failed and not added and not viafs) else 0)\n"
 )
 #: §17.1532 — make Prowlarr resolve the trackers over IPv4 BEFORE adding Cloudflare-gated ones.
 #: Live + researched (Prowlarr issues #2810/#2572): FlareSolverr solves the challenge and grabs the
