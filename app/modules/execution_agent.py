@@ -2855,15 +2855,23 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1412 — a step that writes SOFTWARE in a measured service's directory is
         # DEVELOPED against the real files, not drafted as one blind shell block.
         from app.modules import develop
-        try:
-            # §17.1537 — pass the brief so a build node that names no host of its own deploys to the
-            # job's single named build target (else its files are developed but never written out).
-            _dev_host = develop.host_for(run_node, _services, brief=str(_brief or ""))
-        except Exception as exc:
-            logger.warning("develop_host_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
-            _dev_host = None
-        _developed = _dev_host is not None
-        runbook = "" if _developed else await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
+        # §17.1551 — a runner-write MCP node is not developed or drafted: its command IS the plan.
+        # Render it into a ``## Run this`` runbook so frame_run offers it and the approved supervised
+        # path mints the engine↔runner approval and runs it (it never ran deterministically — that
+        # carried no approval). brief_full is the refined brief for ${brief.*} placeholders.
+        _mcp_runbook = supervised_runs.mcp_write_runbook(run_node, upstream, brief_full)
+        if _mcp_runbook is not None:
+            _dev_host, _developed, runbook = None, False, _mcp_runbook
+        else:
+            try:
+                # §17.1537 — pass the brief so a build node that names no host of its own deploys to the
+                # job's single named build target (else its files are developed but never written out).
+                _dev_host = develop.host_for(run_node, _services, brief=str(_brief or ""))
+            except Exception as exc:
+                logger.warning("develop_host_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+                _dev_host = None
+            _developed = _dev_host is not None
+            runbook = "" if _developed else await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
         # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
         # runs against copies of the real files in the rehearsal sandbox before it is
