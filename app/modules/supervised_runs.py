@@ -5551,6 +5551,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _jb_notes:
         cmds, verify = _jb_cmds, _jb_verify
         _comp_notes = list(_comp_notes) + _jb_notes
+    # §17.1563 — "make <service> reach <public API> / it times out on IPv6": prefer IPv4 in its guest, restart the unit.
+    _p4_cmds, _p4_verify, _p4_notes = rewrite_prefer_ipv4_in_guest(node, cmds, verify, services, inventory)
+    if _p4_notes:
+        cmds, verify = _p4_cmds, _p4_verify
+        _comp_notes = list(_comp_notes) + _p4_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -8930,6 +8935,67 @@ def rewrite_rebuild_jellyfin_library(node: Optional[dict], commands: list[str], 
         f"is not Movies) is REMOVED (database rows only — media files are never touched), the scan that drops its "
         f"orphaned rows is waited for, and it is RE-ADDED with the same name, type and paths so the fresh scan resolves "
         f"the files with the right resolvers. A library that already resolves as its own kind is left alone.")}]
+    return [run], [check], note
+
+
+#: §17.1563 — a guest whose service cannot reach a public API because the guest HOLDS a global IPv6
+#: address that routes nowhere: glibc orders AAAA first, .NET follows it, and every call waits out the
+#: full timeout. Measured live (CT 101, 2026-10-14): `getent ahosts api.themoviedb.org` listed eight
+#: 2600:… addresses before 3.170.…; `curl -6` → no answer, `curl -4` → 401 (reachable); Jellyfin's log
+#: carried 67 `TmdbClientManager.EnsureClientConfigAsync … HttpClient.Timeout of 100 seconds` traces that
+#: day — so no overview or poster could ever land, whatever the library did. §17.1532/1534 fixed the same
+#: class for Prowlarr INLINE in the indexer template; this is the capability. The precedence line makes
+#: IPv4 win in getaddrinfo (RFC 6724 override), the unit is restarted because glibc reads gai.conf once
+#: per process. Reversible: one line in /etc/gai.conf.
+_GAI_PRECEDENCE = "precedence ::ffff:0:0/96  100"
+_PREFER_IPV4_RE = re.compile(
+    r"\bipv6\b|\bipv4\b|\bgai\.conf\b|\bprefer\s+ipv4\b|\btimes?\s*out\b|\btime-?outs?\b|\bcannot\s+reach\b|\bcan'?t\s+reach\b"
+    r"|\bunreachable\b|\bno\s+route\b|\bhttpclient\.timeout\b", re.I)
+_PUBLIC_API_RE = re.compile(r"\b(?:tmdb|themoviedb|tvdb|omdb|fanart|musicbrainz|github|public\s+api|external\s+api|metadata\s+provider)\b", re.I)
+_PREFER_IPV4_APPS = ("jellyfin", "prowlarr", "sonarr", "radarr", "lidarr", "readarr", "bazarr", "qbittorrent")
+_PROBE_HOSTS = {"jellyfin": "api.themoviedb.org", "sonarr": "skyhook.sonarr.tv", "radarr": "api.radarr.video",
+                "prowlarr": "prowlarr.servarr.com", "lidarr": "api.lidarr.audio", "readarr": "api.bookinfo.club"}
+
+
+def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], verify: list[str],
+                                 services: Optional[list] = None,
+                                 inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1563 — a "make <service> reach <public API> / it times out / prefers IPv6" step prefers IPv4
+    in that service's guest, deterministically: append the RFC 6724 precedence line to /etc/gai.conf
+    (once), restart the unit so glibc re-reads it, and show the unit active.
+
+    Live (job 263e920a): after the Sonarr rename (§17.1552) and the library rebuild (§17.1562) the TV
+    library finally resolved as 6 Series / 46 Seasons / 902 Episodes — with 0 overviews and 0 posters,
+    because Jellyfin's TMDb client had been timing out on IPv6 since midnight. The verify reads what
+    changed back off the machine: the precedence line, which family `getent` now orders first, and the
+    provider host answering over the default stack (read-only: grep, getent, curl GET to /dev/null)."""
+    text = _node_text(node)
+    if not (_PREFER_IPV4_RE.search(text) and (_PUBLIC_API_RE.search(text) or re.search(r"\bipv6\b|\bgai\.conf\b", text, re.I))):
+        return list(commands or []), list(verify or []), []
+    app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
+    if not app:
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest(app, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    unit = f"{app}.service"
+    m = re.search(r"\b((?:[a-z0-9-]+\.)+(?:org|com|net|io|tv|club|video|audio))\b", text, re.I)
+    host = m.group(1) if m and not m.group(1).startswith("127.") else _PROBE_HOSTS.get(app, "api.themoviedb.org")
+    run_payload = (f"grep -qxF '{_GAI_PRECEDENCE}' /etc/gai.conf 2>/dev/null || echo '{_GAI_PRECEDENCE}' >> /etc/gai.conf; "
+                   f"echo 'gai.conf:'; grep -n 'precedence ::ffff:0:0/96' /etc/gai.conf; "
+                   f"systemctl restart {unit} && sleep 5 && systemctl is-active {unit} && "
+                   f"echo 'RESULT: {unit} restarted with IPv4 preferred for getaddrinfo'")
+    run = f"pct exec {gid} -- sh -c {_sq_payload(run_payload)}"
+    check_payload = (f'grep -c "{_GAI_PRECEDENCE}" /etc/gai.conf; getent ahosts {host} | head -n 1; '
+                     f'curl -s -m 8 -o /dev/null -w "{host} HTTP %{{http_code}}" https://{host}/; systemctl is-active {unit}')
+    check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+    note = [{"why": (
+        f"drafted the fix from the engine's own shape (§17.1563): inside guest {gid} it makes IPv4 win in "
+        f"getaddrinfo (one `{_GAI_PRECEDENCE}` line in /etc/gai.conf, written once) and restarts {unit} so it "
+        f"re-reads the policy. Measured: the guest holds a global IPv6 address with no working route, glibc listed "
+        f"{host}'s AAAA records first, and {app}'s HTTP client waited out its timeout on every call — curl -6 got no "
+        f"answer while curl -4 did. The check reads the line back, shows which family `getent` orders first, and "
+        f"asks {host} over the default stack.")}]
     return [run], [check], note
 
 
