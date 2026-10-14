@@ -112,10 +112,17 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
             # into "the engine silently stopped being able to run anything".
             try:
                 from app.modules import runner_secrets as _rs
-                pol = {**pol, "held": await _rs.names(db)}
+                from app.modules.machine_values import logins_from_held as _mv_logins
+                # §17.1548 — the NAMES feed `apply_runner_secrets` (a set), unchanged.
+                # Alongside them, the login METADATA (hint + for_operator) a check needs
+                # to present HTTP Basic auth to a service the engine secured: a parallel
+                # key, so `held` keeps its name-set shape.
+                _meta = await _rs.list_secrets(db)
+                pol = {**pol, "held": [m["name"] for m in _meta],
+                       "held_logins": _mv_logins(_meta)}
             except Exception as exc:
                 logger.warning("runner_secret_names_unavailable err=%r", exc)
-                pol = {**pol, "held": []}
+                pol = {**pol, "held": [], "held_logins": []}
     except Exception as exc:
         logger.warning("supervised_runs_channel_failed err=%r", exc)
         return None
@@ -5401,6 +5408,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                            f"never uses that value, so nobody has it to type; the remaining checks stand"}
                    for h in _vhits]
         _vhits = []
+    # §17.1548 — a check that curls a service the engine holds a login for presents it
+    # as HTTP Basic auth, the password fed to the guest on stdin as the runner-resolved
+    # placeholder. BEFORE inputs_for, so the `<SECRET>` it inserts is picked up as a
+    # secret input and resolved by apply_runner_secrets below (never travelling here).
+    cmds, verify, _ba_notes = _mv.present_a_held_login(cmds, verify, services, (policy or {}).get("held_logins") or [])
+    _mv_notes = list(_mv_notes) + _ba_notes
     inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
