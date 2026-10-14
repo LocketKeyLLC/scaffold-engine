@@ -8904,22 +8904,101 @@ def checks_can_witness_the_change(commands: list[str], verify: list[str],
     is untouched -- that case is what §17.1302 is for.
     """
     keys = keys_the_block_writes(commands, files)
-    if not keys:
-        return ""                     # nothing named is written: §17.1302's own case
-    # §17.1365 — the same key is spelled three ways across the layers: the block
-    # writes `WebUI\\\\Username` through two quoting levels, the file holds
-    # `WebUI\\Username`, and a check greps `^WebUI.Username=` with a regex dot. The
-    # comparison is on the letters and digits alone.
-    def _alnum(x: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]", "", str(x or ""))
+    if keys:
+        # §17.1365 — the same key is spelled three ways across the layers: the block
+        # writes `WebUI\\\\Username` through two quoting levels, the file holds
+        # `WebUI\\Username`, and a check greps `^WebUI.Username=` with a regex dot. The
+        # comparison is on the letters and digits alone.
+        def _alnum(x: str) -> str:
+            return re.sub(r"[^A-Za-z0-9]", "", str(x or ""))
 
-    blob = _alnum("\n".join(str(c or "") for c in verify or []))
-    for key in keys:
-        if _alnum(key) and _alnum(key) in blob:
-            return ""
-    return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
-            + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
-            + ", and no check reads any of them back")
+        blob = _alnum("\n".join(str(c or "") for c in verify or []))
+        for key in keys:
+            if _alnum(key) and _alnum(key) in blob:
+                return ""
+        return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
+                + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
+                + ", and no check reads any of them back")
+    # §17.1559 — nothing NAMED is written, so §17.1365 did not engage; two more shapes a pre-read
+    # cannot settle. Live (job 263e920a, 2026-10-14): five steps in a row — "Trigger metadata
+    # refresh", "Trigger image refresh", "Wait for refresh completion", "Verify Name", "Verify
+    # Overview" — were recorded `already met` off `jellyfin HTTP 200` (+ a log grep count), and the
+    # model judge said "confirmed" to each. Nothing had run; Jellyfin had not been refreshed.
+    probes = [c for c in verify or [] if _status_only_probe(str(c or ""))]
+    if verify and len(probes) == len(verify):
+        return ("every check is a liveness probe (an HTTP status or exit code only), which says the "
+                "service is up, not that this step's goal holds")
+    sent = sends_a_change(commands, files)
+    if sent:
+        return (f"the block sends a change ({sent}) that no check reads back -- a trigger's goal is the "
+                f"work it queues, which no pre-read can show already done")
+    return ""                         # a state the checks read (ADD84's `df -h /`): §17.1302's own case
+
+
+#: §17.1559 — a mutating HTTP call: curl's method/body flags, a python `method='POST'`, a wrapper
+#: called with a method literal (`api('/Items/x/Refresh','POST')`), or `requests.post(…)`.
+_SENDS_A_CHANGE_RE = re.compile(
+    r"(?:-X|--request)\s*[\"']?(?P<m1>POST|PUT|PATCH|DELETE)\b"
+    r"|(?:^|\s)(?:-d|--data(?:-raw|-binary)?|--json)(?:\s|=)"
+    r"|\bmethod\s*=\s*[\"'](?P<m2>POST|PUT|PATCH|DELETE)[\"']"
+    r"|\b\w+\((?:[^()\n]|\([^()\n]*\))*?[\"'](?P<m3>POST|PUT|PATCH|DELETE)[\"']"
+    r"|\brequests\.(?P<m4>post|put|patch|delete)\(", re.I)
+
+
+def sends_a_change(commands: list[str], files: Optional[list[dict]] = None) -> str:
+    """§17.1559 — the first mutating request the block sends (``"POST"``), or ``""``.
+
+    Code only, never comments (§17.1040): a comment saying "do not POST" names no request."""
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for ln in t.splitlines():
+            line = _strip_comment_shell(ln)
+            m = _SENDS_A_CHANGE_RE.search(line)
+            if m:
+                verb = next((g for g in (m.group("m1"), m.group("m2"), m.group("m3"), m.group("m4")) if g), "a body")
+                return f"`{verb.upper()}`" if verb != "a body" else "`-d` a request body"
+    return ""
+
+
+def _strip_comment_shell(line: str) -> str:
+    """The code before an unquoted ``#``."""
+    q = ""
+    for i, ch in enumerate(line):
+        if q:
+            if ch == q:
+                q = ""
+            continue
+        if ch in "\"'":
+            q = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+#: §17.1559 — a check that reports a STATUS and nothing else: curl with its body thrown away
+#: (`-o /dev/null`) and `-w` / `--fail`, or a bare `echo`. `systemctl is-active`, `df -h /`,
+#: a `grep` over a file or an API body are READS and are not this.
+_PROBE_PIECE_RE = re.compile(r"^\s*(?:echo\b.*|(?:\S+\s+)*?curl\b(?=.*\s-o\s*/dev/null)(?=.*(?:-w\b|--write-out\b|--fail\b|\s-f\b|-sf\b|-fs\b)).*)$", re.S)
+
+
+def _status_only_probe(check: str) -> bool:
+    """§17.1559 — True when every command in the check only reports a status code."""
+    c = str(check or "").strip()
+    if not c:
+        return False
+    # unwrap `pct exec N -- sh -c '…'` / `bash -c "…"` to what runs inside
+    for _ in range(3):
+        m = re.match(r"^(?:pct\s+exec\s+\d+\s+--\s+|sudo\s+)?(?:ba)?sh\s+-c\s+(['\"])(.*)\1\s*$", c, re.S)
+        if not m:
+            m2 = re.match(r"^pct\s+exec\s+\d+\s+--\s+(.*)$", c, re.S)
+            if not m2:
+                break
+            c = m2.group(1).strip()
+            continue
+        c = m.group(2).replace("'\\''", "'").strip()
+    pieces = [p for p in re.split(r"\s*(?:;|&&|\|\||\|)\s*", c) if p.strip()]
+    return bool(pieces) and all(_PROBE_PIECE_RE.match(p) for p in pieces)
 
 
 def _reads_only(cmd: str) -> bool:

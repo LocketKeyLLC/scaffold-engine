@@ -251,6 +251,45 @@ def test_the_sonarr_completeness_check_and_a_non_jellyfin_step_are_not_the_censu
     assert not rewrite_jellyfin_metadata_report(T7, ["x"], ["y"], [], {"names": {}})[2]  # no guest → the model's
 
 
+# ── §17.1559 a trigger or a probe-only check is never "already met" ────────────────────────────────
+
+def test_the_pre_pass_cannot_declare_a_trigger_or_a_probe_only_step_already_met():
+    """Live: T4/T5 (refresh POSTs), T6 (wait) and T7/T7v2 (census) were all recorded `already met` off
+    `jellyfin HTTP 200` before anything ran. A trigger's goal is the work it queues; a liveness probe says
+    the service is up, not that the goal holds."""
+    from app.modules.supervised_runs import checks_can_witness_the_change, sends_a_change, _status_only_probe
+    r_cmds, r_verify, _ = rewrite_refresh_jellyfin_metadata(T4, ["x"], ["y"], SERVICES, INV)
+    why = checks_can_witness_the_change(r_cmds, r_verify)
+    assert why and "sends a change" in why and "POST" in why
+    c_cmds, c_verify, _ = rewrite_jellyfin_metadata_report(T7, ["x"], ["y"], SERVICES, INV)
+    why2 = checks_can_witness_the_change(c_cmds, c_verify)
+    assert why2 and "liveness probe" in why2
+    w_cmds, w_verify, _ = rewrite_jellyfin_metadata_report(T6, ["x"], ["y"], SERVICES, INV)
+    assert "liveness probe" in checks_can_witness_the_change(w_cmds, w_verify)
+    # the shapes the rules key on
+    assert sends_a_change(["curl -s -X POST http://x/Items/1/Refresh"]) == "`POST`"
+    assert sends_a_change(["curl -s -d '{}' http://x/api"]) == "`-d` a request body"
+    assert sends_a_change(["python3 -c \"api('/api/v3/command','POST',{'name':'RenameSeries'})\""]) == "`POST`"
+    assert sends_a_change(["# never POST here\ncurl -s http://x/Items"]) == ""
+    assert _status_only_probe('pct exec 101 -- curl -s -o /dev/null -w "jellyfin HTTP %{http_code}" http://127.0.0.1:8096/System/Info/Public')
+    assert _status_only_probe("pct exec 104 -- sh -c 'curl -s -o /dev/null -w \"%{http_code}\" http://x/; echo done'")
+    assert not _status_only_probe("pct exec 104 -- curl -s --fail-with-body -H \"X-Api-Key: $K\" http://x/api/v3/config/naming")
+    assert not _status_only_probe("pct exec 101 -- systemctl is-active jellyfin")
+    assert not _status_only_probe("df -h /")
+
+
+def test_a_state_step_whose_checks_read_the_state_is_still_a_pre_pass_candidate():
+    """§17.1302's own case (ADD84: growpart + resize2fs, confirmed by `df -h /`) and §17.1365's readback case
+    are untouched: no change is sent over HTTP, and a key written is read back."""
+    from app.modules.supervised_runs import checks_can_witness_the_change
+    assert checks_can_witness_the_change(["growpart /dev/sda 1", "resize2fs /dev/sda1"], ["df -h /"]) == ""
+    assert checks_can_witness_the_change(["echo 'WebUI\\Port=8080' >> /etc/q.conf"], ["grep '^WebUI.Port=' /etc/q.conf"]) == ""
+    # the organize step (§17.1510) POSTs VirtualFolders and reads the type markers back: a trigger, so it RUNS
+    # (its script is idempotent) rather than being pre-read done off `ls`
+    o_cmds, o_verify, _ = rewrite_organize_jellyfin(ORGANIZE, ["x"], ["y"], SERVICES, INV)
+    assert "sends a change" in checks_can_witness_the_change(o_cmds, o_verify)
+
+
 def test_frame_run_runs_the_jellyfin_rewrites_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr
