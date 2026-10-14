@@ -149,3 +149,17 @@ def test_the_llm_flip_site_passes_deploy_job():
     import pathlib
     ea = pathlib.Path("app/modules/execution_agent.py").read_text()
     assert "deploy_job=bool(deploy_target_guest(str(_rb_llm or" in ea, "LLM flip must pass deploy_job"
+
+
+def test_verify_addendum_is_wired_at_every_runbook_dispatch():
+    # §17.1547 — a verification Shell step gets the verify addendum at all three runbook dispatch sites
+    # (non-stream, stream, verifier regen), so it checks existing state instead of asking a design question.
+    import pathlib
+    ea = pathlib.Path("app/modules/execution_agent.py").read_text()
+    assert ea.count("_system_for_tool(tool) + _verify_add") == 3, "all three dispatch sites must append _verify_add"
+    assert 'if _LEADING_OBSERVE_RE.match(_vtitle) or _vtype in ("verify"' in ea
+    assert "EXECUTION_SYSTEM_VERIFY_ADDENDUM" in ea
+    from app.modules.prompt_assembly import EXECUTION_SYSTEM_VERIFY_ADDENDUM as A
+    low = A.lower()
+    assert "verification" in low and "read-only check" in low
+    assert "design" in low and "option" in low  # it forbids design/implementation options
