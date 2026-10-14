@@ -25,7 +25,28 @@ from app.modules import mcp_client, mcp_registry
 
 logger = logging.getLogger("scaffold.mcp")
 
-_PLACEHOLDER = re.compile(r"\$\{\s*(upstream|brief)\.([A-Za-z0-9_.\-]+)\s*\}")
+#: §17.1557 — the documented forms `${upstream.T2}` / `${brief.x.y}` AND the bare `${T2}` the planner
+#: actually writes (live, job 263e920a: every MCP node carried `${T1}`/`${T2}`/`${T3}`, which rendered
+#: as nothing and ran as empty shell variables). A bare `T<n>`/`T<n>v<m>` renders ONLY when that key
+#: is an upstream node; any other `${…}` stays verbatim (fail-visible, as before).
+_PLACEHOLDER = re.compile(r"\$\{\s*(?:(upstream|brief)\.([A-Za-z0-9_.\-]+)|(T\d+(?:v\d+)?))\s*\}")
+
+#: §17.1556 — an answer that is nothing but the shell complaining is not a result. The runner's
+#: read-only tool returns stdout+stderr as one string with no exit code, so a `grep` of a path that
+#: does not exist (`grep: …: No such file or directory`) or a loop the shell could not parse
+#: (`/bin/sh: 1: Syntax error: "do" unexpected`) came back as text and the node was marked done
+#: (live: T1/T2/T3 of job 263e920a, all "done", all errors). Judged only when EVERY non-empty line
+#: is such a complaint — a real result with one warning line is still a result.
+_SHELL_ERROR_LINE = re.compile(
+    r"^(?:(?:/usr)?/bin/)?(?:sh|bash|dash|zsh): (?:\d+: |line \d+: )?.*(?:not found|Syntax error|No such file or directory|Permission denied)"
+    r"|^[A-Za-z0-9_.+-]+: (?:.+: )?(?:No such file or directory|command not found|Permission denied|not found|Is a directory)\.?$"
+    r"|^curl: \(\d+\) .*$")
+
+
+def only_shell_errors(text_out: str) -> bool:
+    """§17.1556 — True when the output has lines and every one of them is a shell/tool error."""
+    lines = [ln.strip() for ln in (text_out or "").splitlines() if ln.strip()]
+    return bool(lines) and all(_SHELL_ERROR_LINE.search(ln) for ln in lines)
 
 
 def parse_tool_config(raw: Any) -> dict[str, Any]:
@@ -76,7 +97,10 @@ def render_args(raw_args: Any, upstream: dict, brief: dict) -> Any:
     empty). Non-string leaves pass through untouched."""
     if isinstance(raw_args, str):
         def _repl(m: re.Match) -> str:
-            val = _lookup(m.group(1), m.group(2), upstream, brief)
+            if m.group(3):                           # §17.1557 — bare `${T2}`: an upstream key, or verbatim
+                val = _lookup("upstream", m.group(3), upstream, brief)
+            else:
+                val = _lookup(m.group(1), m.group(2), upstream, brief)
             return val if val is not None else m.group(0)
         return _PLACEHOLDER.sub(_repl, raw_args)
     if isinstance(raw_args, dict):
@@ -174,7 +198,19 @@ async def execute_mcp_node(
     except mcp_client.McpError as exc:
         return await _fail(db, node_id, node_key, title, str(exc))
 
-    output = result.text or "(MCP tool returned no content)"
+    # §17.1556 — the runner's answer, unwrapped from its `{"result": "…"}` envelope, and judged: a tool
+    # error, a runner refusal/timeout/privilege note, or an output that is nothing but shell errors is a
+    # FAILED node, not a done one. Live, T1/T2/T3 of job 263e920a all marked done on
+    # `grep: …: No such file or directory` / `/bin/sh: 1: Syntax error: "do" unexpected`, and every
+    # step after them spliced those strings in as data.
+    from app.modules import assist_local_runner as _lr
+    output = _lr._plain_output(result) or "(MCP tool returned no content)"
+    why = _lr.not_evidence(output, getattr(result, "is_error", False) is True)
+    if not why and tool_name == "run_readonly" and only_shell_errors(output):
+        why = "the machine answered only with shell errors, not a result"
+    if why:
+        return await _fail(db, node_id, node_key, title,
+                           f"{why} (§17.1556): {output.strip()[:400]}")
     res = await db.execute(
         text(
             "UPDATE dag_nodes SET status = 'done', output_text = :o, "
