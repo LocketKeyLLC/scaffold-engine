@@ -61,8 +61,14 @@ def test_is_hands_on_node_true_for_runner_write_mcp():
     assert sr.is_hands_on_node(_mcp(WRITE_TOOL)) is True
 
 
-def test_is_hands_on_node_false_for_read_mcp():
-    assert sr.is_hands_on_node(_mcp("run_readonly")) is False
+def test_is_hands_on_node_delegates_for_a_read_mcp_node():
+    # §17.1551 only short-circuits a runner-WRITE node to hands-on; a read MCP node's verdict is
+    # whatever step_is_hands_on decides (unchanged). Compare to that, not a hardcoded value —
+    # step_is_hands_on classifies by command content and is not this fix's concern.
+    from app.modules.step_classify import step_is_hands_on
+    node = _mcp("run_readonly", command="curl -s http://127.0.0.1:8096/Items")
+    on, _ = step_is_hands_on(node)
+    assert sr.is_hands_on_node(node) == bool(on)
 
 
 @pytest.mark.asyncio
