@@ -3532,6 +3532,40 @@ def _subject_of(title: str) -> str:
     return " ".join(keep[:8])
 
 
+#: §17.1561 — a step that asks a HOW/WHY question about a symptom: "research how Jellyfin comes to
+#: resolve TV episodes as movies and how others fix it", "find out why …", "look up how people solve …".
+_TROUBLESHOOTS = re.compile(
+    r"(?i)\b(?:research|look\s+up|find\s+out|investigate|work\s+out)\s+(?:how|why|what)\b"
+    r"|\bhow\s+(?:do\s+|did\s+)?(?:others|people|users|admins)\s+(?:fix|solve|address|handle|resolve|deal\s+with)\b"
+    r"|\bwhy\s+(?:does|do|is|are|did|would|has|have)\b")
+
+
+def troubleshooting_question(node: dict) -> str:
+    """§17.1561 — the HOW/WHY question a step asks about a symptom, or "".
+
+    Live (job 263e920a, FIX1): the operator's direction was "have the engine research how this current
+    issue is addressed by others and apply it", and the step said so in words — "Research how Jellyfin
+    comes to resolve TV episodes as Movie items in a tvshows library and how others fix it" — yet the
+    drafter researched nothing: `research_for_step` fired only on a CURRENCY cue (latest / still works),
+    so the draft was written from the model's memory and repeated the refresh that had already failed.
+    A step that asks how or why is a step whose content depends on what others found; the question is
+    the sentence that asks it, with the step's own nouns kept, and the lookup is the same
+    `research_one` the diagnosis uses."""
+    # each field is its own sentence, so a title never leaks into the question drawn from the body
+    body = ". ".join(s.strip() for s in (str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")) if s.strip())
+    m = _TROUBLESHOOTS.search(body)
+    if not m:
+        return ""
+    # the sentence the cue sits in, up to the next sentence end or a "then …" tail (the DO half)
+    start = max(body.rfind(". ", 0, m.start()), body.rfind("; ", 0, m.start()), body.rfind(": ", 0, m.start()))
+    start = start + 2 if start >= 0 else 0
+    tail = re.search(r"(?:[.!?](?:\s|$)|,?\s+(?:then|and then|afterwards)\s+(?:make|run|do|fix|apply|remove|restart|re-?add|scan)\b)", body[m.start():])
+    end = m.start() + tail.start() if tail else len(body)
+    q = " ".join(body[start:end].split())
+    q = re.sub(r"(?i)^(?:research|look\s+up|find\s+out|investigate|work\s+out)\s+", "", q)
+    return q[:220]
+
+
 def currency_question(node: dict) -> str:
     """The question to research for this step, or "" when it needs no web lookup.
 
@@ -3592,6 +3626,12 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
     behaviour, which is survivable; a draft blocked on a failed search is not.
     """
     question = currency_question(node)
+    kind = "currency"
+    if not question:
+        # §17.1561 — a step that asks HOW others fix a symptom (or WHY it happens) is researched too:
+        # the draft must apply what others found, not repeat what already failed.
+        question = troubleshooting_question(node)
+        kind = "how"
     if not question:
         return ""
     key = str((node or {}).get("node_key") or "?")
@@ -3620,8 +3660,14 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
         return ""
     if not block:
         return ""
-    logger.warning("step_research_attached node=%s sources=%d q=%r",
-                   key, len(sources), query[:120])
+    logger.warning("step_research_attached node=%s kind=%s sources=%d q=%r",
+                   key, kind, len(sources), query[:120])
+    if kind == "how":
+        return ("\n\n" + block
+                + "\n\nUse these to decide HOW to do this step: the CAUSE others found for this symptom and the "
+                  "FIX they applied. Draft the commands that apply that fix on this machine (its own paths, "
+                  "guest ids and service names), and do not repeat an action the step says has already been "
+                  "tried and did not help.")
     return ("\n\n" + block
             + "\n\nUse these to decide WHICH of the things this machine offers are worth using right "
               "now. What the machine lists is what EXISTS; whether each one still works is what these "

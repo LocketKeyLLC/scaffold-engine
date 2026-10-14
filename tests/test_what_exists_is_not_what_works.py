@@ -111,6 +111,47 @@ async def test_the_step_lookup_grounds_in_the_operators_machine(monkeypatch):
     assert "Proxmox" in (seen["context_hint"] or "")
 
 
+# ───────────────────────────────── §17.1561 — a HOW/WHY question is researched too
+
+_FIX1 = {"node_key": "FIX1", "title": "Fix the Jellyfin TV library so its files resolve as Series, Seasons and Episodes",
+         "prompt_template": "Measured on container 101: the library Shows is typed tvshows, yet Jellyfin resolved its "
+                            "content as 6 Folder items and 902 Movie items. Research how Jellyfin comes to resolve TV "
+                            "episodes as Movie items in a tvshows library and how others fix it, then make the Shows "
+                            "library re-resolve its content as Series/Season/Episode. Do not touch media files."}
+
+
+def test_a_step_that_asks_how_others_fix_a_symptom_is_a_research_question():
+    q = sr.troubleshooting_question(_FIX1)
+    assert q.startswith("how Jellyfin comes to resolve TV episodes as Movie items")
+    assert "how others fix it" in q and "then make" not in q          # the DO half is the draft's, not the query's
+    assert sr.currency_question(_FIX1) == ""                           # not a currency cue: the old hook stayed silent
+    why = {"node_key": "X", "title": "Stop the stalls", "description": "Find out why qBittorrent stalls every torrent on this host."}
+    assert sr.troubleshooting_question(why).startswith("why qBittorrent stalls")
+
+
+def test_a_plain_step_asks_no_troubleshooting_question():
+    for node in ({"node_key": "ADD50", "title": "Start container 111", "description": "`pct start 111`."},
+                 {"node_key": "T4", "title": "Trigger metadata refresh", "prompt_template": "POST refresh for each library."},
+                 _ADD115):
+        assert sr.troubleshooting_question(node) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_how_question_reaches_the_lookup_and_the_prompt_says_apply_the_fix(monkeypatch):
+    seen = {}
+
+    async def _fake_research_one(**kw):
+        seen.update(kw)
+        return {"sources": [{"url": "https://example.test/jf", "title": "t", "snippet": "s", "authority": 0.9}]}
+
+    import app.modules.assist_research_lib as lib
+    monkeypatch.setattr(lib, "research_one", _fake_research_one)
+    monkeypatch.setattr(lib, "_render_research_block", lambda s: "## Research\n- jf")
+    out = await sr.research_for_step(_FIX1, {"profile": "Jellyfin runs in container 101."})
+    assert "## Research" in out and "CAUSE others found" in out and "do not repeat an action" in out
+    assert "jellyfin" in seen["question"].lower() and "movie" in seen["question"].lower()
+
+
 @pytest.mark.asyncio
 async def test_a_failed_lookup_leaves_the_prompt_alone(monkeypatch):
     async def _boom(**kw):
