@@ -181,7 +181,9 @@ _API_USED_RE = re.compile(
     r"|\bapi\s+(?:key|token|call|request|response|answers?|reports?|returns?|at\s+http|https?://)"
     # §17.1560b — a HOSTNAME (`api.themoviedb.org`, `api.radarr.video`) names a service the step reaches,
     # not one it builds: live, FIX2 "Make Jellyfin reach TMDb" was routed to develop on `api.themoviedb.org`.
-    r"|\bapi\.[a-z0-9-]+(?:\.[a-z0-9-]+)+", re.I)
+    r"|\bapi\.[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+    # §17.1560b — a NETWORK route is not a web route: "no working IPv6 route", "default route", "route table"
+    r"|\b(?:ipv6|ipv4|ip|network|default|static|working|dead)\s+routes?\b|\bno\s+routes?\b|\broutes?\s+(?:to|table|add|del|via)\b", re.I)
 
 
 def builds_a_capability(text: str) -> bool:

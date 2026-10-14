@@ -74,6 +74,7 @@ def test_a_step_that_builds_no_capability_keeps_its_check():
     ("add a /api/health route to the backend", True), ("expose the status API", True),
     # §17.1560b — a hostname is a service the step REACHES: "Make Jellyfin reach TMDb" named api.themoviedb.org
     ("getent orders api.themoviedb.org's AAAA records first; curl -4 to https://api.themoviedb.org is answered", False),
+    ("the guest holds a global IPv6 address with no working IPv6 route; prefer IPv4 and restart jellyfin.service", False),
 ])
 def test_what_builds_a_capability(text, yes):
     assert builds_a_capability(text) is yes
