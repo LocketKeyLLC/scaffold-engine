@@ -65,6 +65,13 @@ def test_a_step_that_builds_no_capability_keeps_its_check():
     ("implement the media request capability", True), ("add a backend route", True),
     ("build the single-page frontend", True), ("add authentication", True),
     ("install nodejs", False), ("set onboot on VM 110", False),
+    # §17.1560 — an API the step USES is not one it builds (live: FIX1 of job 263e920a was routed to
+    # the develop path on "through the VirtualFolders API" / "API http://127.0.0.1:8096")
+    ("the libraries were deleted and re-added through the VirtualFolders API; then scan", False),
+    ("Fix the Jellyfin TV library so its files resolve as Series (Jellyfin 10.11.11, API http://127.0.0.1:8096, "
+     "key readable on the machine); done when GET /Items?ParentId=X returns Series items", False),
+    ("store the engine API key in config/scaffold.json and read it via the API", False),
+    ("add a /api/health route to the backend", True), ("expose the status API", True),
 ])
 def test_what_builds_a_capability(text, yes):
     assert builds_a_capability(text) is yes
