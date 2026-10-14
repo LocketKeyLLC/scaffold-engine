@@ -88,3 +88,16 @@ def test_frame_run_runs_the_byparr_deploy():
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr)
     assert "rewrite_deploy_byparr(node, cmds, verify, services, inventory)" in src
+
+
+def test_a_panel_feature_step_naming_byparr_is_not_hijacked():
+    # §17.1542 — "Add FlareSolverr and Byparr services" is a control-panel FEATURE step (add them to
+    # the panel's service list), developed on CT 111 — NOT a Byparr container deploy. The deploy
+    # capability must not fire on it (it did, replacing the develop delivery with `pct create 108`).
+    from app.modules.supervised_runs import rewrite_deploy_byparr, rewrite_deploy_flaresolverr
+    node = {"title": "Add FlareSolverr and Byparr services",
+            "prompt_template": "Add FlareSolverr (192.168.1.26:8191) and Byparr (192.168.1.27:8191) to the panel's service list."}
+    out, _, notes = rewrite_deploy_byparr(node, ["x"], ["y"])
+    assert out == ["x"] and not notes, "byparr-deploy must not hijack a panel feature step"
+    out2, _, notes2 = rewrite_deploy_flaresolverr(node, ["x"], ["y"])
+    assert out2 == ["x"] and not notes2, "flaresolverr-deploy must not hijack it either"
