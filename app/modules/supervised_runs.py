@@ -1168,6 +1168,37 @@ def no_commands_retry_note(step_text: str, runbook: str) -> str:
     return "\n".join(lines)
 
 
+def empty_frame_disposition(frame: dict, node: dict) -> Optional[tuple]:
+    """§17.1548b — what to do with a hands-on frame the engine drafted into
+    NOTHING: no command to run, no check to judge, and no refusal explaining why.
+    Such a frame is a dead park — ``decide:run`` returns ``not_runnable`` 409 every
+    time and the job hangs on a decision that can never be taken (live, job
+    ae721781: the degenerate split-fragment verifies T22v2/T23v2 re-drafted empty
+    every round and 409-looped the driver).
+
+    Returns ``('fail', why)`` for a VERIFY step — it verifies nothing, so it fails
+    clean and the frontier moves on (the gap is visible, the §17.1547 way: an
+    absent check is a failed check, not a silent skip); ``('refuse', refusal)`` for
+    any other step — park a real myself/skip/redraft decision, never a dead
+    ``run``; or ``None`` when the frame has something to run, judge, or explain.
+    """
+    if (frame or {}).get("commands") or (frame or {}).get("verify") or (frame or {}).get("refused"):
+        return None
+    from app.modules.step_classify import _LEADING_OBSERVE_RE
+    title = str((node or {}).get("title") or "")
+    vtype = str((node or {}).get("node_type") or "").lower()
+    if _LEADING_OBSERVE_RE.match(title) or vtype in ("verify", "check", "checkpoint", "validation"):
+        return ("fail",
+                "the engine could not draft this verify step into any runnable command or check — there is "
+                "nothing to run and nothing to judge, so nothing was verified. Failed rather than parked on a "
+                "decision that can never be taken (§17.1548b): the step's own text (%r) gave the drafter nothing "
+                "concrete to check." % (title[:120]))
+    return ("refuse", {"why": (
+        "this step produced no command to run and no check to judge, and nothing refused it to explain why — "
+        "there is nothing the engine can carry out here. Redraft it with a concrete command, do it yourself, or "
+        "skip it (§17.1548b); `run` is withheld because it would do nothing.")})
+
+
 #: `/api/v1/indexer`, `/api/v3/rootfolder` — an API path in a drafted command.
 _API_PATH_RE = re.compile(r"/api/v\d+/[A-Za-z0-9_/-]+")
 
