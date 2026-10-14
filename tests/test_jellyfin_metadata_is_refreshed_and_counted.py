@@ -120,20 +120,23 @@ def test_the_refresh_key_fills_and_parses_and_passes_the_loop_gates():
 def _jellyfin(monkeypatch, argv, script, libs=LIBS, items=ITEMS, items_seq=None):
     import urllib.request as ur
     calls = []
-    reads = {"n": 0}
+    passes = {"n": 0}          # one census pass = one VirtualFolders read
 
     def fake_urlopen(req, timeout=None):
         m, u = req.get_method(), req.full_url
         calls.append((m, u))
         if u.endswith("/Library/VirtualFolders"):
+            passes["n"] += 1
             return io.BytesIO(json.dumps(libs).encode())
         if "/Items?" in u and m == "GET":
             lid = re.search(r"ParentId=([^&]+)", u).group(1)
             src = items
             if items_seq:
-                src = items_seq[min(reads["n"] // 2, len(items_seq) - 1)]
-            reads["n"] += 1
-            return io.BytesIO(json.dumps({"Items": src.get(lid, []), "TotalRecordCount": len(src.get(lid, []))}).encode())
+                src = items_seq[min(max(passes["n"] - 1, 0), len(items_seq) - 1)]
+            rows = src.get(lid, [])
+            if "Recursive=true" not in u:          # the top-level read: series/movies only, as Jellyfin would answer
+                rows = [i for i in rows if i.get("Type") in ("Series", "Movie")]
+            return io.BytesIO(json.dumps({"Items": rows, "TotalRecordCount": len(rows)}).encode())
         return io.BytesIO(b"")
 
     monkeypatch.setattr(ur, "urlopen", fake_urlopen)
@@ -205,6 +208,10 @@ def test_the_census_verify_carries_no_key_and_the_key_fills_in_the_run():
 def test_the_census_reports_per_type_counts_the_lacking_items_and_a_verdict(monkeypatch):
     out, calls, code, slept = _jellyfin(monkeypatch, ["k", "report"], _JELLYFIN_CENSUS_PY)
     assert code == 0 and slept == []
+    # the library's declared type and what its top level resolved to — the first thing wrong when a
+    # TV library shows a flat list of "movies" (live: Shows type=tvshows yet 902 Movie items)
+    assert "LIBRARY Shows type=tvshows paths=/media/tv" in out and "top level: Series x1" in out
+    assert "top: Series Scrubs" in out and "sample lacking: Season Season 1" in out
     assert "Movies/Movie: 1, missing name 0, overview 0, poster 0" in out
     assert "Shows/Episode: 2, missing name 1, overview 1, poster 1" in out
     assert "Shows/Season: 1, missing name 0, overview 1, poster 0" in out
@@ -212,6 +219,19 @@ def test_the_census_reports_per_type_counts_the_lacking_items_and_a_verdict(monk
     assert "LACKING: Episode Scrubs S01E04 -- no name, overview, poster" in out
     assert "RESULT: 2 item(s) still lack a name, overview or poster" in out
     assert not any(m == "POST" for m, _ in calls)                 # a read, never a change
+
+
+def test_a_tv_library_whose_items_resolved_as_movies_fails_the_step_plainly(monkeypatch):
+    """Live (2026-10-14): Shows is typed tvshows, yet all 902 items under it were Movie — a flat list of
+    'movies' named like episodes, no Series/Season/Episode. That is not a metadata gap a refresh can fix;
+    the census says so and FAILS (exit 2), so the engine's failure research (§17.1201) takes it from here."""
+    movies_in_tv = {"aaa": ITEMS["aaa"],
+                    "bbb": [{"Id": "x%d" % i, "Type": "Movie", "Name": "Scrubs - S01E0%d - Ep" % i, "Overview": "",
+                             "ImageTags": {}, "Path": "/media/tv/Scrubs/Season 1/Scrubs - S01E0%d.mkv" % i} for i in range(1, 4)]}
+    out, _, code, _ = _jellyfin(monkeypatch, ["k", "report"], _JELLYFIN_CENSUS_PY, items=movies_in_tv)
+    assert code == 2
+    assert "WRONG TYPES: Shows is a TV library (tvshows) but Jellyfin resolved its 3 items as Movie" in out
+    assert "RESULT: 3 item(s) still lack" in out                 # the census is still printed in full
 
 
 def test_a_complete_library_says_complete(monkeypatch):
@@ -235,6 +255,20 @@ def test_the_wait_phase_polls_while_items_keep_refreshing_and_the_last_phase_fai
     assert code == 0 and slept == [40, 40] and "STILL REFRESHING" in out        # a wait phase lets the next run
     out2, _, code2, _ = _jellyfin(monkeypatch, ["k", "last"], _JELLYFIN_CENSUS_PY, items_seq=seq)
     assert code2 == 1 and "STILL REFRESHING" in out2                             # the last phase fails honestly
+
+
+def test_without_server_timestamps_the_wait_polls_by_counts(monkeypatch):
+    """Live: this Jellyfin returned no DateLastRefreshed at all, so a timestamp-only wait 'settled' at
+    once with 902 items still unidentified. With no timestamps the wait reads the library twice 40 s
+    apart and calls it settled only when nothing changed."""
+    def strip(src):
+        return {k: [dict(i, DateLastRefreshed=None) for i in v] for k, v in src.items()}
+    steady = strip(ITEMS)
+    out, _, code, slept = _jellyfin(monkeypatch, ["k", "wait"], _JELLYFIN_CENSUS_PY, items_seq=[steady, steady])
+    assert code == 0 and slept == [40] and "REFRESH SETTLED" in out
+    fewer = strip({"aaa": ITEMS["aaa"], "bbb": ITEMS["bbb"][:3]})
+    out2, _, code2, slept2 = _jellyfin(monkeypatch, ["k", "last"], _JELLYFIN_CENSUS_PY, items_seq=[steady, fewer, steady])
+    assert code2 == 1 and slept2 == [40, 40] and "STILL REFRESHING" in out2
 
 
 def test_the_wait_phase_settles_when_the_refresh_stops_moving(monkeypatch):
