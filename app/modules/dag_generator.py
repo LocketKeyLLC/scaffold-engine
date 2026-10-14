@@ -653,11 +653,32 @@ def connect_isolated_nodes(tasks: list[dict]) -> list[str]:
 # same deterministic post-pass shape as connect_isolated_nodes / converge.
 
 _VALIDATION_NAME_RE = re.compile(r"\b(validate|verify|verif|confirm|check|test)\b", re.IGNORECASE)
-_CHECK_VERB_RE = re.compile(r"\b(?:check|verify|confirm|test|ensure|validate)\b[:\s]+(?P<body>[^.;\n]+)", re.IGNORECASE)
-_CHECK_SPLIT_RE = re.compile(r"\s*(?:,|;|/|\band\b|\bplus\b|&)\s*", re.IGNORECASE)
+# §17.1568 — a `.` ends the check's text only when a space (or the end) follows it: `/etc/gai.conf`,
+# `index.html`, `http://127.0.0.1:3001/api/health`, `10.11.11` are one token. Live, "Confirm … /etc/gai.conf is
+# unchanged …" was cut at `gai` and then split on the slashes into "Verify etc" + "Verify gai" (job 977a8a38).
+_CHECK_VERB_RE = re.compile(r"\b(?:check|verify|confirm|test|ensure|validate)\b[:\s]+(?P<body>(?:[^.;\n]|\.(?=\S))+)", re.IGNORECASE)
+# §17.1568 — a slash or ampersand separates checks only with spaces around it; inside a path, a URL or
+# a query string it is part of the token ("Verify: api." + "X answers at." were the halves of one URL check).
+_CHECK_SPLIT_RE = re.compile(r"\s*(?:,|;|\s/\s|\band\b|\bplus\b|\s&\s)\s*", re.IGNORECASE)
 _CHECK_STOP = frozenset({"all", "the", "each", "every", "is", "are", "works", "working", "correct",
                          "correctly", "functional", "reachable", "present", "valid", "ok", "good",
                          "and", "that", "everything", "entire", "build", "setup", "system"})
+# §17.1568 — a clause is a CHECK when it says something about its subject (a predicate), or is long enough
+# to. "services reachable" / "VPN works" / "api healthy" are checks; "Name" / "Overview" / "Primary image
+# presence" are the ATTRIBUTES of one check ("Verify item metadata completeness: Name, Overview, Primary
+# image presence", job 263e920a, which became T7/T7v2/T7v3 "Verify Name"…) and are not split apart.
+_CHECK_PREDICATE_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|works?|working|reachable|correct(?:ly)?|active|running|present|answers?|returns?"
+    r"|exists?|untouched|unchanged|listed|responds?|resolves?|open|closed|enabled|disabled|set|healthy|connected"
+    r"|functional|serves?|shows?|contains?|matches?|pass(?:es)?|starts?|up|down|ok|valid|loaded|mounted|installed"
+    r"|configured|accessible|available|first|idle|complete(?:d)?|succeeds?|fails?|restarted|reads?|writes?|boots?"
+    r"|pings?|ready|missing|absent|intact|preferred|reaches|answering|listening|bound|points?|equals?)\b", re.IGNORECASE)
+
+
+def _is_a_check(clause: str) -> bool:
+    """§17.1568 — a clause that states something (predicate) or is long enough to be its own check."""
+    words = re.findall(r"[A-Za-z][A-Za-z0-9-]+", clause)
+    return bool(_CHECK_PREDICATE_RE.search(clause)) or len(words) >= 4
 
 
 def _check_clauses(text_in: str) -> list[str]:
@@ -678,11 +699,22 @@ def _check_clauses(text_in: str) -> list[str]:
         words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]+", p)]
         content = [w for w in words if w.lower() not in _CHECK_STOP]
         if not content:
-            continue
-        clause = " ".join(words)
+            # §17.1568 — a part with no content word ("105", "107") is a VALUE in a list: the enumeration
+            # belongs to one check ("unchanged on 101, 105, 107 and 108"), and dropping the value while
+            # splitting the rest would lose it. One check, not split.
+            return []
+        # §17.1568 — keep the clause's own text (paths, URLs, numbers intact), whitespace-normalised
+        clause = " ".join(p.split())
         if clause.lower() not in {o.lower() for o in out}:
             out.append(clause)
-    return out if len(out) >= 2 else []
+    if len(out) < 2:
+        return []
+    # §17.1568 — every clause must be a check in its own right; an enumeration of bare attributes
+    # ("Name, Overview, Primary image presence") or of bare values ("101, 105, 107 and 108") belongs to
+    # ONE check and is not split — a fragment that names no predicate cannot be drafted or judged.
+    if not all(_is_a_check(c) for c in out):
+        return []
+    return out
 
 
 def _validation_shaped(t: dict) -> bool:
@@ -721,7 +753,9 @@ def split_bundled_validation(tasks: list[dict]) -> list[dict]:
         made: list[str] = []
         for i, clause in enumerate(clauses):
             nid = orig["id"] if i == 0 else f"{orig['id']}v{i + 1}"
-            name = ("Verify " + clause)[:60]
+            name = "Verify " + clause
+            if len(name) > 60:                     # §17.1568 — cut at a word, never inside a path or URL
+                name = name[:60].rsplit(" ", 1)[0] if " " in name[:60] else name[:60]
             new_tasks.append({
                 **{k: v for k, v in orig.items() if k not in ("is_deliverable",)},
                 "id": nid, "name": name, "type": "validation",
