@@ -356,3 +356,34 @@ def test_a_codegen_build_node_is_exempt_from_the_own_check_refusal():
     # a non-CodeGen develop step with no own check is still refused (the §17.1418 behavior)
     shell = {"title": "Wire the panel route", "description": "Add the route to server.js."}
     assert dv.own_check_refusal(shell, HOST) != []
+
+
+def test_host_spans_a_sibling_ui_dir_the_brief_names():
+    # §17.1544 — the control-panel app is backend (/opt/control-panel-backend, the unit WorkingDirectory)
+    # PLUS a Vite UI at /opt/control-panel-ui. host_for must include the sibling UI dir so a restyle is
+    # read from and written to the UI, not misplaced in the backend workdir.
+    class _Svc:
+        def __init__(s, **k): [setattr(s, a, v) for a, v in k.items()]
+    svc = _Svc(guest="111", vm=False, unit="control-panel.service",
+               workdir="/opt/control-panel-backend", user="root", group="root", name="control-panel")
+    node = {"title": "Restyle the control panel UI", "tool": "CodeGen",
+            "description": "Restyle the SPA. Frontend source lives in /opt/control-panel-ui; backend in /opt/control-panel-backend."}
+    host = dv.host_for(node, [svc], brief="Build the control-panel; UI in /opt/control-panel-ui, API in /opt/control-panel-backend.")
+    assert host is not None
+    assert "/opt/control-panel-ui" in host.extra_dirs, host.extra_dirs
+    # files under the UI dir are now writable; an unrelated /opt path is not
+    assert dv.allowed_path("/opt/control-panel-ui/src/App.css", host, node)
+    assert dv.allowed_path("/opt/control-panel-backend/server.js", host, node)
+    assert not dv.allowed_path("/opt/some-other-app/x.js", host, node)
+
+
+def test_host_does_not_pull_in_a_venv_or_unrelated_sibling():
+    class _Svc:
+        def __init__(s, **k): [setattr(s, a, v) for a, v in k.items()]
+    svc = _Svc(guest="111", vm=False, unit="control-panel.service",
+               workdir="/opt/control-panel-backend", user="root", group="root", name="control-panel")
+    node = {"title": "Build", "tool": "CodeGen",
+            "description": "Build the backend in /opt/control-panel-backend (its python env is /opt/control-panel-venv)."}
+    host = dv.host_for(node, [svc], brief="Backend /opt/control-panel-backend; venv /opt/control-panel-venv; /opt/unrelated-tool.")
+    assert host is not None
+    assert host.extra_dirs == (), host.extra_dirs  # venv excluded (name); unrelated excluded (prefix)
