@@ -680,6 +680,150 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
     return out
 
 
+def _split_top_args(s: str) -> list[str]:
+    """Split a call's argument list on top-level commas (no nesting in the paths we parse)."""
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur); cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur)
+    return out
+
+
+def _balanced_arg(s: str, start: int) -> tuple[str, int]:
+    """From just after an opening `(` at `start`, return (inner text, index past the matching `)`)."""
+    depth, i = 1, start
+    while i < len(s) and depth:
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+        i += 1
+    return s[start:i - 1], i
+
+
+def _resolve_served_dir(expr: str, base: str) -> Optional[str]:
+    """Resolve a static-root expression to an absolute dir, relative to the backend file's dir (`base`)."""
+    import posixpath
+    expr = expr.strip()
+    m = re.match(r"path\.(?:join|resolve)\((.+)\)$", expr, re.S)        # path.join(__dirname, '..', 'ui')
+    if m:
+        cur = None
+        for seg in _split_top_args(m.group(1)):
+            seg = seg.strip()
+            if seg == "__dirname":
+                cur = base
+            elif seg[:1] in ("'", '"'):
+                part = seg.strip("'\"")
+                cur = posixpath.normpath(posixpath.join(cur or base, part)) if cur is not None else part
+        return cur
+    m = re.match(r"__dirname\s*\+\s*['\"]([^'\"]+)['\"]$", expr)         # __dirname + '/public'
+    if m:
+        return posixpath.normpath(posixpath.join(base, m.group(1).lstrip("/")))
+    m = re.match(r"['\"]([^'\"]+)['\"]$", expr)                          # 'public' / '/abs/dir'
+    if m:
+        p = m.group(1)
+        return p if p.startswith("/") else posixpath.normpath(posixpath.join(base, p))
+    return None
+
+
+def served_entries(workspace: dict[str, str]) -> list[str]:
+    """§17.1546 — the file(s) the service SERVES to the browser, found from the backend's own static-file
+    directive in the workspace it was read with. Live (control-panel ae721781): the backend does
+    `express.static(path.join(__dirname, '..', 'control-panel-ui'))`, so the browser gets that dir's
+    hand-written `index.html` -- NOT the React `src/` the restyle edited, nor the unused Vite `dist/`.
+    Without naming the served file, a theme change landed on a source the service never serves and the
+    panel stayed light. Covers Express static, an nginx/Caddy `root`, and a Flask/FastAPI static dir."""
+    import posixpath
+    dirs: list[str] = []
+    for path, content in (workspace or {}).items():
+        if not path.endswith((".js", ".ts", ".mjs", ".cjs", ".py", ".conf")):
+            continue
+        base = posixpath.dirname(path)
+        for key in ("express.static(", "serveStatic("):      # nested parens: extract the balanced arg
+            i = (content or "").find(key)
+            while i >= 0:
+                arg, j = _balanced_arg(content, i + len(key))
+                d = _resolve_served_dir(arg.strip(), base)
+                if d:
+                    dirs.append(d.rstrip("/"))
+                i = content.find(key, j)
+        for m in re.finditer(r"(?:StaticFiles\(\s*directory\s*=|send_from_directory\(\s*)['\"]([^'\"]+)['\"]",
+                             content or ""):
+            d = m.group(1)
+            dirs.append((d if d.startswith("/") else posixpath.normpath(posixpath.join(base, d))).rstrip("/"))
+        for m in re.finditer(r"\broot\s+([^\s;*]+)\s*;", content or ""):   # nginx / Caddy root
+            dirs.append(m.group(1).rstrip("/"))
+    out: list[str] = []
+    for d in dict.fromkeys(dirs):
+        for p in workspace:                                   # the served dir's HTML the engine actually read
+            if p.endswith((".html", ".htm")) and (posixpath.dirname(p) == d or p.startswith(d + "/")):
+                out.append(p)
+        entry = d + "/index.html"
+        if entry not in out:
+            out.append(entry)
+    return list(dict.fromkeys(out))
+
+
+def served_files_doc(served: list[str]) -> str:
+    """§17.1546 — name the served file(s) in the develop prompt so a visual change lands where it shows."""
+    if not served:
+        return ""
+    return ("WHAT THE SERVICE SERVES TO THE BROWSER (its static web root, from the backend's own static-file "
+            "directive). A change the user SEES -- styling, theme, colour, layout, markup -- must be made IN these "
+            "file(s); they are what the browser loads:\n" + "\n".join(f"- {p}" for p in served) +
+            "\nA build SOURCE the service does not serve (for example a framework `src/` whose built bundle is not "
+            "what this service returns) will NOT change the page, however correct it looks. If the served file holds "
+            "its styles inline, change them there.")
+
+
+_VISUAL_CHANGE_RE = re.compile(
+    r"\b(re-?style|re-?skin|theme|dark[\s-]*mode|colou?r[\s-]*scheme|palette|stylesheet|styling|"
+    r"\bcss\b|look[\s-]*and[\s-]*feel|appearance|visual|layout)\b", re.I)
+
+
+def restyle_missed_the_served_file(node: Optional[dict], files: dict[str, str],
+                                   served: list[str], workspace: dict[str, str]) -> list[dict]:
+    """§17.1546 — a VISUAL change whose files the served page never loads will not be seen. Gate it: the
+    served HTML (served AS-IS, not a build artifact) references none of the written files by name and the
+    step edited none of the served file itself. Live: the dark-theme restyle wrote `src/App.css`, but the
+    served `/opt/control-panel-ui/index.html` is a standalone page with INLINE styles that links nothing,
+    so the panel stayed light. Conservative: it stays silent for a build-pipeline SPA (served file under
+    dist/build/out -- there the source IS the right edit) and when the served page does load a written file."""
+    if not served or not files:
+        return []
+    text = "\n".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not _VISUAL_CHANGE_RE.search(text):
+        return []
+    if any(p in served for p in files):                       # it edited the served file itself
+        return []
+    import posixpath
+    served_html = [p for p in served if p.endswith((".html", ".htm"))
+                   and not re.search(r"/(?:dist|build|out|\.next|\.output)/", p)]
+    if not served_html:
+        return []
+    styled = [p for p in files if p.endswith((".css", ".scss", ".sass", ".less", ".jsx", ".tsx", ".js", ".ts", ".html"))]
+    if not styled:
+        return []
+    for sh in served_html:
+        html = (workspace or {}).get(sh, "")
+        refs = {posixpath.basename(r.split("?", 1)[0])
+                for r in re.findall(r'(?:href|src)\s*=\s*["\']([^"\']+)["\']', html)}
+        if any(posixpath.basename(w) in refs for w in files):  # the served page DOES load one of them
+            return []
+    return [{"command": f"(wrote {', '.join(list(files)[:3])})", "why": (
+        "this is a visual change, but the page the service serves loads NONE of the files it wrote, so the change "
+        f"will not be visible. The service serves: {', '.join(served_html)} -- served as-is. Make the change there "
+        "(if that file holds its styles inline, edit the inline styles), not in a source the served page does not load.")}]
+
+
 async def read_apis(spec, services: Optional[list], status: Optional[list[dict]] = None) -> str:
     """§17.1416 — what the services the code calls hold NOW, for the prompt. The model is handed the
     service's own files (§17.1412) but never the state of the APIs its code talks to, so it invented the

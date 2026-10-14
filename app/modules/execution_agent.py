@@ -2925,6 +2925,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
                 facts = f"{facts}\n\n{develop.engine_doc(run_node)}"
+            _served = develop.served_entries(workspace)                # §17.1546 — what the browser actually gets
+            _served_doc = develop.served_files_doc(_served)
+            if _served_doc:
+                facts = f"{facts}\n\n{_served_doc}"
+                logger.info("develop_served job=%s node=%s served=%s", job_id, _nk_dev, ",".join(_served)[:300])
             status = await develop.read_status(spec, _services)       # §17.1422 — what each probed path answers
             apis = await develop.read_apis(spec, _services, status)   # §17.1416 — what the called APIs hold now
             if apis:
@@ -2957,7 +2962,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                inventory=_inv, engine_address=_eaddr, services=_services)
                 _dead = (develop.calls_a_dead_path(files, status)         # §17.1422
                          + develop.values_put_into_html_attributes(files)   # §17.1424
-                         + develop.a_secret_written_in_the_clear(files, creds))   # §17.1427
+                         + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427
+                         + develop.restyle_missed_the_served_file(run_node, files, _served, workspace))  # §17.1546
                 if _dead:
                     fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}
                 sc = develop.score(fr, _rh_reports.get(rb))

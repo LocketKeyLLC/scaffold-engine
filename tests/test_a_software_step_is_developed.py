@@ -387,3 +387,50 @@ def test_host_does_not_pull_in_a_venv_or_unrelated_sibling():
     host = dv.host_for(node, [svc], brief="Backend /opt/control-panel-backend; venv /opt/control-panel-venv; /opt/unrelated-tool.")
     assert host is not None
     assert host.extra_dirs == (), host.extra_dirs  # venv excluded (name); unrelated excluded (prefix)
+
+
+def test_served_entries_finds_the_express_static_root():
+    # §17.1546 — the backend serves a sibling dir as-is; the served page is that dir's index.html,
+    # NOT the React src/ or the unused dist/.
+    ws = {
+        "/opt/control-panel-backend/server.js":
+            "const path=require('path');\napp.use(express.static(path.join(__dirname, '..', 'control-panel-ui')));\n",
+        "/opt/control-panel-ui/index.html": "<html><head><style>body{background:#f5f7fa}</style></head></html>",
+        "/opt/control-panel-ui/src/App.css": ":root{--bg:#0d1117}",
+    }
+    served = dv.served_entries(ws)
+    assert "/opt/control-panel-ui/index.html" in served, served
+    assert "/opt/control-panel-ui/src/App.css" not in served
+
+
+def test_restyle_that_misses_the_served_file_is_refused():
+    # §17.1546 — a dark-theme restyle writing src/App.css, when the served standalone index.html has
+    # inline styles and links nothing, will not be seen → refuse and point at the served file.
+    ws = {
+        "/opt/control-panel-backend/server.js":
+            "app.use(express.static(path.join(__dirname, '..', 'control-panel-ui')));",
+        "/opt/control-panel-ui/index.html": "<html><head><style>body{background:#f5f7fa}</style></head><body></body></html>",
+    }
+    served = dv.served_entries(ws)
+    node = {"title": "Restyle the control panel to the dark theme", "tool": "CodeGen"}
+    files = {"/opt/control-panel-ui/src/App.css": ":root{--bg:#0d1117}"}
+    refused = dv.restyle_missed_the_served_file(node, files, served, ws)
+    assert refused and "serves" in refused[0]["why"].lower(), refused
+    # editing the served index.html itself passes
+    ok = dv.restyle_missed_the_served_file(node, {"/opt/control-panel-ui/index.html": "x"}, served, ws)
+    assert ok == []
+    # a non-visual change is not gated
+    assert dv.restyle_missed_the_served_file({"title": "Add a health route"}, files, served, ws) == []
+
+
+def test_restyle_gate_silent_for_a_build_pipeline_spa():
+    # §17.1546 — when the served file is a BUILD artifact (dist/), editing src/ is the right edit, so
+    # the gate must stay silent (no misfire on a real SPA).
+    ws = {
+        "/opt/app/server.js": "app.use(express.static(path.join(__dirname, 'dist')));",
+        "/opt/app/dist/index.html": "<html><script src='/assets/main.js'></script></html>",
+    }
+    served = dv.served_entries(ws)
+    node = {"title": "Restyle the app dark theme", "tool": "CodeGen"}
+    files = {"/opt/app/src/App.css": ":root{--bg:#0d1117}"}
+    assert dv.restyle_missed_the_served_file(node, files, served, ws) == []
