@@ -900,6 +900,10 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
         parts.append(f"### {nk}{suffix}\n{texts[nk]}")
     return (
         "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
+        # §17.1565 — said plainly, because live (T8, job 263e920a) a report step read these as a plan still to be
+        # carried out, doubted that the refresh had happened, and wrote the commands for someone to run it.
+        "These steps ALREADY RAN before this one, in plan order. Each section below is a RESULT the machine "
+        "produced, not a plan; this step runs nothing itself.\n\n"
         + "\n\n".join(parts)
         + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
     )
@@ -1024,8 +1028,43 @@ def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> s
     retry sees the prior rejection instead of re-emitting the identical output.
     """
     body = build_base_prompt(node, brief, environment, autonomous=True)   # §17.1564 — a run cannot ask
+    body += formats_what_came_before(node)                                 # §17.1565
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
+
+
+#: §17.1565 — a step whose work is to shape what earlier steps produced: a report, a summary, a list.
+_FORMATS_UPSTREAM_RE = re.compile(
+    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate)\b", re.I)
+
+
+def formats_what_came_before(node: dict) -> str:
+    """§17.1565 — the instruction for a report/format step that CONSUMES upstream results.
+
+    Live (job 263e920a, T8 "Produce missing metadata report. Format the verification results into a
+    human-readable report. This is the final deliverable."): with the brief's goal ("run a full
+    metadata and image refresh … verify … report") in its context, the step took the GOAL as its
+    task — "## Node capability mismatch … Required operator actions: 1. read the API key … 2. trigger
+    the refresh …" — six commands for a machine the engine can reach, and called the census it was
+    handed a "pre-refresh baseline". §17.1259 refused it as instructions-not-work, three times, and
+    the job blocked with the report's every input in hand. The brief says what the JOB does; this
+    step's inputs are the upstream results, which already happened."""
+    n = node or {}
+    deps = n.get("depends_on") or []
+    if not deps or str(n.get("tool") or "LLM").strip().lower() not in ("llm", ""):
+        return ""
+    text = " ".join(str(n.get(k) or "") for k in ("title", "prompt_template", "description"))
+    if not _FORMATS_UPSTREAM_RE.search(text):
+        return ""
+    return (
+        "\n\nTHIS STEP FORMATS WHAT CAME BEFORE. Its inputs are the upstream results above, from steps that "
+        "already ran; the project goal is what the whole JOB did, not what this step must now do. Produce the "
+        "deliverable FROM those results — the report, the list, the verdict, with the real names and numbers "
+        "they carry. Do not write commands for anyone to run, do not restate the job's goals as actions to "
+        "perform, and do not doubt that the upstream steps ran: a listed output is a result. If an upstream "
+        "result is missing or contradicts another, say so in one line inside the deliverable — and still "
+        "produce it."
+    )
 
 # §17.299 — `_format_reviewer_feedback` lives in `execution_retry` so the
 # audit's hot-path-file convention is met. Re-import keeps the original
