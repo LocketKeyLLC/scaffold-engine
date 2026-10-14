@@ -3483,7 +3483,13 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 await db.commit()
             logger.warning("supervised_run_empty_verify_failed job=%s node=%s title=%r",
                            job_id, run_node.get("node_key"), run_node.get("title"))
-            return None          # the frontier re-peeks and moves on
+            # §17.1548b — the step is settled (failed); move to the NEXT decision the
+            # way §17.1302's already-met path does — RECURSE, don't return None. A
+            # None here is read by the serial loop as "a step settled, re-peek and
+            # start the next node", which then runs the next hands-on node outside
+            # its pause and the clean exit flips the job to 'failed' (live: T22v2
+            # failed clean, then T17 was mis-started and the run ended failed).
+            return await _pause_for_decision(job_id, _depth + 1) if _depth < 6 else None
         if _disp is not None and _disp[0] == "refuse":
             frame["refused"] = list(frame.get("refused") or []) + [_disp[1]]
             frame["suggested"] = "myself"
