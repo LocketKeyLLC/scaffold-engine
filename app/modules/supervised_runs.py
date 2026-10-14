@@ -5546,6 +5546,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _jc_notes:
         cmds, verify = _jc_cmds, _jc_verify
         _comp_notes = list(_comp_notes) + _jc_notes
+    # §17.1562 — "make the library re-resolve its files / rebuild the mistyped library": remove, scan, re-add.
+    _jb_cmds, _jb_verify, _jb_notes = rewrite_rebuild_jellyfin_library(node, cmds, verify, services, inventory)
+    if _jb_notes:
+        cmds, verify = _jb_cmds, _jb_verify
+        _comp_notes = list(_comp_notes) + _jb_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -8814,6 +8819,118 @@ def rewrite_jellyfin_metadata_report(node: Optional[dict], commands: list[str], 
         f"item list never hits the runner's output cap. The draft spliced another step's output in as a shell "
         f"variable nothing sets.")}]
     return run, check, note
+
+
+#: §17.1562 — rebuild a typed Jellyfin library whose items resolved as the WRONG kind: remove the library
+#: (database rows only — removing a library never touches media), wait for the scan that drops its
+#: orphaned items, re-add it with the same name/type/paths, and let the fresh scan resolve the files
+#: with the right resolvers. Measured live (2026-10-14): Shows was typed tvshows, yet its top level was
+#: `Folder x6` and 902 `Movie` items — rows left over from the mixed-content library that had covered
+#: /media; Jellyfin reuses an existing item at a path and never re-types it, and §17.1510's re-add did
+#: not drop them because the mixed library still covered the paths at that moment.
+#: NEVER `DELETE /Items/{id}`: in Jellyfin that endpoint deletes the MEDIA FILES from disk.
+#: Single-quoted Python only; runs inside the Jellyfin guest; argv: KEY, [dry].
+_REBUILD_JELLYFIN_PY = (
+    "import sys,json,time,urllib.request,urllib.parse\n"
+    "BASE='http://127.0.0.1:8096'\n"
+    "KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Emby-Token':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=15); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "def q(s): return urllib.parse.quote(str(s))\n"
+    "def scan_idle():\n"
+    "    tasks=api('/ScheduledTasks') or []\n"
+    "    for t in tasks[:60]:\n"
+    "        if t.get('Key')=='RefreshLibrary': return t.get('State')=='Idle'\n"
+    "    return True\n"
+    "def wait_idle():\n"
+    "    for i in range(6):\n"
+    "        try:\n"
+    "            if scan_idle(): return True\n"
+    "        except Exception as e:\n"
+    "            print('poll failed %r' % e)\n"
+    "        time.sleep(10)\n"
+    "    return False\n"
+    "EXPECT={'tvshows':'Series','movies':'Movie'}\n"
+    "libs=[l for l in (api('/Library/VirtualFolders') or []) if l.get('CollectionType') in EXPECT]\n"
+    "wrong=[]\n"
+    "for l in libs[:8]:\n"
+    "    nm=l.get('Name'); ct=l.get('CollectionType')\n"
+    "    try:\n"
+    "        top=(api('/Items?ParentId=%s' % l.get('ItemId')) or {}).get('Items') or []\n"
+    "    except Exception as e:\n"
+    "        print('SKIP %s: top level unreadable %r' % (nm,e)); continue\n"
+    "    types=sorted(set(i.get('Type') or '?' for i in top))\n"
+    "    bad=[i for i in top if (i.get('Type') or '?')!=EXPECT[ct]]\n"
+    "    if top and bad:\n"
+    "        print('WRONG TYPES: %s (%s) top level is %s, expected %s' % (nm,ct,', '.join(types),EXPECT[ct])); wrong.append(l)\n"
+    "    else:\n"
+    "        print('OK: %s (%s) top level is %s' % (nm,ct,', '.join(types) or 'empty'))\n"
+    "if not wrong:\n"
+    "    print('RESULT: every typed library resolves as its own kind -- nothing to rebuild'); sys.exit(0)\n"
+    "if DRY:\n"
+    "    for l in wrong[:4]: print('WOULD REBUILD: %s -> remove, scan, re-add as %s over %s' % (l.get('Name'),l.get('CollectionType'),','.join(l.get('Locations') or [])))\n"
+    "    print('RESULT: dry run, nothing changed'); sys.exit(0)\n"
+    # §17.1267 — at most 4 libraries; every call timeout=15; the two waits are bounded (6 x 10 s each).
+    "for l in wrong[:4]:\n"
+    "    nm=l.get('Name'); ct=l.get('CollectionType'); paths=l.get('Locations') or []\n"
+    "    try:\n"
+    "        api('/Library/VirtualFolders?name=%s&refreshLibrary=true' % q(nm),'DELETE')\n"
+    "        print('REMOVED library %s (rows only; media untouched) -- scan drops its stale items' % nm)\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to remove %s: %r' % (nm,e)); continue\n"
+    "    idle=wait_idle()\n"
+    "    print('scan after removal: %s' % ('idle' if idle else 'still running after 60 s'))\n"
+    "    try:\n"
+    "        api('/Library/VirtualFolders?name=%s&collectionType=%s&paths=%s&refreshLibrary=true' % (q(nm),ct,'&paths='.join(q(p) for p in paths)),'POST',{'LibraryOptions':{}})\n"
+    "        print('RE-ADDED library %s as %s over %s -- fresh scan resolves the files with the %s resolvers' % (nm,ct,','.join(paths),ct))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to re-add %s: %r -- re-add it by hand: name %s, type %s, paths %s' % (nm,e,nm,ct,','.join(paths))); sys.exit(1)\n"
+    "idle=wait_idle()\n"
+    "print('RESULT: %d librar%s rebuilt; scan %s -- the verify step reads the new item types' % (len(wrong[:4]),'y' if len(wrong[:4])==1 else 'ies','finished' if idle else 'still running'))\n"
+)
+#: the step that asks for a library's items to be re-resolved / the library rebuilt.
+_JF_REBUILD_RE = re.compile(
+    r"\bre-?resolve\b|\brebuild\b|\bre-?create\b|\bre-?add\b|\bwrong\s+types?\b|\bstale\s+(?:items?|rows?|entries)\b"
+    r"|\bresolved?\s+(?:its\s+|the\s+|their\s+)?(?:content|items|files|episodes|shows)?\s*as\s+(?:plain\s+)?(?:folders?|movies?)\b"
+    r"|\bresolve\s+as\s+series\b", re.I)
+
+
+def rewrite_rebuild_jellyfin_library(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1562 — a "make the Jellyfin library re-resolve its files / rebuild the library whose items
+    came out as the wrong type" step does it deterministically: remove the mistyped library, wait for
+    the scan that drops its orphaned rows, re-add it typed over the same paths, scan.
+
+    Live (job 263e920a, FIX1): the census (§17.1554b) failed honestly — Shows typed tvshows, top level
+    `Folder x6`, 902 `Movie` items — and the fix step was left to the model with the engine's research
+    attached (§17.1561). Three drafts: `systemctl stop jellyfin` + `sqlite3` SELECTs (sqlite3 is not
+    installed there; `set -e` would have left Jellyfin stopped), then exploratory `find`/`jq` with the
+    key read from a file that has none. The research itself found no source for this exact shape. The
+    fix others use for a mis-resolved library is remove-and-re-add; the engine owns that shape already
+    (§17.1510) and knows the condition exactly (the census). Media files are never touched — and
+    `DELETE /Items/{id}` is never used, because in Jellyfin that endpoint deletes the files."""
+    text = _node_text(node)
+    if not (_JF_REBUILD_RE.search(text) and _JF_SERVICE_RE.search(text) and re.search(r"\blibrar(?:y|ies)\b", text, re.I)):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("jellyfin", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_REBUILD_JELLYFIN_PY}" "<JELLYFIN_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # §17.1512 — the type MARKER files witness the re-added libraries exist and are typed (no key, no
+    # interpreter, no `$( )`); the new item types are the census step's to read.
+    check = (f"pct exec {gid} -- sh -c {_sq_payload('ls -1 /var/lib/jellyfin/root/default/*/*.collection 2>/dev/null; echo ---libraries---; ls -1 /var/lib/jellyfin/root/default/')}")
+    note = [{"why": (
+        f"drafted the rebuild from the engine's own shape (§17.1562): inside guest {gid} it reads each typed library's "
+        f"top level through Jellyfin's API; a TV library whose top level is not Series items (or a movie library whose "
+        f"is not Movies) is REMOVED (database rows only — media files are never touched), the scan that drops its "
+        f"orphaned rows is waited for, and it is RE-ADDED with the same name, type and paths so the fresh scan resolves "
+        f"the files with the right resolvers. A library that already resolves as its own kind is left alone.")}]
+    return [run], [check], note
 
 
 def a_validating_endpoint_sent_an_empty_body(

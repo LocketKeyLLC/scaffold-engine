@@ -64,8 +64,15 @@ COMPLETENESS = {"title": "Check Scrubs completeness",
 LIBS = [{"Name": "Movies", "CollectionType": "movies", "ItemId": "aaa", "Locations": ["/media/movies"]},
         {"Name": "Shows", "CollectionType": "tvshows", "ItemId": "bbb", "Locations": ["/media/tv"]},
         {"Name": "Music", "CollectionType": "music", "ItemId": "ccc", "Locations": ["/media/music"]}]
-RECENT = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-OLD = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+def _ago(**kw):
+    """A Jellyfin-shaped UTC timestamp this many seconds/hours ago — built at CALL time, not import
+    time: CI runs the module minutes after collection, and a 'recent' refresh aged past the 3-minute
+    window made the wait settle at once (the first CI run of this file)."""
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(**kw)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+
+
+RECENT = _ago(seconds=30)
+OLD = _ago(hours=2)
 ITEMS = {
     "aaa": [{"Id": "m1", "Type": "Movie", "Name": "Sintel", "Overview": "A girl", "ImageTags": {"Primary": "x"}, "DateLastRefreshed": OLD}],
     "bbb": [{"Id": "s1", "Type": "Series", "Name": "Scrubs", "Overview": "Hospital", "ImageTags": {"Primary": "x"}, "DateLastRefreshed": OLD},
@@ -248,9 +255,7 @@ def test_the_wait_phase_settles_at_once_when_nothing_was_refreshed_recently(monk
 def test_the_wait_phase_polls_while_items_keep_refreshing_and_the_last_phase_fails(monkeypatch):
     def moving(ts):
         return {"aaa": [dict(ITEMS["aaa"][0], DateLastRefreshed=ts)], "bbb": ITEMS["bbb"]}
-    seq = [moving(RECENT),
-           moving((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")),
-           moving((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z"))]
+    seq = [moving(_ago(seconds=30)), moving(_ago(seconds=20)), moving(_ago(seconds=10))]
     out, _, code, slept = _jellyfin(monkeypatch, ["k", "wait"], _JELLYFIN_CENSUS_PY, items_seq=seq)
     assert code == 0 and slept == [40, 40] and "STILL REFRESHING" in out        # a wait phase lets the next run
     out2, _, code2, _ = _jellyfin(monkeypatch, ["k", "last"], _JELLYFIN_CENSUS_PY, items_seq=seq)
@@ -272,7 +277,7 @@ def test_without_server_timestamps_the_wait_polls_by_counts(monkeypatch):
 
 
 def test_the_wait_phase_settles_when_the_refresh_stops_moving(monkeypatch):
-    steady = {"aaa": [dict(ITEMS["aaa"][0], DateLastRefreshed=RECENT)], "bbb": ITEMS["bbb"]}
+    steady = {"aaa": [dict(ITEMS["aaa"][0], DateLastRefreshed=_ago(seconds=30))], "bbb": ITEMS["bbb"]}
     out, _, code, slept = _jellyfin(monkeypatch, ["k", "last"], _JELLYFIN_CENSUS_PY, items_seq=[steady, steady])
     assert code == 0 and slept == [40] and "REFRESH SETTLED" in out and "RESULT:" in out
 
