@@ -74,6 +74,22 @@ def _text(node: Optional[dict]) -> str:
     return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
 
 
+def _step_text(node: Optional[dict]) -> str:
+    """§17.1550 — the step's text is ``prompt_template``, or ``description`` when that is empty
+    (``plan_reconcile.STEP_TEXT_EXPR`` — the same rule every other read of a step's text already
+    follows). The develop path read ``description`` alone, so a step the planner wrote whole into
+    ``prompt_template`` reached the model as its title only, and an operator's redraft review
+    (``decision_pause.add_review`` writes it to whichever column already holds the text) never
+    arrived — the model redrafted from the title and reproduced the same block.
+
+    Live, 5-section control-panel job c28ddeb0, 2026-10-14: T19 "Write Scaffold UI section" carried
+    its whole spec AND a redraft correction in ``prompt_template`` (860 chars) while ``description``
+    was empty, so every round reinvented a generic HTTP-request builder from the title and ignored
+    the correction. The regular executor's ``build_base_prompt`` already folds both columns in
+    (§17.1237/ADD100); this is the sibling call site that drifted."""
+    return str((node or {}).get("prompt_template") or "").strip() or str((node or {}).get("description") or "")
+
+
 _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|create|destroy|resize|migrate|restore)\b"
                              r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces")
 
@@ -254,7 +270,7 @@ def done_checks(node: Optional[dict], host: Host) -> list[str]:
 
     §17.1414 — only reads: the verify channel carries nothing else, and silently dropped ADD123's
     POST. A check that WRITES is the run's own acceptance step (`acceptance_checks`)."""
-    checks = [c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or ""))
+    checks = [c.strip() for c in _CHECK_RE.findall(_step_text(node))   # §17.1550 — whole step text
               if _is_read(c.strip()) and not _needs_a_secret(c.strip())]
     tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
     checks.append(f"{tool} systemctl is-active {host.unit}")
@@ -304,7 +320,7 @@ def engine_doc(node: Optional[dict]) -> str:
 
 def own_checks(node: Optional[dict]) -> list[str]:
     """§17.1419 — every check the step's text names (backticked `pct exec N -- …`), reads and writes."""
-    return list(dict.fromkeys(c.strip() for c in _CHECK_RE.findall(str((node or {}).get("description") or ""))))
+    return list(dict.fromkeys(c.strip() for c in _CHECK_RE.findall(_step_text(node))))   # §17.1550
 
 
 def acceptance_checks(node: Optional[dict]) -> list[str]:
@@ -313,7 +329,7 @@ def acceptance_checks(node: Optional[dict]) -> list[str]:
     the approved block's LAST step -- visible to the operator before approval -- with `curl -f`, so
     an HTTP error fails the run instead of printing an error page and exiting 0."""
     out: list[str] = []
-    for c in _CHECK_RE.findall(str((node or {}).get("description") or "")):
+    for c in _CHECK_RE.findall(_step_text(node)):   # §17.1550 — whole step text
         c = c.strip()
         if _is_read(c) and not _needs_a_secret(c):      # §17.1426 — a read that needs a secret runs approved
             continue
@@ -903,7 +919,7 @@ def test_contract(target: Optional[dict]) -> str:
 def build_prompt(node: dict, host: Host, facts: str, workspace: dict[str, str],
                  current: Optional[dict[str, str]], evidence: str, round_no: int, kit: str = "",
                  test: str = "") -> str:
-    parts = [f"STEP {node.get('node_key')}: {node.get('title')}", str(node.get("description") or ""), "",
+    parts = [f"STEP {node.get('node_key')}: {node.get('title')}", _step_text(node), "",   # §17.1550
              f"THE SERVICE: {host.name or host.unit} on guest {host.guest} ({'VM' if host.vm else 'container'}), "
              f"directory {host.workdir}, unit {host.unit}" + (f", runs as {host.user}" if host.user else ", runs as root"),
              "", facts.strip(), "", kit.strip(), "", test.strip(), "", "=== THE SERVICE'S CURRENT FILES (on the machine now) ==="]
