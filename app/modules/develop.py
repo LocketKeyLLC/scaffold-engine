@@ -71,7 +71,13 @@ class Host:
 
 
 def _text(node: Optional[dict]) -> str:
-    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    # §17.1550 — all the step's words, prompt_template included (as the delivery-path assembly at the
+    # bottom of this module already does). `credentials_for` gates runner-secret INJECTION on the secret
+    # name appearing here, `host_for` decides build-intent from here, and `engine_doc`/path-extraction read
+    # here too; a step the planner wrote into prompt_template (or an operator correction added there by
+    # add_review) was invisible to every one of them. Live: an operator correction naming the panel's held
+    # engine key sat in prompt_template, so the delivery would not have injected it.
+    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
 
 
 def _step_text(node: Optional[dict]) -> str:

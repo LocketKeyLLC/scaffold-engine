@@ -69,3 +69,21 @@ def test_own_check_refusal_sees_a_prompt_template_check_for_a_non_codegen_step()
     node = {"node_key": "T20", "title": "Configure scaffold route", "tool": "Shell",
             "description": "", "prompt_template": f"Wire it. Done when {CHECK} answers JSON."}
     assert develop.own_check_refusal(node, HOST) == []
+
+
+def test_credentials_for_sees_a_held_secret_named_in_prompt_template():
+    # the delivery injects a runner-held secret only when the step text names it; the name here lives
+    # in prompt_template (where add_review writes an operator correction), description empty.
+    node = {"node_key": "T13", "title": "Write scaffold route",
+            "description": "",
+            "prompt_template": "config/scaffold-engine.json gets apiKey @@SCAFFOLD:SCAFFOLD_PANEL_KEY@@."}
+    creds = develop.credentials_for([], runner_secrets=["SCAFFOLD_PANEL_KEY"], node=node)
+    assert creds.get("SCAFFOLD_PANEL_KEY") == develop.RUNNER_HELD
+
+
+def test_text_includes_prompt_template():
+    # the detection helper used by credentials_for / host_for / engine_doc / path-extraction now
+    # carries prompt_template, not title+description alone.
+    node = {"title": "t", "description": "", "prompt_template": "build intent and @@SCAFFOLD:X@@ here"}
+    txt = develop._text(node)
+    assert "build intent" in txt and "@@SCAFFOLD:X@@" in txt
