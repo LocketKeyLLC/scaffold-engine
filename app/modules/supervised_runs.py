@@ -8973,12 +8973,31 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
     if not (_PREFER_IPV4_RE.search(text) and (_PUBLIC_API_RE.search(text) or re.search(r"\bipv6\b|\bgai\.conf\b", text, re.I))):
         return list(commands or []), list(verify or []), []
     app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
-    if not app:
-        return list(commands or []), list(verify or []), []
-    gid = _arr_guest(app, services, inventory)
+    gid = _arr_guest(app, services, inventory) if app else None
+    unit = f"{app}.service" if app else ""
+    if not gid:
+        # §17.1563b — any guest the step names: by a MEASURED service (name + unit) or by inventory name,
+        # or by "container N" when the guest's unit was measured. Live: 111 control-panel, 120 caddy,
+        # 130 pihole (unit pihole-FTL.service) are not *arr apps, and the same dead IPv6 route hits them.
+        for s in services or []:
+            nm = str(getattr(s, "name", "") or "").lower()
+            if nm and re.search(rf"\b{re.escape(nm)}\b", text, re.I) and getattr(s, "guest", ""):
+                app, gid, unit = nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or f"{nm}.service")
+                break
+    if not gid:
+        names = (inventory or {}).get("names") or {}
+        m_ct = re.search(r"\b(?:container|ct|lxc)\s*(\d{3})\b", text, re.I)
+        for g, nm in names.items():
+            nm_s = str(nm or "")
+            if (nm_s and re.search(rf"\b{re.escape(nm_s)}\b", text, re.I)) or (m_ct and str(g) == m_ct.group(1)):
+                app, gid = nm_s.lower() or f"guest {g}", str(g)
+                unit = next((str(getattr(s, "unit", "") or "") for s in services or []
+                             if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
+                break
     if not gid:
         return list(commands or []), list(verify or []), []
-    unit = f"{app}.service"
+    if not unit:
+        return list(commands or []), list(verify or []), []           # no unit to restart → not this rule's call
     m = re.search(r"\b((?:[a-z0-9-]+\.)+(?:org|com|net|io|tv|club|video|audio))\b", text, re.I)
     host = m.group(1) if m and not m.group(1).startswith("127.") else _PROBE_HOSTS.get(app, "api.themoviedb.org")
     run_payload = (f"grep -qxF '{_GAI_PRECEDENCE}' /etc/gai.conf 2>/dev/null || echo '{_GAI_PRECEDENCE}' >> /etc/gai.conf; "

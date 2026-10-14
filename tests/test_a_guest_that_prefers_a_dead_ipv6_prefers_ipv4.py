@@ -62,6 +62,29 @@ def test_the_app_and_guest_come_from_the_step_and_the_probe_host_from_its_text()
     assert not rewrite_prefer_ipv4_in_guest(unknown, ["x"], ["y"], SERVICES, INV)[2]      # no lidarr guest known
 
 
+def test_a_guest_that_is_not_an_arr_app_is_resolved_from_the_measured_service_or_the_inventory():
+    """§17.1563b — live, the same dead IPv6 route hits 111 control-panel, 120 caddy and 130 pihole (unit
+    pihole-FTL.service): none is in the *arr list, so the guest and unit come from what was measured."""
+    class _Unit(_Svc):
+        def __init__(self, name, guest, ports, unit):
+            super().__init__(name, guest, ports); self.unit = unit
+    svcs = [_Unit("pihole", "130", ("53",), "pihole-FTL.service"), _Unit("caddy", "120", ("443",), "caddy.service")]
+    inv = {"names": {"120": "caddy-proxy", "130": "pihole", "111": "control-panel"}}
+    node = {"title": "Make Pi-hole on container 130 reach its gravity lists", "tool": "Shell",
+            "description": "pihole times out on IPv6 fetching raw.githubusercontent.com; prefer IPv4 in the guest."}
+    cmds, verify, notes = rewrite_prefer_ipv4_in_guest(node, ["x"], ["y"], svcs, inv)
+    assert notes and cmds[0].startswith("pct exec 130 -- ") and "restart pihole-FTL.service" in cmds[0]
+    assert "raw.githubusercontent.com" in verify[0]
+    # by inventory name when nothing measured names it, with the unit from a measured service on that guest
+    node2 = {"title": "Caddy-proxy cannot reach Let's Encrypt over IPv6", "tool": "Shell",
+             "description": "prefer IPv4 for acme-v02.api.letsencrypt.org on the caddy-proxy guest"}
+    cmds2, _, notes2 = rewrite_prefer_ipv4_in_guest(node2, ["x"], ["y"], svcs, inv)
+    assert notes2 and cmds2[0].startswith("pct exec 120 -- ") and "restart caddy.service" in cmds2[0]
+    # a guest with NO measured unit is left alone (nothing safe to restart)
+    node3 = {"title": "Control-panel on container 111 times out on IPv6", "tool": "Shell", "description": "prefer IPv4"}
+    assert not rewrite_prefer_ipv4_in_guest(node3, ["x"], ["y"], svcs, inv)[2]
+
+
 def test_unrelated_steps_are_left_to_their_own_capabilities_or_the_model():
     for node in ({"title": "Trigger metadata refresh", "prompt_template": "POST refresh with ReplaceAllMetadata=true for each Jellyfin library."},
                  {"title": "Fix the Jellyfin TV library so its files resolve as Series", "prompt_template": "the library resolved its items as Movie"},
