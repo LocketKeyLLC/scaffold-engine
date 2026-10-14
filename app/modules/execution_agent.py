@@ -1563,6 +1563,19 @@ async def execute_next_node(
             _held = await _hand_back_for_approval(db, job_id, node, tool)
             if _held is not None:
                 return _held
+        # §17.1558 — the same hand-back for an MCP machine node the frontier must HOLD (a runner write,
+        # §17.1551; a runner read that splices an upstream output, §17.1555). The serial loop's peek
+        # (`_hands_on_peek` → is_hands_on_node) never sees a node the PARALLEL frontier pre-claimed, and
+        # this is the one chokepoint both paths reach for a claimed node (§17.1541) — without it the
+        # worker fell straight through to the MCP dispatch below, where §17.1551's defense FAILED the
+        # node instead of parking it. Live (263e920a, 2026-10-14): one refill claimed R1 (Shell → handed
+        # back → parked) and T4 (MCP run_supervised → dispatched → failed at retry 3/3) together.
+        if tool_lower == "mcp" and settings.execution_supervised_runs_enabled:
+            from app.modules import supervised_runs as _sr_mcp
+            if _sr_mcp.mcp_needs_the_pause(dict(node) if hasattr(node, "keys") else {}):
+                _held = await _hand_back_for_approval(db, job_id, node, tool)
+                if _held is not None:
+                    return _held
         if tool_lower == "shell" and settings.shell_tool_enabled:
             raise NotImplementedError(
                 "Shell tool execution requested but no backend wired. "

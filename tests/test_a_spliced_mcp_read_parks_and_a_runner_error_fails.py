@@ -143,6 +143,22 @@ async def test_a_runner_refusal_or_tool_error_fails_the_node(monkeypatch):
     assert out2["status"] == "failed" and "error" in out2["error"]
 
 
+# ── §17.1558 the parallel worker hands a held MCP node back, before the dispatch ───────────────────
+
+def test_the_claimed_node_path_hands_an_mcp_machine_node_back_before_dispatching_it():
+    """The serial peek never sees a node the parallel frontier pre-claimed; `execute_next_node` is the
+    chokepoint both paths reach (§17.1541). Live, T4 (run_supervised) was claimed alongside R1 and fell
+    through to the MCP dispatch, where §17.1551's defense FAILED it instead of parking it."""
+    import inspect
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea.execute_next_node)
+    hold = src.index("mcp_needs_the_pause(")
+    assert 'tool_lower == "mcp" and settings.execution_supervised_runs_enabled' in src[:hold + 1]
+    assert "_hand_back_for_approval(db, job_id, node, tool)" in src[hold:hold + 400]
+    assert hold < src.index("execute_mcp_node(")                       # held BEFORE it can be dispatched
+    assert hold > src.index('tool_lower == "shell" and not settings.shell_tool_enabled')   # beside the Shell hold
+
+
 @pytest.mark.asyncio
 async def test_a_real_answer_is_done_and_stored_unwrapped(monkeypatch):
     body = '[{"Name":"Movies","ItemId":"aaa"}]'
