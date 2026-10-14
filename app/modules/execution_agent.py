@@ -1526,7 +1526,7 @@ async def execute_next_node(
         # runbook prompt and is reported `runbook_only`, exactly as a Shell
         # step is, instead of being "completed" as prose.
         if tool_lower == "llm":
-            from app.modules.step_classify import step_is_hands_on, deploy_target_guest
+            from app.modules.step_classify import step_is_hands_on  # deploy_target_guest is module-level (§17.1545)
             # §17.1545 — in a deploy job (brief names a machine deploy target) a verify step checks the
             # DEPLOYED state on that machine, so it is hands-on → Shell (the runbook executor runs the
             # check) rather than an LLM task that writes the pct-exec commands as prose and is failed
@@ -1547,7 +1547,7 @@ async def execute_next_node(
         # Shell hands it back for approval below, after which pending_hands_on (brief-aware) develops
         # it and `develop.host_for` (§17.1537) delivers the files to the deploy target.
         if tool_lower == "codegen":
-            from app.modules.step_classify import step_is_hands_on, deploy_target_guest
+            from app.modules.step_classify import step_is_hands_on  # deploy_target_guest is module-level (§17.1545)
             _rb = (await db.execute(
                 text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
             if deploy_target_guest(str(_rb or "")):
