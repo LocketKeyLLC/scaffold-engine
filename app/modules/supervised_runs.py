@@ -676,6 +676,47 @@ async def decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry:
         return True
 
 
+def _mcp_cfg(node: Optional[dict]) -> dict:
+    """§17.1551 — a node's MCP tool_config, or {} when it is not an MCP node."""
+    if str((node or {}).get("tool") or "").strip().lower() != "mcp":
+        return {}
+    from app.modules.mcp_node import parse_tool_config
+    return parse_tool_config((node or {}).get("tool_config"))
+
+
+def is_mcp_write(node: Optional[dict]) -> bool:
+    """§17.1551 — an MCP node whose target is the machine-runner's WRITE tool (``run_supervised``).
+
+    Such a node CHANGES a machine, so it must not run deterministically like a read MCP node:
+    ``run_supervised`` demands a single-use ``approval`` the engine mints over the exact command
+    (engine↔runner auth), and minting that automatically for any planned node would remove the
+    operator's oversight of machine writes. Instead the node parks for approval (``_pause_for_decision``
+    frames it with ``mcp_write_runbook``), and the approved supervised path mints the approval and runs
+    it secret-safely — the same gate every hands-on write already passes. Live: Jellyfin metadata-pass
+    job 263e920a, T4, which hard-failed with ``approval Field required``."""
+    from app.modules.assist_supervised import WRITE_TOOL
+    cfg = _mcp_cfg(node)
+    args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
+    return str(cfg.get("tool") or "") == WRITE_TOOL and bool(str((args or {}).get("command") or "").strip())
+
+
+def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], brief: Any) -> Optional[str]:
+    """§17.1551 — the ``## Run this`` runbook for a runner-write MCP node: its command with the
+    ${upstream.*}/${brief.*} placeholders rendered, wrapped in a fence so ``frame_run`` offers it like
+    any hands-on block and ``resolve_run`` runs it through the approval-gated, secret-safe channel.
+
+    A secret belongs in the command as a machine-side read (``KEY=$(…)``) or a ``$NAME`` reference, never
+    rendered in from an upstream output — a rendered secret would be inlined into the runner's sudo log
+    (§17.1430)."""
+    if not is_mcp_write(node):
+        return None
+    from app.modules.mcp_node import parse_tool_config, render_args
+    cfg = parse_tool_config((node or {}).get("tool_config"))
+    rendered = render_args(cfg.get("args") or {}, upstream_outputs or {}, brief or {})
+    cmd = str((rendered or {}).get("command") or "").strip() if isinstance(rendered, dict) else ""
+    return "## Run this\n```bash\n" + cmd + "\n```" if cmd else None
+
+
 async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""
@@ -690,7 +731,7 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
-                   n.retry_count, n.last_verification_reason, n.execution_order, n.output_text
+                   n.retry_count, n.last_verification_reason, n.execution_order, n.output_text, n.tool_config
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending'
               AND NOT EXISTS (
@@ -724,6 +765,11 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
             continue
         if _ops.is_wholly_operators(node):
             continue
+        # §17.1551 — a runner-write MCP node changes a machine, so it parks for approval like any
+        # hands-on step rather than running deterministically with no engine↔runner approval.
+        if is_mcp_write(node):
+            node["hands_on_reason"] = "mcp:runner-write"
+            return node
         _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
         on, why = step_is_hands_on(node, develops_codegen=_dc)
         if on and not why.startswith("tool:human"):
@@ -738,6 +784,10 @@ def is_hands_on_node(node: dict, brief: str = "") -> bool:
     # (no deploy target) is not. `brief` is threaded from the job so the peek can tell them apart.
     from app.modules.step_classify import step_is_hands_on, deploy_target_guest
     _n = dict(node) if hasattr(node, "keys") else {}
+    # §17.1551 — a runner-write MCP node changes a machine, so the frontier must NOT run it
+    # deterministically: it is hands-on and parks for approval (the peek/claim both read this).
+    if is_mcp_write(_n):
+        return True
     _dc = str(_n.get("tool") or "").strip().lower() == "codegen" and bool(deploy_target_guest(brief))
     on, why = step_is_hands_on(_n, develops_codegen=_dc)
     return bool(on) and not why.startswith("tool:human")
