@@ -267,7 +267,7 @@ def deploy_target_guest(brief: str) -> str:
 
 
 def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabled: bool | None = None,
-                     develops_codegen: bool = False) -> tuple[bool, str]:
+                     develops_codegen: bool = False, deploy_job: bool = False) -> tuple[bool, str]:
     """``(hands_on, reason)`` for one DAG node row (``tool``, ``node_type``,
     ``title``, ``description``, ``prompt_template`` — any may be missing).
 
@@ -330,6 +330,17 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
             obs = _LEADING_OBSERVE_RE.match(title)
             if svc and obs and _MACHINE_CRITERION_RE.search(text):
                 return True, f"observe:{obs.group('verb').lower()} service:{svc.group(1).lower()}"
+            # §17.1545 — in a DEPLOY job (the brief names a machine deploy target), a step whose title
+            # OPENS with an observation verb is a check of the DEPLOYED state on that machine, even when
+            # its terse title names no service the engine knows ("Verify media-request", "Verify
+            # components are still imported/rendered/wired"). As an LLM task it cannot reach the
+            # container: it writes the `pct exec …` commands as prose and is failed "INSTRUCTIONS, not
+            # work" (live ae721781, T17-T18v2, each after 3 retries). Hands-on → Shell, where the runbook
+            # executor GENERATES and RUNS the check, exactly as the planner's own Shell verify nodes do
+            # (T22-T24 in the same job). Gated on deploy_job so a reasoning verify in a non-deploy job
+            # (e.g. "Verify the summary is coherent") still runs as the model task it is.
+            if obs and deploy_job:
+                return True, f"observe:{obs.group('verb').lower()} deploy-verify"
             # §17.1474 — and a check of the WHOLE build names no one service. Live, T37 "Validate entire build"
             # (tool LLM, a checkpoint) was hands-on only while a single-guest template wrongly fit it; once
             # §17.1473 made it host-side it ran as a model task, answered from the upstream outputs, ran nothing,
