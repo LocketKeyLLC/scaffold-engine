@@ -33,6 +33,7 @@ import base64
 import logging
 import os
 import re
+from itertools import zip_longest
 import shlex
 from dataclasses import dataclass
 from typing import Optional
@@ -44,7 +45,7 @@ ROUNDS = int(os.environ.get("DEVELOP_ROUNDS", "8"))
 #: where the delivery stages files on the host before pushing them into the guest
 STAGE_ROOT = "/tmp/scaffold-dev"
 
-_SKIP_RE = re.compile(r"/node_modules/|/\.git/|\.bak(?:\.|$)|\.log$|/package-lock\.json$|\.tgz$")
+_SKIP_RE = re.compile(r"/node_modules/|/\.git/|/(?:venv|\.venv|site-packages|__pycache__|dist|build)/|\.bak(?:\.|$)|\.log$|/package-lock\.json$|\.tgz$")
 _PATH_IN_TEXT_RE = re.compile(r"(?<![\w.-])(/(?:opt|srv|var/www|etc/systemd/system)/[A-Za-z0-9_./-]+)")
 #: a check the step itself names (`pct exec 111 -- curl -s http://…`) -- read-only by construction
 _CHECK_RE = re.compile(r"`((?:pct exec \d+ --|qm guest exec \d+ --)\s*[^`]+)`")
@@ -62,6 +63,11 @@ class Host:
     user: str = ""
     group: str = ""
     name: str = ""
+    # §17.1544 — sibling app directories the brief names (e.g. a Vite UI at
+    # /opt/control-panel-ui beside the backend's WorkingDirectory /opt/control-panel-backend). The
+    # app spans more than the unit's one WorkingDirectory; read_workspace reads these too and
+    # allowed_path permits writes into them, so a UI restyle is not misplaced in the backend.
+    extra_dirs: tuple = ()
 
 
 def _text(node: Optional[dict]) -> str:
@@ -142,13 +148,31 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
     # router (DHCP)…"): its title names VM 106, the Palworld service there has a workdir, so the netplan
     # change was "developed" in the game server's directory and refused for eight rounds.
     _wd = str(pick.workdir).rstrip("/")
+    # §17.1544 — sibling app directories the brief/step names beside the service's WorkingDirectory:
+    # the app can span more than the unit's one dir (a Vite UI at /opt/control-panel-ui beside the
+    # backend's /opt/control-panel-backend). Include a same-parent dir whose basename shares the
+    # workdir's prefix (control-panel-*), so the UI code is read and its files may be written —
+    # otherwise a UI change is confined to the backend workdir and misplaced there. Computed BEFORE
+    # the §17.1465 guard so a step whose only named path is the sibling UI dir counts as in-app.
+    _parent, _base = _wd.rsplit("/", 1) if "/" in _wd else ("", _wd)
+    _prefix = _base.rsplit("-", 1)[0] if "-" in _base else _base
+    _hay = str(brief or "") + " " + text
+    extra = tuple(d for d in dict.fromkeys(re.findall(r"/opt/[A-Za-z0-9][\w-]*", _hay))
+                  if d.rstrip("/") != _wd and d.rsplit("/", 1)[0] == _parent
+                  and d.rsplit("/", 1)[-1].startswith(_prefix)
+                  and not re.search(r"venv|node_modules|cache|\.git|dist|build", d))
+    # §17.1465 — a step whose named files all lie outside the app's directories is configuring the
+    # GUEST, not building the service. A path under the WorkingDirectory OR a sibling app dir (§1544)
+    # is in-app; anything else (a netplan under /etc, another service's /opt) is not.
+    _in_app = (_wd, *(d.rstrip("/") for d in extra))
     named = [p for p in re.findall(r"(?<![\w.~-])(/(?:etc|usr|var|lib|boot|root|home|srv|opt)/[\w./-]+)", text)
              if not p.startswith("/etc/systemd/system/")]
-    if named and not any(p.startswith(_wd + "/") or p == _wd for p in named):
+    if named and not any(p.startswith(d + "/") or p == d for p in named for d in _in_app):
         return None
     return Host(guest=str(pick.guest), vm=bool(getattr(pick, "vm", False)), workdir=str(pick.workdir).rstrip("/"),
                 unit=str(pick.unit), user=str(getattr(pick, "user", "") or ""),
-                group=str(getattr(pick, "group", "") or ""), name=str(getattr(pick, "name", "") or ""))
+                group=str(getattr(pick, "group", "") or ""), name=str(getattr(pick, "name", "") or ""),
+                extra_dirs=extra)
 
 
 def allowed_path(path: str, host: Host, node: Optional[dict]) -> bool:
@@ -158,6 +182,8 @@ def allowed_path(path: str, host: Host, node: Optional[dict]) -> bool:
     if not p.startswith("/") or "/../" in p or p.endswith("/") or "\x00" in p:
         return False
     if p.startswith(host.workdir + "/") or p == f"/etc/systemd/system/{host.unit}":
+        return True
+    if any(p.startswith(d.rstrip("/") + "/") for d in host.extra_dirs):  # §17.1544 — a sibling app dir
         return True
     for named in _PATH_IN_TEXT_RE.findall(_text(node)):
         base = named.rstrip("/.")
@@ -171,11 +197,19 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
     """The service directory's code and config as it is NOW, read through the read-only channel."""
     from app.modules import rehearsal
     from app.modules import service_truth as st
-    ok, listing = await st._probe(spec, rehearsal.listing_command(st.in_guest(host.guest, host.vm), host.workdir))
-    paths = [p.strip() for p in (listing or "").split("\n")
-             if p.strip().startswith(host.workdir + "/") and not p.strip().endswith("/")] if ok else []
     out: dict[str, str] = {}
-    for p in [p for p in paths if not _SKIP_RE.search(p)][:rehearsal.MAX_SEED_FILES]:
+    per_dir: list[list[str]] = []
+    for d in (host.workdir, *host.extra_dirs):  # §17.1544 — the WorkingDirectory AND sibling app dirs
+        d = d.rstrip("/")
+        ok, listing = await st._probe(spec, rehearsal.listing_command(st.in_guest(host.guest, host.vm), d))
+        if ok:
+            per_dir.append([p.strip() for p in (listing or "").split("\n")
+                            if p.strip().startswith(d + "/") and not p.strip().endswith("/")
+                            and not _SKIP_RE.search(p.strip())])
+    # §17.1544 — round-robin across the dirs so the MAX_SEED_FILES budget is not spent entirely on the
+    # first (backend) dir, leaving a sibling UI dir unread; each dir is represented.
+    paths = [p for group in zip_longest(*per_dir) for p in group if p]
+    for p in list(dict.fromkeys(paths))[:rehearsal.MAX_SEED_FILES]:
         body = await rehearsal._cat(spec, host.guest, host.vm, p)
         if body is not None and len(body) <= rehearsal.MAX_SEED_BYTES:
             out[p] = body
