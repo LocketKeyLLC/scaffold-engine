@@ -51,6 +51,51 @@ def test_upstream_sections_are_ordered_and_stamped_by_when_they_finished():
     assert "FINISHED" not in plain and plain.index("### T7 ") < plain.index("### T7v2")
 
 
+RECORD = """## Run this
+```bash
+for item in {"result": "/bin/sh: 1: Syntax error"}; do curl -s -H 'X-Emby-Token: ${T1}' "http://192.168.1.20:8096/Items/$item" | jq '.'; done
+```
+
+## Executed on pve-runner (supervised, operator-approved)
+$ pct exec 101 -- sh -c 'python3 -c "import sys,json
+BASE='\\''http://127.0.0.1:8096'\\''
+def api(p):
+    return json.loads(urllib.request.urlopen(p).read())
+print(1)" "<JELLYFIN_API_KEY>" "report"'
+LIBRARY Shows type=tvshows paths=/media/tv
+  top level: Series x6
+Shows/Episode: 902, missing name 0, overview 0, poster 0
+LACKING: Season Scrubs / Season 4 -- no overview
+RESULT: 20 item(s) still lack a name, overview or poster
+
+## Verify results
+$ pct exec 101 -- curl -s -o /dev/null -w "jellyfin HTTP %{http_code}" http://127.0.0.1:8096/System/Info/Public
+jellyfin HTTP 200
+"""
+
+
+def test_a_consumer_gets_what_the_step_printed_not_its_command_text():
+    """§17.1567 — live, T8 saw each census OPEN with `for item in …; do curl … | jq` and a 40-line python
+    payload, mirrored them as 'commands to run', and the census table sat in the truncated middle."""
+    r = ea._result_of(RECORD)
+    assert "## Results (what the step's commands printed)" in r
+    assert "Shows/Episode: 902, missing name 0, overview 0, poster 0" in r and "RESULT: 20 item(s)" in r
+    assert "jellyfin HTTP 200" in r and "## Verify results" in r
+    assert "for item in" not in r and "python3 -c" not in r and "def api" not in r and "$ pct exec" not in r
+    assert "## Run this" not in r
+    # an ordinary LLM output is passed through untouched
+    assert ea._result_of("## Report\nAll good.") == "## Report\nAll good."
+    block = ea._format_upstream_block({"T7": (RECORD, 0.9)}, "T8")
+    assert "python3 -c" not in block and "RESULT: 20 item(s)" in block
+
+
+def test_the_optimizer_is_skipped_for_a_step_that_formats_upstream():
+    import inspect
+    src = inspect.getsource(ea.execute_next_node)
+    i = src.index("opt_result = await optimize_prompt(")
+    assert "not formats_what_came_before(" in src[i - 600:i]
+
+
 def test_the_upstream_block_says_the_results_already_happened():
     block = ea._format_upstream_block({"T7": ("Shows/Episode: 902, missing overview 0, poster 279\nRESULT: 281 item(s)", 0.9)}, "T8")
     assert "ALREADY RAN before this one" in block and "a RESULT the machine produced, not a plan" in block

@@ -843,11 +843,57 @@ async def _fetch_upstream_finished(db, job_id: str, depends_on: list[str]) -> di
     from a name."""
     if not depends_on:
         return {}
-    rows = await db.execute(
-        text("SELECT node_key, completed_at FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
-             "AND status = 'done'"),
-        {"jid": job_id, "keys": depends_on})
-    return {r.node_key: r.completed_at for r in rows.fetchall() if r.completed_at is not None}
+    try:
+        rows = await db.execute(
+            text("SELECT node_key, completed_at FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
+                 "AND status = 'done'"),
+            {"jid": job_id, "keys": depends_on})
+        return {r.node_key: r.completed_at for r in rows.fetchall() if r.completed_at is not None}
+    except Exception as exc:                 # an annotation must never sink the step it annotates
+        logger.warning("upstream_finished_lookup_failed job=%s err=%r", job_id, exc)
+        return {}
+
+
+def _balanced_shell(s: str) -> bool:
+    """True when ``s`` closes every quote it opens (so a multi-line `$ command` has ended)."""
+    import shlex
+    try:
+        shlex.split(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _result_of(output_text: str) -> str:
+    """§17.1567 — what a supervised step PRINTED, for the steps that consume it.
+
+    A supervised node's ``output_text`` is its record: the drafted runbook (`## Run this` + a fenced
+    command block), then `## Executed on <runner>` with each `$ command` followed by its output, then
+    `## Verify results`. Downstream that is the wrong face: live (T8, job 263e920a) the report step saw
+    three census sections each OPENING with the planner's `for item in …; do curl … | jq …` block and
+    a 40-line `python3 -c` payload, mirrored them ("Commands to run on pve-runner…"), and the census
+    table itself sat in the part the size cap truncated. The record stays whole on the node; the
+    consumer gets the outputs — the runbook dropped, every `$ command` (quote-balanced across lines)
+    dropped, the printed results and verify outputs kept."""
+    text_value = str(output_text or "")
+    if "## Executed on" not in text_value:
+        return text_value
+    _head, _, rest = text_value.partition("## Executed on")
+    lines = rest.split("\n")
+    out: list[str] = ["## Results (what the step's commands printed)"]
+    i = 1                                           # skip the remainder of the `## Executed on …` header line
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("$ "):
+            buf = ln[2:]
+            while not _balanced_shell(buf) and i + 1 < len(lines):
+                i += 1
+                buf += "\n" + lines[i]
+            i += 1
+            continue
+        out.append(ln)
+        i += 1
+    return "\n".join(out).rstrip() + "\n"
 
 
 def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None) -> str:
@@ -878,7 +924,7 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
             txt, conf = val
         else:
             txt, conf = val, None
-        texts[nk] = txt
+        texts[nk] = _result_of(txt)            # §17.1567 — the outputs, not the record's command text
         confs[nk] = conf
 
     total_chars = sum(len(v) for v in texts.values())
@@ -1884,7 +1930,10 @@ async def execute_next_node(
         # §17.1483 — and never for a step given the inventory: live, T38's task was rewritten into "Document that
         # /etc/pve/firewall/groups/ does not exist and security groups still need creation" — an instruction that
         # outranked the inventory below it (every guest's firewall on, its own rules file).
-        if not skip_optimize and settings.execution_optimize_enabled and not _inventory_text:
+        # §17.1567 — nor for a step that FORMATS upstream results: the optimizer rewrote T8's task and dropped
+        # the engine's own "formats what came before" / "decide and state" instructions with it.
+        if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text
+                and not formats_what_came_before(dict(node) if hasattr(node, "keys") else {})):
             try:
                 opt_result = await optimize_prompt(
                     prompt=_task_prompt,  # §17.1042 — the task only
