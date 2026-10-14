@@ -833,9 +833,76 @@ async def _fetch_upstream_outputs(
     }
 
 
-def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
+async def _fetch_upstream_finished(db, job_id: str, depends_on: list[str]) -> dict[str, object]:
+    """§17.1566 — when each upstream node finished (``completed_at``), by node_key.
+
+    Live (job 263e920a, T8): three census siblings T7/T7v2/T7v3 fed the final report. T7v2 and T7v3
+    had last run BEFORE the library rebuild (902 Movie rows), T7 after it (Series/Season/Episode, the
+    real state) — and the report called T7v3 "the most recent pass" by its key, concluding 902 items
+    still lacked metadata. A section's recency is a fact the engine holds; the model must not infer it
+    from a name."""
+    if not depends_on:
+        return {}
+    try:
+        rows = await db.execute(
+            text("SELECT node_key, completed_at FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
+                 "AND status = 'done'"),
+            {"jid": job_id, "keys": depends_on})
+        return {r.node_key: r.completed_at for r in rows.fetchall() if r.completed_at is not None}
+    except Exception as exc:                 # an annotation must never sink the step it annotates
+        logger.warning("upstream_finished_lookup_failed job=%s err=%r", job_id, exc)
+        return {}
+
+
+def _balanced_shell(s: str) -> bool:
+    """True when ``s`` closes every quote it opens (so a multi-line `$ command` has ended)."""
+    import shlex
+    try:
+        shlex.split(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _result_of(output_text: str) -> str:
+    """§17.1567 — what a supervised step PRINTED, for the steps that consume it.
+
+    A supervised node's ``output_text`` is its record: the drafted runbook (`## Run this` + a fenced
+    command block), then `## Executed on <runner>` with each `$ command` followed by its output, then
+    `## Verify results`. Downstream that is the wrong face: live (T8, job 263e920a) the report step saw
+    three census sections each OPENING with the planner's `for item in …; do curl … | jq …` block and
+    a 40-line `python3 -c` payload, mirrored them ("Commands to run on pve-runner…"), and the census
+    table itself sat in the part the size cap truncated. The record stays whole on the node; the
+    consumer gets the outputs — the runbook dropped, every `$ command` (quote-balanced across lines)
+    dropped, the printed results and verify outputs kept."""
+    text_value = str(output_text or "")
+    if "## Executed on" not in text_value:
+        return text_value
+    _head, _, rest = text_value.partition("## Executed on")
+    lines = rest.split("\n")
+    out: list[str] = ["## Results (what the step's commands printed)"]
+    i = 1                                           # skip the remainder of the `## Executed on …` header line
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("$ "):
+            buf = ln[2:]
+            while not _balanced_shell(buf) and i + 1 < len(lines):
+                i += 1
+                buf += "\n" + lines[i]
+            i += 1
+            continue
+        out.append(ln)
+        i += 1
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
+
+    §17.1566 — ``finished`` (``{node_key: completed_at}``) orders the sections by when they finished,
+    oldest first, stamps each with its time, and says that where two disagree the LATER one is the
+    current state — so a report step reads recency off the engine's facts, not off a node's name.
 
     - Annotates each section header with the upstream node's verifier
       confidence (omitted for NULL / un-verified nodes).
@@ -857,7 +924,7 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
             txt, conf = val
         else:
             txt, conf = val, None
-        texts[nk] = txt
+        texts[nk] = _result_of(txt)            # §17.1567 — the outputs, not the record's command text
         confs[nk] = conf
 
     total_chars = sum(len(v) for v in texts.values())
@@ -894,12 +961,27 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
         )
 
     parts = []
-    for nk in texts:
+    fin = finished or {}
+    # §17.1566 — oldest first, so the LAST section is the latest state; a node with no time keeps plan order at the end.
+    order = sorted(texts, key=lambda k: (fin.get(k) is None, fin.get(k) or 0, list(texts).index(k))) if fin else list(texts)
+    for nk in order:
         c = confs[nk]
         suffix = f" (confidence: {c:.2f})" if c is not None else ""
+        when = fin.get(nk)
+        if when is not None:
+            try:
+                suffix += f" (finished {when.strftime('%Y-%m-%d %H:%M')} UTC)"
+            except Exception:
+                suffix += f" (finished {when})"
         parts.append(f"### {nk}{suffix}\n{texts[nk]}")
+    ordered_note = (" They are listed in the order they FINISHED, oldest first; where two disagree, the later one "
+                    "is the current state and the earlier one is history." if fin else "")
     return (
         "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
+        # §17.1565 — said plainly, because live (T8, job 263e920a) a report step read these as a plan still to be
+        # carried out, doubted that the refresh had happened, and wrote the commands for someone to run it.
+        "These steps ALREADY RAN before this one, in plan order. Each section below is a RESULT the machine "
+        "produced, not a plan; this step runs nothing itself." + ordered_note + "\n\n"
         + "\n\n".join(parts)
         + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
     )
@@ -1023,9 +1105,44 @@ def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> s
     non-empty, a "Reviewer feedback" block is prepended (autonomous-only) so a
     retry sees the prior rejection instead of re-emitting the identical output.
     """
-    body = build_base_prompt(node, brief, environment)
+    body = build_base_prompt(node, brief, environment, autonomous=True)   # §17.1564 — a run cannot ask
+    body += formats_what_came_before(node)                                 # §17.1565
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
+
+
+#: §17.1565 — a step whose work is to shape what earlier steps produced: a report, a summary, a list.
+_FORMATS_UPSTREAM_RE = re.compile(
+    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate)\b", re.I)
+
+
+def formats_what_came_before(node: dict) -> str:
+    """§17.1565 — the instruction for a report/format step that CONSUMES upstream results.
+
+    Live (job 263e920a, T8 "Produce missing metadata report. Format the verification results into a
+    human-readable report. This is the final deliverable."): with the brief's goal ("run a full
+    metadata and image refresh … verify … report") in its context, the step took the GOAL as its
+    task — "## Node capability mismatch … Required operator actions: 1. read the API key … 2. trigger
+    the refresh …" — six commands for a machine the engine can reach, and called the census it was
+    handed a "pre-refresh baseline". §17.1259 refused it as instructions-not-work, three times, and
+    the job blocked with the report's every input in hand. The brief says what the JOB does; this
+    step's inputs are the upstream results, which already happened."""
+    n = node or {}
+    deps = n.get("depends_on") or []
+    if not deps or str(n.get("tool") or "LLM").strip().lower() not in ("llm", ""):
+        return ""
+    text = " ".join(str(n.get(k) or "") for k in ("title", "prompt_template", "description"))
+    if not _FORMATS_UPSTREAM_RE.search(text):
+        return ""
+    return (
+        "\n\nTHIS STEP FORMATS WHAT CAME BEFORE. Its inputs are the upstream results above, from steps that "
+        "already ran; the project goal is what the whole JOB did, not what this step must now do. Produce the "
+        "deliverable FROM those results — the report, the list, the verdict, with the real names and numbers "
+        "they carry. Do not write commands for anyone to run, do not restate the job's goals as actions to "
+        "perform, and do not doubt that the upstream steps ran: a listed output is a result. If an upstream "
+        "result is missing or contradicts another, say so in one line inside the deliverable — and still "
+        "produce it."
+    )
 
 # §17.299 — `_format_reviewer_feedback` lives in `execution_retry` so the
 # audit's hot-path-file convention is met. Re-import keeps the original
@@ -1563,6 +1680,19 @@ async def execute_next_node(
             _held = await _hand_back_for_approval(db, job_id, node, tool)
             if _held is not None:
                 return _held
+        # §17.1558 — the same hand-back for an MCP machine node the frontier must HOLD (a runner write,
+        # §17.1551; a runner read that splices an upstream output, §17.1555). The serial loop's peek
+        # (`_hands_on_peek` → is_hands_on_node) never sees a node the PARALLEL frontier pre-claimed, and
+        # this is the one chokepoint both paths reach for a claimed node (§17.1541) — without it the
+        # worker fell straight through to the MCP dispatch below, where §17.1551's defense FAILED the
+        # node instead of parking it. Live (263e920a, 2026-10-14): one refill claimed R1 (Shell → handed
+        # back → parked) and T4 (MCP run_supervised → dispatched → failed at retry 3/3) together.
+        if tool_lower == "mcp" and settings.execution_supervised_runs_enabled:
+            from app.modules import supervised_runs as _sr_mcp
+            if _sr_mcp.mcp_needs_the_pause(dict(node) if hasattr(node, "keys") else {}):
+                _held = await _hand_back_for_approval(db, job_id, node, tool)
+                if _held is not None:
+                    return _held
         if tool_lower == "shell" and settings.shell_tool_enabled:
             raise NotImplementedError(
                 "Shell tool execution requested but no backend wired. "
@@ -1612,6 +1742,8 @@ async def execute_next_node(
                 await _fetch_upstream_outputs(db, job_id, depends_on)
                 if depends_on else {}
             )
+            # §17.1566 — when each finished, so the block can say which result is current
+            _upstream_finished = (await _fetch_upstream_finished(db, job_id, depends_on) if depends_on else {})
             # §17.1039 — values the upstream reports left unsupported; they are
             # not credited by the upstream text they sit in (§17.1028).
             _upstream_flagged = await fetch_upstream_flagged(db, job_id, depends_on)
@@ -1786,7 +1918,7 @@ async def execute_next_node(
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
-        _upstream_block = _format_upstream_block(upstream_outputs, node_key)
+        _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished)
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 
@@ -1798,7 +1930,10 @@ async def execute_next_node(
         # §17.1483 — and never for a step given the inventory: live, T38's task was rewritten into "Document that
         # /etc/pve/firewall/groups/ does not exist and security groups still need creation" — an instruction that
         # outranked the inventory below it (every guest's firewall on, its own rules file).
-        if not skip_optimize and settings.execution_optimize_enabled and not _inventory_text:
+        # §17.1567 — nor for a step that FORMATS upstream results: the optimizer rewrote T8's task and dropped
+        # the engine's own "formats what came before" / "decide and state" instructions with it.
+        if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text
+                and not formats_what_came_before(dict(node) if hasattr(node, "keys") else {})):
             try:
                 opt_result = await optimize_prompt(
                     prompt=_task_prompt,  # §17.1042 — the task only
@@ -2639,13 +2774,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             brief = _brief_text(job)
             brief_full = (job or {}).get("refined_brief") or {}
             upstream = await _fetch_upstream_outputs(db, job_id, target.get("depends_on") or [])
+            upstream_fin = await _fetch_upstream_finished(db, job_id, target.get("depends_on") or [])   # §17.1566
     except Exception as exc:
         # The LOOK-UP failing must not sink the run — but it is logged as an
         # error, not a debug line: a silent miss here means the model decides
         # for the operator (feedback: fail-soft hides the first-run defect).
         logger.error("decision_pause_check_failed job=%s err=%s", job_id, exc)
         return None
-    up_block = _format_upstream_block(upstream, target.get("node_key") or "") if upstream else ""
+    up_block = _format_upstream_block(upstream, target.get("node_key") or "", finished=upstream_fin) if upstream else ""
     if op_node is not None:
         # §17.1464 — what the engine learned, and the operator's other steps in the same place (one trip)
         from app.modules.runbook_inputs import job_environment

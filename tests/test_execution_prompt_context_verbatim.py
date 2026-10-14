@@ -32,8 +32,8 @@ async def _run(optimize_enabled: bool):
     job = AsyncMock(return_value={"id": "job-1", "status": "running",
                                   "refined_brief": {"description": "Project P", "goals": ["G"]}})
     node = AsyncMock(return_value={
-        "id": "node-2", "node_key": "T2", "title": "Write the report", "tool": "LLM",
-        "prompt_template": "Write the report from T1's findings.", "domain": None,
+        "id": "node-2", "node_key": "T2", "title": "Write the analysis", "tool": "LLM",  # not a format step: §17.1567 skips the optimizer for those
+        "prompt_template": "Write the analysis from T1's findings.", "domain": None,
         "depends_on": ["T1"], "assigned_model": None, "retry_count": 0,
         "last_verification_reason": None})
     captured = {}
@@ -66,7 +66,7 @@ async def test_the_optimizer_sees_only_the_task_and_context_is_reattached_verbat
     prompt, opt, set_status = await _run(optimize_enabled=True)
     sent = opt.call_args.kwargs["prompt"]
     assert "UPSTREAM-FINDINGS-ALPHA" not in sent and "GROUND-TRUTH-BETA" not in sent
-    assert "Write the report from T1's findings." in sent
+    assert "Write the analysis from T1's findings." in sent
     assert prompt.startswith("## Upstream Node Outputs")
     assert "UPSTREAM-FINDINGS-ALPHA" in prompt
     assert prompt.index("UPSTREAM-FINDINGS-ALPHA") < prompt.index("OPTIMIZED-TASK-BODY") < prompt.index("GROUND-TRUTH-BETA")
@@ -78,4 +78,4 @@ async def test_with_the_optimizer_off_the_raw_assembly_is_unchanged():
     prompt, opt, _ = await _run(optimize_enabled=False)
     assert not opt.called
     assert prompt.startswith("## Upstream Node Outputs")
-    assert "Write the report from T1's findings." in prompt and prompt.rstrip().endswith("GROUND-TRUTH-BETA")
+    assert "Write the analysis from T1's findings." in prompt and prompt.rstrip().endswith("GROUND-TRUTH-BETA")

@@ -671,8 +671,13 @@ def _brief_essentials(brief: dict) -> str:
     return "\n\n".join(parts)
 
 
-def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
+def build_base_prompt(node: dict, brief: dict, environment: dict | None = None, *,
+                      autonomous: bool = False) -> str:
     """The bare task prompt, before grounding or upstream injection.
+
+    §17.1564 — ``autonomous``: the prompt is for the executor (auto mode / a runbook draft), where
+    no person answers: an undecided brief question becomes DECIDE AND STATE, not ASK BEFORE YOU
+    BUILD. The assist guide (a walkthrough read by the operator) keeps asking.
 
     §17.1250 — ``environment`` is the operator's ledger (``{"profile": …}``). It
     was invisible here, so it was invisible to AUTO mode entirely: every consumer
@@ -750,10 +755,13 @@ def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) 
     # here, not to the plan. This is the one place every step's guide and runbook
     # is assembled, so a step that depends on something undecided opens by asking
     # it — the same way a run pause asks for the values it needs (§17.1187).
+    # §17.1564 — but only where someone can ANSWER. In an autonomous run the step decides the
+    # conservative way and states it; live, T8 asked the brief's own (a)/(b)/(c) question four rounds
+    # running and the job blocked on a deliverable whose inputs were all in hand.
     try:
-        from app.modules.unanswered import ask_first_block, questions_for_step
-        tail += ask_first_block(questions_for_step(
-            title, brief or {}, description=str(node.get("description") or "")))
+        from app.modules.unanswered import ask_first_block, decide_and_state_block, questions_for_step
+        _qs = questions_for_step(title, brief or {}, description=str(node.get("description") or ""))
+        tail += decide_and_state_block(_qs) if autonomous else ask_first_block(_qs)
     except Exception:                      # a prompt must never fail to assemble
         pass
     if template:

@@ -700,15 +700,45 @@ def is_mcp_write(node: Optional[dict]) -> bool:
     return str(cfg.get("tool") or "") == WRITE_TOOL and bool(str((args or {}).get("command") or "").strip())
 
 
+#: §17.1555 — a shell command that splices another node's output in: `${upstream.T3}`, `${brief.x}`,
+#: or the bare `${T3}` the planner writes (§17.1557 renders it).
+_UPSTREAM_SPLICE_RE = re.compile(r"\$\{\s*(?:(?:upstream|brief)\.[A-Za-z0-9_.\-]+|T\d+(?:v\d+)?)\s*\}")
+
+
+def mcp_splices_an_upstream(node: Optional[dict]) -> bool:
+    """§17.1555 — a runner-READ MCP node (``run_readonly``) whose command splices another node's
+    output into shell text.
+
+    That is not a deterministic call: the spliced text is whatever the upstream node happened to
+    print (live, job 263e920a: T3's `${T2}` rendered to NOTHING, so `for lib in ; do` ran as
+    `/bin/sh: 1: Syntax error`; the three verify steps spliced THAT error in as `${T3}`), it may be a
+    secret (T1 read the API key, and `${T1}` would have inlined it into a command line), and the
+    read-only channel cannot run the shape such a step really needs (an in-guest `python3` over the
+    API). So it parks for approval like a write: ``frame_run`` sees it — the deterministic
+    capabilities (§17.1554's census) replace it, the gates judge what is left — and the operator
+    decides. A read with no splice (``curl -s http://…/Items``) is still a plain deterministic call."""
+    cfg = _mcp_cfg(node)
+    args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
+    cmd = str((args or {}).get("command") or "")
+    return str(cfg.get("tool") or "") == "run_readonly" and bool(_UPSTREAM_SPLICE_RE.search(cmd))
+
+
+def mcp_needs_the_pause(node: Optional[dict]) -> bool:
+    """§17.1551/§17.1555 — an MCP node the frontier must HOLD for the operator rather than call:
+    a runner write, or a runner read that splices an upstream output into its command."""
+    return is_mcp_write(node) or mcp_splices_an_upstream(node)
+
+
 def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], brief: Any) -> Optional[str]:
     """§17.1551 — the ``## Run this`` runbook for a runner-write MCP node: its command with the
     ${upstream.*}/${brief.*} placeholders rendered, wrapped in a fence so ``frame_run`` offers it like
     any hands-on block and ``resolve_run`` runs it through the approval-gated, secret-safe channel.
+    §17.1555 — and for a runner-read node that splices an upstream output (``mcp_needs_the_pause``).
 
     A secret belongs in the command as a machine-side read (``KEY=$(…)``) or a ``$NAME`` reference, never
     rendered in from an upstream output — a rendered secret would be inlined into the runner's sudo log
     (§17.1430)."""
-    if not is_mcp_write(node):
+    if not mcp_needs_the_pause(node):
         return None
     from app.modules.mcp_node import parse_tool_config, render_args
     cfg = parse_tool_config((node or {}).get("tool_config"))
@@ -767,8 +797,9 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
             continue
         # §17.1551 — a runner-write MCP node changes a machine, so it parks for approval like any
         # hands-on step rather than running deterministically with no engine↔runner approval.
-        if is_mcp_write(node):
-            node["hands_on_reason"] = "mcp:runner-write"
+        # §17.1555 — so does a runner-read whose command splices another node's output in.
+        if mcp_needs_the_pause(node):
+            node["hands_on_reason"] = "mcp:runner-write" if is_mcp_write(node) else "mcp:spliced-read"
             return node
         _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
         on, why = step_is_hands_on(node, develops_codegen=_dc)
@@ -786,7 +817,8 @@ def is_hands_on_node(node: dict, brief: str = "") -> bool:
     _n = dict(node) if hasattr(node, "keys") else {}
     # §17.1551 — a runner-write MCP node changes a machine, so the frontier must NOT run it
     # deterministically: it is hands-on and parks for approval (the peek/claim both read this).
-    if is_mcp_write(_n):
+    # §17.1555 — likewise a runner-read that splices an upstream output into its command.
+    if mcp_needs_the_pause(_n):
         return True
     _dc = str(_n.get("tool") or "").strip().lower() == "codegen" and bool(deploy_target_guest(brief))
     on, why = step_is_hands_on(_n, develops_codegen=_dc)
@@ -3500,6 +3532,40 @@ def _subject_of(title: str) -> str:
     return " ".join(keep[:8])
 
 
+#: §17.1561 — a step that asks a HOW/WHY question about a symptom: "research how Jellyfin comes to
+#: resolve TV episodes as movies and how others fix it", "find out why …", "look up how people solve …".
+_TROUBLESHOOTS = re.compile(
+    r"(?i)\b(?:research|look\s+up|find\s+out|investigate|work\s+out)\s+(?:how|why|what)\b"
+    r"|\bhow\s+(?:do\s+|did\s+)?(?:others|people|users|admins)\s+(?:fix|solve|address|handle|resolve|deal\s+with)\b"
+    r"|\bwhy\s+(?:does|do|is|are|did|would|has|have)\b")
+
+
+def troubleshooting_question(node: dict) -> str:
+    """§17.1561 — the HOW/WHY question a step asks about a symptom, or "".
+
+    Live (job 263e920a, FIX1): the operator's direction was "have the engine research how this current
+    issue is addressed by others and apply it", and the step said so in words — "Research how Jellyfin
+    comes to resolve TV episodes as Movie items in a tvshows library and how others fix it" — yet the
+    drafter researched nothing: `research_for_step` fired only on a CURRENCY cue (latest / still works),
+    so the draft was written from the model's memory and repeated the refresh that had already failed.
+    A step that asks how or why is a step whose content depends on what others found; the question is
+    the sentence that asks it, with the step's own nouns kept, and the lookup is the same
+    `research_one` the diagnosis uses."""
+    # each field is its own sentence, so a title never leaks into the question drawn from the body
+    body = ". ".join(s.strip() for s in (str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")) if s.strip())
+    m = _TROUBLESHOOTS.search(body)
+    if not m:
+        return ""
+    # the sentence the cue sits in, up to the next sentence end or a "then …" tail (the DO half)
+    start = max(body.rfind(". ", 0, m.start()), body.rfind("; ", 0, m.start()), body.rfind(": ", 0, m.start()))
+    start = start + 2 if start >= 0 else 0
+    tail = re.search(r"(?:[.!?](?:\s|$)|,?\s+(?:then|and then|afterwards)\s+(?:make|run|do|fix|apply|remove|restart|re-?add|scan)\b)", body[m.start():])
+    end = m.start() + tail.start() if tail else len(body)
+    q = " ".join(body[start:end].split())
+    q = re.sub(r"(?i)^(?:research|look\s+up|find\s+out|investigate|work\s+out)\s+", "", q)
+    return q[:220]
+
+
 def currency_question(node: dict) -> str:
     """The question to research for this step, or "" when it needs no web lookup.
 
@@ -3560,6 +3626,12 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
     behaviour, which is survivable; a draft blocked on a failed search is not.
     """
     question = currency_question(node)
+    kind = "currency"
+    if not question:
+        # §17.1561 — a step that asks HOW others fix a symptom (or WHY it happens) is researched too:
+        # the draft must apply what others found, not repeat what already failed.
+        question = troubleshooting_question(node)
+        kind = "how"
     if not question:
         return ""
     key = str((node or {}).get("node_key") or "?")
@@ -3588,8 +3660,14 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
         return ""
     if not block:
         return ""
-    logger.warning("step_research_attached node=%s sources=%d q=%r",
-                   key, len(sources), query[:120])
+    logger.warning("step_research_attached node=%s kind=%s sources=%d q=%r",
+                   key, kind, len(sources), query[:120])
+    if kind == "how":
+        return ("\n\n" + block
+                + "\n\nUse these to decide HOW to do this step: the CAUSE others found for this symptom and the "
+                  "FIX they applied. Draft the commands that apply that fix on this machine (its own paths, "
+                  "guest ids and service names), and do not repeat an action the step says has already been "
+                  "tried and did not help.")
     return ("\n\n" + block
             + "\n\nUse these to decide WHICH of the things this machine offers are worth using right "
               "now. What the machine lists is what EXISTS; whether each one still works is what these "
@@ -3642,7 +3720,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
             if type(exc).__name__ == "ContentCut":
                 return ("<!-- runbook-cut -->\n## Why this cannot run yet\n\n"
                         f"{exc}\n\n## Run this\n\n```bash\necho \"content cut\"\n```\n")
-    prompt = build_base_prompt(node, b, environment)
+    prompt = build_base_prompt(node, b, environment, autonomous=True)   # §17.1564 — a runbook cannot ask either
     # §17.1222 — a value the operator already gave once must never be asked for
     # again. The store, the `$NAME` reference and the out-of-band delivery all
     # existed (§17.1191/1193); what did not was the drafter KNOWING the names,
@@ -5452,6 +5530,32 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _jf_notes:
         cmds, verify = _jf_cmds, _jf_verify
         _comp_notes = list(_comp_notes) + _jf_notes
+    # §17.1552 — "rename/organize the episode files into season folders": Sonarr renames and moves them
+    # itself (renameEpisodes + seasonFolder + one RenameSeries), so Jellyfin can identify every file.
+    _sr_cmds, _sr_verify, _sr_notes = rewrite_sonarr_rename_files(node, cmds, verify, services, inventory)
+    if _sr_notes:
+        cmds, verify = _sr_cmds, _sr_verify
+        _comp_notes = list(_comp_notes) + _sr_notes
+    # §17.1553 — "refresh the Jellyfin metadata/images": a recursive ReplaceAll refresh per typed library.
+    _jr_cmds, _jr_verify, _jr_notes = rewrite_refresh_jellyfin_metadata(node, cmds, verify, services, inventory)
+    if _jr_notes:
+        cmds, verify = _jr_cmds, _jr_verify
+        _comp_notes = list(_comp_notes) + _jr_notes
+    # §17.1554 — "verify / enumerate / wait for the Jellyfin metadata": the per-item census, read in-guest.
+    _jc_cmds, _jc_verify, _jc_notes = rewrite_jellyfin_metadata_report(node, cmds, verify, services, inventory)
+    if _jc_notes:
+        cmds, verify = _jc_cmds, _jc_verify
+        _comp_notes = list(_comp_notes) + _jc_notes
+    # §17.1562 — "make the library re-resolve its files / rebuild the mistyped library": remove, scan, re-add.
+    _jb_cmds, _jb_verify, _jb_notes = rewrite_rebuild_jellyfin_library(node, cmds, verify, services, inventory)
+    if _jb_notes:
+        cmds, verify = _jb_cmds, _jb_verify
+        _comp_notes = list(_comp_notes) + _jb_notes
+    # §17.1563 — "make <service> reach <public API> / it times out on IPv6": prefer IPv4 in its guest, restart the unit.
+    _p4_cmds, _p4_verify, _p4_notes = rewrite_prefer_ipv4_in_guest(node, cmds, verify, services, inventory)
+    if _p4_notes:
+        cmds, verify = _p4_cmds, _p4_verify
+        _comp_notes = list(_comp_notes) + _p4_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -8356,6 +8460,568 @@ def rewrite_organize_jellyfin(node: Optional[dict], commands: list[str], verify:
     return [run], [check], note
 
 
+def _node_text(node: Optional[dict]) -> str:
+    """§17.1552 — the step's whole text: title, description, prompt_template AND an MCP node's own
+    command (``tool_config.args.command``). A planner-written MCP verify step ("Verify: Name. (split
+    from T7)") names its service only in the command (``X-Emby-Token`` / ``:8096``), so a detector that
+    read the prose alone could not tell which app it checks."""
+    n = node or {}
+    parts = [str(n.get(k) or "") for k in ("title", "description", "prompt_template")]
+    cfg = _mcp_cfg(n)
+    args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
+    parts.append(str((args or {}).get("command") or ""))
+    return " ".join(parts)
+
+
+#: §17.1552 — Sonarr renames every episode file into the library's canonical shape and moves it into
+#: its season folder, through Sonarr's own API: turn on `renameEpisodes` (keeping the configured
+#: formats), set `seasonFolder` on each series, then ONE `RenameSeries` command, polled to completion.
+#: Measured live (CT 104, 2026-10-14): `renameEpisodes: false`, so every import kept its scene name in
+#: a FLAT series folder — `Power.Rangers.Super.Megaforce.S01E19…mkv` beside `…Beast.Morphers.S26E01…`
+#: under /media/tv/Power Rangers — and Jellyfin read S01E19 as Mighty Morphin season 1. Idempotent
+#: (a renaming library is left alone); media files are MOVED/renamed, never deleted. Single-quoted
+#: Python only; runs inside the Sonarr guest; argv: KEY, [dry].
+_SONARR_RENAME_PY = (
+    "import sys,json,time,urllib.request\n"
+    "BASE='http://127.0.0.1:8989'\n"
+    "KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=15); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "nm=api('/api/v3/config/naming') or {}\n"
+    "if nm.get('renameEpisodes'):\n"
+    "    print('OK: naming already renames episodes (%s)' % nm.get('standardEpisodeFormat'))\n"
+    "elif DRY:\n"
+    "    print('WOULD SET: renameEpisodes=true (format %s)' % nm.get('standardEpisodeFormat'))\n"
+    "else:\n"
+    "    nm['renameEpisodes']=True\n"
+    "    api('/api/v3/config/naming/%s' % nm.get('id',1),'PUT',nm)\n"
+    "    print('SET: renameEpisodes=true (episode format %s; season folder %s)' % (nm.get('standardEpisodeFormat'),nm.get('seasonFolderFormat')))\n"
+    "series=api('/api/v3/series') or []\n"
+    "ids=[]\n"
+    # §17.1267 — a bounded slice at timeout=15: 10 x 15 s = 150 s inside the 180 s budget; a library
+    # with more series takes a second (idempotent) run, said in the output.
+    "for s in series[:10]:\n"
+    "    t=s.get('title') or ''\n"
+    "    ids.append(s.get('id'))\n"
+    "    if s.get('seasonFolder'):\n"
+    "        print('OK: %s already uses season folders' % t); continue\n"
+    "    if DRY:\n"
+    "        print('WOULD SET: %s seasonFolder=true' % t); continue\n"
+    "    try:\n"
+    "        s['seasonFolder']=True\n"
+    "        api('/api/v3/series/%s' % s.get('id'),'PUT',s)\n"
+    "        print('SET: %s seasonFolder=true' % t)\n"
+    "    except Exception as e:\n"
+    "        print('FAILED %s: %r' % (t,e))\n"
+    "if len(series)>10:\n"
+    "    print('HELD: %d more series beyond the 10 this run takes -- run the step again for the rest' % (len(series)-10))\n"
+    "if DRY:\n"
+    "    print('RESULT: dry run, nothing renamed'); sys.exit(0)\n"
+    "cmd=api('/api/v3/command','POST',{'name':'RenameSeries','seriesIds':ids}) or {}\n"
+    "cid=cmd.get('id'); st=cmd.get('status') or 'queued'\n"
+    # the rename is Sonarr's own background command: poll it to a terminal state, bounded (8 x 15 s).
+    "for i in range(8):\n"
+    "    if st in ('completed','failed','aborted'): break\n"
+    "    time.sleep(15)\n"
+    "    try:\n"
+    "        st=(api('/api/v3/command/%s' % cid) or {}).get('status') or st\n"
+    "    except Exception as e:\n"
+    "        st='unknown (%r)' % e\n"
+    "print('RENAME: Sonarr command %s is %s for %d series' % (cid,st,len(ids)))\n"
+    "if st=='failed': sys.exit('RESULT: rename FAILED -- see Sonarr System > Events')\n"
+    "print('RESULT: rename %s -- episode files now live at Series/Season N/Series - SxxEyy - Episode Title' % st)\n"
+)
+#: the step whose work is "rename/organize the episode files" (Sonarr's job, not Jellyfin's).
+_RENAME_TITLE_RE = re.compile(r"\b(?:rename|re-?organi[sz]e|organi[sz]e|restructure|normali[sz]e|standardi[sz]e|tidy)\b", re.I)
+_RENAME_TEXT_RE = re.compile(r"\bsonarr\b|\bseason\s*folders?\b|\bepisode\s*files?\b|\bfile\s*nam(?:es?|ing)\b|\brenam(?:e|ing)\b", re.I)
+
+
+def rewrite_sonarr_rename_files(node: Optional[dict], commands: list[str], verify: list[str],
+                                services: Optional[list] = None,
+                                inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1552 — a "rename/organize the episode files into season folders" step makes Sonarr do
+    it, deterministically, through its own API: `renameEpisodes=true`, `seasonFolder=true` on every
+    series, one `RenameSeries` command polled to completion.
+
+    Live (Jellyfin metadata job 263e920a, 2026-10-14): the operator saw the TV library "not broken
+    down into seasons / episode names" and wrong posters. Measured on CT 104, Sonarr's naming config
+    had `renameEpisodes: false` and the series folders were FLAT scene names — Power Rangers held
+    `Super.Megaforce.S01E19` beside `Beast.Morphers.S26E01` — so Jellyfin parsed the scene numbers
+    and identified the wrong episodes. No Jellyfin refresh can fix a file that names the wrong
+    episode; the rename is the first step, and it is Sonarr's to do (it knows each file's real
+    season/episode). Key read on the machine via `<SONARR_API_KEY>` (§17.1382). Not fired on a
+    Jellyfin-only organize step (§17.1510's) — that one names no Sonarr/season-folder/file work."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_RENAME_TITLE_RE.search(title) and _RENAME_TEXT_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    if re.search(r"\bjellyfin\b", title, re.I) and not re.search(r"\bsonarr\b", text, re.I):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("sonarr", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_SONARR_RENAME_PY}" "<SONARR_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # §17.1505 — the verify is a plain authenticated READ of the setting the run changes (the stored
+    # key `$SONARR_API_KEY` is host-expanded by run_verify; no `$( )`, no interpreter): it prints
+    # Sonarr's naming config, so `renameEpisodes` is witnessed as a value, not inferred from exit 0.
+    check = (f'pct exec {gid} -- curl -s --fail-with-body -H "X-Api-Key: $SONARR_API_KEY" '
+             f'"http://127.0.0.1:8989/api/v3/config/naming"')
+    note = [{"why": (
+        f"drafted the rename from the engine's own shape (§17.1552): inside guest {gid} it turns on Sonarr's "
+        f"episode renaming (keeping the configured formats), sets season folders on every series, and issues ONE "
+        f"RenameSeries command, polled to completion — Sonarr knows each file's real season and episode, so the "
+        f"files land as Series/Season N/Series - SxxEyy - Title and Jellyfin can identify them. Measured: "
+        f"renameEpisodes was off and the series folders held flat scene names (Power Rangers Super Megaforce "
+        f"S01E19 read as season 1). Files are moved and renamed, never deleted.")}]
+    return [run], [check], note
+
+
+#: §17.1553 — Jellyfin re-scans and re-identifies every typed library (Movies/TV) with a recursive
+#: refresh whose mode the step names: ReplaceAllMetadata, ReplaceAllImages, or both. Prints a BEFORE
+#: census per library (items lacking a name, overview or poster) so the run records what it started
+#: from. Single-quoted Python only; runs inside the Jellyfin guest; argv: KEY, MODE, [dry].
+_JELLYFIN_REFRESH_PY = (
+    "import sys,json,urllib.request\n"
+    "BASE='http://127.0.0.1:8096'\n"
+    "KEY=sys.argv[1]; MODE=sys.argv[2] if len(sys.argv)>2 else 'both'; DRY=len(sys.argv)>3 and sys.argv[3]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Emby-Token':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=20); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "libs=[l for l in (api('/Library/VirtualFolders') or []) if l.get('CollectionType') in ('movies','tvshows')]\n"
+    "meta='FullRefresh' if MODE in ('metadata','both') else 'None'\n"
+    "img='FullRefresh' if MODE in ('images','both') else 'None'\n"
+    "q='Recursive=true&MetadataRefreshMode=%s&ImageRefreshMode=%s&ReplaceAllMetadata=%s&ReplaceAllImages=%s' % "
+    "(meta,img,str(meta=='FullRefresh').lower(),str(img=='FullRefresh').lower())\n"
+    # §17.1267 — 8 libraries x timeout=20 = 160 s inside the budget; each call guarded (§17.1274).
+    "for l in libs[:8]:\n"
+    "    name=l.get('Name'); lid=l.get('ItemId')\n"
+    "    try:\n"
+    "        d=api('/Items?ParentId=%s&Recursive=true&IncludeItemTypes=Series,Season,Episode,Movie&Fields=Overview&EnableImageTypes=Primary&ImageTypeLimit=1' % lid) or {}\n"
+    "        items=d.get('Items') or []\n"
+    "        lack=[i for i in items if not (i.get('Name') and i.get('Overview') and (i.get('ImageTags') or {}).get('Primary'))]\n"
+    "        print('BEFORE %s: %d items, %d lacking a name, overview or poster' % (name,len(items),len(lack)))\n"
+    "    except Exception as e:\n"
+    "        print('BEFORE %s: census failed %r' % (name,e))\n"
+    "    if DRY:\n"
+    "        print('WOULD REFRESH: %s (%s)' % (name,q)); continue\n"
+    "    try:\n"
+    "        api('/Items/%s/Refresh?%s' % (lid,q),'POST')\n"
+    "        print('REFRESH QUEUED: %s (metadata=%s images=%s)' % (name,meta,img))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED %s: %r' % (name,e))\n"
+    "if not libs:\n"
+    "    print('RESULT: no typed Movies/TV library -- organize the libraries first'); sys.exit(1)\n"
+    "print('RESULT: %s refresh queued for %d librar%s -- Jellyfin re-scans the folders and re-identifies every item; "
+    "the wait/verify step reports completion' % (MODE,len(libs),'y' if len(libs)==1 else 'ies'))\n"
+)
+_JF_REFRESH_TITLE_RE = re.compile(r"\b(?:refresh|re-?fetch|re-?scan|scan|update|pull|download|populate|fix|repair|replace|trigger)\b", re.I)
+_JF_METADATA_RE = re.compile(r"\bmetadata\b|\bposters?\b|\bartwork\b|\bimages?\b|\bcover\s*art\b|\boverviews?\b", re.I)
+_JF_SERVICE_RE = re.compile(r"\bjellyfin\b|\bemby\b|x-emby-token|:8096\b", re.I)
+#: a step that READS or WAITS is never the refresh: those go to §17.1554.
+_JF_OBSERVE_TITLE_RE = re.compile(r"\b(?:verify|check|confirm|validate|wait|poll|monitor|report|enumerate|list|audit|inventory|until)\b", re.I)
+
+
+def _jellyfin_refresh_mode(text: str) -> str:
+    """Which halves the step asks for: the explicit ReplaceAll flags first, then the words."""
+    meta = bool(re.search(r"ReplaceAllMetadata\s*=\s*true", text, re.I))
+    img = bool(re.search(r"ReplaceAllImages\s*=\s*true", text, re.I))
+    if meta and not img:
+        return "metadata"
+    if img and not meta:
+        return "images"
+    if meta and img:
+        return "both"
+    words_img = bool(re.search(r"\bposters?\b|\bartwork\b|\bimages?\b|\bcover\s*art\b", text, re.I))
+    words_meta = bool(re.search(r"\bmetadata\b|\boverviews?\b|\bepisode\s*names?\b|\btitles?\b", text, re.I))
+    if words_img and not words_meta:
+        return "images"
+    if words_meta and not words_img:
+        return "metadata"
+    return "both"
+
+
+def rewrite_refresh_jellyfin_metadata(node: Optional[dict], commands: list[str], verify: list[str],
+                                      services: Optional[list] = None,
+                                      inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1553 — a "refresh the Jellyfin metadata/images" step queues Jellyfin's own recursive
+    refresh on every typed library, deterministically, with the ReplaceAll flags the step names.
+
+    Live (job 263e920a, T4/T5): the planner wrote `for lib in ${T2}; do curl -s -X POST -H
+    'X-Emby-Token: ${T1}' …/Items/$lib/Refresh…` — bare placeholders nothing renders, a key spliced
+    in from another node's output (which would have inlined it into the sudo log), `curl -s` that
+    cannot report a 401, no check. The engine knows the whole shape: read the key on the machine
+    (`<JELLYFIN_API_KEY>`), list the typed libraries through VirtualFolders, and POST
+    `/Items/{ItemId}/Refresh?Recursive=true&…ReplaceAll…=true` per library — the same call the
+    Jellyfin UI's "Scan library"/"Refresh metadata" makes, so it also picks up files Sonarr renamed
+    (§17.1552). Mode from the step text: ReplaceAllMetadata → metadata, ReplaceAllImages → images,
+    both or unspecific → both. A verify/wait step is §17.1554's, not this."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_JF_REFRESH_TITLE_RE.search(title) and _JF_METADATA_RE.search(text) and _JF_SERVICE_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    if _JF_OBSERVE_TITLE_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("jellyfin", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    mode = _jellyfin_refresh_mode(text)
+    payload = f'python3 -c "{_JELLYFIN_REFRESH_PY}" "<JELLYFIN_API_KEY>" "{mode}"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # §17.1512 — Jellyfin's key is readable-not-stored, so the check carries no key, no interpreter
+    # and no `$( )`: it witnesses the server answering (an unauthenticated public read, HTTP 200 only
+    # when Jellyfin is up) and the refresh landing in Jellyfin's own log ("… will be refreshed" lines
+    # per day-file) — what the API call left behind on the machine, not the call's exit code.
+    check_payload = ('curl -s -o /dev/null -w "jellyfin HTTP %{http_code}" http://127.0.0.1:8096/System/Info/Public; '
+                     'echo; grep -c "will be refreshed" /var/log/jellyfin/*.log')
+    check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+    note = [{"why": (
+        f"drafted the refresh from the engine's own shape (§17.1553): inside guest {gid} it reads the key on the "
+        f"machine, lists Jellyfin's typed Movies/TV libraries and queues a recursive {mode} refresh on each with "
+        f"the ReplaceAll flag(s) set — the call the Jellyfin UI makes for 'Refresh metadata' — after printing how "
+        f"many items in each library lacked a name, overview or poster before it ran. The draft spliced another "
+        f"step's output in as `${{T1}}`/`${{T2}}`, which nothing renders and which would put the key in the sudo log.")}]
+    return [run], [check], note
+
+
+#: §17.1554 — the per-item census of Jellyfin's typed libraries: for every Series, Season, Episode and
+#: Movie, does it have a Name, an Overview and a Primary image? Prints a per-library/per-type table, the
+#: first 40 lacking items by name, and a RESULT line. In `wait`/`last` mode it first decides whether the
+#: refresh is still running (an item was refreshed in the last 3 minutes → poll twice more, 40 s apart;
+#: still moving → `wait` prints and exits 0 so the next phase continues, `last` exits 1 so the step
+#: FAILS honestly). Single-quoted Python only; runs inside the Jellyfin guest; argv: KEY, [wait|last].
+_JELLYFIN_CENSUS_PY = (
+    "import sys,json,time,urllib.request\n"
+    "from datetime import datetime,timezone\n"
+    "BASE='http://127.0.0.1:8096'\n"
+    "KEY=sys.argv[1]; PHASE=sys.argv[2] if len(sys.argv)>2 else 'report'\n"
+    "def api(p):\n"
+    "    r=urllib.request.Request(BASE+p,headers={'X-Emby-Token':KEY})\n"
+    "    u=urllib.request.urlopen(r,timeout=20); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "def label(i):\n"
+    "    t=i.get('Type') or '?'\n"
+    "    if t=='Episode': return 'Episode %s S%02dE%02d' % (i.get('SeriesName') or '?', i.get('ParentIndexNumber') or 0, i.get('IndexNumber') or 0)\n"
+    "    if t=='Season': return 'Season %s / %s' % (i.get('SeriesName') or '?', i.get('Name') or '?')\n"
+    "    return '%s %s' % (t, i.get('Name') or '?')\n"
+    "def census():\n"
+    "    libs=[l for l in (api('/Library/VirtualFolders') or []) if l.get('CollectionType') in ('movies','tvshows')]\n"
+    "    rows=[]; lacking=[]; last=''\n"
+    "    for l in libs[:8]:\n"
+    "        lid=l.get('ItemId'); nm=l.get('Name')\n"
+    "        rows.append('LIBRARY %s type=%s paths=%s' % (nm,l.get('CollectionType'),','.join(l.get('Locations') or [])))\n"
+    # what the library's top level resolved to (Series folders in a TV library, Movies in a movie one):
+    # the shape the operator sees first, and the first thing wrong when a TV library shows a flat list.
+    "        try:\n"
+    "            top=(api('/Items?ParentId=%s&Fields=Path' % lid) or {}).get('Items') or []\n"
+    "            th={}\n"
+    "            for i in top: th[i.get('Type') or '?']=th.get(i.get('Type') or '?',0)+1\n"
+    "            rows.append('  top level: %s' % (', '.join('%s x%d' % (k,th[k]) for k in sorted(th)) or 'empty'))\n"
+    "            for i in top[:3]: rows.append('  top: %s %s (%s)' % (i.get('Type'),i.get('Name'),i.get('Path')))\n"
+    "        except Exception as e:\n"
+    "            rows.append('  top level: read failed %r' % e)\n"
+    "        try:\n"
+    "            d=api('/Items?ParentId=%s&Recursive=true&IncludeItemTypes=Series,Season,Episode,Movie&Fields=Overview,Path,DateLastRefreshed&EnableImageTypes=Primary&ImageTypeLimit=1' % lid) or {}\n"
+    "        except Exception as e:\n"
+    "            rows.append('%s: read failed %r' % (nm,e)); continue\n"
+    "        by={}; shown=0\n"
+    "        for i in d.get('Items') or []:\n"
+    "            t=i.get('Type') or '?'; c=by.setdefault(t,[0,0,0,0]); c[0]+=1; miss=[]\n"
+    "            if not i.get('Name'): c[1]+=1; miss.append('name')\n"
+    "            if not i.get('Overview'): c[2]+=1; miss.append('overview')\n"
+    "            if not (i.get('ImageTags') or {}).get('Primary'): c[3]+=1; miss.append('poster')\n"
+    "            if miss: lacking.append('%s -- no %s' % (label(i),', '.join(miss)))\n"
+    "            if miss and shown<2: shown+=1; rows.append('  sample lacking: %s %s (%s)' % (t,i.get('Name'),i.get('Path')))\n"
+    "            last=max(last,str(i.get('DateLastRefreshed') or ''))\n"
+    "        for t in sorted(by):\n"
+    "            c=by[t]; rows.append('%s/%s: %d, missing name %d, overview %d, poster %d' % (nm,t,c[0],c[1],c[2],c[3]))\n"
+    # a TV library whose items Jellyfin resolved as Movies (or a movie library full of Episodes) is
+    # not a metadata gap -- no refresh can identify a show that was never resolved as one. Said
+    # plainly, and the step FAILS on it, so the engine's own failure research takes it from here.
+    "        if l.get('CollectionType')=='tvshows' and 'Movie' in by and not ('Series' in by or 'Episode' in by):\n"
+    "            wrong.append('%s is a TV library (tvshows) but Jellyfin resolved its %d items as Movie and none as Series/Episode -- the files are not being identified as shows, so no metadata refresh can name their episodes' % (nm,by['Movie'][0]))\n"
+    "        if l.get('CollectionType')=='movies' and 'Episode' in by and 'Movie' not in by:\n"
+    "            wrong.append('%s is a movie library but Jellyfin resolved its items as Episodes' % nm)\n"
+    "    return rows,lacking,last\n"
+    "wrong=[]\n"
+    "def age(last):\n"
+    "    try: return (datetime.now(timezone.utc).replace(tzinfo=None)-datetime.strptime(last[:19],'%Y-%m-%dT%H:%M:%S')).total_seconds()\n"
+    "    except Exception: return 1e9\n"
+    "rows,lacking,last=census()\n"
+    "if PHASE in ('wait','last'):\n"
+    # the server's own timestamps when it gives them (this Jellyfin returned none for DateLastRefreshed);
+    # else the counts: a library still being refreshed changes between two reads 40 s apart.
+    "    sig=(tuple(rows),len(lacking)); moving=(age(last)<180) if last else True\n"
+    "    for i in range(2):\n"
+    "        if not moving: break\n"
+    "        time.sleep(40)\n"
+    "        try:\n"
+    "            rows,lacking,last2=census()\n"
+    "        except Exception as e:\n"
+    "            print('poll failed %r' % e); continue\n"
+    "        sig2=(tuple(rows),len(lacking))\n"
+    "        moving=(last2!=last) if (last or last2) else (sig2!=sig); last=last2; sig=sig2\n"
+    "    if moving:\n"
+    "        print('STILL REFRESHING: last item refreshed %s; %d item(s) still lack something' % (last,len(lacking)))\n"
+    "        sys.exit(1 if PHASE=='last' else 0)\n"
+    "    print('REFRESH SETTLED: last item refreshed %s' % last)\n"
+    "for r in rows: print(r)\n"
+    "for x in lacking[:40]: print('LACKING: '+x)\n"
+    "if len(lacking)>40: print('... and %d more' % (len(lacking)-40))\n"
+    "for w in wrong[-2:]: print('WRONG TYPES: '+w)\n"
+    "print('RESULT: COMPLETE -- every series, season, episode and movie has a name, overview and poster' if not lacking "
+    "else 'RESULT: %d item(s) still lack a name, overview or poster' % len(lacking))\n"
+    "if wrong: sys.exit(2)\n"
+)
+_JF_WAIT_TITLE_RE = re.compile(r"\b(?:wait|poll|until|monitor)\b", re.I)
+_JF_CENSUS_TEXT_RE = re.compile(r"\bmetadata\b|\boverviews?\b|\bprimary\s*image\b|\bposters?\b|\bimages?\b|\bnames?\b|\bitems?\b"
+                                r"|\bepisodes?\b|\bseasons?\b|\bseries\b|\brefresh(?:ed|ing|library)?\b|\bscheduledtasks\b|\blibrar(?:y|ies)\b", re.I)
+
+
+def rewrite_jellyfin_metadata_report(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1554 — a "verify / enumerate / wait for the Jellyfin metadata" step reads the library
+    itself and reports, deterministically: per library and type, how many items lack a Name, an
+    Overview or a Primary image, the first 40 by name, and a COMPLETE / N-lacking verdict.
+
+    Live (job 263e920a, T3/T6/T7*): "Enumerate all items" ran a `for lib in ${T2}` loop that the
+    runner answered with `/bin/sh: 1: Syntax error: "do" unexpected` — and was marked done; the three
+    "Verify: Name / Overview / Primary image presence" checks spliced that output in as `${T3}`. The
+    read runs INSIDE the guest so the multi-megabyte /Items answer never crosses the runner's 20 000-
+    char cap; only the table and the verdict return. A WAIT step ("Wait for refresh completion",
+    "Poll until…") becomes six `wait` phases and a `last`: each first asks whether any item was
+    refreshed in the last three minutes, polls twice more when it was, and the `last` phase FAILS the
+    step if the refresh is still moving — never a `while true` on the runner's 180 s budget."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_JF_OBSERVE_TITLE_RE.search(title) and _JF_SERVICE_RE.search(text) and _JF_CENSUS_TEXT_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("jellyfin", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+
+    def _phase(p: str) -> str:
+        payload = f'python3 -c "{_JELLYFIN_CENSUS_PY}" "<JELLYFIN_API_KEY>" "{p}"'
+        return f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    waiting = bool(_JF_WAIT_TITLE_RE.search(title))
+    run = [_phase("wait")] * 6 + [_phase("last")] if waiting else [_phase("report")]
+    # §17.1512 — no key in the check (readable-not-stored): the public system read witnesses that the
+    # server the run read is up and answering, with no interpreter and no `$( )`.
+    check = [(f'pct exec {gid} -- curl -s -o /dev/null -w "jellyfin HTTP %{{http_code}}" '
+              f'http://127.0.0.1:8096/System/Info/Public')]
+    what = ("waits for the refresh to settle (six polls, then a last phase that fails the step if items are still "
+            "being refreshed) and then prints" if waiting else "prints")
+    note = [{"why": (
+        f"drafted the metadata check from the engine's own shape (§17.1554): inside guest {gid} it reads every typed "
+        f"library's items through Jellyfin's API and {what} a per-type table of items lacking a name, overview or "
+        f"poster, the first 40 by name, and a COMPLETE / N-lacking verdict — the read stays in the guest so the full "
+        f"item list never hits the runner's output cap. The draft spliced another step's output in as a shell "
+        f"variable nothing sets.")}]
+    return run, check, note
+
+
+#: §17.1562 — rebuild a typed Jellyfin library whose items resolved as the WRONG kind: remove the library
+#: (database rows only — removing a library never touches media), wait for the scan that drops its
+#: orphaned items, re-add it with the same name/type/paths, and let the fresh scan resolve the files
+#: with the right resolvers. Measured live (2026-10-14): Shows was typed tvshows, yet its top level was
+#: `Folder x6` and 902 `Movie` items — rows left over from the mixed-content library that had covered
+#: /media; Jellyfin reuses an existing item at a path and never re-types it, and §17.1510's re-add did
+#: not drop them because the mixed library still covered the paths at that moment.
+#: NEVER `DELETE /Items/{id}`: in Jellyfin that endpoint deletes the MEDIA FILES from disk.
+#: Single-quoted Python only; runs inside the Jellyfin guest; argv: KEY, [dry].
+_REBUILD_JELLYFIN_PY = (
+    "import sys,json,time,urllib.request,urllib.parse\n"
+    "BASE='http://127.0.0.1:8096'\n"
+    "KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Emby-Token':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=15); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "def q(s): return urllib.parse.quote(str(s))\n"
+    "def scan_idle():\n"
+    "    tasks=api('/ScheduledTasks') or []\n"
+    "    for t in tasks[:60]:\n"
+    "        if t.get('Key')=='RefreshLibrary': return t.get('State')=='Idle'\n"
+    "    return True\n"
+    "def wait_idle():\n"
+    "    for i in range(6):\n"
+    "        try:\n"
+    "            if scan_idle(): return True\n"
+    "        except Exception as e:\n"
+    "            print('poll failed %r' % e)\n"
+    "        time.sleep(10)\n"
+    "    return False\n"
+    "EXPECT={'tvshows':'Series','movies':'Movie'}\n"
+    "libs=[l for l in (api('/Library/VirtualFolders') or []) if l.get('CollectionType') in EXPECT]\n"
+    "wrong=[]\n"
+    "for l in libs[:8]:\n"
+    "    nm=l.get('Name'); ct=l.get('CollectionType')\n"
+    "    try:\n"
+    "        top=(api('/Items?ParentId=%s' % l.get('ItemId')) or {}).get('Items') or []\n"
+    "    except Exception as e:\n"
+    "        print('SKIP %s: top level unreadable %r' % (nm,e)); continue\n"
+    "    types=sorted(set(i.get('Type') or '?' for i in top))\n"
+    "    bad=[i for i in top if (i.get('Type') or '?')!=EXPECT[ct]]\n"
+    "    if top and bad:\n"
+    "        print('WRONG TYPES: %s (%s) top level is %s, expected %s' % (nm,ct,', '.join(types),EXPECT[ct])); wrong.append(l)\n"
+    "    else:\n"
+    "        print('OK: %s (%s) top level is %s' % (nm,ct,', '.join(types) or 'empty'))\n"
+    "if not wrong:\n"
+    "    print('RESULT: every typed library resolves as its own kind -- nothing to rebuild'); sys.exit(0)\n"
+    "if DRY:\n"
+    "    for l in wrong[:4]: print('WOULD REBUILD: %s -> remove, scan, re-add as %s over %s' % (l.get('Name'),l.get('CollectionType'),','.join(l.get('Locations') or [])))\n"
+    "    print('RESULT: dry run, nothing changed'); sys.exit(0)\n"
+    # §17.1267 — at most 4 libraries; every call timeout=15; the two waits are bounded (6 x 10 s each).
+    "for l in wrong[:4]:\n"
+    "    nm=l.get('Name'); ct=l.get('CollectionType'); paths=l.get('Locations') or []\n"
+    "    try:\n"
+    "        api('/Library/VirtualFolders?name=%s&refreshLibrary=true' % q(nm),'DELETE')\n"
+    "        print('REMOVED library %s (rows only; media untouched) -- scan drops its stale items' % nm)\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to remove %s: %r' % (nm,e)); continue\n"
+    "    idle=wait_idle()\n"
+    "    print('scan after removal: %s' % ('idle' if idle else 'still running after 60 s'))\n"
+    "    try:\n"
+    "        api('/Library/VirtualFolders?name=%s&collectionType=%s&paths=%s&refreshLibrary=true' % (q(nm),ct,'&paths='.join(q(p) for p in paths)),'POST',{'LibraryOptions':{}})\n"
+    "        print('RE-ADDED library %s as %s over %s -- fresh scan resolves the files with the %s resolvers' % (nm,ct,','.join(paths),ct))\n"
+    "    except Exception as e:\n"
+    "        print('FAILED to re-add %s: %r -- re-add it by hand: name %s, type %s, paths %s' % (nm,e,nm,ct,','.join(paths))); sys.exit(1)\n"
+    "idle=wait_idle()\n"
+    "print('RESULT: %d librar%s rebuilt; scan %s -- the verify step reads the new item types' % (len(wrong[:4]),'y' if len(wrong[:4])==1 else 'ies','finished' if idle else 'still running'))\n"
+)
+#: the step that asks for a library's items to be re-resolved / the library rebuilt.
+_JF_REBUILD_RE = re.compile(
+    r"\bre-?resolve\b|\brebuild\b|\bre-?create\b|\bre-?add\b|\bwrong\s+types?\b|\bstale\s+(?:items?|rows?|entries)\b"
+    r"|\bresolved?\s+(?:its\s+|the\s+|their\s+)?(?:content|items|files|episodes|shows)?\s*as\s+(?:plain\s+)?(?:folders?|movies?)\b"
+    r"|\bresolve\s+as\s+series\b", re.I)
+
+
+def rewrite_rebuild_jellyfin_library(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1562 — a "make the Jellyfin library re-resolve its files / rebuild the library whose items
+    came out as the wrong type" step does it deterministically: remove the mistyped library, wait for
+    the scan that drops its orphaned rows, re-add it typed over the same paths, scan.
+
+    Live (job 263e920a, FIX1): the census (§17.1554b) failed honestly — Shows typed tvshows, top level
+    `Folder x6`, 902 `Movie` items — and the fix step was left to the model with the engine's research
+    attached (§17.1561). Three drafts: `systemctl stop jellyfin` + `sqlite3` SELECTs (sqlite3 is not
+    installed there; `set -e` would have left Jellyfin stopped), then exploratory `find`/`jq` with the
+    key read from a file that has none. The research itself found no source for this exact shape. The
+    fix others use for a mis-resolved library is remove-and-re-add; the engine owns that shape already
+    (§17.1510) and knows the condition exactly (the census). Media files are never touched — and
+    `DELETE /Items/{id}` is never used, because in Jellyfin that endpoint deletes the files."""
+    text = _node_text(node)
+    if not (_JF_REBUILD_RE.search(text) and _JF_SERVICE_RE.search(text) and re.search(r"\blibrar(?:y|ies)\b", text, re.I)):
+        return list(commands or []), list(verify or []), []
+    gid = _arr_guest("jellyfin", services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    payload = f'python3 -c "{_REBUILD_JELLYFIN_PY}" "<JELLYFIN_API_KEY>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # §17.1512 — the type MARKER files witness the re-added libraries exist and are typed (no key, no
+    # interpreter, no `$( )`); the new item types are the census step's to read.
+    check = (f"pct exec {gid} -- sh -c {_sq_payload('ls -1 /var/lib/jellyfin/root/default/*/*.collection 2>/dev/null; echo ---libraries---; ls -1 /var/lib/jellyfin/root/default/')}")
+    note = [{"why": (
+        f"drafted the rebuild from the engine's own shape (§17.1562): inside guest {gid} it reads each typed library's "
+        f"top level through Jellyfin's API; a TV library whose top level is not Series items (or a movie library whose "
+        f"is not Movies) is REMOVED (database rows only — media files are never touched), the scan that drops its "
+        f"orphaned rows is waited for, and it is RE-ADDED with the same name, type and paths so the fresh scan resolves "
+        f"the files with the right resolvers. A library that already resolves as its own kind is left alone.")}]
+    return [run], [check], note
+
+
+#: §17.1563 — a guest whose service cannot reach a public API because the guest HOLDS a global IPv6
+#: address that routes nowhere: glibc orders AAAA first, .NET follows it, and every call waits out the
+#: full timeout. Measured live (CT 101, 2026-10-14): `getent ahosts api.themoviedb.org` listed eight
+#: 2600:… addresses before 3.170.…; `curl -6` → no answer, `curl -4` → 401 (reachable); Jellyfin's log
+#: carried 67 `TmdbClientManager.EnsureClientConfigAsync … HttpClient.Timeout of 100 seconds` traces that
+#: day — so no overview or poster could ever land, whatever the library did. §17.1532/1534 fixed the same
+#: class for Prowlarr INLINE in the indexer template; this is the capability. The precedence line makes
+#: IPv4 win in getaddrinfo (RFC 6724 override), the unit is restarted because glibc reads gai.conf once
+#: per process. Reversible: one line in /etc/gai.conf.
+_GAI_PRECEDENCE = "precedence ::ffff:0:0/96  100"
+_PREFER_IPV4_RE = re.compile(
+    r"\bipv6\b|\bipv4\b|\bgai\.conf\b|\bprefer\s+ipv4\b|\btimes?\s*out\b|\btime-?outs?\b|\bcannot\s+reach\b|\bcan'?t\s+reach\b"
+    r"|\bunreachable\b|\bno\s+route\b|\bhttpclient\.timeout\b", re.I)
+_PUBLIC_API_RE = re.compile(r"\b(?:tmdb|themoviedb|tvdb|omdb|fanart|musicbrainz|github|public\s+api|external\s+api|metadata\s+provider)\b", re.I)
+_PREFER_IPV4_APPS = ("jellyfin", "prowlarr", "sonarr", "radarr", "lidarr", "readarr", "bazarr", "qbittorrent")
+_PROBE_HOSTS = {"jellyfin": "api.themoviedb.org", "sonarr": "skyhook.sonarr.tv", "radarr": "api.radarr.video",
+                "prowlarr": "prowlarr.servarr.com", "lidarr": "api.lidarr.audio", "readarr": "api.bookinfo.club"}
+
+
+def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], verify: list[str],
+                                 services: Optional[list] = None,
+                                 inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1563 — a "make <service> reach <public API> / it times out / prefers IPv6" step prefers IPv4
+    in that service's guest, deterministically: append the RFC 6724 precedence line to /etc/gai.conf
+    (once), restart the unit so glibc re-reads it, and show the unit active.
+
+    Live (job 263e920a): after the Sonarr rename (§17.1552) and the library rebuild (§17.1562) the TV
+    library finally resolved as 6 Series / 46 Seasons / 902 Episodes — with 0 overviews and 0 posters,
+    because Jellyfin's TMDb client had been timing out on IPv6 since midnight. The verify reads what
+    changed back off the machine: the precedence line, which family `getent` now orders first, and the
+    provider host answering over the default stack (read-only: grep, getent, curl GET to /dev/null)."""
+    text = _node_text(node)
+    if not (_PREFER_IPV4_RE.search(text) and (_PUBLIC_API_RE.search(text) or re.search(r"\bipv6\b|\bgai\.conf\b", text, re.I))):
+        return list(commands or []), list(verify or []), []
+    # §17.1563c — a VERIFY/CHECK step is a read ("Verify prowlarr IPv4 first"): never the fix, which would
+    # restart the unit once more per check. Live plan 977a8a38: 6 appends, 6 restarts, 6 verifies.
+    if _JF_OBSERVE_TITLE_RE.search(str((node or {}).get("title") or "")):
+        return list(commands or []), list(verify or []), []
+    app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
+    gid = _arr_guest(app, services, inventory) if app else None
+    unit = f"{app}.service" if app else ""
+    if not gid:
+        # §17.1563b — any guest the step names: by a MEASURED service (name + unit) or by inventory name,
+        # or by "container N" when the guest's unit was measured. Live: 111 control-panel, 120 caddy,
+        # 130 pihole (unit pihole-FTL.service) are not *arr apps, and the same dead IPv6 route hits them.
+        for s in services or []:
+            nm = str(getattr(s, "name", "") or "").lower()
+            if nm and re.search(rf"\b{re.escape(nm)}\b", text, re.I) and getattr(s, "guest", ""):
+                app, gid, unit = nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or f"{nm}.service")
+                break
+    if not gid:
+        names = (inventory or {}).get("names") or {}
+        m_ct = re.search(r"\b(?:container|ct|lxc)\s*(\d{3})\b", text, re.I)
+        for g, nm in names.items():
+            nm_s = str(nm or "")
+            if (nm_s and re.search(rf"\b{re.escape(nm_s)}\b", text, re.I)) or (m_ct and str(g) == m_ct.group(1)):
+                app, gid = nm_s.lower() or f"guest {g}", str(g)
+                unit = next((str(getattr(s, "unit", "") or "") for s in services or []
+                             if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
+                break
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    if not unit:
+        return list(commands or []), list(verify or []), []           # no unit to restart → not this rule's call
+    m = re.search(r"\b((?:[a-z0-9-]+\.)+(?:org|com|net|io|tv|club|video|audio))\b", text, re.I)
+    host = m.group(1) if m and not m.group(1).startswith("127.") else _PROBE_HOSTS.get(app, "api.themoviedb.org")
+    run_payload = (f"grep -qxF '{_GAI_PRECEDENCE}' /etc/gai.conf 2>/dev/null || echo '{_GAI_PRECEDENCE}' >> /etc/gai.conf; "
+                   f"echo 'gai.conf:'; grep -n 'precedence ::ffff:0:0/96' /etc/gai.conf; "
+                   f"systemctl restart {unit} && sleep 5 && systemctl is-active {unit} && "
+                   f"echo 'RESULT: {unit} restarted with IPv4 preferred for getaddrinfo'")
+    run = f"pct exec {gid} -- sh -c {_sq_payload(run_payload)}"
+    check_payload = (f'grep -c "{_GAI_PRECEDENCE}" /etc/gai.conf; getent ahosts {host} | head -n 1; '
+                     f'curl -s -m 8 -o /dev/null -w "{host} HTTP %{{http_code}}" https://{host}/; systemctl is-active {unit}')
+    check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+    note = [{"why": (
+        f"drafted the fix from the engine's own shape (§17.1563): inside guest {gid} it makes IPv4 win in "
+        f"getaddrinfo (one `{_GAI_PRECEDENCE}` line in /etc/gai.conf, written once) and restarts {unit} so it "
+        f"re-reads the policy. Measured: the guest holds a global IPv6 address with no working route, glibc listed "
+        f"{host}'s AAAA records first, and {app}'s HTTP client waited out its timeout on every call — curl -6 got no "
+        f"answer while curl -4 did. The check reads the line back, shows which family `getent` orders first, and "
+        f"asks {host} over the default stack.")}]
+    return [run], [check], note
+
+
 def a_validating_endpoint_sent_an_empty_body(
         commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     r"""§17.1378b — a `/test` endpoint called with `{}` when it validates the object.
@@ -8516,22 +9182,101 @@ def checks_can_witness_the_change(commands: list[str], verify: list[str],
     is untouched -- that case is what §17.1302 is for.
     """
     keys = keys_the_block_writes(commands, files)
-    if not keys:
-        return ""                     # nothing named is written: §17.1302's own case
-    # §17.1365 — the same key is spelled three ways across the layers: the block
-    # writes `WebUI\\\\Username` through two quoting levels, the file holds
-    # `WebUI\\Username`, and a check greps `^WebUI.Username=` with a regex dot. The
-    # comparison is on the letters and digits alone.
-    def _alnum(x: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]", "", str(x or ""))
+    if keys:
+        # §17.1365 — the same key is spelled three ways across the layers: the block
+        # writes `WebUI\\\\Username` through two quoting levels, the file holds
+        # `WebUI\\Username`, and a check greps `^WebUI.Username=` with a regex dot. The
+        # comparison is on the letters and digits alone.
+        def _alnum(x: str) -> str:
+            return re.sub(r"[^A-Za-z0-9]", "", str(x or ""))
 
-    blob = _alnum("\n".join(str(c or "") for c in verify or []))
-    for key in keys:
-        if _alnum(key) and _alnum(key) in blob:
-            return ""
-    return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
-            + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
-            + ", and no check reads any of them back")
+        blob = _alnum("\n".join(str(c or "") for c in verify or []))
+        for key in keys:
+            if _alnum(key) and _alnum(key) in blob:
+                return ""
+        return (f"the block writes {', '.join('`' + k + '`' for k in keys[:4])}"
+                + (f" and {len(keys) - 4} more" if len(keys) > 4 else "")
+                + ", and no check reads any of them back")
+    # §17.1559 — nothing NAMED is written, so §17.1365 did not engage; two more shapes a pre-read
+    # cannot settle. Live (job 263e920a, 2026-10-14): five steps in a row — "Trigger metadata
+    # refresh", "Trigger image refresh", "Wait for refresh completion", "Verify Name", "Verify
+    # Overview" — were recorded `already met` off `jellyfin HTTP 200` (+ a log grep count), and the
+    # model judge said "confirmed" to each. Nothing had run; Jellyfin had not been refreshed.
+    probes = [c for c in verify or [] if _status_only_probe(str(c or ""))]
+    if verify and len(probes) == len(verify):
+        return ("every check is a liveness probe (an HTTP status or exit code only), which says the "
+                "service is up, not that this step's goal holds")
+    sent = sends_a_change(commands, files)
+    if sent:
+        return (f"the block sends a change ({sent}) that no check reads back -- a trigger's goal is the "
+                f"work it queues, which no pre-read can show already done")
+    return ""                         # a state the checks read (ADD84's `df -h /`): §17.1302's own case
+
+
+#: §17.1559 — a mutating HTTP call: curl's method/body flags, a python `method='POST'`, a wrapper
+#: called with a method literal (`api('/Items/x/Refresh','POST')`), or `requests.post(…)`.
+_SENDS_A_CHANGE_RE = re.compile(
+    r"(?:-X|--request)\s*[\"']?(?P<m1>POST|PUT|PATCH|DELETE)\b"
+    r"|(?:^|\s)(?:-d|--data(?:-raw|-binary)?|--json)(?:\s|=)"
+    r"|\bmethod\s*=\s*[\"'](?P<m2>POST|PUT|PATCH|DELETE)[\"']"
+    r"|\b\w+\((?:[^()\n]|\([^()\n]*\))*?[\"'](?P<m3>POST|PUT|PATCH|DELETE)[\"']"
+    r"|\brequests\.(?P<m4>post|put|patch|delete)\(", re.I)
+
+
+def sends_a_change(commands: list[str], files: Optional[list[dict]] = None) -> str:
+    """§17.1559 — the first mutating request the block sends (``"POST"``), or ``""``.
+
+    Code only, never comments (§17.1040): a comment saying "do not POST" names no request."""
+    texts = [str(c) for c in commands or []] + \
+            [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for ln in t.splitlines():
+            line = _strip_comment_shell(ln)
+            m = _SENDS_A_CHANGE_RE.search(line)
+            if m:
+                verb = next((g for g in (m.group("m1"), m.group("m2"), m.group("m3"), m.group("m4")) if g), "a body")
+                return f"`{verb.upper()}`" if verb != "a body" else "`-d` a request body"
+    return ""
+
+
+def _strip_comment_shell(line: str) -> str:
+    """The code before an unquoted ``#``."""
+    q = ""
+    for i, ch in enumerate(line):
+        if q:
+            if ch == q:
+                q = ""
+            continue
+        if ch in "\"'":
+            q = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+#: §17.1559 — a check that reports a STATUS and nothing else: curl with its body thrown away
+#: (`-o /dev/null`) and `-w` / `--fail`, or a bare `echo`. `systemctl is-active`, `df -h /`,
+#: a `grep` over a file or an API body are READS and are not this.
+_PROBE_PIECE_RE = re.compile(r"^\s*(?:echo\b.*|(?:\S+\s+)*?curl\b(?=.*\s-o\s*/dev/null)(?=.*(?:-w\b|--write-out\b|--fail\b|\s-f\b|-sf\b|-fs\b)).*)$", re.S)
+
+
+def _status_only_probe(check: str) -> bool:
+    """§17.1559 — True when every command in the check only reports a status code."""
+    c = str(check or "").strip()
+    if not c:
+        return False
+    # unwrap `pct exec N -- sh -c '…'` / `bash -c "…"` to what runs inside
+    for _ in range(3):
+        m = re.match(r"^(?:pct\s+exec\s+\d+\s+--\s+|sudo\s+)?(?:ba)?sh\s+-c\s+(['\"])(.*)\1\s*$", c, re.S)
+        if not m:
+            m2 = re.match(r"^pct\s+exec\s+\d+\s+--\s+(.*)$", c, re.S)
+            if not m2:
+                break
+            c = m2.group(1).strip()
+            continue
+        c = m.group(2).replace("'\\''", "'").strip()
+    pieces = [p for p in re.split(r"\s*(?:;|&&|\|\||\|)\s*", c) if p.strip()]
+    return bool(pieces) and all(_PROBE_PIECE_RE.match(p) for p in pieces)
 
 
 def _reads_only(cmd: str) -> bool:

@@ -337,6 +337,30 @@ def questions_for_step(title: str, brief: dict, *, description: str = "") -> lis
             if len(_keywords(q) & mine) >= 2 and (_keywords(q) & want)]
 
 
+def decide_and_state_block(questions: list[str]) -> str:
+    """§17.1564 — the AUTONOMOUS counterpart of ``ask_first_block``.
+
+    Live (job 263e920a, T8 "Produce missing metadata report"): the brief's unanswered ambiguity ("if
+    some items still lack a title… (a) list them (b) second refresh (c) leave them") matched the
+    report step, the step opened with that question as §17.1221 told it to — and nobody answers
+    inside an autonomous run. The verifier refused the question as "no report", the retry re-drew
+    the same question, three times, four rounds, and the job blocked on a step whose inputs were
+    all in hand. A guide talks to a person; an executor talks to a verifier. So in a run the step
+    takes the most conservative option, delivers, and names the assumption for the operator to
+    overrule afterwards."""
+    if not questions:
+        return ""
+    lines = "\n".join(f"  - {q}" for q in questions)
+    return (
+        "\n\nDECIDE AND STATE — this step depends on something the operator has not decided:\n" + lines
+        + "\n\nNobody answers inside an autonomous run, so do NOT ask and do NOT offer options: a question "
+        "instead of the deliverable is a failed step. Take the most CONSERVATIVE reading — the one that "
+        "changes nothing beyond this step's own output (report it, list it, leave it as it is) — produce "
+        "the deliverable in full, and end with one line `Assumed: <the reading you took>` so the operator "
+        "can overrule it later."
+    )
+
+
 def ask_first_block(questions: list[str]) -> str:
     """What the step's own prompt carries so the walkthrough opens by asking.
 

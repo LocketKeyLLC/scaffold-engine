@@ -170,8 +170,27 @@ def presence_only(check: str) -> bool:
     return bool(_PRESENCE_RE.match(c))
 
 
+#: §17.1560 — an API the step USES, not one it builds: "through the VirtualFolders API", "read it via
+#: the API", "the API at http://…", "API key". Live (job 263e920a, FIX1 "Fix the Jellyfin TV library so
+#: its files resolve as Series…"): an ops step that calls Jellyfin's API to restart/re-add/scan a library
+#: matched `api\b` here, was routed to the DEVELOP path (software for jellyfin.service) and refused for
+#: lacking a backticked feature check — a code-delivery rule applied to a step that delivers no code.
+_API_USED_RE = re.compile(
+    r"\b(?:through|via|using|use|uses|call(?:s|ing)?|query(?:ing)?|read(?:s|ing)?|from|over|against|poll(?:s|ing)?|hit(?:s|ting)?|with)\s+"
+    r"(?:the\s+|its\s+|an?\s+|their\s+|that\s+)?(?:[\w'./-]+\s+){0,3}api\b"
+    r"|\bapi\s+(?:key|token|call|request|response|answers?|reports?|returns?|at\s+http|https?://)"
+    # §17.1560b — a HOSTNAME (`api.themoviedb.org`, `api.radarr.video`) names a service the step reaches,
+    # not one it builds: live, FIX2 "Make Jellyfin reach TMDb" was routed to develop on `api.themoviedb.org`.
+    r"|\bapi\.[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+    # §17.1560b — a NETWORK route is not a web route: "no working IPv6 route", "default route", "route table"
+    r"|\b(?:ipv6|ipv4|ip|network|default|static|working|dead)\s+routes?\b|\bno\s+routes?\b|\broutes?\s+(?:to|table|add|del|via)\b", re.I)
+
+
 def builds_a_capability(text: str) -> bool:
-    return bool(_CAPABILITY_BUILD_RE.search(str(text or "")))
+    """A step that BUILDS something that does something — a route, an API, a page. §17.1560: an API the
+    step merely uses (calls, reads through, holds the key of) does not make it a build."""
+    t = _API_USED_RE.sub(" ", str(text or ""))
+    return bool(_CAPABILITY_BUILD_RE.search(t))
 
 
 def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str], keys: list[str],
