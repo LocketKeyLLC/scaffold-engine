@@ -117,6 +117,19 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
         # and seven rounds proposed `/etc/caddy/Caddyfile` for the wrong container until each was refused.
         if pick is None:
             return None
+    # §17.1549 — a job that DECLARES a single deploy target (deploy-verb phrasing, §17.1540
+    # `deploy_target_guest`) keeps EVERY build node on it. A panel-aggregator node names the
+    # service it QUERIES, not the machine it deploys to: "Add Palworld status endpoint" is a
+    # route on the control panel that reads VM 106 via the Proxmox API — it must NOT deploy a
+    # status server ONTO VM 106. So the declared target outranks the name-match below; only an
+    # explicit guest id in the title (handled above) overrides it. Live (job 5b71ec89,
+    # 2026-10-14): that very node matched the palworld service on VM 106, delivered
+    # `/opt/palworld/status_server.py` there and restarted the game, instead of a CT 111 route.
+    if pick is None and str(brief or ""):
+        from app.modules.step_classify import deploy_target_guest as _deploy_target
+        _tgt = _deploy_target(str(brief))
+        if _tgt:
+            pick = next((s for s in cands if str(s.guest) == _tgt), None)
     if pick is None:
         # §17.1456 — the host is the step's SUBJECT, which its title names. Live (ADD151 "Proxmox firewall:
         # enforce the security groups on every guest", 2026-10-10): the description lists Jellyfin's ports, so
