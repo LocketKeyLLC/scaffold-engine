@@ -833,9 +833,30 @@ async def _fetch_upstream_outputs(
     }
 
 
-def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
+async def _fetch_upstream_finished(db, job_id: str, depends_on: list[str]) -> dict[str, object]:
+    """§17.1566 — when each upstream node finished (``completed_at``), by node_key.
+
+    Live (job 263e920a, T8): three census siblings T7/T7v2/T7v3 fed the final report. T7v2 and T7v3
+    had last run BEFORE the library rebuild (902 Movie rows), T7 after it (Series/Season/Episode, the
+    real state) — and the report called T7v3 "the most recent pass" by its key, concluding 902 items
+    still lacked metadata. A section's recency is a fact the engine holds; the model must not infer it
+    from a name."""
+    if not depends_on:
+        return {}
+    rows = await db.execute(
+        text("SELECT node_key, completed_at FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
+             "AND status = 'done'"),
+        {"jid": job_id, "keys": depends_on})
+    return {r.node_key: r.completed_at for r in rows.fetchall() if r.completed_at is not None}
+
+
+def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
+
+    §17.1566 — ``finished`` (``{node_key: completed_at}``) orders the sections by when they finished,
+    oldest first, stamps each with its time, and says that where two disagree the LATER one is the
+    current state — so a report step reads recency off the engine's facts, not off a node's name.
 
     - Annotates each section header with the upstream node's verifier
       confidence (omitted for NULL / un-verified nodes).
@@ -894,16 +915,27 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
         )
 
     parts = []
-    for nk in texts:
+    fin = finished or {}
+    # §17.1566 — oldest first, so the LAST section is the latest state; a node with no time keeps plan order at the end.
+    order = sorted(texts, key=lambda k: (fin.get(k) is None, fin.get(k) or 0, list(texts).index(k))) if fin else list(texts)
+    for nk in order:
         c = confs[nk]
         suffix = f" (confidence: {c:.2f})" if c is not None else ""
+        when = fin.get(nk)
+        if when is not None:
+            try:
+                suffix += f" (finished {when.strftime('%Y-%m-%d %H:%M')} UTC)"
+            except Exception:
+                suffix += f" (finished {when})"
         parts.append(f"### {nk}{suffix}\n{texts[nk]}")
+    ordered_note = (" They are listed in the order they FINISHED, oldest first; where two disagree, the later one "
+                    "is the current state and the earlier one is history." if fin else "")
     return (
         "## Upstream Node Outputs (MANDATORY CONTEXT — your output MUST build on and be consistent with this work)\n"
         # §17.1565 — said plainly, because live (T8, job 263e920a) a report step read these as a plan still to be
         # carried out, doubted that the refresh had happened, and wrote the commands for someone to run it.
         "These steps ALREADY RAN before this one, in plan order. Each section below is a RESULT the machine "
-        "produced, not a plan; this step runs nothing itself.\n\n"
+        "produced, not a plan; this step runs nothing itself." + ordered_note + "\n\n"
         + "\n\n".join(parts)
         + "\n\n---\n\n## YOUR TASK (build on the upstream outputs above — do NOT rewrite or contradict them):\n"
     )
@@ -1664,6 +1696,8 @@ async def execute_next_node(
                 await _fetch_upstream_outputs(db, job_id, depends_on)
                 if depends_on else {}
             )
+            # §17.1566 — when each finished, so the block can say which result is current
+            _upstream_finished = (await _fetch_upstream_finished(db, job_id, depends_on) if depends_on else {})
             # §17.1039 — values the upstream reports left unsupported; they are
             # not credited by the upstream text they sit in (§17.1028).
             _upstream_flagged = await fetch_upstream_flagged(db, job_id, depends_on)
@@ -1838,7 +1872,7 @@ async def execute_next_node(
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
-        _upstream_block = _format_upstream_block(upstream_outputs, node_key)
+        _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished)
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 
@@ -2691,13 +2725,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             brief = _brief_text(job)
             brief_full = (job or {}).get("refined_brief") or {}
             upstream = await _fetch_upstream_outputs(db, job_id, target.get("depends_on") or [])
+            upstream_fin = await _fetch_upstream_finished(db, job_id, target.get("depends_on") or [])   # §17.1566
     except Exception as exc:
         # The LOOK-UP failing must not sink the run — but it is logged as an
         # error, not a debug line: a silent miss here means the model decides
         # for the operator (feedback: fail-soft hides the first-run defect).
         logger.error("decision_pause_check_failed job=%s err=%s", job_id, exc)
         return None
-    up_block = _format_upstream_block(upstream, target.get("node_key") or "") if upstream else ""
+    up_block = _format_upstream_block(upstream, target.get("node_key") or "", finished=upstream_fin) if upstream else ""
     if op_node is not None:
         # §17.1464 — what the engine learned, and the operator's other steps in the same place (one trip)
         from app.modules.runbook_inputs import job_environment

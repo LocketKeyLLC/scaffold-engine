@@ -32,6 +32,25 @@ def test_a_step_with_no_upstream_or_that_does_work_gets_no_such_block():
     assert ea.formats_what_came_before(shell) == ""
 
 
+def test_upstream_sections_are_ordered_and_stamped_by_when_they_finished():
+    """§17.1566 — live, the report called T7v3 'the most recent pass' by its KEY while T7 had run an hour
+    later, after the library rebuild; the block now orders by completed_at and says the later one wins."""
+    from datetime import datetime, timezone
+    up = {"T7": ("Shows/Episode: 902, overview 0, poster 279", 0.9),
+          "T7v2": ("Shows/Movie: 902, overview 902, poster 321", 0.9),
+          "T7v3": ("Shows/Movie: 902, overview 902, poster 321", 0.9)}
+    fin = {"T7": datetime(2026, 10, 14, 22, 6, tzinfo=timezone.utc),
+           "T7v2": datetime(2026, 10, 14, 20, 43, tzinfo=timezone.utc),
+           "T7v3": datetime(2026, 10, 14, 20, 44, tzinfo=timezone.utc)}
+    block = ea._format_upstream_block(up, "T8", finished=fin)
+    assert block.index("### T7v2") < block.index("### T7v3") < block.index("### T7 ")
+    assert "### T7 (confidence: 0.90) (finished 2026-10-14 22:06 UTC)" in block
+    assert "order they FINISHED, oldest first" in block and "the later one is the current state" in block
+    # without times: plan order, no claim about recency
+    plain = ea._format_upstream_block(up, "T8")
+    assert "FINISHED" not in plain and plain.index("### T7 ") < plain.index("### T7v2")
+
+
 def test_the_upstream_block_says_the_results_already_happened():
     block = ea._format_upstream_block({"T7": ("Shows/Episode: 902, missing overview 0, poster 279\nRESULT: 281 item(s)", 0.9)}, "T8")
     assert "ALREADY RAN before this one" in block and "a RESULT the machine produced, not a plan" in block
