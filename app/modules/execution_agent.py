@@ -1526,8 +1526,15 @@ async def execute_next_node(
         # runbook prompt and is reported `runbook_only`, exactly as a Shell
         # step is, instead of being "completed" as prose.
         if tool_lower == "llm":
-            from app.modules.step_classify import step_is_hands_on
-            _on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+            from app.modules.step_classify import step_is_hands_on  # deploy_target_guest is module-level (§17.1545)
+            # §17.1545 — in a deploy job (brief names a machine deploy target) a verify step checks the
+            # DEPLOYED state on that machine, so it is hands-on → Shell (the runbook executor runs the
+            # check) rather than an LLM task that writes the pct-exec commands as prose and is failed
+            # "INSTRUCTIONS, not work". Same brief signal as the §17.1541 CodeGen reroute below.
+            _rb_llm = (await db.execute(
+                text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
+            _on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {},
+                                         deploy_job=bool(deploy_target_guest(str(_rb_llm or ""))))
             if _on:
                 logger.info("hands_on_step_as_runbook job=%s node=%s reason=%s", job_id, node_key, _why)
                 tool, tool_lower = "Shell", "shell"
@@ -1540,7 +1547,7 @@ async def execute_next_node(
         # Shell hands it back for approval below, after which pending_hands_on (brief-aware) develops
         # it and `develop.host_for` (§17.1537) delivers the files to the deploy target.
         if tool_lower == "codegen":
-            from app.modules.step_classify import step_is_hands_on, deploy_target_guest
+            from app.modules.step_classify import step_is_hands_on  # deploy_target_guest is module-level (§17.1545)
             _rb = (await db.execute(
                 text("SELECT refined_brief FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
             if deploy_target_guest(str(_rb or "")):

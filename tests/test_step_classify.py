@@ -125,3 +125,27 @@ def test_the_four_consumers_are_wired():
     assert "hands_on_step_as_runbook" in run and 'tool, tool_lower = "Shell", "shell"' in run
     comp = inspect.getsource(execution_compile)
     assert comp.count("step_is_hands_on(dict(") >= 2, "the banner count and the deliverable kind both read what a step does"
+
+
+def test_a_verify_step_in_a_deploy_job_is_hands_on_shell():
+    # §17.1545 — a verify step in a DEPLOY job checks deployed machine state; as an LLM task it writes
+    # the pct-exec commands as prose and is failed "INSTRUCTIONS, not work" (live ae721781 T17-T18v2).
+    # With deploy_job it is hands-on → Shell (the runbook executor runs the check).
+    for title in ("Verify media-request", "Verify existing frontend components are still imported",
+                  "Check the health dashboard renders", "Prove the Byparr cards show"):
+        node = {"tool": "LLM", "title": title}
+        on, why = step_is_hands_on(node, shell_backend=False, mcp_enabled=True, deploy_job=True)
+        assert on and why.endswith("deploy-verify"), (title, on, why)
+    # OFF in a non-deploy job: a reasoning verify stays an LLM task
+    node = {"tool": "LLM", "title": "Verify the summary is coherent"}
+    assert step_is_hands_on(node, shell_backend=False, mcp_enabled=True, deploy_job=False) == (False, "")
+    # a non-observe title in a deploy job is NOT swept in by this branch
+    node = {"tool": "LLM", "title": "Summarize the findings"}
+    assert step_is_hands_on(node, shell_backend=False, mcp_enabled=True, deploy_job=True) == (False, "")
+
+
+def test_the_llm_flip_site_passes_deploy_job():
+    # §17.1545 — the execution flip site reads refined_brief and passes deploy_job to the classifier.
+    import pathlib
+    ea = pathlib.Path("app/modules/execution_agent.py").read_text()
+    assert "deploy_job=bool(deploy_target_guest(str(_rb_llm or" in ea, "LLM flip must pass deploy_job"
