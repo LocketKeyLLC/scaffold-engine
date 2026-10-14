@@ -1023,7 +1023,7 @@ def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> s
     non-empty, a "Reviewer feedback" block is prepended (autonomous-only) so a
     retry sees the prior rejection instead of re-emitting the identical output.
     """
-    body = build_base_prompt(node, brief, environment)
+    body = build_base_prompt(node, brief, environment, autonomous=True)   # §17.1564 — a run cannot ask
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
 

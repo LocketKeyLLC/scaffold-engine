@@ -92,7 +92,7 @@ def test_the_drafter_takes_it():
     from app.modules import supervised_runs as sr
     sig = inspect.signature(sr.draft_runbook)
     assert "environment" in sig.parameters
-    assert "build_base_prompt(node, b, environment)" in inspect.getsource(sr.draft_runbook)
+    assert "build_base_prompt(node, b, environment, autonomous=True)" in inspect.getsource(sr.draft_runbook)   # §17.1564
 
 
 def test_the_environment_is_read_before_the_first_draft_uses_it():

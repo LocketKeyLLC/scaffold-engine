@@ -287,7 +287,9 @@ def test_every_step_prompt_goes_through_the_one_place_that_asks():
     import inspect
     from app.modules import prompt_assembly as pa
     src = inspect.getsource(pa.build_base_prompt)
-    assert "ask_first_block(questions_for_step(" in src, src
+    # §17.1564 — the one place still asks (a guide) or decides-and-states (a run), from the same question list
+    assert "questions_for_step(title, brief or {}" in src and "ask_first_block(_qs)" in src \
+        and "decide_and_state_block(_qs) if autonomous" in src, src
     assert "except Exception:" in src, "a prompt must never fail to assemble over this"
 
 

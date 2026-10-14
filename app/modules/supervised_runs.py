@@ -3720,7 +3720,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
             if type(exc).__name__ == "ContentCut":
                 return ("<!-- runbook-cut -->\n## Why this cannot run yet\n\n"
                         f"{exc}\n\n## Run this\n\n```bash\necho \"content cut\"\n```\n")
-    prompt = build_base_prompt(node, b, environment)
+    prompt = build_base_prompt(node, b, environment, autonomous=True)   # §17.1564 — a runbook cannot ask either
     # §17.1222 — a value the operator already gave once must never be asked for
     # again. The store, the `$NAME` reference and the out-of-band delivery all
     # existed (§17.1191/1193); what did not was the drafter KNOWING the names,

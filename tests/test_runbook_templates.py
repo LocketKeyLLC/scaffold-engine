@@ -107,7 +107,7 @@ def test_the_drafter_renders_a_template_first_and_the_pause_measures_before_draf
     # touches several guests is drafted from no single-guest template.
     assert "truth=None" in src[i:i + 400] and "rt.select_template(node, truth, services)" in src[i:] \
         and "rt.render(tpl" in src[i:]
-    assert src.index("rt.select_template(node, truth, services)", i) < src.index("prompt = build_base_prompt(node, b, environment)", i)
+    assert src.index("rt.select_template(node, truth, services)", i) < src.index("prompt = build_base_prompt(node, b, environment, autonomous=True)", i)
     from app.modules import execution_agent as ea
     esrc = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     j = esrc.index("async def _pause_for_decision(")
