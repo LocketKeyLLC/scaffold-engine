@@ -72,6 +72,8 @@ def test_a_step_that_builds_no_capability_keeps_its_check():
      "key readable on the machine); done when GET /Items?ParentId=X returns Series items", False),
     ("store the engine API key in config/scaffold.json and read it via the API", False),
     ("add a /api/health route to the backend", True), ("expose the status API", True),
+    # §17.1560b — a hostname is a service the step REACHES: "Make Jellyfin reach TMDb" named api.themoviedb.org
+    ("getent orders api.themoviedb.org's AAAA records first; curl -4 to https://api.themoviedb.org is answered", False),
 ])
 def test_what_builds_a_capability(text, yes):
     assert builds_a_capability(text) is yes

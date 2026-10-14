@@ -178,7 +178,10 @@ def presence_only(check: str) -> bool:
 _API_USED_RE = re.compile(
     r"\b(?:through|via|using|use|uses|call(?:s|ing)?|query(?:ing)?|read(?:s|ing)?|from|over|against|poll(?:s|ing)?|hit(?:s|ting)?|with)\s+"
     r"(?:the\s+|its\s+|an?\s+|their\s+|that\s+)?(?:[\w'./-]+\s+){0,3}api\b"
-    r"|\bapi\s+(?:key|token|call|request|response|answers?|reports?|returns?|at\s+http|https?://)", re.I)
+    r"|\bapi\s+(?:key|token|call|request|response|answers?|reports?|returns?|at\s+http|https?://)"
+    # §17.1560b — a HOSTNAME (`api.themoviedb.org`, `api.radarr.video`) names a service the step reaches,
+    # not one it builds: live, FIX2 "Make Jellyfin reach TMDb" was routed to develop on `api.themoviedb.org`.
+    r"|\bapi\.[a-z0-9-]+(?:\.[a-z0-9-]+)+", re.I)
 
 
 def builds_a_capability(text: str) -> bool:
