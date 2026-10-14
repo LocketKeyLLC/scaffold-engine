@@ -784,6 +784,10 @@ def is_hands_on_node(node: dict, brief: str = "") -> bool:
     # (no deploy target) is not. `brief` is threaded from the job so the peek can tell them apart.
     from app.modules.step_classify import step_is_hands_on, deploy_target_guest
     _n = dict(node) if hasattr(node, "keys") else {}
+    # §17.1551 — a runner-write MCP node changes a machine, so the frontier must NOT run it
+    # deterministically: it is hands-on and parks for approval (the peek/claim both read this).
+    if is_mcp_write(_n):
+        return True
     _dc = str(_n.get("tool") or "").strip().lower() == "codegen" and bool(deploy_target_guest(brief))
     on, why = step_is_hands_on(_n, develops_codegen=_dc)
     return bool(on) and not why.startswith("tool:human")

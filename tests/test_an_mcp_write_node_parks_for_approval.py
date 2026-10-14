@@ -55,6 +55,16 @@ def test_mcp_write_runbook_is_none_for_a_read_node():
     assert sr.mcp_write_runbook(_mcp("run_readonly"), {}, {}) is None
 
 
+def test_is_hands_on_node_true_for_runner_write_mcp():
+    # the frontier's hands-on predicate (peek + claim) must hold a runner-write MCP node for approval,
+    # not run it deterministically.
+    assert sr.is_hands_on_node(_mcp(WRITE_TOOL)) is True
+
+
+def test_is_hands_on_node_false_for_read_mcp():
+    assert sr.is_hands_on_node(_mcp("run_readonly")) is False
+
+
 @pytest.mark.asyncio
 async def test_execute_mcp_node_refuses_a_runner_write_instead_of_calling_it(monkeypatch):
     # defense-in-depth: if a runner-write node ever reaches deterministic execution (the pause was

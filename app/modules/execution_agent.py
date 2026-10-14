@@ -2525,7 +2525,7 @@ async def _peek_next_node(job_id: str) -> dict | None:
         rows = await db.execute(
             text("""
                 SELECT node_key, title, tool, node_type, depends_on, execution_order,
-                       description, prompt_template
+                       description, prompt_template, tool_config
                 FROM dag_nodes
                 WHERE job_id = :jid AND status = 'pending'
                 ORDER BY execution_order ASC
