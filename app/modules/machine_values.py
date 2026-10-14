@@ -932,3 +932,150 @@ def a_check_the_engine_can_write(commands: list[str], inventory: Optional[dict] 
                     f"(§17.1345); the engine had already composed this read and could only describe "
                     f"it until now."))
     return out
+
+
+# ── §17.1548: present a login the engine holds to a service's own HTTP check ──
+# Live, control-panel job ae721781, 2026-10-14: every verify curled the panel
+# UNAUTHENTICATED and came back `{"error":"Authentication required"}` (401) — the
+# panel's `server.js` does `app.use(basicAuth)` on EVERY route, user `panel`,
+# password in the runner-held secret PANEL_PASSWORD. §17.1547 made the check FAIL
+# honestly on that 401, but the engine was blind to the app it had itself secured.
+# The *arr family already presents a key it READS off the machine
+# (`read_on_the_machine`); HTTP Basic auth from a STORED secret is a different
+# KIND, so it gets its own presenter. The value is never carried in the command:
+# the password is fed to the guest on STDIN as a herestring (the §17.1191/§17.901
+# shape), written as the `<NAME>` placeholder the runner resolves — so it never
+# reaches the host argv, the approval it is signed with, or a sudo log.
+_LOGIN_NAME_RE = re.compile(r"(PASSWORD|PASSWD|PASS)$")
+#: the operator's login user, as the secret's hint records it (`user `panel``,
+#: `user "panel"`, `user: panel`).
+_HINT_USER_RE = re.compile(r"\buser[\s:`'\"]+([A-Za-z0-9._-]{1,64})", re.I)
+_SAFE_USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+#: a curl that already presents a credential of its own — left exactly as drafted.
+_HAS_AUTH_RE = re.compile(r"(?:\s-u\s|\s--user\b|\s--netrc(?:-file)?\b|\s-K\s|-K-|Authorization\s*:)", re.I)
+#: the loopback literal port in a check (mirrors service_truth's §17.1502).
+_LOOPBACK_PORT_RE = re.compile(
+    r"(?:https?://)?(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]):(\d{2,5})\b")
+#: a shell shape too compound to re-wrap safely — left untouched (fail-soft).
+_COMPOUND_RE = re.compile(r"[;|&><`]|\$\(")
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def _login_stem(name: str) -> str:
+    """`PANEL_PASSWORD` → `panel` — the name with its `…PASSWORD` tail stripped,
+    normalised, so it can be matched against a service's own name."""
+    return _norm(_LOGIN_NAME_RE.sub("", str(name or "")).rstrip("_"))
+
+
+def logins_from_held(meta: Optional[list]) -> list[dict]:
+    """`[{name,user,hint}]` for the HELD secrets that are an operator LOGIN: a
+    `for_operator` value (§17.1463 marks a login so), a `…PASSWORD`-shaped name,
+    and a username the hint records. A secret missing any of these is not a login
+    this presenter will use — an API key or token never becomes Basic auth."""
+    out: list[dict] = []
+    for m in meta or []:
+        name = str((m or {}).get("name") or "")
+        if not (m or {}).get("for_operator") or not _LOGIN_NAME_RE.search(name):
+            continue
+        um = _HINT_USER_RE.search(str((m or {}).get("hint") or ""))
+        if not um or not _SAFE_USER_RE.match(um.group(1)):
+            continue
+        out.append({"name": name, "user": um.group(1), "hint": str((m or {}).get("hint") or "")})
+    return out
+
+
+def _guarded_ports(services: Optional[list], logins: list[dict]) -> dict:
+    """`{port: (secret, user, guest, vm)}` for every MEASURED service a held login
+    names — the login's hint carries the service's name/unit, or the secret's stem
+    is that service's name. Only these ports this presenter will ever touch, so a
+    login is never presented to a service it does not belong to."""
+    guard: dict = {}
+    for s in services or []:
+        guest = str(getattr(s, "guest", "") or "")
+        if not guest:
+            continue
+        sname, sunit = _norm(getattr(s, "name", "") or ""), _norm(getattr(s, "unit", "") or "")
+        for L in logins:
+            hint_n, stem = _norm(L.get("hint", "")), _login_stem(L.get("name", ""))
+            names_it = ((sname and sname in hint_n) or (sunit and sunit in hint_n)
+                        or (stem and sname and stem in sname) or (stem and sunit and stem in sunit))
+            if not names_it:
+                continue
+            for p in (getattr(s, "ports", ()) or ()):
+                guard[str(p)] = (L["name"], L["user"], guest, bool(getattr(s, "vm", False)))
+            break
+    return guard
+
+
+def _present_one(line: str, guard: dict) -> Optional[str]:
+    """The rewritten line, or None to leave it exactly as drafted. Fail-soft: a
+    single, non-compound `curl` that already runs inside the login's LXC guest,
+    carries no credential of its own, and targets the service's measured loopback
+    port — anything else is untouched (no regression on a check that can't bind)."""
+    if "curl" not in line or _COMPOUND_RE.search(line) or "\n" in line or _HAS_AUTH_RE.search(line):
+        return None
+    hit = [p for p in {m.group(1) for m in _LOOPBACK_PORT_RE.finditer(line)} if p in guard]
+    if len(hit) != 1:
+        return None                                   # no guarded port, or ambiguous between two
+    secret, user, guest, vm = guard[hit[0]]
+    if vm or not addresses_guest(line, guest):
+        return None                                   # the stdin herestring is an LXC (pct) shape run in-guest
+    m = re.match(rf"^\s*pct\s+exec\s+{re.escape(guest)}\s+--\s+(.*\S)\s*$", line)
+    if not m:
+        return None
+    inner = m.group(1)
+    sc = re.match(r"^sh\s+-c\s+'(.*)'\s*$", inner)
+    if sc:
+        payload = sc.group(1).replace("'\\''", "'")   # undo the single-quote escape, then re-wrap once
+    elif inner.lstrip().startswith("curl"):
+        payload = inner
+    else:
+        return None
+    if "curl" not in payload or _HAS_AUTH_RE.search(payload):
+        return None
+    payload2 = re.sub(r"\bcurl\b(\s)", lambda mm: f'curl -u "{user}:$CPW"{mm.group(1)}', payload, count=1)
+    if payload2 == payload:
+        return None                                   # no bare `curl ` token to extend
+    payload2 = "IFS= read -r CPW; " + payload2
+    return f'pct exec {guest} -- sh -c {_sq(payload2)} <<< "<{secret}>"'
+
+
+def present_a_held_login(commands: list[str], verify: list[str], services: Optional[list],
+                         logins: Optional[list[dict]]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1548 — rewrite a check that curls a service the engine holds a login for
+    to present HTTP Basic auth, the password fed to the guest on stdin as the
+    runner-resolved `<NAME>` placeholder (never in the command). Returns
+    ``(commands, verify, notes)``; see `_present_one` for the narrow, fail-soft
+    conditions under which a line is touched at all."""
+    logins = logins or []
+    if not logins or not services:
+        return list(commands or []), list(verify or []), []
+    guard = _guarded_ports(services, logins)
+    if not guard:
+        return list(commands or []), list(verify or []), []
+    touched = False
+
+    def fix(seq: Optional[list]) -> list:
+        nonlocal touched
+        out = []
+        for c in seq or []:
+            new = _present_one(str(c), guard)
+            if new is not None and new != str(c):
+                out.append(new)
+                touched = True
+            else:
+                out.append(c)
+        return out
+
+    out_cmds, out_verify = fix(commands), fix(verify)
+    notes: list[dict] = []
+    if touched:
+        notes.append({"why": (
+            "a check curled a service the engine secured with its own login and sent no credential, so it came "
+            "back 401 — blind to the app the engine built. Presented the held login as HTTP Basic auth, with the "
+            "password fed to the guest on stdin (never in the command, the approval, or a log) as the "
+            "runner-resolved reference (§17.1548).")})
+    return out_cmds, out_verify, notes

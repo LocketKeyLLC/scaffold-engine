@@ -3462,6 +3462,37 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                         return await _pause_for_decision(job_id, _depth + 1)
             except Exception as exc:
                 logger.warning("step_split_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+        # §17.1548b — a step the engine drafted into NOTHING (no command, no check,
+        # no refusal) is a dead park: decide:run returns `not_runnable` 409 every
+        # time and the job hangs on a decision that can never be taken. Live, job
+        # ae721781: the degenerate split-fragment verifies T22v2/T23v2 ("Verify
+        # that the served HTML", empty descriptions) re-drafted empty every round
+        # and 409-looped the driver. A VERIFY step fails clean (it verified
+        # nothing, §17.1547); any other empty-and-unrefused step gets a stated
+        # refusal so it parks as a real myself/skip/redraft decision, never a dead
+        # `run`. The disposition is decided in one tested place.
+        _disp = supervised_runs.empty_frame_disposition(frame, run_node)
+        if _disp is not None and _disp[0] == "fail":
+            async with async_session() as db:
+                await db.execute(
+                    text("UPDATE dag_nodes SET status = 'failed', completed_at = NOW(), "
+                         "started_at = COALESCE(started_at, NOW()), updated_at = NOW(), "
+                         "last_verification_reason = :why "
+                         "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+                    {"jid": job_id, "nk": run_node.get("node_key"), "why": _disp[1]})
+                await db.commit()
+            logger.warning("supervised_run_empty_verify_failed job=%s node=%s title=%r",
+                           job_id, run_node.get("node_key"), run_node.get("title"))
+            # §17.1548b — the step is settled (failed); move to the NEXT decision the
+            # way §17.1302's already-met path does — RECURSE, don't return None. A
+            # None here is read by the serial loop as "a step settled, re-peek and
+            # start the next node", which then runs the next hands-on node outside
+            # its pause and the clean exit flips the job to 'failed' (live: T22v2
+            # failed clean, then T17 was mis-started and the run ended failed).
+            return await _pause_for_decision(job_id, _depth + 1) if _depth < 6 else None
+        if _disp is not None and _disp[0] == "refuse":
+            frame["refused"] = list(frame.get("refused") or []) + [_disp[1]]
+            frame["suggested"] = "myself"
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

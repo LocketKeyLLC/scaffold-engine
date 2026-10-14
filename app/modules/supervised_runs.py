@@ -112,10 +112,17 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
             # into "the engine silently stopped being able to run anything".
             try:
                 from app.modules import runner_secrets as _rs
-                pol = {**pol, "held": await _rs.names(db)}
+                from app.modules.machine_values import logins_from_held as _mv_logins
+                # §17.1548 — the NAMES feed `apply_runner_secrets` (a set), unchanged.
+                # Alongside them, the login METADATA (hint + for_operator) a check needs
+                # to present HTTP Basic auth to a service the engine secured: a parallel
+                # key, so `held` keeps its name-set shape.
+                _meta = await _rs.list_secrets(db)
+                pol = {**pol, "held": [m["name"] for m in _meta],
+                       "held_logins": _mv_logins(_meta)}
             except Exception as exc:
                 logger.warning("runner_secret_names_unavailable err=%r", exc)
-                pol = {**pol, "held": []}
+                pol = {**pol, "held": [], "held_logins": []}
     except Exception as exc:
         logger.warning("supervised_runs_channel_failed err=%r", exc)
         return None
@@ -1159,6 +1166,37 @@ def no_commands_retry_note(step_text: str, runbook: str) -> str:
         "is worth far more than one that is 0% runnable.",
     ]
     return "\n".join(lines)
+
+
+def empty_frame_disposition(frame: dict, node: dict) -> Optional[tuple]:
+    """§17.1548b — what to do with a hands-on frame the engine drafted into
+    NOTHING: no command to run, no check to judge, and no refusal explaining why.
+    Such a frame is a dead park — ``decide:run`` returns ``not_runnable`` 409 every
+    time and the job hangs on a decision that can never be taken (live, job
+    ae721781: the degenerate split-fragment verifies T22v2/T23v2 re-drafted empty
+    every round and 409-looped the driver).
+
+    Returns ``('fail', why)`` for a VERIFY step — it verifies nothing, so it fails
+    clean and the frontier moves on (the gap is visible, the §17.1547 way: an
+    absent check is a failed check, not a silent skip); ``('refuse', refusal)`` for
+    any other step — park a real myself/skip/redraft decision, never a dead
+    ``run``; or ``None`` when the frame has something to run, judge, or explain.
+    """
+    if (frame or {}).get("commands") or (frame or {}).get("verify") or (frame or {}).get("refused"):
+        return None
+    from app.modules.step_classify import _LEADING_OBSERVE_RE
+    title = str((node or {}).get("title") or "")
+    vtype = str((node or {}).get("node_type") or "").lower()
+    if _LEADING_OBSERVE_RE.match(title) or vtype in ("verify", "check", "checkpoint", "validation"):
+        return ("fail",
+                "the engine could not draft this verify step into any runnable command or check — there is "
+                "nothing to run and nothing to judge, so nothing was verified. Failed rather than parked on a "
+                "decision that can never be taken (§17.1548b): the step's own text (%r) gave the drafter nothing "
+                "concrete to check." % (title[:120]))
+    return ("refuse", {"why": (
+        "this step produced no command to run and no check to judge, and nothing refused it to explain why — "
+        "there is nothing the engine can carry out here. Redraft it with a concrete command, do it yourself, or "
+        "skip it (§17.1548b); `run` is withheld because it would do nothing.")})
 
 
 #: `/api/v1/indexer`, `/api/v3/rootfolder` — an API path in a drafted command.
@@ -5401,6 +5439,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                            f"never uses that value, so nobody has it to type; the remaining checks stand"}
                    for h in _vhits]
         _vhits = []
+    # §17.1548 — a check that curls a service the engine holds a login for presents it
+    # as HTTP Basic auth, the password fed to the guest on stdin as the runner-resolved
+    # placeholder. BEFORE inputs_for, so the `<SECRET>` it inserts is picked up as a
+    # secret input and resolved by apply_runner_secrets below (never travelling here).
+    cmds, verify, _ba_notes = _mv.present_a_held_login(cmds, verify, services, (policy or {}).get("held_logins") or [])
+    _mv_notes = list(_mv_notes) + _ba_notes
     inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.

@@ -286,7 +286,10 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     # waits for, a split, and a split's numbering or stated count corrected on this
     # step's own text (the draft reads that text, so it restarts rather than drafts).
     # §17.1407 — five: and an upstream step reopened while this one was being drafted.
-    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 5
+    # §17.1548b — six: and a verify the engine could draft into nothing, failed clean
+    # (settled), which recurses to the NEXT decision rather than returning None (a
+    # None reads as "start the next node" and the clean exit flips the job failed).
+    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 6
     assert "decision_pause_upstream_moved" in body
     assert "step_split_restart" in body
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')

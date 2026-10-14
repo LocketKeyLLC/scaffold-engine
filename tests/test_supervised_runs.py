@@ -119,10 +119,13 @@ async def test_channel_is_none_when_off_or_without_a_runner_or_policy(monkeypatc
         assert await sr.channel(AsyncMock()) is None
     with patch("app.modules.assist_local_runner.runner_spec", new=AsyncMock(return_value=_spec())), \
          patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=POLICY)), \
-         patch("app.modules.runner_secrets.names", new=AsyncMock(return_value=["DB_PASSWORD"])):
+         patch("app.modules.runner_secrets.list_secrets",
+               new=AsyncMock(return_value=[{"name": "DB_PASSWORD", "for_operator": True,
+                                            "hint": "the postgres password"}])):
         spec, pol = await sr.channel(AsyncMock())
-    assert spec.name == "pve-runner" and {k: v for k, v in pol.items() if k != "held"} == POLICY
+    assert spec.name == "pve-runner" and {k: v for k, v in pol.items() if k not in ("held", "held_logins")} == POLICY
     assert pol["held"] == ["DB_PASSWORD"]          # §17.1193 — names the ENGINE holds
+    assert pol["held_logins"] == []                # §17.1548 — a password with no named user is not a login
 
 
 @pytest.mark.asyncio
@@ -134,9 +137,9 @@ async def test_the_write_channel_survives_a_missing_secret_store(monkeypatch):
     monkeypatch.setattr(settings, "mcp_tool_enabled", True)
     with patch("app.modules.assist_local_runner.runner_spec", new=AsyncMock(return_value=_spec())), \
          patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=POLICY)), \
-         patch("app.modules.runner_secrets.names", new=AsyncMock(side_effect=RuntimeError("no such table"))):
+         patch("app.modules.runner_secrets.list_secrets", new=AsyncMock(side_effect=RuntimeError("no such table"))):
         ch = await sr.channel(AsyncMock())
-    assert ch is not None and ch[1]["allow"] == POLICY["allow"] and ch[1]["held"] == []
+    assert ch is not None and ch[1]["allow"] == POLICY["allow"] and ch[1]["held"] == [] and ch[1]["held_logins"] == []
 
 
 # ── resolution ───────────────────────────────────────────────────────────
