@@ -8972,6 +8972,10 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
     text = _node_text(node)
     if not (_PREFER_IPV4_RE.search(text) and (_PUBLIC_API_RE.search(text) or re.search(r"\bipv6\b|\bgai\.conf\b", text, re.I))):
         return list(commands or []), list(verify or []), []
+    # §17.1563c — a VERIFY/CHECK step is a read ("Verify prowlarr IPv4 first"): never the fix, which would
+    # restart the unit once more per check. Live plan 977a8a38: 6 appends, 6 restarts, 6 verifies.
+    if _JF_OBSERVE_TITLE_RE.search(str((node or {}).get("title") or "")):
+        return list(commands or []), list(verify or []), []
     app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
     gid = _arr_guest(app, services, inventory) if app else None
     unit = f"{app}.service" if app else ""

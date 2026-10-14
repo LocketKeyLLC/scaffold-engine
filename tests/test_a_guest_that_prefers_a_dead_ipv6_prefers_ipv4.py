@@ -85,6 +85,17 @@ def test_a_guest_that_is_not_an_arr_app_is_resolved_from_the_measured_service_or
     assert not rewrite_prefer_ipv4_in_guest(node3, ["x"], ["y"], svcs, inv)[2]
 
 
+def test_a_verify_step_is_a_read_not_the_fix():
+    """§17.1563c — the planner (job 977a8a38) wrote 'Append gai.conf on prowlarr' / 'Restart prowlarr service' /
+    'Verify prowlarr IPv4 first' as three steps; the verify names IPv4 but must not re-run the fix."""
+    verify = {"title": "Verify prowlarr IPv4 first", "tool": "Shell", "node_type": "checkpoint",
+              "description": "getent ahosts prowlarr.servarr.com lists an IPv4 address first and prowlarr.service is active (gai.conf precedence)."}
+    assert not rewrite_prefer_ipv4_in_guest(verify, ["x"], ["y"], SERVICES, INV)[2]
+    append = {"title": "Append gai.conf on prowlarr", "tool": "Shell",
+              "description": "Append 'precedence ::ffff:0:0/96  100' to /etc/gai.conf on container 103 prowlarr so IPv4 is preferred; prowlarr.servarr.com times out on IPv6."}
+    assert rewrite_prefer_ipv4_in_guest(append, ["x"], ["y"], SERVICES, INV)[2]
+
+
 def test_unrelated_steps_are_left_to_their_own_capabilities_or_the_model():
     for node in ({"title": "Trigger metadata refresh", "prompt_template": "POST refresh with ReplaceAllMetadata=true for each Jellyfin library."},
                  {"title": "Fix the Jellyfin TV library so its files resolve as Series", "prompt_template": "the library resolved its items as Movie"},
