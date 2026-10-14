@@ -65,6 +65,7 @@ from app.modules.prompt_assembly import (
     EXECUTION_SYSTEM_LLM,
     EXECUTION_SYSTEM_CODEGEN,
     EXECUTION_SYSTEM_RUNBOOK,
+    EXECUTION_SYSTEM_VERIFY_ADDENDUM,
     build_base_prompt,
     system_for_tool,
     truncate_output,
@@ -1870,11 +1871,24 @@ async def execute_next_node(
         except Exception:
             _best_of_n_eligible = False
 
+    # §17.1547 — a VERIFICATION step (title opens with an observe verb, or a verify/checkpoint node_type)
+    # that reached the runbook tool gets the verify addendum: check existing state, never build or ask a
+    # design question. Live: T22v2 "Verify health returns JSON…" drew a design question and stalled the job.
+    _verify_add = ""
+    if tool_lower == "shell":
+        from app.modules.step_classify import _LEADING_OBSERVE_RE
+        _vn = dict(node) if hasattr(node, "keys") else {}
+        _vtitle = str(_vn.get("title") or "")
+        _vtype = str(_vn.get("node_type") or "").lower()
+        if _LEADING_OBSERVE_RE.match(_vtitle) or _vtype in ("verify", "check", "checkpoint", "validation"):
+            _verify_add = EXECUTION_SYSTEM_VERIFY_ADDENDUM
+            logger.info("runbook_verify_mode job=%s node=%s", job_id, node_key)
+
     # Execute with timeout guard.
     _node_t0 = time.monotonic()
     try:
         async def _run_inference():
-            system_prompt = _system_for_tool(tool)
+            system_prompt = _system_for_tool(tool) + _verify_add
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": exec_prompt},
@@ -1913,7 +1927,7 @@ async def execute_next_node(
             # cost tracking (stream_chat does not _record_call; chat does). A
             # mid-stream provider error is swallowed here so the empty-guard
             # fallback re-runs the draw on the recorded path.
-            system_prompt = _system_for_tool(tool)
+            system_prompt = _system_for_tool(tool) + _verify_add
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": exec_prompt},
@@ -2045,7 +2059,7 @@ async def execute_next_node(
     try:
         async def _regen_node(notice: str) -> str:
             _messages = [
-                {"role": "system", "content": _system_for_tool(tool)},
+                {"role": "system", "content": _system_for_tool(tool) + _verify_add},
                 {"role": "user", "content": exec_prompt + notice},
             ]
             _resp = await asyncio.wait_for(

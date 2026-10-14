@@ -582,6 +582,21 @@ If ground truth is provided, treat it as authoritative.
 Produce the runbook the task asks for. Nothing more."""
 
 
+# §17.1547 — appended to the runbook system prompt when the step is a VERIFICATION. Live (control-panel
+# ae721781, T22v2 "Verify health returns JSON with service statuses for all services"): routed to Shell by
+# §17.1545, the model read the terse title as "BUILD the health check" and produced a design question
+# ("How should the panel decide a service is up? Option A/B/C") instead of a check — no runnable command, so
+# the engine could not run the block and the job stalled. A verify step checks what EXISTS; it never builds
+# and never asks the operator how the feature should behave.
+EXECUTION_SYSTEM_VERIFY_ADDENDUM = """
+
+THIS STEP IS A VERIFICATION. Its whole job is to CHECK existing state and report whether it holds. It builds, installs, modifies and restarts NOTHING — an earlier step already built the thing; you confirm it.
+- Output ONLY read-only check commands, all under "## Verify", one bullet per check pairing the expected outcome with the exact command: curl/wget a URL and inspect the response, `grep` a file, `systemctl is-active <unit>`, `ss -ltn`, `test -f`, `cat` a config. Omit "## Run this", "## Rollback" and "## Risk" — there is nothing to run, undo, or risk.
+- Do NOT ask the operator how the feature should BEHAVE and do NOT offer design or implementation OPTIONS. A verification is settled by what EXISTS, not by a choice. If the thing you would check is absent or wrong, write the check that DETECTS that — its failing result IS the finding, a valid outcome, never a reason to ask a question.
+- Check the thing by its real endpoint/port/path from the task and ground truth (e.g. `curl -fsS http://127.0.0.1:<PORT>/api/<route>`), not a hypothetical you invent. If a required address is genuinely unknown, list it under "## Inputs needed" as a placeholder — never a behavioural question.
+- A check that needs auth sends the credential the task/ground-truth gives; a request that returns 401/403 unauthenticated still PROVES the endpoint is up — state that as the expected outcome."""
+
+
 def system_for_tool(tool: str) -> str:
     """Pick the appropriate system prompt for a node tool type.
 
