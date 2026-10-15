@@ -3068,13 +3068,17 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             and the best version go back to the model."""
             from app.modules import service_truth as _st_dev
             _nk_dev = str(run_node.get("node_key") or "")
-            _no_check = develop.own_check_refusal(run_node, host)      # §17.1418 — no check, no run
+            workspace = await develop.read_workspace(spec, host)
+            # §17.1582 — a check the step's text never named, read off the service's own routes
+            _derived = develop.derived_checks(run_node, host, workspace, develop.service_port(host, _services))
+            if _derived:
+                logger.warning("develop_checks_derived job=%s node=%s checks=%s", job_id, _nk_dev, [c[-60:] for c in _derived])
+            _no_check = develop.own_check_refusal(run_node, host, _derived)      # §17.1418 — no check, no run
             if _no_check:
                 logger.warning("develop_no_own_check job=%s node=%s", job_id, _nk_dev)
                 return {**empty_frame, "refused": list(empty_frame.get("refused") or []) + _no_check,
                         "suggested": "myself"}
-            workspace = await develop.read_workspace(spec, host)
-            checks = develop.done_checks(run_node, host)
+            checks = develop.done_checks(run_node, host, _derived)
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
             # §17.1426/§17.1427 — the runner's own secrets file AND the engine's encrypted store (`held`): the
             # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it

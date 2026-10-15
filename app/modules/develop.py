@@ -281,13 +281,83 @@ def _needs_a_secret(cmd: str) -> bool:
     return bool(_SECRET_REF_RE.search(cmd))
 
 
-def done_checks(node: Optional[dict], host: Host) -> list[str]:
-    """The step's own READ checks (backticked `pct exec N -- …` in its text), then the unit is active.
+#: §17.1582 — a GET route the service's own code registers: `app.get('/api/x', …)` / `router.get("/x", …)`
+_ROUTE_DEF_RE = re.compile(r"\b(?:app|router)\.get\(\s*['\"](/[^'\"\s]*)['\"]")
+#: words of a fix step's title that say nothing about WHICH feature
+_FEATURE_STOP = frozenset({
+    "fix", "the", "and", "for", "its", "endpoint", "endpoints", "backend", "backends", "handler", "handlers",
+    "remaining", "any", "not", "covered", "container", "edit", "return", "returns", "real", "data", "clear", "json",
+    "error", "errors", "preserve", "existing", "feature", "features", "every", "each", "service", "services", "route",
+    "routes", "api", "with", "from", "that", "this", "all", "other", "make", "add", "update", "repair", "wire", "page",
+})
+_UI_WORDS = frozenset({"ui", "frontend", "page", "html", "index", "render", "rendering", "section", "sections",
+                       "fetch", "loading", "css", "theme", "dom", "browser"})
+
+
+def service_port(host: Host, services: Optional[list]) -> str:
+    """§17.1582 — the measured loopback port of the service `host` develops on, or ''."""
+    for s in services or []:
+        if str(getattr(s, "unit", "") or "") == str(host.unit) and str(getattr(s, "guest", "") or "") == str(host.guest):
+            ports = [str(p) for p in (getattr(s, "ports", ()) or ()) if str(p).strip()]
+            if ports:
+                return ports[0]
+    return ""
+
+
+def derived_checks(node: Optional[dict], host: Host, workspace: Optional[dict[str, str]], port: str) -> list[str]:
+    """§17.1582 — the feature check a fix step's text never named, read off the SERVICE'S OWN ROUTES.
+
+    Live (c2792d4b T4 "Fix Radarr endpoint backend — edit the Radarr handler on container 111 … return
+    JSON data"): the step names no backticked check, so §17.1418 refused it with "its text must name the
+    check … e.g. `pct exec 111 -- curl … /api/<route>`" — and the engine had the service's code in hand
+    (`read_workspace`) and the panel's probe one step upstream. The routes whose handler FILE carries a
+    word of the step's title ("radarr" → media_library_route.js → `/api/media-library`; "Palworld, media,
+    network, FlareSolverr" → theirs) are the step's feature; a UI step ("fetch", "rendering", "sections")
+    has the served page. Each check is a plain `curl -s --fail-with-body` of the loopback port — a route
+    that hangs or errors fails it — and §17.1548 presents the held login to it when the service has one.
+    Nothing derived (no port, no words, no route file) leaves §17.1418's refusal standing."""
+    if not port or not workspace:
+        return []
+    title = str((node or {}).get("title") or "")
+    full = (title + " " + _step_text(node)).lower()
+    words = {w for w in re.findall(r"[a-z][a-z0-9]{2,}", title.lower())} - _FEATURE_STOP
+    try:
+        from app.modules.service_truth import names_in
+        words |= {n.lower() for n in names_in(node)} | {n.lower() for n in names_in({"title": full})}   # the body's services too
+    except Exception:
+        pass
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    base = f"{tool} curl -s --fail-with-body --max-time 20 http://127.0.0.1:{port}"
+    feature_words = words - _UI_WORDS
+    step_words = set(re.findall(r"[a-z][a-z0-9]{2,}", full)) - _FEATURE_STOP - _UI_WORDS
+    routes: list[str] = []
+    for path, body in sorted((workspace or {}).items()):
+        if "node_modules" in path or not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        found = _ROUTE_DEF_RE.findall(str(body or ""))
+        if not found:
+            continue
+        low, fname = str(body or "").lower(), path.rsplit("/", 1)[-1].lower()
+        # the title's words (and the services the step names) in the file — or, the other way round, the file's
+        # OWN name words in the step's text ("… Palworld, media, network, FlareSolverr" → network_view_route.js)
+        stem_words = set(re.findall(r"[a-z][a-z0-9]{2,}", fname.rsplit(".", 1)[0])) - _FEATURE_STOP - {"server", "index", "main", "app"}
+        if any(w in fname or w in low for w in feature_words) or (stem_words and stem_words & step_words):
+            routes += found
+    out = [f"{base}{r}" for r in dict.fromkeys(routes)]
+    if not out and words & _UI_WORDS and any(p.endswith((".html", ".htm")) for p in workspace):
+        out = [f"{base}/"]                      # the served page is the UI step's feature; its behaviour is the verify step's
+    return out
+
+
+def done_checks(node: Optional[dict], host: Host, derived: Optional[list[str]] = None) -> list[str]:
+    """The step's own READ checks (backticked `pct exec N -- …` in its text), then the ones the engine
+    derived from the service's routes (§17.1582), then the unit is active.
 
     §17.1414 — only reads: the verify channel carries nothing else, and silently dropped ADD123's
     POST. A check that WRITES is the run's own acceptance step (`acceptance_checks`)."""
     checks = [c.strip() for c in _CHECK_RE.findall(_step_text(node))   # §17.1550 — whole step text
               if _is_read(c.strip()) and not _needs_a_secret(c.strip())]
+    checks += [str(c) for c in derived or []]
     tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
     checks.append(f"{tool} systemctl is-active {host.unit}")
     return list(dict.fromkeys(checks))
@@ -296,7 +366,7 @@ def done_checks(node: Optional[dict], host: Host) -> list[str]:
 NO_OWN_CHECK = "names no command the engine can run to see the feature work"
 
 
-def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
+def own_check_refusal(node: Optional[dict], host: Host, derived: Optional[list[str]] = None) -> list[dict]:
     """§17.1418 — a developed step needs a check of ITS feature. `done_checks` always adds the unit's
     `is-active`, which the delivery itself makes true; a step whose text names nothing else would be
     recorded done while its route answers a connection error. Live: ADD124 ("returns the engine's
@@ -310,7 +380,7 @@ def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
     `is-active`-style check parked every one with nothing to run (live: control-panel, T9/T12/…)."""
     if str((node or {}).get("tool") or "").strip().lower() == "codegen":
         return []
-    if acceptance_checks(node) or len(done_checks(node, host)) > 1:
+    if acceptance_checks(node) or len(done_checks(node, host, derived)) > 1:   # §17.1582 — a derived check counts
         return []
     return [{"command": "(the step's done-condition)", "why": (
         f"this step {NO_OWN_CHECK}: its only check would be `systemctl is-active {host.unit}`, which the "

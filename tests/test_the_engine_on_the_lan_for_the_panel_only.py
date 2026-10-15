@@ -43,8 +43,10 @@ def test_steps_with_their_own_check_are_not():
 
 def test_the_loop_refuses_before_spending_a_round():
     src = inspect.getsource(execution_agent._pause_for_decision)
-    i, j = src.index("develop.own_check_refusal(run_node, host)"), src.index("await develop.read_workspace(spec, host)")
-    assert i < j
+    # §17.1582 — the workspace (a machine read) is read first so a check can be DERIVED from the service's routes;
+    # the refusal still comes before any model round (the kit, the prompt, `propose`)
+    i, j = src.index("develop.own_check_refusal(run_node, host, _derived)"), src.index("develop.kit_for(host, workspace)")
+    assert i < j and src.index("await develop.read_workspace(spec, host)") < i
 
 
 # ── the engine's own address ────────────────────────────────────────────────
