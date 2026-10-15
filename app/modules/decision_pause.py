@@ -222,7 +222,7 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
         "node_key": node["node_key"], "title": node.get("title") or "",
         # §17.1396 — the done-condition travels with the question, so the judge
         # that reads the run's checks sees what the operator decided
-        "description": node.get("description") or "",
+        "description": node.get("description") or node.get("prompt_template") or "",   # §17.1593 — the step's text (§17.1550's rule)
         # §17.1407 — and what it stands on, so the answer can re-check it with no extra read
         "depends_on": list(node.get("depends_on") or []),
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,

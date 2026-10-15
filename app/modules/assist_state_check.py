@@ -963,6 +963,29 @@ _NEG_LOG_RE = re.compile(
     r"|\b(?:Failed|failed) to (?:fetch|connect|load|read|start|bind|listen)\b|\bexited with (?:code|status) [1-9]\d*|\bcode=exited, status=[1-9]")
 
 
+#: §17.1593 — a done-condition that accepts an error answer ("return real data or a clear JSON error")
+_ACCEPTS_ERROR_RE = re.compile(r"\b(?:or\s+(?:an?\s+)?(?:clear|structured|proper)?\s*(?:json\s+)?error(?:\s+(?:message|body|response|json))?)\b", re.I)
+
+
+def _accepts_a_clear_error(claim: str) -> bool:
+    return bool(_ACCEPTS_ERROR_RE.search(str(claim or "")))
+
+
+def _json_error_body(text_out: str) -> str:
+    """The first line of ``text_out`` that is a JSON object carrying an ``error`` key, or ''."""
+    import json as _json
+    for ln in str(text_out or "").splitlines():
+        ln = ln.strip()
+        if ln.startswith("{") and '"error"' in ln:
+            try:
+                obj = _json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and str(obj.get("error") or "").strip():
+                return ln
+    return ""
+
+
 def negative_evidence(command: str, output: str, claim: str = "") -> str:
     """The reason a check's output CONTRADICTS its claim with no model, or ``""``.
 
@@ -1098,6 +1121,13 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
         body = "\n".join(ln for ln in txt.splitlines() if not ln.startswith("$ "))
         if len(exp) >= 6 and exp in " ".join(body.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
+        elif _accepts_a_clear_error(probed[cid].get("claim") or "") and _json_error_body(body):
+            # §17.1593 — the step ASKED for "real data or a clear JSON error": a route that reports its upstream's
+            # failure as `{"error": …}` did what the step said (live, c2792d4b T7: Byparr's own /health takes 8 s;
+            # the panel answered `{"error":"Byparr service is not available","detail":"Request timeout"}` and the
+            # judge read that as the work not landing)
+            verdicts[cid].update({"verdict": "confirmed", "reason": (
+                f"the step accepts a clear JSON error and the route answered one: {_json_error_body(body)[:120]!r}")})
         elif neg:
             # §17.1310 — a health check that answered "Cannot GET /api/health" is not
             # ambiguous; live the model judge called it unknown and a step that did
