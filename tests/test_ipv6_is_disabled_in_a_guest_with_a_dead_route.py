@@ -32,7 +32,9 @@ def test_the_step_is_rewritten_to_a_persisted_sysctl_drop_in_applied_live():
     assert "/etc/sysctl.d/99-scaffold-disable-ipv6.conf" in c and "sysctl -q -p" in c
     assert "net.ipv6.conf.eth0.disable_ipv6 = 1" in c and "net.ipv6.conf.default.disable_ipv6 = 1" in c
     assert "net.ipv6.conf.all.accept_ra = 0" in c and "net.ipv6.conf.eth0.autoconf = 0" in c
-    assert "net.ipv6.conf.all.disable_ipv6" not in c          # loopback keeps IPv6: services bound to ::1 live on
+    # §17.1570c — loopback is stated, not assumed: `all` reset first, lo on, then the LAN interface off, in that order
+    assert "net.ipv6.conf.all.disable_ipv6 = 1" not in c
+    assert c.index("net.ipv6.conf.all.disable_ipv6 = 0") < c.index("net.ipv6.conf.lo.disable_ipv6 = 0") < c.index("net.ipv6.conf.eth0.disable_ipv6 = 1")
     assert "systemctl restart" not in c and "reboot" not in c
     assert subprocess.run(["bash", "-n", "-c", c], capture_output=True, text=True).returncode == 0
 
@@ -88,6 +90,48 @@ def test_the_planners_own_shapes_are_claimed_by_disable_not_by_prefer_ipv4():
     t4 = {"node_key": "T4", "title": "Verify IPv6 disabled jellyfin", "tool": "Shell",
           "prompt_template": "Checks /proc/sys/net/ipv6/conf/eth0/disable_ipv6 reads 1 in container 101 only."}
     assert not rewrite_disable_ipv6_in_guest(t4, ["x"], ["y"], SERVICES, INV)[2]        # a verify is a read
+
+
+def test_a_blanket_all_disable_is_refused_and_the_engines_own_block_is_not():
+    """§17.1570d — live, the model's draft for 'Write sysctl config prowlarr' set all.disable_ipv6=1 and CT 102
+    lost ::1 while the brief had said to keep loopback."""
+    from app.modules.supervised_runs import disables_loopback_ipv6
+    bad = ["pct exec 102 -- sh -c 'printf \"net.ipv6.conf.all.disable_ipv6 = 1\\nnet.ipv6.conf.eth0.disable_ipv6 = 1\\n\" > /etc/sysctl.d/99.conf && sysctl -p /etc/sysctl.d/99.conf'"]
+    hit = disables_loopback_ipv6(bad)
+    assert hit and "loopback" in hit[0]["why"] and "::1" in hit[0]["why"]
+    assert disables_loopback_ipv6(["sysctl -w net.ipv6.conf.all.disable_ipv6=1"])
+    assert disables_loopback_ipv6([], [{"path": "/tmp/x.sh", "content": "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"}])
+    cmds, _, _ = rewrite_disable_ipv6_in_guest(STEP, ["x"], ["y"], SERVICES, INV)
+    assert disables_loopback_ipv6(cmds) == []                       # the engine's block sets all back to 0
+    assert disables_loopback_ipv6(["# never set net.ipv6.conf.all.disable_ipv6 = 1\nsysctl -w net.ipv6.conf.eth0.disable_ipv6=1"]) == []
+
+
+def test_a_step_that_says_same_as_t2_inherits_t2s_text_and_is_then_claimed():
+    """§17.1570c — live: T5 'Writes the sysctl config file inside container 102 (prowlarr) only. Same contents as
+    T2.' carried no IPv6 word of its own, so the model drafted it; T2's text is appended before the frame."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from app.modules.supervised_runs import inherit_referenced_step_text, _REFERENCED_STEP_RE
+    t5 = {"node_key": "T5", "title": "Write sysctl config prowlarr", "tool": "Shell", "description": "",
+          "prompt_template": "Starts from T1 decision. Writes the sysctl config file inside container 102 (prowlarr) only. "
+                             "Same contents as T2. Does NOT apply settings."}
+    assert not rewrite_disable_ipv6_in_guest(t5, ["x"], ["y"], SERVICES, INV)[2]          # on its own text: unclaimed
+    assert [m.group(1) for m in _REFERENCED_STEP_RE.finditer(t5["prompt_template"])] == ["T2"]
+    assert not list(_REFERENCED_STEP_RE.finditer("Starts from T1 decision. Writes the file."))   # a plain mention is not a reference
+    rows = [{"node_key": "T2", "title": "Write sysctl config jellyfin", "description": None,
+             "prompt_template": "Writes the sysctl config file inside container 101 (jellyfin) only. Contents: "
+                                "net.ipv6.conf.eth0.disable_ipv6=1, net.ipv6.conf.eth0.accept_ra=0."}]
+    res = MagicMock(); res.mappings.return_value.all.return_value = rows
+    db = MagicMock(); db.execute = AsyncMock(return_value=res)
+    out = asyncio.run(inherit_referenced_step_text(db, "job", t5))
+    assert "[as in T2: Write sysctl config jellyfin" in out["description"] and "disable_ipv6=1" in out["description"]
+    cmds, _, notes = rewrite_disable_ipv6_in_guest(out, ["x"], ["y"], SERVICES, INV)
+    assert notes and cmds[0].startswith("pct exec 102 -- ")                              # now claimed, for 102
+    again = asyncio.run(inherit_referenced_step_text(db, "job", out))
+    assert again["description"].count("[as in T2:") == 1                                 # appended once
+    import inspect
+    from app.modules import supervised_runs as sr
+    assert "return await inherit_referenced_step_text(db, job_id, node)" in inspect.getsource(sr.pending_hands_on)
 
 
 def test_frame_run_runs_the_disable_ipv6_rewrite_before_the_key_reader():

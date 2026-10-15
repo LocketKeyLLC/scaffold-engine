@@ -805,8 +805,46 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
         on, why = step_is_hands_on(node, develops_codegen=_dc)
         if on and not why.startswith("tool:human"):
             node["hands_on_reason"] = why
-            return node
+            return await inherit_referenced_step_text(db, job_id, node)     # §17.1570c
     return None
+
+
+#: §17.1570c — a step that defines itself by another step: "Same contents as T2", "as in T3", "like T5".
+_REFERENCED_STEP_RE = re.compile(r"\b(?:same\s+(?:\w+\s+){0,3}as|as\s+in|like|identical\s+to|mirror(?:s|ing)?)\s+(T\d+(?:v\d+)?)\b", re.I)
+
+
+async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict) -> dict:
+    """§17.1570c — a step whose text points at another step carries that step's text.
+
+    Live (job eff80f98): the planner wrote the work once — T2 "Writes the sysctl config file … Contents:
+    net.ipv6.conf.eth0.disable_ipv6=1, …" — and then T5/T8/T11/… as "Writes the sysctl config file inside
+    container 102 (prowlarr) only. Same contents as T2." Every deterministic capability reads the step's
+    OWN text, so T2 was claimed by §17.1570 and T5 was left to the model, which set
+    `net.ipv6.conf.all.disable_ipv6=1` and took loopback IPv6 down with it. The referenced step's title
+    and text are appended to the node's description (once), so the capabilities and gates see the whole
+    specification. Fail-soft: an unreadable reference leaves the node as it was."""
+    own = _node_text(node)
+    refs = sorted({m.group(1) for m in _REFERENCED_STEP_RE.finditer(own)} - {str(node.get("node_key") or "")})
+    if not refs:
+        return node
+    try:
+        rows = (await db.execute(
+            text("SELECT node_key, title, description, prompt_template FROM dag_nodes "
+                 "WHERE job_id = :jid AND node_key = ANY(:keys)"),
+            {"jid": job_id, "keys": refs})).mappings().all()
+    except Exception as exc:
+        logger.warning("referenced_step_lookup_failed job=%s node=%s err=%r", job_id, node.get("node_key"), exc)
+        return node
+    extra = []
+    for r in rows:
+        body = " ".join(str(r.get(k) or "").strip() for k in ("title", "description", "prompt_template") if r.get(k))
+        if body and f"[as in {r['node_key']}:" not in str(node.get("description") or ""):
+            extra.append(f"[as in {r['node_key']}: {body[:1200]}]")
+    if extra:
+        node = dict(node)
+        node["description"] = (str(node.get("description") or "").rstrip() + "\n" + "\n".join(extra)).strip()
+        logger.info("referenced_step_text_inherited job=%s node=%s from=%s", job_id, node.get("node_key"), refs)
+    return node
 
 
 def is_hands_on_node(node: dict, brief: str = "") -> bool:
@@ -5847,6 +5885,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # live script died at indexer 40 of 89 on a TimeoutError its `except HTTPError`
     # never saw. Prose since §17.1263; a gate now.
     refused = refused + loop_dies_on_one_dead_party(cmds, shape_files)
+    # §17.1570d — a sysctl that disables IPv6 on ALL interfaces takes loopback with it (::1 gone, services
+    # bound to it dark). Live, the model's draft for "Write sysctl config prowlarr" did exactly that.
+    refused = refused + disables_loopback_ipv6(cmds, shape_files)
     # §17.1278 — and it must tell a dead tracker from a bad request the way the
     # service does: by whether a field is NAMED, not whether the key is present.
     refused = refused + classifies_by_key_presence(cmds, shape_files)
@@ -8986,28 +9027,10 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
     # §17.1570 — a step that DISABLES IPv6 is that capability's, not a preference tweak
     if _DISABLE_IPV6_RE.search(text):
         return list(commands or []), list(verify or []), []
-    app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
-    gid = _arr_guest(app, services, inventory) if app else None
-    unit = f"{app}.service" if app else ""
-    if not gid:
-        # §17.1563b — any guest the step names: by a MEASURED service (name + unit) or by inventory name,
-        # or by "container N" when the guest's unit was measured. Live: 111 control-panel, 120 caddy,
-        # 130 pihole (unit pihole-FTL.service) are not *arr apps, and the same dead IPv6 route hits them.
-        for s in services or []:
-            nm = str(getattr(s, "name", "") or "").lower()
-            if nm and re.search(rf"\b{re.escape(nm)}\b", text, re.I) and getattr(s, "guest", ""):
-                app, gid, unit = nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or f"{nm}.service")
-                break
-    if not gid:
-        names = (inventory or {}).get("names") or {}
-        m_ct = re.search(r"\b(?:container|ct|lxc)\s*(\d{3})\b", text, re.I)
-        for g, nm in names.items():
-            nm_s = str(nm or "")
-            if (nm_s and re.search(rf"\b{re.escape(nm_s)}\b", text, re.I)) or (m_ct and str(g) == m_ct.group(1)):
-                app, gid = nm_s.lower() or f"guest {g}", str(g)
-                unit = next((str(getattr(s, "unit", "") or "") for s in services or []
-                             if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
-                break
+    # §17.1563b — any guest the step names: a known app, a MEASURED service (name + unit), an inventory name,
+    # or "container N" with the unit measured on that guest (111 control-panel, 120 caddy, 130 pihole are not
+    # *arr apps and the same dead IPv6 route hit them). §17.1570c — read off the step's OWN words.
+    app, gid, unit = _named_guest(_own_step_text(node), services, inventory)
     if not gid:
         return list(commands or []), list(verify or []), []
     if not unit:
@@ -9030,6 +9053,13 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
         f"answer while curl -4 did. The check reads the line back, shows which family `getent` orders first, and "
         f"asks {host} over the default stack.")}]
     return [run], [check], note
+
+
+def _own_step_text(node: Optional[dict]) -> str:
+    """§17.1570c — the step's OWN words, without the `[as in T<n>: …]` text it inherited: the guest a
+    step names is read here (T5 is about container 102 even though it says "same as T2", whose text
+    names 101), while detection reads the whole text."""
+    return re.sub(r"\[as in T\d+(?:v\d+)?: .*?\]", " ", _node_text(node), flags=re.S)
 
 
 def _named_guest(text: str, services: Optional[list], inventory: Optional[dict]) -> tuple[str, str, str]:
@@ -9089,12 +9119,17 @@ def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], ver
         return list(commands or []), list(verify or []), []
     if _JF_OBSERVE_TITLE_RE.search(str((node or {}).get("title") or "")):
         return list(commands or []), list(verify or []), []
-    name, gid, _unit = _named_guest(text, services, inventory)
+    own = _own_step_text(node)                       # §17.1570c — the guest is the step's own, never an inherited one
+    name, gid, _unit = _named_guest(own, services, inventory)
     if not gid:
         return list(commands or []), list(verify or []), []
-    m_if = re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", text)
+    m_if = re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", own) or re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", text)
     iface = m_if.group(1) if m_if else "eth0"
-    body = (f"net.ipv6.conf.{iface}.disable_ipv6 = 1\\nnet.ipv6.conf.default.disable_ipv6 = 1\\n"
+    # §17.1570c — loopback is stated, not assumed: `all` first (resets every interface's flag, undoing a
+    # prior blanket disable), then lo explicitly on, then the LAN interface off. Applying this file heals a
+    # guest where an earlier draft had set all.disable_ipv6=1 (live: CT 102, ::1 gone).
+    body = (f"net.ipv6.conf.all.disable_ipv6 = 0\\nnet.ipv6.conf.lo.disable_ipv6 = 0\\n"
+            f"net.ipv6.conf.{iface}.disable_ipv6 = 1\\nnet.ipv6.conf.default.disable_ipv6 = 1\\n"
             f"net.ipv6.conf.{iface}.accept_ra = 0\\nnet.ipv6.conf.default.accept_ra = 0\\nnet.ipv6.conf.all.accept_ra = 0\\n"
             f"net.ipv6.conf.{iface}.autoconf = 0\\nnet.ipv6.conf.default.autoconf = 0\\nnet.ipv6.conf.all.autoconf = 0\\n")
     run_payload = (f"printf '{body}' > {_DISABLE_IPV6_FILE} && sysctl -q -p {_DISABLE_IPV6_FILE} && "
@@ -9113,6 +9148,36 @@ def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], ver
         f"unaffected; nothing is restarted. Measured: the guest took SLAAC addresses from the gateway's advertisements "
         f"over a route that answers nothing. Reversible: remove the file and reboot the guest.")}]
     return [run], [check], note
+
+
+#: §17.1570d — `net.ipv6.conf.all.disable_ipv6 = 1` written or set (sysctl -w, a file line, /proc write)
+_ALL_DISABLE_IPV6_RE = re.compile(
+    r"net\.ipv6\.conf\.all\.disable_ipv6\s*=\s*1\b|/proc/sys/net/ipv6/conf/all/disable_ipv6\b[^\n|;]*\b1\b"
+    r"|\becho\s+1\s*>\s*/proc/sys/net/ipv6/conf/all/disable_ipv6\b", re.I)
+
+
+def disables_loopback_ipv6(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1570d — the block switches IPv6 off on ALL interfaces, loopback included.
+
+    Live (job eff80f98, T5 "Write sysctl config prowlarr", model-drafted): the script wrote
+    `net.ipv6.conf.all.disable_ipv6 = 1` and applied it; CT 102 lost `::1`, and the step's own brief
+    had said "leave loopback IPv6 enabled so services bound to ::1 keep working". The `all` knob is a
+    blanket; the interface that routes nowhere is `eth0`, and `default` covers interfaces created later.
+    Judged on code, never comments; a line that sets `all` back to 0 is not this."""
+    out: list[dict] = []
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        for ln in t.splitlines():
+            code = _strip_comment_shell(ln)
+            if _ALL_DISABLE_IPV6_RE.search(code):
+                out.append({"command": ln.strip()[:160], "why": (
+                    "this disables IPv6 on ALL interfaces (`net.ipv6.conf.all.disable_ipv6 = 1`), which takes "
+                    "loopback down with it: `::1` disappears and anything bound to it goes dark. MEASURED live "
+                    "(§17.1570d): CT 102 lost `::1` to exactly this line. Disable the LAN interface by name "
+                    "(`net.ipv6.conf.eth0.disable_ipv6 = 1`) and `default` for interfaces created later; leave "
+                    "`all` and `lo` at 0.")})
+                break
+    return out
 
 
 def a_validating_endpoint_sent_an_empty_body(
