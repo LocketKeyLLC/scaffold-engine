@@ -60,3 +60,23 @@ def test_frame_run_runs_the_inventory_rewrite_before_the_key_reader():
     src = inspect.getsource(sr)
     assert "rewrite_inventory_service_routes(node, cmds, verify, services, inventory)" in src
     assert src.index("rewrite_inventory_service_routes(node, cmds") < src.index("read_on_the_machine(cmds")
+
+
+# §17.1602 — a step that CHANGES something is never rewritten into a read-only template.
+def test_the_live_token_step_is_not_rewritten_into_a_read():
+    """Live (c2792d4b T14, 2026-10-15): "Create a read-only Proxmox API token for the panel" matched "read … API"; the
+    inventory read replaced its draft and would have recorded it done with no token created."""
+    import json, pathlib
+    from app.modules.supervised_runs import rewrite_probe_service_endpoints
+    node = json.loads((pathlib.Path(__file__).parent / "fixtures" / "panel_t14_node_2026_10_15.json").read_text())
+    cmds, ver, notes = rewrite_inventory_service_routes(node, ["pveum user add panel@pve"], [], SERVICES, INV)
+    assert notes == [] and cmds == ["pveum user add panel@pve"]
+    cmds, ver, notes = rewrite_probe_service_endpoints(node, ["x"], [], SERVICES, INV, logins=[{"name": "PANEL_PASSWORD"}])
+    assert notes == [] and cmds == ["x"]
+
+
+def test_read_only_is_an_adjective_and_a_read_step_still_is_one():
+    node = {"title": "Check the read-only token", "description": "the panel has a read-only API token"}
+    assert rewrite_inventory_service_routes(node, ["a"], [], SERVICES, INV)[2] == []
+    still = {"title": "Inventory panel endpoints", "description": "read the panel backend's routes"}
+    assert rewrite_inventory_service_routes(still, ["a"], [], SERVICES, INV)[2] != []

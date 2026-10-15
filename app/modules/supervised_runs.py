@@ -9690,9 +9690,22 @@ def _guest_by_name_fragment(text: str, services: Optional[list], inventory: Opti
 
 #: §17.1572 — "inventory / list / map the endpoints|routes|API of <service>" is a READ the engine owns:
 #: grep the service's route registrations and its config keys under its /opt/<name>* directories.
-_ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
+#: §17.1602 — `read` the verb, never the adjective: "Create a read-only Proxmox API token" matched "read … API"
+_ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read(?![-‐ ]only|[-‐ ]write)|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
                                  r"\b(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
 _ROUTE_SERVICE_RE = re.compile(r"\b(control-?panel|panel|backend|express|node|flask|fastapi)\b", re.I)
+
+
+#: §17.1602 — a step whose title opens with a change is never rewritten into a read-only template: live (c2792d4b T14
+#: "Create a read-only Proxmox API token for the panel"), the inventory read replaced the draft and would have recorded
+#: the step done with no token created.
+_CHANGE_TITLE_RE = re.compile(r"^\s*(?:create|add|set|install|configure|fix|change|write|deploy|enable|disable|remove|"
+                              r"delete|grant|give|update|replace|rotate|build|implement|make|move|rename|restart|issue|"
+                              r"generate|provision|register|store|put|push)\b", re.I)
+
+
+def title_changes_something(node: Optional[dict]) -> bool:
+    return bool(_CHANGE_TITLE_RE.match(str((node or {}).get("title") or "")))
 
 
 def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], verify: list[str],
@@ -9709,7 +9722,7 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     not guess where they are. A read, settled by STATE-OK when at least one route was found."""
     text = _node_text(node)
     title = str((node or {}).get("title") or "")
-    if not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
+    if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
         return list(commands or []), list(verify or []), []
     own = _own_step_text(node)
     name, gid, _unit = _named_guest(own, services, inventory)
@@ -9759,8 +9772,8 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
     line is run and check: it changes nothing."""
     from app.modules import machine_values as _mv
     text = _node_text(node)
-    if not (_PROBE_ENDPOINTS_RE.search(text) and _AUTHENTICATED_RE.search(text)):
-        return list(commands or []), list(verify or []), []
+    if title_changes_something(node) or not (_PROBE_ENDPOINTS_RE.search(text) and _AUTHENTICATED_RE.search(text)):
+        return list(commands or []), list(verify or []), []   # §17.1602 — a change is not a probe
     own = _own_step_text(node)
     name, gid, _unit = _named_guest(own, services, inventory)
     if not gid:
