@@ -997,13 +997,20 @@ def paths_called(files: dict[str, str], service) -> list[str]:
             continue
         if not path.endswith((".js", ".ts", ".mjs", ".py")):
             continue
+        # the file's OWN routes (`app.get('/api/byparr/status', …)`) are the panel's, not the upstream's — live, the
+        # upstream path was `/api/status` on Byparr itself, which a bare `/api/` exclusion hid (§17.1596's first cut)
+        own = {m.group(1).rstrip("/") for m in _ANY_ROUTE_DEF_RE.finditer(c)}
         for m in _PATH_LITERAL_RE.finditer(c):
             p = m.group(1).rstrip("/") or "/"
-            if p == "/" or p.startswith("/api/") or p.startswith("/opt/") or p.startswith("/etc/") or p.startswith("/tmp/") or p.startswith("/var/"):
+            if p == "/" or p in own or p.startswith(("/opt/", "/etc/", "/tmp/", "/var/", "/usr/", "/home/", "/root/")):
                 continue
             if p not in out:
                 out.append(p)
     return out[:8]
+
+
+#: §17.1596 — every route the file itself registers, any verb
+_ANY_ROUTE_DEF_RE = re.compile(r"\b(?:app|router)\.(?:get|post|put|patch|delete|use|all)\(\s*['\"](/[^'\"\s]*)['\"]")
 
 
 async def probe_called_paths(spec, files: dict[str, str], services: Optional[list], status: Optional[list[dict]]) -> list[dict]:
