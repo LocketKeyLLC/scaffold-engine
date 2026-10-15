@@ -963,6 +963,8 @@ _NEG_LOG_RE = re.compile(
     r"|\b(?:Failed|failed) to (?:fetch|connect|load|read|start|bind|listen)\b|\bexited with (?:code|status) [1-9]\d*|\bcode=exited, status=[1-9]")
 
 
+#: §17.1597 — an error body that quotes an upstream 3xx as the failure
+_NEG_REDIRECT_MISREAD_RE = re.compile(r"\"(?:detail|error|message)\"\s*:\s*\"[^\"]*\bHTTP\s*3\d\d\b")
 #: §17.1593 — a done-condition that accepts an error answer ("return real data or a clear JSON error")
 _ACCEPTS_ERROR_RE = re.compile(r"\b(?:or\s+(?:an?\s+)?(?:clear|structured|proper)?\s*(?:json\s+)?error(?:\s+(?:message|body|response|json))?)\b", re.I)
 
@@ -1003,6 +1005,12 @@ def negative_evidence(command: str, output: str, claim: str = "") -> str:
             pass
     if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_HTTP_RE.search(out):
         return f"the check answered an error, not the service: {_NEG_HTTP_RE.search(out).group(0)!r}"
+    # §17.1597 — a route that reports its upstream DOWN on a 3xx answer: the upstream answered (a redirect), the handler
+    # misread it (live, c2792d4b T7: `{"error":"Byparr service is not available","detail":"HTTP 301: "}` — Byparr's `/`
+    # redirects to /docs in 3 ms). Not "a clear JSON error" the step asked for: a bug in the handler.
+    if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_REDIRECT_MISREAD_RE.search(out):
+        return ("the route reports its upstream as unavailable on an HTTP 3xx answer "
+                f"({_NEG_REDIRECT_MISREAD_RE.search(out).group(0)!r}): a redirect is the service answering — follow it, or count 2xx/3xx as up")
     # §17.1586 — a service's JOURNAL since its restart that carries an error line is the service saying its work
     # did not land (live: "Failed to fetch Radarr library: HTTP 401" under a route that answered 200)
     if re.search(r"(?<![\w-])journalctl(?![\w-])", head) and not undoes and _NEG_LOG_RE.search(out):
@@ -1121,18 +1129,18 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
         body = "\n".join(ln for ln in txt.splitlines() if not ln.startswith("$ "))
         if len(exp) >= 6 and exp in " ".join(body.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
-        elif _accepts_a_clear_error(probed[cid].get("claim") or "") and _json_error_body(body):
-            # §17.1593 — the step ASKED for "real data or a clear JSON error": a route that reports its upstream's
-            # failure as `{"error": …}` did what the step said (live, c2792d4b T7: Byparr's own /health takes 8 s;
-            # the panel answered `{"error":"Byparr service is not available","detail":"Request timeout"}` and the
-            # judge read that as the work not landing)
-            verdicts[cid].update({"verdict": "confirmed", "reason": (
-                f"the step accepts a clear JSON error and the route answered one: {_json_error_body(body)[:120]!r}")})
         elif neg:
             # §17.1310 — a health check that answered "Cannot GET /api/health" is not
             # ambiguous; live the model judge called it unknown and a step that did
             # nothing stood as done.
             verdicts[cid].update({"verdict": "contradicted", "reason": neg})
+        elif _accepts_a_clear_error(probed[cid].get("claim") or "") and _json_error_body(body):
+            # §17.1593 (after negative evidence, §17.1597) — the step ASKED for "real data or a clear JSON error": a route that reports its upstream's
+            # failure as `{"error": …}` did what the step said (live, c2792d4b T7: Byparr's own /health takes 8 s;
+            # the panel answered `{"error":"Byparr service is not available","detail":"Request timeout"}` and the
+            # judge read that as the work not landing)
+            verdicts[cid].update({"verdict": "confirmed", "reason": (
+                f"the step accepts a clear JSON error and the route answered one: {_json_error_body(body)[:120]!r}")})
         elif _VERDICT_WORD_RE.fullmatch(exp_raw):
             # §17.1574a — the expectation is a VERDICT WORD (`STATE-OK`, a rewrite's own last line, §17.1570g):
             # the check prints it when the goal holds and its complement when it does not. Absent, the claim is

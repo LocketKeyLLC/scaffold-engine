@@ -48,3 +48,20 @@ def test_a_step_that_did_not_ask_for_an_error_is_not_handed_one(monkeypatch):
 def test_the_frame_carries_the_steps_text_where_the_description_is_empty():
     src = inspect.getsource(dp.park_awaiting_decision)
     assert '"description": node.get("description") or node.get("prompt_template") or ""' in src
+
+
+def test_a_redirect_misread_as_down_is_not_a_clear_error_the_step_accepts(monkeypatch):
+    """§17.1597 — live: `{"error":"Byparr service is not available","detail":"HTTP 301: "}` — Byparr answered; the handler misread it."""
+    from app import model_router
+    called = []
+
+    async def _no_judge(*a, **k):
+        called.append(1); raise RuntimeError("the judge must not be asked")
+    monkeypatch.setattr(model_router, "tool_call", _no_judge)
+    body = '{"error":"Byparr service is not available","detail":"HTTP 301: "}'
+    why = asc.negative_evidence(CHK, body, CLAIM)
+    assert why and "3xx" in why and "redirect" in why
+    probes = [{"id": "V:1", "kind": "state", "claim": CLAIM, "command": CHK, "expect": ""}]
+    out = asyncio.run(asc.judge_outputs(probes, "== V:1 ==\n" + body + "\n"))
+    assert out[0]["verdict"] == "contradicted" and "redirect" in out[0]["reason"] and not called      # §17.1593 does not accept it
+    assert asc.negative_evidence(CHK, ERR, CLAIM) == ""                                               # a timeout is a real outage: §17.1593's case

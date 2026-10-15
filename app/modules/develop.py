@@ -1374,7 +1374,9 @@ async def read_apis(spec, services: Optional[list], status: Optional[list[dict]]
     for s in (status if status is not None else await read_status(spec, services)):   # §17.1421
         where = f" ({s['address']})" if s.get("address") else ""
         lines.append(f"- {s['service']}{where} GET {s['path']} without a key: "
-                     + ((f"HTTP {s['code']}" + (f" in {s['seconds']} s" if s.get("seconds") is not None else "")) if s.get("code")
+                     + ((f"HTTP {s['code']}" + (f" in {s['seconds']} s" if s.get("seconds") is not None else "")
+                         + (" (a redirect: the service is UP — follow it, or count 2xx/3xx as up; never report a 3xx as down)"
+                            if str(s['code']).startswith("3") else "")) if s.get("code")                      # §17.1597
                         else "(could not be read just now)"))   # §17.1594 — the latency too, so a timeout is sized to it
     if not lines:
         return ""
