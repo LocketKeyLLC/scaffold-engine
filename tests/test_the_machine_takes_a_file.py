@@ -1096,7 +1096,8 @@ def test_resolve_run_verifies_through_run_verify_and_scrubs_before_the_record():
     body = src[i:src.index("\nasync def _verify_verdicts(", i)]
     assert "_lr.run_probes(" not in body, "every verify check in resolve_run goes through run_verify"
     assert body.count("await run_verify(spec, verify_cmds, secret_env)") >= 2, "both the first read and the §17.1239 re-read"
-    assert body.index('e["output"] = scrub_run_output(e.get("output"), secret_env)') < body.index("_executed_report(runbook, spec.name, executed, verify_out)")
+    # §17.1569 — the record's head is the frame (`_head`), still composed AFTER the outputs are scrubbed
+    assert body.index('e["output"] = scrub_run_output(e.get("output"), secret_env)') < body.index("_executed_report(_head, spec.name, executed, verify_out)")
     assert "verify_out = scrub_run_output(verify_out, secret_env)" in body
 
 

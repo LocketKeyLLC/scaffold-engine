@@ -6276,7 +6276,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     for e in executed:
         e["output"] = scrub_run_output(e.get("output"), secret_env)
     verify_out = scrub_run_output(verify_out, secret_env)
-    output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
+    # §17.1569 — the record's head is the FRAME that was approved and ran, not the pre-rewrite draft
+    _head = _frame_runbook(waiting, runnable, verify_cmds) if runnable else runbook
+    output = mask_secrets(_executed_report(_head, spec.name, executed, verify_out), values, need)
     # §17.1258 — a block that repeated one failure is not a success, whatever the
     # exit codes said. The commands "worked"; the work did not.
     _repeated = repeated_identical_failures(
@@ -9400,6 +9402,29 @@ async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bo
                    title[:60], len(verdicts), ok,
                    [str(v.get("verdict")) for v in verdicts])
     return ok
+
+
+def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -> str:
+    """§17.1569 — the record's head is WHAT WAS APPROVED AND RAN: the frame's commands, its checks, the
+    files it wrote and the engine's own drafting notes — not the pre-rewrite draft.
+
+    Live (jobs 263e920a/977a8a38): a supervised node's `output_text` opened with `## Run this` + the
+    planner's original block (`for item in ${T3}; do curl … | jq …`, or the model's `systemctl stop
+    jellyfin` + sqlite3 draft) while `## Executed on` held the capability's rewrite that actually ran.
+    Every reader of the record saw a command that never ran presented as the step's plan — the report
+    step mirrored it (§17.1567), an operator reading the node would have believed it. The frame
+    (`awaiting_decision`) is the approved truth: `commands`, `verify`, `files`, `engine_fixed`."""
+    w = waiting or {}
+    lines = ["## Run this", "```bash", *[str(c) for c in commands or []], "```"]
+    files = [str((f or {}).get("path") or "") for f in (w.get("files") or []) if (f or {}).get("path")]
+    if files:
+        lines += ["", "## Files written", *[f"- `{p}`" for p in files]]
+    if verify_cmds:
+        lines += ["", "## Verify", "```bash", *[str(c) for c in verify_cmds], "```"]
+    notes = [str(n.get("why") or "").strip() for n in (w.get("engine_fixed") or []) if isinstance(n, dict) and n.get("why")]
+    if notes:
+        lines += ["", "## The engine drafted this", *[f"- {n}" for n in notes]]
+    return "\n".join(lines)
 
 
 def _executed_report(runbook: str, runner: str, executed: list[dict], verify_out: str) -> str:
