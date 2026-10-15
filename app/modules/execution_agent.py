@@ -3459,7 +3459,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # redrafting for the checks swapped a correct budget refusal for a
             # draft of invalid Python: two unrunnable frames, the second one less
             # informative. The refusal path above owns that case.
-            _nv = "" if (frame.get("refused") or _developed or frame.get("expects")) else supervised_runs.verify_not_runnable(runbook)   # §17.1577
+            _nv = "" if (frame.get("expects") or frame.get("refused") or _developed) else supervised_runs.verify_not_runnable(runbook)   # §17.1577
             if _nv:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))

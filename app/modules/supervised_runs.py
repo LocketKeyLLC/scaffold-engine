@@ -181,6 +181,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
+                   "reads every `$UPPER` reference as a secret",     # §17.1578
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
@@ -287,6 +288,8 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
 #: what stops this recurring in a fifth costume
 #: ([[feedback_failsafes_are_a_registry]]).
 _WHOSE_GAP: dict[str, str] = {
+    # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
+    "reads every `$UPPER` reference as a secret": "drafter",
     # ── the machine contradicts the block ────────────────────────────────────
     "is stopped (`": "machine",
     "fails before it starts": "machine",
@@ -5170,6 +5173,49 @@ def a_shell_runs_it(cmd: str, path: str, body: str) -> bool:
     return path.endswith((".sh", ".bash"))
 
 
+#: §17.1578 — the first runner whose `secret_refs` leaves the names a block binds itself alone
+_RUNNER_LEAVES_BOUND_NAMES = 23
+
+
+def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> list[dict]:
+    """§17.1578 — an UPPERCASE name the block sets and then reads, on a runner that demands a value for
+    EVERY `$UPPER` reference.
+
+    Live (c2792d4b T2, helper 22): the engine's own probe opened `CPW=$(cat); … PORT=$(grep …)` and used
+    `$CPW`/`$PORT`; the runner's `secret_refs` reads every `$[A-Z]…` as a secret it must resolve, found
+    neither in its file nor sent, and refused the approved block — "this command needs $PORT, $CPW, which
+    neither the engine sent nor this runner's secrets file holds". The engine's own gate (§17.1348) knew
+    the names were bound and said nothing, so Run was offered for a block that could not run. Helper 23's
+    `secret_refs` subtracts the names a block binds; until the machine runs it, the frame says so and
+    Run is off. Names the runner or the engine HOLDS are not this: those it resolves whatever the block
+    does with them."""
+    helper = str((policy or {}).get("helper") or "").strip()
+    try:
+        if helper and int(helper) >= _RUNNER_LEAVES_BOUND_NAMES:
+            return []
+    except ValueError:
+        pass
+    held = ({str(x) for x in ((policy or {}).get("secrets") or [])}
+            | {str(x) for x in ((policy or {}).get("held") or [])} | set(_SHELL_VARS))
+    out: list[dict] = []
+    for cmd in commands or []:
+        text_value = str(cmd or "")
+        bound = {m.group("name") for m in _VAR_SET_RE.finditer(text_value)
+                 if not _SELF_ASSIGN_RE.match(text_value[m.start("name"):])}
+        bound |= {g for m in _VAR_BIND_RE.finditer(text_value)
+                  for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        hits = sorted({m.group(1) for m in _SECRET_REF_RE.finditer(text_value)} & bound - held)
+        if hits:
+            names = ", ".join(f"`${n}`" for n in hits)
+            out.append({"command": text_value[:200], "why": (
+                f"{names} {'is a name' if len(hits) == 1 else 'are names'} this block sets itself, but the runner at hand "
+                f"(helper {helper or '?'}) reads every `$UPPER` reference as a secret it must hold and refuses the block: "
+                f"\"this command needs {', '.join('$' + n for n in hits)}, which neither the engine sent nor this runner's "
+                f"secrets file holds\". Name the block's own variables in lowercase (`{hits[0].lower()}`), or update the "
+                f"runner — helper {_RUNNER_LEAVES_BOUND_NAMES} leaves the names a block binds alone.")})
+    return out
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -5889,6 +5935,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
+    refused = refused + locals_the_runner_reads_as_secrets(list(cmds) + list(verify), policy)   # §17.1578
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
@@ -9645,7 +9692,7 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
     stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
     if mine:
         port, secret, user = sorted(mine)[0]
-        port_expr = f"PORT={port}; "
+        port_expr = f"port={port}; "
     else:
         # §17.1574d — no MEASURED service for this guest (live, c2792d4b: the job named no service, so nothing was
         # measured): the login whose stem names the guest (`PANEL_PASSWORD` → `panel` ∈ `control-panel`) is still the
@@ -9656,17 +9703,19 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
         if not fits or not str(fits[0].get("user") or "").strip():
             return list(commands or []), list(verify or []), []
         secret, user = str(fits[0]["name"]), str(fits[0]["user"])
-        port_expr = (f'PORT=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/{stem}* --include="*.js" --include="*.ts" --include="*.py" '
+        port_expr = (f'port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/{stem}* --include="*.js" --include="*.ts" --include="*.py" '
                      f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "[0-9]+" | head -n 1); '
-                     'test -n "$PORT" || echo "FAILED: no listen(<port>) in the service code"; ')   # an empty PORT → every curl 000 → STATE-WRONG
+                     'test -n "$port" || echo "FAILED: no listen(<port>) in the service code"; ')   # an empty port → every curl 000 → STATE-WRONG
     # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
     payload = (
-        'CPW=$(cat); fails=""; ' + port_expr +          # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
+        'cpw=$(cat); fails=""; ' + port_expr +          # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
+        # §17.1578 — the block's own names are LOWERCASE: the runner reads every `$UPPER` reference as a secret it must
+        # hold and refused `$CPW`/`$PORT` live ("neither the engine sent nor this runner's secrets file holds")
         # the route's quote is matched with `.` and stripped with tr's octal `\047`: no quote character of either kind
         # appears in the payload, so `_sq_payload` wraps it once with no `'\''` escapes
         f'for ep in $(grep -rhoE "(app|router)\\.get\\(.(/[^,)]*)" /opt/{stem}* --include="*.js" --include="*.ts" '
         f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "/[^,)]*" | tr -d "\\047\\042" | sort -u); do '
-        f'echo "=== $ep ==="; out=$(curl -s -m 20 -u "{user}:$CPW" -w "\\nHTTP %{{http_code}} in %{{time_total}}s" "http://127.0.0.1:$PORT$ep" 2>&1); '
+        f'echo "=== $ep ==="; out=$(curl -s -m 20 -u "{user}:$cpw" -w "\\nHTTP %{{http_code}} in %{{time_total}}s" "http://127.0.0.1:$port$ep" 2>&1); '
         'case "$out" in *"HTTP 000"*) fails="$fails $ep";; esac; printf "%s\\n" "$out" | tail -c 400; echo; done; '
         'echo "unanswered:$fails"; test -z "$fails" && echo STATE-OK || echo STATE-WRONG')
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)} <<< \"<{secret}>\""

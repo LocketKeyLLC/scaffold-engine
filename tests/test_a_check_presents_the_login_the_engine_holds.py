@@ -60,11 +60,11 @@ def test_an_api_key_is_not_a_login():
 def test_the_naked_panel_curl_gets_basic_auth():
     cmds, verify, notes = mv.present_a_held_login([NAKED], [], [PANEL], _logins())
     got = cmds[0]
-    # wrapped to run in-guest through sh -c, password read from stdin into CPW,
-    # presented to curl as `-u panel:$CPW`, fed by the herestring placeholder.
+    # wrapped to run in-guest through sh -c, password read from stdin into cpw,
+    # presented to curl as `-u panel:$cpw`, fed by the herestring placeholder.
     assert got.startswith("pct exec 111 -- sh -c ")
-    assert "IFS= read -r CPW" in got
-    assert '-u "panel:$CPW"' in got
+    assert "IFS= read -r cpw" in got
+    assert '-u "panel:$cpw"' in got
     assert got.rstrip().endswith('<<< "<PANEL_PASSWORD>"')
     # the original endpoint + flags survive.
     assert "--fail-with-body" in got and "http://127.0.0.1:3001/api/health" in got
@@ -73,7 +73,7 @@ def test_the_naked_panel_curl_gets_basic_auth():
 
 def test_the_check_is_presented_too():
     _, verify, _ = mv.present_a_held_login([], [NAKED], [PANEL], _logins())
-    assert '-u "panel:$CPW"' in verify[0]
+    assert '-u "panel:$cpw"' in verify[0]
 
 
 # ── the SECRET never lands where a log would see it ──────────────────────────
@@ -82,12 +82,12 @@ def test_the_password_is_a_stdin_placeholder_never_in_the_argv():
     cmds, _, _ = mv.present_a_held_login([NAKED], [], [PANEL], _logins())
     got = cmds[0]
     # the ONLY reference to the secret is the herestring placeholder; the plaintext
-    # is nowhere (it is not even available here), and `$CPW` — the thing in the
+    # is nowhere (it is not even available here), and `$cpw` — the thing in the
     # curl argv — is the guest's own stdin read, inside the single-quoted payload.
     assert got.count("<PANEL_PASSWORD>") == 1
     head = got.split("<<<")[0]
     assert "PANEL_PASSWORD" not in head          # the placeholder is only in the herestring tail
-    assert "$CPW" in head                         # the argv carries the stdin var, not a value
+    assert "$cpw" in head                         # the argv carries the stdin var, not a value
 
 
 def test_the_runner_resolves_the_placeholder_and_it_never_travels():
@@ -115,7 +115,7 @@ def test_a_curl_to_another_service_is_untouched():
 
 
 def test_a_curl_that_already_authenticates_is_untouched():
-    authed = 'pct exec 111 -- sh -c \'curl -s -u "panel:$CPW" http://127.0.0.1:3001/api/health\''
+    authed = 'pct exec 111 -- sh -c \'curl -s -u "panel:$cpw" http://127.0.0.1:3001/api/health\''
     cmds, _, _ = mv.present_a_held_login([authed], [], [PANEL], _logins())
     assert cmds == [authed]
 

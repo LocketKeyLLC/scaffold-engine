@@ -51,7 +51,7 @@ def test_the_executor_never_redrafts_a_frame_a_capability_drafted():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
     assert '_ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)' in src
-    assert '_nv = "" if (frame.get("refused") or _developed or frame.get("expects"))' in src
+    assert '_nv = "" if (frame.get("expects") or frame.get("refused") or _developed)' in src
     assert '_missing = [] if (_developed or frame.get("expects")) else uncovered(' in src
 
 
@@ -64,9 +64,9 @@ def test_the_operator_reads_the_block_that_will_run_first_when_a_capability_repl
     from types import SimpleNamespace
     policy = {"allow": ["ANY"], "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
     frame = sr.frame_run(LIVE_T2, COOKIE_DRAFT, SimpleNamespace(name="pve-runner"), policy, inventory=INV)
-    assert frame["commands"] and frame["commands"][0].startswith("pct exec 111 -- sh -c 'CPW=$(cat)") and frame["suggested"] == "run"
+    assert frame["commands"] and frame["commands"][0].startswith("pct exec 111 -- sh -c 'cpw=$(cat)") and frame["suggested"] == "run"
     rb = frame["runbook"]
-    assert rb.startswith("## Run this\n```bash\npct exec 111 -- sh -c 'CPW=$(cat)"), rb[:120]
+    assert rb.startswith("## Run this\n```bash\npct exec 111 -- sh -c 'cpw=$(cat)"), rb[:120]
     assert "## The engine drafted this" in rb and "§17.1574c" in rb
     assert rb.index("## The model's draft, replaced by the block above") < rb.index("connect.sid=<PANEL_COOKIE>")
     assert rb.endswith(sr._runbook_for_display(COOKIE_DRAFT, frame["commands"]))          # the rehearsal path still finds the draft

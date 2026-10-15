@@ -1036,10 +1036,10 @@ def _present_one(line: str, guard: dict) -> Optional[str]:
         return None
     if "curl" not in payload or _HAS_AUTH_RE.search(payload):
         return None
-    payload2 = re.sub(r"\bcurl\b(\s)", lambda mm: f'curl -u "{user}:$CPW"{mm.group(1)}', payload, count=1)
+    payload2 = re.sub(r"\bcurl\b(\s)", lambda mm: f'curl -u "{user}:$cpw"{mm.group(1)}', payload, count=1)   # §17.1578 — a lowercase local
     if payload2 == payload:
         return None                                   # no bare `curl ` token to extend
-    payload2 = "IFS= read -r CPW; " + payload2
+    payload2 = "IFS= read -r cpw; " + payload2
     return f'pct exec {guest} -- sh -c {_sq(payload2)} <<< "<{secret}>"'
 
 
