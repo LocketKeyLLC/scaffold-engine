@@ -5599,6 +5599,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _d6_notes:
         cmds, verify = _d6_cmds, _d6_verify
         _comp_notes = list(_comp_notes) + _d6_notes
+    # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
+    # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
+    # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
+    # with `net.ipv6.conf.all.disable_ipv6 = 1` inside — stayed on the frame, the §17.1570d gate refused it,
+    # and the run would have written it to the host anyway. The rewrites never declare files.
+    if _comp_notes and files:
+        logger.info("rewrite_dropped_drafted_files node=%s files=%d", (node or {}).get("node_key"), len(files))
+        files = []
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.

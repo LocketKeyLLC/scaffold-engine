@@ -134,6 +134,27 @@ def test_a_step_that_says_same_as_t2_inherits_t2s_text_and_is_then_claimed():
     assert "return await inherit_referenced_step_text(db, job_id, node)" in inspect.getsource(sr.pending_hands_on)
 
 
+def test_a_rewrite_drops_the_drafts_files_so_the_frame_is_the_engines_block_alone():
+    """§17.1570e — live (T6): the rewrite's commands were right but the draft's /tmp/in_ct_102.sh (with
+    all.disable_ipv6=1 inside) stayed on the frame, the §17.1570d gate refused it, and the run would have
+    written it to the host anyway."""
+    from unittest.mock import MagicMock
+    from app.modules import supervised_runs as sr
+    runbook = ("<!-- runbook-template: run_in_container -->\n## Run commands inside container 102\n\n"
+               "## Write these files\n\n### /tmp/in_ct_102.sh\n```bash\n#!/usr/bin/env bash\n"
+               "pct exec 102 -- sh -c 'printf \"net.ipv6.conf.all.disable_ipv6 = 1\\n\" > /etc/sysctl.d/99.conf; sysctl -p /etc/sysctl.d/99.conf'\n```\n\n"
+               "## Run this\n```bash\nbash /tmp/in_ct_102.sh start\nbash /tmp/in_ct_102.sh last\n```\n\n"
+               "## Verify\n```bash\npct exec 102 -- cat /etc/sysctl.d/99.conf\n```\n")
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    node = {"node_key": "T6", "title": "Apply sysctl live prowlarr", "tool": "Shell",
+            "prompt_template": "Runs sysctl -p /etc/sysctl.d/99-scaffold-disable-ipv6.conf inside container 102 only."}
+    frame = sr.frame_run(node, runbook, spec, {"allow": ["ANY"], "sudo": False, "helper": "22", "can_write_files": True},
+                         inventory={"names": {"102": "prowlarr"}})
+    assert frame["files"] == []                                              # the draft's file is gone
+    assert len(frame["commands"]) == 1 and "net.ipv6.conf.all.disable_ipv6 = 0" in frame["commands"][0]
+    assert not frame.get("refused") and "run" in [o["id"] for o in frame["options"]]
+
+
 def test_frame_run_runs_the_disable_ipv6_rewrite_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr
