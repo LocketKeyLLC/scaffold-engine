@@ -1,0 +1,11 @@
+{
+ "node_key": "T15",
+ "title": "Read the host's guests through the Proxmox API",
+ "description": "Operator decision 2026-10-15: network-ui reads the Proxmox API with the read-only token, not ssh.",
+ "prompt_template": "Change the control panel's /api/network-ui handler on container 111 to read the Proxmox host (10.9.8.156, port 8006) through its API instead of ssh: GET /api2/json/cluster/resources?type=vm for the guests (vmid, name, type lxc/qemu, status) and GET /api2/json/nodes/<node>/status for the host's own state and uptime, with the token in /opt/control-panel-backend/config/proxmox-api.json (header Authorization: PVEAPIToken=<tokenid>=<secret>) and TLS verified against /opt/control-panel-backend/config/pve-root-ca.pem. Asynchronous calls only, a timeout on each, both reads together. Keep the answer's shape {host, containers, vms, timestamp} so the page keeps rendering it. When the API cannot be reached, answer host.status 'unreachable' with the reason -- never 'offline' for a host the panel simply could not ask. Preserve every other feature.",
+ "tool": "Shell",
+ "depends_on": [
+  "T14"
+ ],
+ "status": "pending"
+}

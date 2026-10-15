@@ -99,8 +99,13 @@ def _step_text(node: Optional[dict]) -> str:
     return str((node or {}).get("prompt_template") or "").strip() or str((node or {}).get("description") or "")
 
 
-_HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|create|destroy|resize|migrate|restore)\b"
-                             r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces")
+#: §17.1601 — and Proxmox's own host administration: users/tokens/ACLs (`pveum`), the API's writes (`pvesh create|set|
+#: delete`), storage (`pvesm`), the node (`pvenode`), and a file pushed into or pulled out of a guest from the host
+#: (`pct push|pull`). Live (c2792d4b T14 "Create a read-only Proxmox API token for the panel", its text naming
+#: `pveum user token add …`): developed as a panel route, the token never created.
+_HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|create|destroy|resize|migrate|restore|push|pull)\b"
+                             r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces"
+                             r"|\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b")
 
 
 _CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:validate|verify|check|test|audit|review|document)\b", re.I)

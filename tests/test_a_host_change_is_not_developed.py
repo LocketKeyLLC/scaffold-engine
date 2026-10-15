@@ -70,3 +70,27 @@ def test_a_step_that_configures_the_guest_is_not_a_service_build():
     node = json.loads((FIX / "add154_node_2026_10_11.json").read_text())
     pal = st.ServiceTruth(guest="106", name="palworld", unit="palworld.service", workdir="/home/steam/palworld", vm=True)
     assert dv.host_for(node, [pal, PANEL]) is None
+
+
+# §17.1601 — Proxmox's own host administration is a host change too.
+def test_a_proxmox_token_step_is_not_developed():
+    """Live (c2792d4b T14, 2026-10-15): its text names `pveum user token add …`; the rule knew only pct/qm verbs, so it
+    was developed as a new panel route and the token was never going to be created."""
+    node = json.loads((FIX / "panel_t14_node_2026_10_15.json").read_text())
+    assert dv.host_for(node, [CADDY, PANEL]) is None
+
+
+def test_the_api_reader_step_that_follows_it_is_still_developed():
+    node = json.loads((FIX / "panel_t15_node_2026_10_15.json").read_text())
+    assert dv.host_for(node, [CADDY, PANEL]) is not None
+
+
+@pytest.mark.parametrize("cmd", ["pveum user token add panel@pve panel", "pvesh create /access/users", "pvesm add dir x",
+                                 "pvenode config set", "pct push 111 /tmp/a /opt/a", "pct pull 111 /a /tmp/a"])
+def test_proxmox_host_commands_are_host_changes(cmd):
+    assert dv._HOST_CHANGE_RE.search(cmd)
+
+
+@pytest.mark.parametrize("cmd", ["pvesh get /cluster/resources", "pct exec 111 -- ls", "pct config 111"])
+def test_proxmox_reads_are_not(cmd):
+    assert not dv._HOST_CHANGE_RE.search(cmd)

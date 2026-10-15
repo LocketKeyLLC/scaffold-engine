@@ -1,0 +1,11 @@
+{
+ "node_key": "T14",
+ "title": "Create a read-only Proxmox API token for the panel",
+ "description": "Operator decision 2026-10-15: the panel reads the host's guests through the Proxmox API with a read-only token, not ssh as root.",
+ "prompt_template": "On the Proxmox host: create the user panel@pve (no password) if it does not exist, give it the PVEAuditor role on / (read-only), and create its API token named panel with privilege separation off (--privsep 0), replacing an existing token of that name. The token's secret is shown once: never print it, never put it in a command line or a log -- pipe the JSON output of `pveum user token add ... --output-format json` straight into a file that holds {\"tokenid\": \"panel@pve!panel\", \"secret\": ...}, mode 600, and push it into container 111 as /opt/control-panel-backend/config/proxmox-api.json (owner root, mode 600), then remove the host copy. Also push the host's CA certificate /etc/pve/pve-root-ca.pem into container 111 as /opt/control-panel-backend/config/pve-root-ca.pem (mode 644). Check: from inside container 111, call the API at https://10.9.8.156:8006/api2/json/cluster/resources?type=vm with the token from that file (header Authorization: PVEAPIToken=<tokenid>=<secret>, the CA file as --cacert) and print only the number of guests it lists -- never the secret.",
+ "tool": "Shell",
+ "depends_on": [
+  "T11"
+ ],
+ "status": "pending"
+}
