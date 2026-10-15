@@ -22,8 +22,8 @@ CREDS = {"SONARR_API_KEY": "pct exec 104 -- grep -oP '(?<=<ApiKey>)[^<]+' /var/l
 
 
 def test_a_credential_the_workspace_carries_reaches_the_model_as_its_mark():
-    ws, marked = dv.mark_held_credentials(WS, CREDS)
-    assert marked == ["SONARR_API_KEY"]
+    ws, marked, creds = dv.mark_held_credentials(WS, CREDS)
+    assert marked == ["SONARR_API_KEY"] and creds == CREDS
     assert K not in "\n".join(ws.values())
     assert '"sonarrApiKey": "@@SCAFFOLD:SONARR_API_KEY@@"' in ws["/opt/control-panel-backend/config/media-request.json"]
     assert '"radarrApiKey": "@@SCAFFOLD:RADARR_API_KEY@@"' in ws["/opt/control-panel-backend/config/media-request.json"]   # already a mark
@@ -31,12 +31,17 @@ def test_a_credential_the_workspace_carries_reaches_the_model_as_its_mark():
     assert ws["/opt/control-panel-backend/server.js"] == WS["/opt/control-panel-backend/server.js"]                         # a GUID, a lookup: untouched
     # a key whose name is no credential the engine holds is left alone (and §17.1391 refuses it in a proposed file)
     other = {"/x/cfg.json": '{"plexToken": "' + K + '"}'}
-    assert dv.mark_held_credentials(other, CREDS) == (other, [])
-    assert dv.mark_held_credentials(WS, {}) == (WS, [])
+    assert dv.mark_held_credentials(other, CREDS) == (other, [], CREDS)
+    assert dv.mark_held_credentials(WS, {}) == (WS, [], {})
+    # §17.1585 — a HELD name the step's creds never mentioned: the unit file T4 delivered, read back for T5
+    unit = {"/etc/systemd/system/control-panel.service": "[Service]\nEnvironment=NODE_ENV=production\nEnvironment=RADARR_API_KEY=971c0d2e4f6a8b1c3d5e7f9a0b2c4d6e\n"}
+    ws2, marked2, creds2 = dv.mark_held_credentials(unit, {"SONARR_API_KEY": "read"}, ["RADARR_API_KEY", "PANEL_PASSWORD"])
+    assert marked2 == ["RADARR_API_KEY"] and "Environment=RADARR_API_KEY=@@SCAFFOLD:RADARR_API_KEY@@" in ws2["/etc/systemd/system/control-panel.service"]
+    assert creds2 == {"SONARR_API_KEY": "read", "RADARR_API_KEY": dv.RUNNER_HELD}                  # the delivery can fill it
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
-    assert "workspace, _marked = develop.mark_held_credentials(workspace, creds)" in src
-    assert src.index("creds = develop.credentials_for(") < src.index("mark_held_credentials(workspace, creds)") < src.index("develop.build_prompt(")
+    assert "workspace, _marked, creds = develop.mark_held_credentials(" in src and '(policy or {}).get("held") or []))' in src
+    assert src.index("creds = develop.credentials_for(") < src.index("develop.mark_held_credentials(") < src.index("develop.build_prompt(")
 
 
 def test_a_json_style_key_is_a_credential_shape_too():
@@ -62,3 +67,13 @@ def test_the_develop_loop_stops_when_a_round_brings_nothing_new():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
     assert "if develop.stalled(evidence, _this_ev):" in src and src.index("develop.stalled(evidence, _this_ev)") < src.index("current, evidence = best[2], develop.evidence_of(best[1])")
+
+
+def test_a_value_the_machine_holds_wins_over_the_runners_copy():
+    """§17.1585 — live: the runner's RADARR_API_KEY was stale; Radarr's config.xml on its guest is the truth."""
+    radarr = NS(name="radarr", guest="103", unit="radarr.service", ports=("7878",), workdir="/var/lib/radarr", vm=False)
+    node = {"title": "Fix Radarr endpoint backend", "prompt_template": "read RADARR_API_KEY from engine-held secrets and send X-Api-Key"}
+    creds = dv.credentials_for([radarr], ["RADARR_API_KEY", "PANEL_PASSWORD"], node)
+    assert creds["RADARR_API_KEY"] != dv.RUNNER_HELD and "103" in creds["RADARR_API_KEY"] and "config.xml" in creds["RADARR_API_KEY"]
+    assert "PANEL_PASSWORD" not in creds                                            # not named by the step
+    assert dv.credentials_for([], ["RADARR_API_KEY"], node) == {"RADARR_API_KEY": dv.RUNNER_HELD}   # no machine read: the runner's copy

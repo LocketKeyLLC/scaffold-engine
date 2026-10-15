@@ -3086,7 +3086,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             creds = develop.credentials_for(_services, list((policy or {}).get("secrets") or [])
                                             + list((policy or {}).get("held") or []), run_node)
             # §17.1583 — a credential the workspace carries in the clear travels to the model as its mark
-            workspace, _marked = develop.mark_held_credentials(workspace, creds)
+            workspace, _marked, creds = develop.mark_held_credentials(
+                workspace, creds, list((policy or {}).get("secrets") or []) + list((policy or {}).get("held") or []))
             if _marked:
                 logger.warning("develop_credentials_marked job=%s node=%s names=%s", job_id, _nk_dev, _marked)
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()

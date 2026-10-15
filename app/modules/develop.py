@@ -636,7 +636,11 @@ def credentials_for(services: Optional[list], runner_secrets: Optional[list] = N
     text = _text(node)
     for n in runner_secrets or []:
         if re.fullmatch(r"[A-Z][A-Z0-9_]{2,60}", str(n)) and re.search(rf"\b{re.escape(str(n))}\b", text):
-            out[str(n)] = RUNNER_HELD
+            # §17.1585 — a value the MACHINE holds wins over a copy the runner stores: live (c2792d4b T4), the step
+            # named RADARR_API_KEY, the runner's copy replaced Radarr's own key as the read, and the delivered
+            # panel answered "Failed to fetch Radarr library: HTTP 401" exactly as before — the stored copy was
+            # stale while `read_apis` had just read Radarr's API with the key off its config.xml.
+            out.setdefault(str(n), RUNNER_HELD)
     return out
 
 
@@ -650,7 +654,8 @@ def _cred_norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
 
-def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str],
+                          held: Optional[list] = None) -> tuple[dict[str, str], list[str], dict[str, str]]:
     """§17.1583 — a credential the SERVICE'S OWN FILES carry in the clear reaches the model as its mark, not
     its value, and comes back as its value at delivery.
 
@@ -660,10 +665,18 @@ def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str]) -> t
     the delivery already fills `@@SCAFFOLD:NAME@@` from it — so the file the model sees carries the mark where
     the key's own name says which credential it is (`sonarrApiKey` ≡ `SONARR_API_KEY`). Returns the marked
     workspace and the names marked. A value whose key names no credential the engine holds is left as it is
-    (and §17.1391's gate refuses it in a proposed file)."""
-    if not creds or not workspace:
-        return dict(workspace or {}), []
-    by_norm = {_cred_norm(n): n for n in creds}
+    (and §17.1391's gate refuses it in a proposed file).
+
+    §17.1585 — `held`: every runner secret's NAME, not only the step's `creds`. Live (c2792d4b T5): T4's delivery
+    had written `Environment=RADARR_API_KEY=<key>` into the unit file; T5 names Sonarr, so RADARR_API_KEY was not
+    in its creds, the unit reached the model with the key in the clear, and the model copied it back twice
+    (§17.1391 refused; §17.1583 stalled). A held name found in the workspace is marked and joins `creds` as
+    runner-held, so the delivery can fill it. Returns (workspace, marked names, creds)."""
+    creds = dict(creds or {})
+    names = set(creds) | {str(h) for h in held or [] if re.fullmatch(r"[A-Z][A-Z0-9_]{2,60}", str(h))}
+    if not names or not workspace:
+        return dict(workspace or {}), [], creds
+    by_norm = {_cred_norm(n): n for n in sorted(names)}
     out: dict[str, str] = {}
     marked: set[str] = set()
 
@@ -675,7 +688,9 @@ def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str]) -> t
         return m.group("pre") + SECRET_MARK.format(name=name)
     for path, body in (workspace or {}).items():
         out[path] = _FILE_CREDENTIAL_RE.sub(_repl, str(body or "")) if path and not path.endswith((".js.map", ".lock")) else body
-    return out, sorted(marked)
+    for n in marked:
+        creds.setdefault(n, RUNNER_HELD)          # a held name the files carry: the delivery fills it from the runner
+    return out, sorted(marked), creds
 
 
 def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
