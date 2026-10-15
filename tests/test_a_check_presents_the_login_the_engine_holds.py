@@ -63,7 +63,7 @@ def test_the_naked_panel_curl_gets_basic_auth():
     # wrapped to run in-guest through sh -c, password read from stdin into cpw,
     # presented to curl as `-u panel:$cpw`, fed by the herestring placeholder.
     assert got.startswith("pct exec 111 -- sh -c ")
-    assert "IFS= read -r cpw" in got
+    assert "cpw=$(cat); " in got and "read -r" not in got     # §17.1583 — the verify channel refuses `read`, takes `cat`
     assert '-u "panel:$cpw"' in got
     assert got.rstrip().endswith('<<< "<PANEL_PASSWORD>"')
     # the original endpoint + flags survive.

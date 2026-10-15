@@ -7518,7 +7518,8 @@ async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]
 #: what was sent; the value never survives.
 _CREDENTIAL_LITERAL_RE = re.compile(
     r"((?:X-(?:Api-Key|Emby-Token|MediaBrowser-Token|Plex-Token)|Authorization)\s*:\s*"
-    r"(?:Bearer\s+)?|(?:api_?key|access_?token)\s*=\s*)"
+    r"(?:Bearer\s+)?|(?:api_?key|access_?token)\s*=\s*"
+    r"|[\"']?\w*api_?key[\"']?\s*:\s*[\"'])"              # §17.1583 — `"sonarrApiKey": "<hex>"` in a JSON/JS file
     r"(?!\$)([A-Za-z0-9_-]{16,128})", re.I)
 
 

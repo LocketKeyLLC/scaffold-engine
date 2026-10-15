@@ -1039,7 +1039,7 @@ def _present_one(line: str, guard: dict) -> Optional[str]:
     payload2 = re.sub(r"\bcurl\b(\s)", lambda mm: f'curl -u "{user}:$cpw"{mm.group(1)}', payload, count=1)   # §17.1578 — a lowercase local
     if payload2 == payload:
         return None                                   # no bare `curl ` token to extend
-    payload2 = "IFS= read -r cpw; " + payload2
+    payload2 = "cpw=$(cat); " + payload2     # §17.1583 — `cat` is a reader the verify channel takes; `read` is not (§17.1390)
     return f'pct exec {guest} -- sh -c {_sq(payload2)} <<< "<{secret}>"'
 
 

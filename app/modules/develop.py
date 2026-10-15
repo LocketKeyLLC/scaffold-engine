@@ -615,6 +615,44 @@ def credentials_for(services: Optional[list], runner_secrets: Optional[list] = N
     return out
 
 
+#: §17.1583 — a credential a workspace file carries in the clear: `"sonarrApiKey": "<hex>"`, `apiKey = '<hex>'`,
+#: `SONARR_API_KEY=<hex>`. The key's letters name the credential (sonarrApiKey ≡ SONARR_API_KEY).
+_FILE_CREDENTIAL_RE = re.compile(
+    r"(?P<pre>(?P<q>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=q)\s*[:=]\s*(?P<vq>[\"']?))(?P<val>[A-Za-z0-9_-]{16,128})(?=[\"'\s,;}\]]|$)")
+
+
+def _cred_norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """§17.1583 — a credential the SERVICE'S OWN FILES carry in the clear reaches the model as its mark, not
+    its value, and comes back as its value at delivery.
+
+    Live (c2792d4b T4): `read_workspace` handed the model the panel's config/media-request.json with Sonarr's
+    key in it; the model wrote the file back whole, key included, and the value sat in the frame the operator
+    reads and in the record. The engine HOLDS that credential (`creds`: a machine read or a runner secret), and
+    the delivery already fills `@@SCAFFOLD:NAME@@` from it — so the file the model sees carries the mark where
+    the key's own name says which credential it is (`sonarrApiKey` ≡ `SONARR_API_KEY`). Returns the marked
+    workspace and the names marked. A value whose key names no credential the engine holds is left as it is
+    (and §17.1391's gate refuses it in a proposed file)."""
+    if not creds or not workspace:
+        return dict(workspace or {}), []
+    by_norm = {_cred_norm(n): n for n in creds}
+    out: dict[str, str] = {}
+    marked: set[str] = set()
+
+    def _repl(m: "re.Match[str]") -> str:
+        name = by_norm.get(_cred_norm(m.group("key")))
+        if not name:
+            return m.group(0)
+        marked.add(name)
+        return m.group("pre") + SECRET_MARK.format(name=name)
+    for path, body in (workspace or {}).items():
+        out[path] = _FILE_CREDENTIAL_RE.sub(_repl, str(body or "")) if path and not path.endswith((".js.map", ".lock")) else body
+    return out, sorted(marked)
+
+
 def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
     if not creds:
         return ""
@@ -1085,6 +1123,12 @@ def score(frame: dict, report: Optional[dict]) -> int:
 
 def evidence_of(frame: dict) -> str:
     return "\n".join(f"- {' '.join(str(r.get('why') or '').split())[:1500]}" for r in frame.get("refused") or [])
+
+
+def stalled(previous: str, now: str) -> bool:
+    """§17.1583 — a round whose refusals are exactly the previous round's brings the model nothing new."""
+    p, n = " ".join(str(previous or "").split()), " ".join(str(now or "").split())
+    return bool(n) and p == n
 
 
 def nothing_refusal(evidence: str) -> list[dict]:

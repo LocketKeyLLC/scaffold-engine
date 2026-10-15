@@ -3084,6 +3084,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it
             creds = develop.credentials_for(_services, list((policy or {}).get("secrets") or [])
                                             + list((policy or {}).get("held") or []), run_node)
+            # §17.1583 — a credential the workspace carries in the clear travels to the model as its mark
+            workspace, _marked = develop.mark_held_credentials(workspace, creds)
+            if _marked:
+                logger.warning("develop_credentials_marked job=%s node=%s names=%s", job_id, _nk_dev, _marked)
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
@@ -3136,6 +3140,13 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if best is None or sc <= best[0]:          # a tie goes to the newer version
                     best = (sc, fr, files)
                 if sc == 0:
+                    break
+                # §17.1583 — the same refusal twice running is a round the model cannot change (live, T4: eight
+                # rounds, each refused for the ENGINE'S OWN held-login check — `IFS= read` on the verify channel —
+                # a shape no file of the model's touches). Nothing new to show it: stop, and park with the reason.
+                _this_ev = develop.evidence_of(fr)
+                if develop.stalled(evidence, _this_ev):
+                    logger.warning("develop_rounds_stalled job=%s node=%s round=%d why=%r", job_id, _nk_dev, round_no, _this_ev[:300])
                     break
                 current, evidence = best[2], develop.evidence_of(best[1])
             if best is None:
