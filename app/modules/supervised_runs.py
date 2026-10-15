@@ -9421,7 +9421,9 @@ def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -
         lines += ["", "## Files written", *[f"- `{p}`" for p in files]]
     if verify_cmds:
         lines += ["", "## Verify", "```bash", *[str(c) for c in verify_cmds], "```"]
-    notes = [str(n.get("why") or "").strip() for n in (w.get("engine_fixed") or []) if isinstance(n, dict) and n.get("why")]
+    # the frame stores its notes as plain strings (live) or as {"why": …} dicts (the rewrites' own shape)
+    notes = [str(n.get("why") if isinstance(n, dict) else n or "").strip() for n in (w.get("engine_fixed") or [])]
+    notes = [n for n in notes if n]
     if notes:
         lines += ["", "## The engine drafted this", *[f"- {n}" for n in notes]]
     return "\n".join(lines)

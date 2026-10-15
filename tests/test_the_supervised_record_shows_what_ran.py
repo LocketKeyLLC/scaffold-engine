@@ -16,7 +16,8 @@ FRAME = {"runbook": DRAFT,
          "commands": ["pct exec 101 -- sh -c 'python3 -c \"census\" \"<JELLYFIN_API_KEY>\" \"report\"'"],
          "verify": ["pct exec 101 -- curl -s -o /dev/null -w \"jellyfin HTTP %{http_code}\" http://127.0.0.1:8096/System/Info/Public"],
          "files": [{"path": "/tmp/in_ct_101.sh", "content": "#!/bin/bash"}],
-         "engine_fixed": [{"why": "drafted the metadata check from the engine's own shape (§17.1554)"},
+         # live frames store the notes as plain strings; the rewrites' own shape is {"why": …} — both render
+         "engine_fixed": ["drafted the metadata check from the engine's own shape (§17.1554)",
                           {"why": "read JELLYFIN_API_KEY inside guest 101 instead of asking"}]}
 
 
