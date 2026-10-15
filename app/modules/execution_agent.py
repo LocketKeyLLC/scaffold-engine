@@ -21,6 +21,7 @@ Error recovery cascade (per spec):
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import AsyncGenerator, Literal
@@ -3120,6 +3121,13 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
                 facts = f"{facts}\n\n{develop.engine_doc(run_node)}"
+            if develop.machines_doc(spec):                      # §17.1598 — and where the Proxmox host is
+                facts = f"{facts}\n\n{develop.machines_doc(spec)}"
+            # §17.1598 — the addresses the engine measured: never probed, never refused
+            _held_addrs = ([str(getattr(s, "address", "") or "") for s in _services or []]
+                           + [develop.host_address(spec), _eaddr, os.environ.get("SCAFFOLD_LAN_ADDRESS")]
+                           + [a for v in ((_inv or {}).get("addresses") or {}).values() for a in v])
+            _addr_probes: dict = {}
             _served = develop.served_entries(workspace)                # §17.1546 — what the browser actually gets
             _served_doc = develop.served_files_doc(_served)
             if _served_doc:
@@ -3183,6 +3191,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                          + develop.calls_a_dead_path(files, status)         # §17.1422
                          + develop.values_put_into_html_attributes(files)   # §17.1424
                          + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427
+                         + develop.blocks_the_event_loop(files, workspace, host, kit)   # §17.1598
+                         + await develop.addresses_that_do_not_answer(spec, files, workspace, host, _held_addrs,
+                                                                      kit, _addr_probes)   # §17.1598
                          + develop.restyle_missed_the_served_file(run_node, files, _served, workspace))  # §17.1546
                 if _dead:
                     fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}

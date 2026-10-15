@@ -669,9 +669,13 @@ _KIT_DIR = os.path.join(os.path.dirname(__file__), "develop_kit")
 KIT_SUBDIR = "scaffold-kit"
 KIT_DOC = """THE ENGINE'S KIT (installed for you at {kit}/ on every delivery -- use it, do not write your own):
 - `const remote = require('{kit}/remote');` -- for ANYTHING on another machine. `host = {{address, user}}`.
-  `remote.readFile(host, path)` -> text (sudo cat). `remote.writeFile(host, path, text, {{owner: 'user:group'}})`
-  (sudo tee, the text travels on stdin). `remote.exists(host, path)`. `remote.unit(host, 'stop'|'start'|'restart'|'is-active', unit)`.
-  Never build an ssh command line yourself; never quote content into one.
+  In a server, ALWAYS the promises form, awaited: `await remote.promises.readFile(host, path)` -> text (sudo cat).
+  `await remote.promises.writeFile(host, path, text, {{owner: 'user:group'}})` (sudo tee, the text travels on stdin).
+  `await remote.promises.exists(host, path)`. `await remote.promises.unit(host, 'stop'|'start'|'restart'|'is-active', unit)`.
+  `await remote.promises.run(host, ['pct', 'list'])` -> stdout of a command run as that user (no sudo).
+  The plain forms (`remote.readFile(...)`) and child_process's `execFileSync`/`execSync`/`spawnSync` BLOCK the
+  whole service while they wait -- every other request stalls behind them -- and are refused. Run independent
+  remote reads together with `Promise.all`. Never build an ssh command line yourself; never quote content into one.
 - `const ue = require('{kit}/ue_settings');` -- Unreal-engine settings files (one `[/Script/...]` header and one
   `OptionSettings=(k=v,...)` line; a value can itself be `(A,B,C)`). `ue.parse(text)` -> `{{header, settings}}`
   or null when the file has no OptionSettings line; `ue.serialize(doc)` -> the file text. parse(serialize(doc)) equals doc.
@@ -1163,6 +1167,150 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
             f"and the engine asked that path just now: it answers HTTP {code}, so the feature cannot work. "
             + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx/3xx, no key)' for b in better)} -- use that, and "
                f"its own response fields." if better else "Use a path the service actually serves."))})
+    return out
+
+
+#: §17.1598 — files that run inside the server process (not the page the browser runs)
+_SERVER_FILE_RE = re.compile(r"\.(?:js|cjs|mjs|ts)$")
+_BLOCKING_CALL_RE = re.compile(r"\b(execFileSync|execSync|spawnSync)\s*\(")
+_KIT_BINDING_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"][^'\"]*scaffold-kit/remote(?:\.js)?['\"]\s*\)")
+
+
+def _service_files(files: dict[str, str], workspace: Optional[dict[str, str]], host: Optional[Host],
+                   kit: Optional[dict[str, str]]) -> list[tuple[str, str, bool]]:
+    """``(path, content, carried)`` for every file the service will run with after this version: the version's
+    own files, then the workspace files it leaves as they are (``carried``). The kit is the engine's and is
+    judged by its own tests, not here; the UI directories are the browser's."""
+    ui = tuple(str(d).rstrip("/") + "/" for d in (getattr(host, "extra_dirs", ()) or ()))
+    out = [(p, str(c or ""), False) for p, c in (files or {}).items()]
+    out += [(p, str(c or ""), True) for p, c in (workspace or {}).items() if p not in (files or {})]
+    return [(p, c, carried) for p, c, carried in out
+            if p not in (kit or {}) and "/scaffold-kit/" not in p and not (ui and p.startswith(ui))]
+
+
+def blocks_the_event_loop(files: dict[str, str], workspace: Optional[dict[str, str]] = None,
+                          host: Optional[Host] = None, kit: Optional[dict[str, str]] = None) -> list[dict]:
+    """§17.1598 — a server file that waits on another process SYNCHRONOUSLY: child_process's `*Sync` calls, or
+    the kit's blocking forms. Node runs every request on one thread, so the whole service stops while it waits.
+
+    Live (c2792d4b, 2026-10-15): network_ui_route.js made three `execFileSync('ssh', …)` calls in a row, 15 s
+    timeout each, to an address with no ssh. Every page load froze the panel for 45 s, so every section -- the
+    healthy ones too -- sat on "Loading…", and T11's route probe saw `/api/network-ui` AND `/api/network-view`
+    (Pi-hole, up) both time out. A file the version does not touch is judged too: the service runs with it."""
+    out: list[dict] = []
+    for path, c, carried in _service_files(files, workspace, host, kit):
+        if not _SERVER_FILE_RE.search(path):
+            continue
+        hits = [m.group(1) for m in _BLOCKING_CALL_RE.finditer(c)]
+        for b in dict.fromkeys(m.group(1) for m in _KIT_BINDING_RE.finditer(c)):
+            hits += [f"{b}.{m.group(1)}" for m in re.finditer(rf"(?<![\w$.]){re.escape(b)}\.(readFile|writeFile|exists|unit)\s*\(", c)]
+        if not hits:
+            continue
+        names = ", ".join(f"`{h}`" for h in dict.fromkeys(hits))
+        out.append({"command": f"{path}: {names}", "why": (
+            f"{'`' + path + '` (already on the machine, unchanged by this version)' if carried else '`' + path + '`'} "
+            f"calls {names}, which BLOCKS the whole Node service until the other process returns: every other "
+            f"request -- every section of the page -- waits behind it, and a machine that does not answer holds "
+            f"them for the full timeout. Return this file changed: use `await remote.promises.*` from the kit (or "
+            f"`util.promisify(execFile)`), make the handler `async`, and run independent reads together with "
+            f"`Promise.all`.")})
+    return out
+
+
+#: §17.1598 — an address in a server file, and the ports the file reaches it on
+_ADDR_FILE_RE = re.compile(r"\.(?:js|cjs|mjs|ts|json|py|conf|service|env|ya?ml)$")
+
+
+def _valid_ipv4(ip: str) -> bool:
+    return all(p.isdigit() and int(p) <= 255 for p in ip.split("."))
+
+
+def ports_for_address(content: str, ip: str) -> list[str]:
+    """The ports ``content`` reaches ``ip`` on: an explicit `ip:port`, a `port: N` within a few lines of it, 22 when
+    it is an ssh target (an `ssh` call or a kit host object), 80/443 for a bare `http(s)://ip`. Empty when the file
+    does not say -- and then nothing is judged."""
+    e = re.escape(ip)
+    ports = [m.group(1) for m in re.finditer(rf"(?<![\d.]){e}:(\d{{2,5}})\b", content)]
+    for m in re.finditer(rf"(?<![\d.]){e}(?![\d.])", content):
+        near = content[max(0, m.start() - 300):m.end() + 300]
+        ports += re.findall(r"\bport['\"]?\s*[:=]\s*['\"]?(\d{2,5})\b", near, re.I)
+        if re.search(r"\bssh\b|\baddress\s*:\s*['\"][^'\"]+['\"]\s*,\s*user\s*:", near):
+            ports.append("22")
+        if re.search(rf"https://{e}(?![\d.:])", content):
+            ports.append("443")
+        elif re.search(rf"http://{e}(?![\d.:])", content):
+            ports.append("80")
+    return list(dict.fromkeys(ports))[:4]
+
+
+def host_address(spec) -> str:
+    """§17.1598 — the Proxmox host's own address: the machine the runner answers on."""
+    m = re.search(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])", str(getattr(spec, "endpoint", "") or ""))
+    return m.group(1) if m else ""
+
+
+def machines_doc(spec) -> str:
+    """§17.1598 — the drafter is told where the Proxmox host is. Live, it was never told, and a route that lists the
+    host's guests was written against `192.168.1.2` -- a device on the LAN with no ssh -- not the host."""
+    addr = host_address(spec)
+    return (f"THE PROXMOX HOST: {addr} -- the machine where `pct` and `qm` run (and where the engine's runner is). "
+            f"Code that reads the host's guests or the host's own state reaches it at {addr}.") if addr else ""
+
+
+async def addresses_that_do_not_answer(spec, files: dict[str, str], workspace: Optional[dict[str, str]],
+                                       host: Optional[Host], held: Optional[list[str]] = None,
+                                       kit: Optional[dict[str, str]] = None,
+                                       cache: Optional[dict] = None, probe=None) -> list[dict]:
+    """§17.1598 — an address a server file reaches that NOTHING the engine measured names, and that does not accept
+    a connection on any port the file reaches it on, asked just now from the Proxmox host.
+
+    Live (c2792d4b): network_ui_route.js sent `pct list`/`qm list` over ssh to `192.168.1.2`. That address is a device
+    on the LAN (REACHABLE in the host's neighbour table) with port 22 closed; the host is 192.168.1.156. §17.1312's
+    unsourced-address gate never ran: this job has no ledger of facts, and it stays silent without one. Here the
+    machine is the source: a held address (a measured service, the host, the engine) is never probed, and an
+    address is refused only on the evidence of a refused connection -- a probe that could not run says nothing."""
+    from app.modules import service_truth as st
+    held_set = {str(a) for a in held or [] if a}
+    cache = cache if cache is not None else {}
+
+    async def _answers(ip: str, port: str) -> Optional[bool]:
+        if (ip, port) in cache:
+            return cache[(ip, port)]
+        try:
+            if probe is not None:
+                res = await probe(ip, port)
+            else:
+                ok, body = await st._probe(spec, f"nc -z -w2 {ip} {port} && echo OPEN || echo SHUT")
+                res = ("OPEN" in body) if ok and ("OPEN" in body or "SHUT" in body) else None
+        except Exception:
+            res = None
+        cache[(ip, port)] = res
+        return res
+
+    out: list[dict] = []
+    for path, c, carried in _service_files(files, workspace, host, kit):
+        if not _ADDR_FILE_RE.search(path):
+            continue
+        for ip in dict.fromkeys(re.findall(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])", c)):
+            last = ip.rsplit(".", 1)[1]
+            if (not _valid_ipv4(ip) or ip in held_set or ip.startswith("127.") or last in ("0", "1", "255")
+                    or ip in ("0.0.0.0",) or not ip.startswith(("10.", "172.", "192.168."))):
+                continue
+            ports = ports_for_address(c, ip)
+            if not ports:
+                continue
+            answers = [await _answers(ip, p) for p in ports]
+            if any(a is None for a in answers) or any(answers):
+                continue                       # unknown, or it answers: no judgment
+            line = next((ln.strip() for ln in c.splitlines() if ip in ln), "")[:120]
+            hint = (f" The Proxmox host is {host_address(spec)}." if host_address(spec) else "")
+            out.append({"command": f"{path}: {line}", "why": (
+                f"{'`' + path + '` (already on the machine, unchanged by this version)' if carried else '`' + path + '`'} "
+                f"reaches `{ip}` on port {', '.join(ports)}, and nothing the engine measured names that address: the "
+                f"engine asked it just now from the Proxmox host and it refused the connection on "
+                f"{'that port' if len(ports) == 1 else 'every one of those ports'}. The code would wait on a machine "
+                f"that is not the one it means.{hint} Use the address of the machine the code is about, from the "
+                f"facts, and return this file changed.")})
     return out
 
 
