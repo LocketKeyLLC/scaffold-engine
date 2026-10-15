@@ -654,12 +654,12 @@ def _brief_essentials(brief: dict) -> str:
         # did not re-ask — it built a control panel to a spec they had just said
         # they did not have. Split them: an answer is honoured, a non-answer is
         # a decision still owed to the operator.
-        from app.modules.unanswered import parse_feedback
-        pairs = parse_feedback(feedback)
+        from app.modules.unanswered import answers
+        pairs = answers(brief)              # §17.1605 — numbered answers are paired with their question too
         answered = [p for p in pairs if p["answered"]]
         if answered:
             parts.append("Operator answers (already decided — honor, do not re-ask):\n"
-                         + "\n".join(f"Q: {p['question']}\nA: {p['answer']}" for p in answered)[:1200])
+                         + "\n".join(f"Q: {p['question'][:160]}\nA: {p['answer']}" for p in answered)[:3000])
         elif not pairs:
             parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
         # §17.1480 — the still-undecided items are NOT carried here. This block goes into every STEP's prompt
