@@ -40,3 +40,14 @@ def test_a_timeout_shorter_than_the_measured_latency_is_refused_and_a_generous_o
     assert dv.timeouts_shorter_than_measured(secs, status)
     from app.modules import execution_agent as ea
     assert "+ develop.timeouts_shorter_than_measured(files, status)" in inspect.getsource(ea._pause_for_decision)
+
+
+def test_a_redirect_is_a_live_answer_not_a_dead_path():
+    """§17.1595 — Byparr's `/` answers 301 → /docs in 3 ms: the fast, live path a health check may use."""
+    status = [{"service": "byparr", "path": "/", "code": "301", "address": "192.168.1.27", "seconds": 0.0},
+              {"service": "byparr", "path": "/health", "code": "200", "address": "192.168.1.27", "seconds": 8.3},
+              {"service": "pihole", "path": "/admin/api.php?summary", "code": "400", "address": "192.168.1.30", "seconds": 0.0}]
+    files = {"/opt/control-panel-backend/byparr_route.js": "const r = await httpRequest('192.168.1.27', 8191, '/', {});\n",
+             "/opt/control-panel-backend/network_route.js": "fetch('http://192.168.1.30/admin/api.php?summary')\n"}
+    out = dv.calls_a_dead_path(files, status)
+    assert len(out) == 1 and out[0]["command"].endswith(": /admin/api.php") and "HTTP 400" in out[0]["why"]      # the 400 is dead; the 301 is not

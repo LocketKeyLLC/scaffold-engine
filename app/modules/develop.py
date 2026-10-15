@@ -1074,11 +1074,14 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
     `/api/stats/summary` → 200 and `/admin/api.php?summary` → 400 (Pi-hole v6.4.3), the model still wrote
     the v5 path -- its step text asked for an "API token", a v5 notion -- and the sandbox, which reaches no
     machine, passed the route because it answered at all."""
-    alive = [s for s in status or [] if s.get("code", "").startswith("2")]
+    # §17.1595 — a 3xx is the service ANSWERING (Byparr's `/` → 301 /docs in 3 ms, live): alive, not dead. Live
+    # (c2792d4b T7), the model moved the health call from the 8 s `/health` to `/`, this gate refused `/` as dead,
+    # and the develop loop stalled between a timeout it may not give and a path it may not call.
+    alive = [s for s in status or [] if s.get("code", "").startswith(("2", "3"))]
     out: list[dict] = []
     for s in status or []:
         code = s.get("code", "")
-        if not code or code.startswith("2"):
+        if not code or code.startswith(("2", "3")):
             continue
         base = s["path"].split("?", 1)[0]
         hit = next((p for p, c in (files or {}).items() if base in (c or "")), None)
@@ -1089,7 +1092,7 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
         out.append({"command": f"{hit}: {base}", "why": (
             f"this code calls `{base}` on {s['service']}{where}, "
             f"and the engine asked that path just now: it answers HTTP {code}, so the feature cannot work. "
-            + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx, no key)' for b in better)} -- use that, and "
+            + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx/3xx, no key)' for b in better)} -- use that, and "
                f"its own response fields." if better else "Use a path the service actually serves."))})
     return out
 
