@@ -103,7 +103,49 @@ async def _cat(spec, gid: str, vm: bool, path: str) -> Optional[str]:
     ok, out = await st._probe(spec, f"{st.in_guest(gid, vm)} cat {shlex.quote(path)}")
     if not ok or _CAT_ERROR_RE.match(str(out or "").strip()):
         return None
+    if len(out or "") >= RUNNER_OUTPUT_CAP - 64:
+        return await _cat_in_chunks(spec, gid, vm, path)       # §17.1600 — the runner cut it
     return out
+
+
+#: §17.1600 — the runner returns at most this many characters of a command's output (local_runner_mcp.py's
+#: `[:20000]`), silently. Live (c2792d4b): CT 111's served index.html is 48,897 bytes and every develop read of
+#: it came back as its first 20,000 characters -- the page the model was asked to change, cut, with no sign.
+RUNNER_OUTPUT_CAP = 20000
+#: base64 characters per chunk: a multiple of 4 (each chunk decodes on its own), well under the cap
+_B64_CHUNK = 16000
+
+
+async def _cat_in_chunks(spec, gid: str, vm: bool, path: str) -> Optional[str]:
+    """A file larger than the runner's output cap, read as base64 slices and checked against its size. None when
+    any slice fails or the bytes do not add up -- a cut file is never returned as if it were whole."""
+    import base64
+    from app.modules import service_truth as st
+    g, q = st.in_guest(gid, vm), shlex.quote(path)
+    ok, size_out = await st._probe(spec, f"{g} stat -c %s {q}")
+    try:
+        size = int(str(size_out or "").strip().split()[-1]) if ok else -1
+    except (ValueError, IndexError):
+        size = -1
+    if size < 0 or size > MAX_SEED_BYTES:
+        return None
+    total = (size + 2) // 3 * 4
+    parts: list[str] = []
+    for start in range(1, total + 1, _B64_CHUNK):
+        end = min(start + _B64_CHUNK - 1, total)
+        ok, chunk = await st._probe(spec, f'{g} sh -c "base64 -w0 {q} | cut -c {start}-{end}"')
+        chunk = "".join(str(chunk or "").split())
+        if not ok or len(chunk) != end - start + 1:
+            logger.warning("chunked_read_failed path=%s at=%d got=%d", path, start, len(chunk))
+            return None
+        parts.append(chunk)
+    try:
+        raw = base64.b64decode("".join(parts), validate=True)
+    except Exception:
+        return None
+    if len(raw) != size:
+        return None
+    return raw.decode("utf-8", errors="replace")
 
 
 async def seeds_for(spec, target: dict, services: Optional[list]) -> list[dict]:

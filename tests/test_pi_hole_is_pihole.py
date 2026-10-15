@@ -40,7 +40,7 @@ def test_status_probes_are_read_only_and_inside_the_guest():
     reads = dv.status_reads([PIHOLE])
     assert [p for _, p, _ in reads] == ["/api/stats/summary", "/admin/api.php?summary"]
     for _, _, cmd in reads:
-        assert cmd.startswith("pct exec 130 -- curl -s -m 10 -o /dev/null -w %{http_code} ") and read_only_command(cmd)
+        assert cmd.startswith('pct exec 130 -- curl -s -m 10 -o /dev/null -w "%{http_code} %{time_total}" ') and read_only_command(cmd)   # §17.1594 — timed
 
 
 def test_the_prompt_says_which_api_answers(monkeypatch):

@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "22"
+HELPER_VERSION = "23"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -1047,13 +1047,29 @@ def load_secrets(path: str | None) -> dict:
 
 
 _SECRET_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{0,63})\}?")
+#: §17.1578 (helper 23) — the names a block BINDS itself: `CPW=$(cat)`, `export X=`, `for F in`, `read -r CPW`,
+#: `local X`. A reference to one of these is the block's own variable, not a secret this runner must hold:
+#: live, the engine's probe opened `CPW=$(cat); … PORT=$(grep …)` and was refused "needs $PORT, $CPW". An
+#: assignment FROM ITSELF (`TOK=$TOK`, `TOK="${TOK}"`) binds nothing and is still demanded.
+_BOUND_NAME_RE = re.compile(
+    r"(?:^|[;&|(\s'\"])(?:export\s+|local\s+|declare\s+(?:-\S+\s+)?)?(?P<set>[A-Z][A-Z0-9_]{0,63})="
+    r"(?!(?P<q>[\"']?)\$\{?(?P=set)\}?(?P=q)(?:$|[\s;&|)]))"
+    r"|\bfor\s+(?P<for>[A-Z][A-Z0-9_]{0,63})\s+in\b"
+    r"|\bread\b(?:\s+-\S+)*\s+(?P<read>[A-Z][A-Z0-9_]{0,63})\b", re.M)
+
+
+def bound_names(command: str) -> set[str]:
+    """§17.1578 — the UPPERCASE names ``command`` binds itself (see ``_BOUND_NAME_RE``)."""
+    return {g for m in _BOUND_NAME_RE.finditer(command or "") for g in (m.group("set"), m.group("for"), m.group("read")) if g}
 
 
 def secret_refs(command: str) -> list[str]:
-    """The ``$NAME`` / ``${NAME}`` references in a command, in first-seen order."""
+    """The ``$NAME`` / ``${NAME}`` references in a command, in first-seen order — minus the names the
+    command binds itself (§17.1578, helper 23)."""
+    bound = bound_names(command)
     out: list[str] = []
     for m in _SECRET_REF_RE.finditer(command or ""):
-        if m.group(1) not in out:
+        if m.group(1) not in out and m.group(1) not in bound:
             out.append(m.group(1))
     return out
 

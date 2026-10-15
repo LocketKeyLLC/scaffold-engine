@@ -956,6 +956,38 @@ _UNDOES_RE = re.compile(r"\b(?:stop|stopp(?:ed|ing)|disabl\w*|pause\w*|turn(?:ed
                         r"remov\w*|delet\w*|uninstall\w*|purg\w*|mask\w*|kill\w*)\b", re.I)
 
 
+#: §17.1586 — error shapes a service writes to its journal (an HTTP status it got, a socket error, an uncaught exception)
+_NEG_LOG_RE = re.compile(
+    r"HTTP(?:/[\d.]+)?\s*(?:Error\s*)?[45]\d\d\b|\bE(?:CONNREFUSED|CONNRESET|TIMEDOUT|NOTFOUND|HOSTUNREACH|ACCES|ADDRINUSE)\b"
+    r"|\b(?:Unhandled(?:Promise)?Rejection|TypeError|ReferenceError|SyntaxError|Traceback \(most recent call last\)|FATAL|fatal:|panic:)"
+    r"|\b(?:Failed|failed) to (?:fetch|connect|load|read|start|bind|listen)\b|\bexited with (?:code|status) [1-9]\d*|\bcode=exited, status=[1-9]")
+
+
+#: §17.1597 — an error body that quotes an upstream 3xx as the failure
+_NEG_REDIRECT_MISREAD_RE = re.compile(r"\"(?:detail|error|message)\"\s*:\s*\"[^\"]*\bHTTP\s*3\d\d\b")
+#: §17.1593 — a done-condition that accepts an error answer ("return real data or a clear JSON error")
+_ACCEPTS_ERROR_RE = re.compile(r"\b(?:or\s+(?:an?\s+)?(?:clear|structured|proper)?\s*(?:json\s+)?error(?:\s+(?:message|body|response|json))?)\b", re.I)
+
+
+def _accepts_a_clear_error(claim: str) -> bool:
+    return bool(_ACCEPTS_ERROR_RE.search(str(claim or "")))
+
+
+def _json_error_body(text_out: str) -> str:
+    """The first line of ``text_out`` that is a JSON object carrying an ``error`` key, or ''."""
+    import json as _json
+    for ln in str(text_out or "").splitlines():
+        ln = ln.strip()
+        if ln.startswith("{") and '"error"' in ln:
+            try:
+                obj = _json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and str(obj.get("error") or "").strip():
+                return ln
+    return ""
+
+
 def negative_evidence(command: str, output: str, claim: str = "") -> str:
     """The reason a check's output CONTRADICTS its claim with no model, or ``""``.
 
@@ -973,6 +1005,16 @@ def negative_evidence(command: str, output: str, claim: str = "") -> str:
             pass
     if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_HTTP_RE.search(out):
         return f"the check answered an error, not the service: {_NEG_HTTP_RE.search(out).group(0)!r}"
+    # §17.1597 — a route that reports its upstream DOWN on a 3xx answer: the upstream answered (a redirect), the handler
+    # misread it (live, c2792d4b T7: `{"error":"Byparr service is not available","detail":"HTTP 301: "}` — Byparr's `/`
+    # redirects to /docs in 3 ms). Not "a clear JSON error" the step asked for: a bug in the handler.
+    if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_REDIRECT_MISREAD_RE.search(out):
+        return ("the route reports its upstream as unavailable on an HTTP 3xx answer "
+                f"({_NEG_REDIRECT_MISREAD_RE.search(out).group(0)!r}): a redirect is the service answering — follow it, or count 2xx/3xx as up")
+    # §17.1586 — a service's JOURNAL since its restart that carries an error line is the service saying its work
+    # did not land (live: "Failed to fetch Radarr library: HTTP 401" under a route that answered 200)
+    if re.search(r"(?<![\w-])journalctl(?![\w-])", head) and not undoes and _NEG_LOG_RE.search(out):
+        return f"the service's journal since the restart carries an error: {_NEG_LOG_RE.search(out).group(0)!r}"
     if "is-active" in head and not undoes and re.fullmatch(r"\s*(?:inactive|failed|unknown|deactivating)\s*", out):
         return f"systemctl is-active says {out.strip()!r}"
     if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and not undoes and _NEG_FS_RE.search(out):
@@ -1052,6 +1094,10 @@ _JUDGE_OPENING = (
 )
 
 
+#: §17.1574a — a verdict word: ALL-CAPS with a hyphen/underscore (`STATE-OK`, `RESULT-DONE`), never prose.
+_VERDICT_WORD_RE = re.compile(r"[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+")
+
+
 @tagged_calls("assist.state_check.judge_outputs")
 async def judge_outputs(probes: list[dict], pasted: str, *,
                         model_overrides: Optional[dict] = None) -> list[dict]:
@@ -1076,13 +1122,34 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
     for cid, txt in with_output.items():
         exp = " ".join((probed[cid].get("expect") or "").split()).lower()
         neg = negative_evidence(probed[cid].get("command") or "", txt, probed[cid].get("claim") or "")
-        if len(exp) >= 6 and exp in " ".join(txt.split()).lower():
+        exp_raw = str(probed[cid].get("expect") or "").strip()
+        # §17.1580 — the OUTPUT, not the prompt echo: a paste that opens `$ <command>` (the run path's record, an
+        # operator's terminal) carries the command's own `echo STATE-OK || echo STATE-WRONG`, and the expected word
+        # was found in that line while the output's last line said STATE-WRONG (live, c2792d4b T2: recorded done).
+        body = "\n".join(ln for ln in txt.splitlines() if not ln.startswith("$ "))
+        if len(exp) >= 6 and exp in " ".join(body.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
         elif neg:
             # §17.1310 — a health check that answered "Cannot GET /api/health" is not
             # ambiguous; live the model judge called it unknown and a step that did
             # nothing stood as done.
             verdicts[cid].update({"verdict": "contradicted", "reason": neg})
+        elif _accepts_a_clear_error(probed[cid].get("claim") or "") and _json_error_body(body):
+            # §17.1593 (after negative evidence, §17.1597) — the step ASKED for "real data or a clear JSON error": a route that reports its upstream's
+            # failure as `{"error": …}` did what the step said (live, c2792d4b T7: Byparr's own /health takes 8 s;
+            # the panel answered `{"error":"Byparr service is not available","detail":"Request timeout"}` and the
+            # judge read that as the work not landing)
+            verdicts[cid].update({"verdict": "confirmed", "reason": (
+                f"the step accepts a clear JSON error and the route answered one: {_json_error_body(body)[:120]!r}")})
+        elif _VERDICT_WORD_RE.fullmatch(exp_raw):
+            # §17.1574a — the expectation is a VERDICT WORD (`STATE-OK`, a rewrite's own last line, §17.1570g):
+            # the check prints it when the goal holds and its complement when it does not. Absent, the claim is
+            # contradicted deterministically — the judge never sees it. Live (job 9e1c2c68, T3–T7): the check
+            # ended `STATE-WRONG` and the model judge still read the counter lines above it as "confirms the
+            # goal", so five steps were recorded already met over their own verdict word.
+            verdicts[cid].update({"verdict": "contradicted",
+                                  "reason": f"the check did not print its verdict word '{exp_raw[:40]}' "
+                                            f"(its last line: {(body.strip().splitlines() or [''])[-1][:80]!r})"})
         else:
             verdicts[cid]["reason"] = "the judge returned no verdict for this check"
             to_judge[cid] = txt

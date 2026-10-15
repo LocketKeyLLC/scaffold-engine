@@ -46,6 +46,8 @@ ROUNDS = int(os.environ.get("DEVELOP_ROUNDS", "8"))
 STAGE_ROOT = "/tmp/scaffold-dev"
 
 _SKIP_RE = re.compile(r"/node_modules/|/\.git/|/(?:venv|\.venv|site-packages|__pycache__|dist|build)/|\.bak(?:\.|$)|\.log$|/package-lock\.json$|\.tgz$")
+#: §17.1600 — files a browser fetches as-is: read last, if the budget allows
+_ASSET_RE = re.compile(r"\.(?:png|jpe?g|gif|ico|svg|webp|woff2?|ttf|eot|map)$", re.I)
 _PATH_IN_TEXT_RE = re.compile(r"(?<![\w.-])(/(?:opt|srv|var/www|etc/systemd/system)/[A-Za-z0-9_./-]+)")
 #: a check the step itself names (`pct exec 111 -- curl -s http://…`) -- read-only by construction
 _CHECK_RE = re.compile(r"`((?:pct exec \d+ --|qm guest exec \d+ --)\s*[^`]+)`")
@@ -63,6 +65,7 @@ class Host:
     user: str = ""
     group: str = ""
     name: str = ""
+    port: str = ""          # §17.1590 — the measured loopback port, so a step naming no service still has one
     # §17.1544 — sibling app directories the brief names (e.g. a Vite UI at
     # /opt/control-panel-ui beside the backend's WorkingDirectory /opt/control-panel-backend). The
     # app spans more than the unit's one WorkingDirectory; read_workspace reads these too and
@@ -96,8 +99,13 @@ def _step_text(node: Optional[dict]) -> str:
     return str((node or {}).get("prompt_template") or "").strip() or str((node or {}).get("description") or "")
 
 
-_HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|create|destroy|resize|migrate|restore)\b"
-                             r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces")
+#: §17.1601 — and Proxmox's own host administration: users/tokens/ACLs (`pveum`), the API's writes (`pvesh create|set|
+#: delete`), storage (`pvesm`), the node (`pvenode`), and a file pushed into or pulled out of a guest from the host
+#: (`pct push|pull`). Live (c2792d4b T14 "Create a read-only Proxmox API token for the panel", its text naming
+#: `pveum user token add …`): developed as a panel route, the token never created.
+_HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|create|destroy|resize|migrate|restore|push|pull)\b"
+                             r"|\b(?:ifreload|ifup|ifdown)\b|/etc/network/interfaces"
+                             r"|\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b")
 
 
 _CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:validate|verify|check|test|audit|review|document)\b", re.I)
@@ -139,6 +147,16 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
         # and seven rounds proposed `/etc/caddy/Caddyfile` for the wrong container until each was refused.
         if pick is None:
             return None
+    if pick is None:
+        # §17.1581 — the step's own words place the work ON a guest ("… the Radarr handler on container 111"):
+        # the developable service there hosts it, and a service the step merely NAMES elsewhere does not.
+        # Live (c2792d4b T4): the title's name match hosted panel work on Radarr's CT 103.
+        from app.modules.machine_truth import place_guest as _place_guest
+        _pg = _place_guest(node)
+        if _pg:
+            pick = next((s for s in cands if str(s.guest) == _pg), None)
+            if pick is None:
+                return None
     # §17.1549 — a job that DECLARES a single deploy target (deploy-verb phrasing, §17.1540
     # `deploy_target_guest`) keeps EVERY build node on it. A panel-aggregator node names the
     # service it QUERIES, not the machine it deploys to: "Add Palworld status endpoint" is a
@@ -207,6 +225,7 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
     return Host(guest=str(pick.guest), vm=bool(getattr(pick, "vm", False)), workdir=str(pick.workdir).rstrip("/"),
                 unit=str(pick.unit), user=str(getattr(pick, "user", "") or ""),
                 group=str(getattr(pick, "group", "") or ""), name=str(getattr(pick, "name", "") or ""),
+                port=str(next((p for p in (getattr(pick, "ports", ()) or ()) if str(p).strip()), "")),   # §17.1590
                 extra_dirs=extra)
 
 
@@ -228,6 +247,40 @@ def allowed_path(path: str, host: Host, node: Optional[dict]) -> bool:
     return False
 
 
+#: §17.1603c — a file whose NAME says it holds a secret (the machine's own, minted there: a Proxmox API token)
+SECRET_FILE_RE = re.compile(r"(?:token|secret|passw(?:or)?d|credential|api[-_]?key|private[-_]?key)[^/]*$|\.key$", re.I)
+SECRET_MASK = "@@MASKED: kept on the machine@@"
+
+
+def mask_secret_file(path: str, body: str) -> str:
+    """§17.1603c — what the model is shown of a secret file: a JSON file's KEYS with every value masked (the code can
+    be written against its shape), anything else replaced whole. The value never enters a prompt."""
+    if not SECRET_FILE_RE.search(path.rsplit("/", 1)[-1]):
+        return body
+    import json
+    try:
+        doc = json.loads(body)
+    except Exception:
+        return f"{SECRET_MASK}\n"
+
+    def _mask(v):
+        if isinstance(v, dict):
+            return {k: _mask(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_mask(x) for x in v]
+        return SECRET_MASK
+    return json.dumps(_mask(doc), indent=2) + "\n"
+
+
+def writes_a_secret_file(files: dict[str, str]) -> list[dict]:
+    """§17.1603c — a version may not write a file named as a secret: the machine holds it (and the model saw only its
+    masked shape -- writing it back would replace the real value with the mask)."""
+    return [{"command": f"{p}: (secret file)", "why": (
+        f"`{p}` is named as a secret and the machine holds its value; the version would overwrite it (the model was "
+        f"shown it masked). Leave it out of the version and READ it at run time.")}
+        for p in files or {} if SECRET_FILE_RE.search(p.rsplit("/", 1)[-1])]
+
+
 async def read_workspace(spec, host: Host) -> dict[str, str]:
     """The service directory's code and config as it is NOW, read through the read-only channel."""
     from app.modules import rehearsal
@@ -238,16 +291,20 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
         d = d.rstrip("/")
         ok, listing = await st._probe(spec, rehearsal.listing_command(st.in_guest(host.guest, host.vm), d))
         if ok:
-            per_dir.append([p.strip() for p in (listing or "").split("\n")
-                            if p.strip().startswith(d + "/") and not p.strip().endswith("/")
-                            and not _SKIP_RE.search(p.strip())])
+            # §17.1600 — code before assets, shallow before deep: live, CT 111's UI dir listed 26 files (images,
+            # svgs, a Vite src/) and the 40-file budget ran out before the page the browser is served
+            # (/opt/control-panel-ui/index.html) was read at all
+            per_dir.append(sorted((p.strip() for p in (listing or "").split("\n")
+                                   if p.strip().startswith(d + "/") and not p.strip().endswith("/")
+                                   and not _SKIP_RE.search(p.strip())),
+                                  key=lambda p: (bool(_ASSET_RE.search(p)), p.count("/"), p)))
     # §17.1544 — round-robin across the dirs so the MAX_SEED_FILES budget is not spent entirely on the
     # first (backend) dir, leaving a sibling UI dir unread; each dir is represented.
     paths = [p for group in zip_longest(*per_dir) for p in group if p]
     for p in list(dict.fromkeys(paths))[:rehearsal.MAX_SEED_FILES]:
         body = await rehearsal._cat(spec, host.guest, host.vm, p)
         if body is not None and len(body) <= rehearsal.MAX_SEED_BYTES:
-            out[p] = body
+            out[p] = mask_secret_file(p, body)          # §17.1603c — a secret file reaches the model as its shape
     unit = await rehearsal._cat(spec, host.guest, host.vm, f"/etc/systemd/system/{host.unit}")
     if unit is not None:
         out[f"/etc/systemd/system/{host.unit}"] = unit
@@ -271,13 +328,209 @@ def _needs_a_secret(cmd: str) -> bool:
     return bool(_SECRET_REF_RE.search(cmd))
 
 
-def done_checks(node: Optional[dict], host: Host) -> list[str]:
-    """The step's own READ checks (backticked `pct exec N -- …` in its text), then the unit is active.
+#: §17.1582 — a GET route the service's own code registers: `app.get('/api/x', …)` / `router.get("/x", …)`
+_ROUTE_DEF_RE = re.compile(r"\b(?:app|router)\.get\(\s*['\"](/[^'\"\s]*)['\"]")
+#: words of a fix step's title that say nothing about WHICH feature
+_FEATURE_STOP = frozenset({
+    "fix", "the", "and", "for", "its", "endpoint", "endpoints", "backend", "backends", "handler", "handlers",
+    "remaining", "any", "not", "covered", "container", "edit", "return", "returns", "real", "data", "clear", "json",
+    "error", "errors", "preserve", "existing", "feature", "features", "every", "each", "service", "services", "route",
+    "routes", "api", "with", "from", "that", "this", "all", "other", "make", "add", "update", "repair", "wire", "page",
+})
+_UI_WORDS = frozenset({"ui", "frontend", "page", "html", "index", "render", "rendering", "section", "sections",
+                       "fetch", "loading", "css", "theme", "dom", "browser"})
+
+
+#: §17.1584 — name words every route file has: a step saying "engine-held secrets" is not about scaffold_engine_route.js
+_GENERIC_STEMS = frozenset({"server", "index", "main", "app", "api", "engine", "route", "routes", "view", "ui", "status",
+                            "request", "requests", "library", "backend", "dashboard", "settings", "health", "handler", "controller"})
+
+
+def derived_from_files(host: Host, files: Optional[dict[str, str]], port: str) -> list[str]:
+    """§17.1584 — the feature check of a DELIVERY: the GET routes defined in the files it rewrites.
+
+    Live (c2792d4b T4): the word-derived permit (§17.1582) named five routes whose handlers mention Radarr —
+    /api/overview among them, which hangs for a reason of its own — so this step's verify would have failed on
+    another step's bug. The files the model changed (media_library_route.js) say exactly which routes this
+    delivery touches; those are what its checks read. Empty when the changed files define no route (a UI
+    file): the caller keeps the word-derived checks."""
+    if not port:
+        return []
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    base = f"{tool} curl -s --fail-with-body --max-time 20 http://127.0.0.1:{port}"
+    routes: list[str] = []
+    for path, body in sorted((files or {}).items()):
+        if "node_modules" in path or "scaffold-kit" in path or not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        routes += _ROUTE_DEF_RE.findall(str(body or ""))
+    return [f"{base}{r}" for r in dict.fromkeys(routes)]
+
+
+def journal_check(host: Host) -> str:
+    """§17.1586 — the unit's own journal since the restart: what the service SAID while the checks called it."""
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    return f"{tool} sh -c 'journalctl -u {host.unit} --since -3min --no-pager -o cat | tail -n 40'"
+
+
+def with_journal(checks: list[str], host: Host) -> list[str]:
+    """§17.1586 — a developed delivery is judged by its unit's journal too, read AFTER the route checks have
+    called it and before `is-active`.
+
+    Live (c2792d4b T4): `/api/media-library` answered 200 and the step would have been recorded done, while the
+    panel's journal said "Failed to fetch Radarr library: HTTP 401" five seconds after the restart — the handler
+    swallows the upstream failure and answers an empty list. The route check cannot see that; the journal can,
+    and the judge reads it against the step's goal (`negative_evidence` knows a log line's error shapes)."""
+    j = journal_check(host)
+    out = [c for c in checks or [] if c != j]
+    tail = [c for c in out if c.endswith(f"systemctl is-active {host.unit}")]
+    body = [c for c in out if c not in tail]
+    return body + [j] + tail
+
+
+def service_port(host: Host, services: Optional[list]) -> str:
+    """§17.1582 — the measured loopback port of the service `host` develops on, or ''."""
+    for s in services or []:
+        if str(getattr(s, "unit", "") or "") == str(host.unit) and str(getattr(s, "guest", "") or "") == str(host.guest):
+            ports = [str(p) for p in (getattr(s, "ports", ()) or ()) if str(p).strip()]
+            if ports:
+                return ports[0]
+    return str(getattr(host, "port", "") or "")      # §17.1590 — the host remembers the port the picker saw
+
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _service_named_by(path: str, services: Optional[list]):
+    stem = path.rsplit("/", 1)[-1].lower()
+    hits = [s for s in services or [] if str(getattr(s, "name", "") or "").lower() and str(getattr(s, "name", "")).lower() in stem]
+    return hits[0] if len(hits) == 1 else None
+
+
+def stale_service_addresses(files: dict[str, str], services: Optional[list]) -> list[dict]:
+    """§17.1590 — a delivered file points a measured service at an address it is not at.
+
+    Live (c2792d4b T7): byparr_route.js and config/byparr.json carried `192.168.1.25:8192` while Byparr sits on
+    192.168.1.27 (measured: `pct list` 108 byparr, its guest's IPv4, `ss` 8192) — the delivery's own check answered
+    `connect ECONNREFUSED 192.168.1.25:8192`. Two shapes: `<ip>:<port>` where the port is the service's and the ip
+    is not its address; and an IPv4 in a file NAMED after the service (byparr.json) that is not its address."""
+    out: list[dict] = []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        for s in services or []:
+            addr, ports = str(getattr(s, "address", "") or ""), {str(p) for p in (getattr(s, "ports", ()) or ())}
+            if not addr:
+                continue
+            for m in re.finditer(r"\b((?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})\b", c):
+                if m.group(2) in ports and m.group(1) != addr:
+                    out.append({"command": f"{path}: {m.group(0)}", "why": (
+                        f"this points {s.name} at `{m.group(0)}`, and {s.name} is at {addr} (measured on guest "
+                        f"{getattr(s, 'guest', '?')}: its address, and `ss` lists :{m.group(2)} there). Nothing answers at "
+                        f"{m.group(1)}:{m.group(2)}; the engine's facts above carry the measured address — use it.")})
+                    break
+        named = _service_named_by(path, services)
+        if named and getattr(named, "address", ""):
+            others = sorted({ip for ip in _IPV4_RE.findall(c) if ip != named.address and not ip.startswith("127.")})
+            if others and not any(o["command"].startswith(path + ":") for o in out):
+                out.append({"command": f"{path}: {others[0]}", "why": (
+                    f"this file is {named.name}'s and carries `{others[0]}`, but {named.name} is at {named.address} "
+                    f"(measured on guest {getattr(named, 'guest', '?')}). Use the measured address.")})
+            # §17.1591 — and its port: byparr.json said 8192 while Byparr listens on 8191
+            nports = [str(p) for p in (getattr(named, "ports", ()) or ())]
+            pm = _PORT_KEY_RE.search(c)
+            if len(nports) == 1 and pm and pm.group(1) != nports[0] and not any(o["command"].startswith(path + ":") for o in out):
+                out.append({"command": f"{path}: port {pm.group(1)}", "why": (
+                    f"this file is {named.name}'s and says port {pm.group(1)}, but {named.name} listens on {nports[0]} "
+                    f"(measured). Use the measured port.")})
+    return out
+
+
+#: §17.1591 — a JSON/YAML-style `"port": 8192` in a service's own config
+_PORT_KEY_RE = re.compile(r"[\"']?port[\"']?\s*[:=]\s*[\"']?(\d{2,5})")
+
+
+def refresh_address_copies(files: dict[str, str], workspace: dict[str, str], services: Optional[list],
+                           host: Host, node: Optional[dict]) -> tuple[dict[str, str], list[str]]:
+    """§17.1590 — a workspace file NAMED after a measured service (config/byparr.json) that carries another
+    address for it is delivered with the measured one, unless the model delivers its own version. The engine
+    measured where the service is; the copy in the config is a fact of the machine it owns, like a credential copy."""
+    out = dict(files or {})
+    added: list[str] = []
+    for path, content in sorted((workspace or {}).items()):
+        if path in out or not allowed_path(path, host, node):
+            continue
+        s = _service_named_by(path, services)
+        addr = str(getattr(s, "address", "") or "") if s else ""
+        if not addr:
+            continue
+        c = str(content or "")
+        stale = sorted({ip for ip in _IPV4_RE.findall(c) if ip != addr and not ip.startswith("127.")})
+        for ip in stale:
+            c = c.replace(ip, addr)
+        nports = [str(p) for p in (getattr(s, "ports", ()) or ())]
+        pm = _PORT_KEY_RE.search(c)
+        if len(nports) == 1 and pm and pm.group(1) != nports[0]:                      # §17.1591 — the port too
+            c = c[:pm.start(1)] + nports[0] + c[pm.end(1):]
+        if c == str(content or ""):
+            continue
+        out[path] = c
+        added.append(path)
+    return out, added
+
+
+def derived_checks(node: Optional[dict], host: Host, workspace: Optional[dict[str, str]], port: str) -> list[str]:
+    """§17.1582 — the feature check a fix step's text never named, read off the SERVICE'S OWN ROUTES.
+
+    Live (c2792d4b T4 "Fix Radarr endpoint backend — edit the Radarr handler on container 111 … return
+    JSON data"): the step names no backticked check, so §17.1418 refused it with "its text must name the
+    check … e.g. `pct exec 111 -- curl … /api/<route>`" — and the engine had the service's code in hand
+    (`read_workspace`) and the panel's probe one step upstream. The routes whose handler FILE carries a
+    word of the step's title ("radarr" → media_library_route.js → `/api/media-library`; "Palworld, media,
+    network, FlareSolverr" → theirs) are the step's feature; a UI step ("fetch", "rendering", "sections")
+    has the served page. Each check is a plain `curl -s --fail-with-body` of the loopback port — a route
+    that hangs or errors fails it — and §17.1548 presents the held login to it when the service has one.
+    Nothing derived (no port, no words, no route file) leaves §17.1418's refusal standing."""
+    if not port or not workspace:
+        return []
+    title = str((node or {}).get("title") or "")
+    full = (title + " " + _step_text(node)).lower()
+    words = {w for w in re.findall(r"[a-z][a-z0-9]{2,}", title.lower())} - _FEATURE_STOP
+    try:
+        from app.modules.service_truth import names_in
+        words |= {n.lower() for n in names_in(node)} | {n.lower() for n in names_in({"title": full})}   # the body's services too
+    except Exception:
+        pass
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    base = f"{tool} curl -s --fail-with-body --max-time 20 http://127.0.0.1:{port}"
+    feature_words = words - _UI_WORDS
+    step_words = set(re.findall(r"[a-z][a-z0-9]{2,}", full)) - _FEATURE_STOP - _UI_WORDS
+    routes: list[str] = []
+    for path, body in sorted((workspace or {}).items()):
+        if "node_modules" in path or not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        found = _ROUTE_DEF_RE.findall(str(body or ""))
+        if not found:
+            continue
+        low, fname = str(body or "").lower(), path.rsplit("/", 1)[-1].lower()
+        # the title's words (and the services the step names) in the file — or, the other way round, the file's
+        # OWN name words in the step's text ("… Palworld, media, network, FlareSolverr" → network_view_route.js)
+        stem_words = set(re.findall(r"[a-z][a-z0-9]{2,}", fname.rsplit(".", 1)[0])) - _FEATURE_STOP - _GENERIC_STEMS
+        if any(w in fname or w in low for w in feature_words) or (stem_words and stem_words & step_words):
+            routes += found
+    out = [f"{base}{r}" for r in dict.fromkeys(routes)]
+    if not out and words & _UI_WORDS and any(p.endswith((".html", ".htm")) for p in workspace):
+        out = [f"{base}/"]                      # the served page is the UI step's feature; its behaviour is the verify step's
+    return out
+
+
+def done_checks(node: Optional[dict], host: Host, derived: Optional[list[str]] = None) -> list[str]:
+    """The step's own READ checks (backticked `pct exec N -- …` in its text), then the ones the engine
+    derived from the service's routes (§17.1582), then the unit is active.
 
     §17.1414 — only reads: the verify channel carries nothing else, and silently dropped ADD123's
     POST. A check that WRITES is the run's own acceptance step (`acceptance_checks`)."""
     checks = [c.strip() for c in _CHECK_RE.findall(_step_text(node))   # §17.1550 — whole step text
               if _is_read(c.strip()) and not _needs_a_secret(c.strip())]
+    checks += [str(c) for c in derived or []]
     tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
     checks.append(f"{tool} systemctl is-active {host.unit}")
     return list(dict.fromkeys(checks))
@@ -286,7 +539,7 @@ def done_checks(node: Optional[dict], host: Host) -> list[str]:
 NO_OWN_CHECK = "names no command the engine can run to see the feature work"
 
 
-def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
+def own_check_refusal(node: Optional[dict], host: Host, derived: Optional[list[str]] = None) -> list[dict]:
     """§17.1418 — a developed step needs a check of ITS feature. `done_checks` always adds the unit's
     `is-active`, which the delivery itself makes true; a step whose text names nothing else would be
     recorded done while its route answers a connection error. Live: ADD124 ("returns the engine's
@@ -300,7 +553,7 @@ def own_check_refusal(node: Optional[dict], host: Host) -> list[dict]:
     `is-active`-style check parked every one with nothing to run (live: control-panel, T9/T12/…)."""
     if str((node or {}).get("tool") or "").strip().lower() == "codegen":
         return []
-    if acceptance_checks(node) or len(done_checks(node, host)) > 1:
+    if acceptance_checks(node) or len(done_checks(node, host, derived)) > 1:   # §17.1582 — a derived check counts
         return []
     return [{"command": "(the step's done-condition)", "why": (
         f"this step {NO_OWN_CHECK}: its only check would be `systemctl is-active {host.unit}`, which the "
@@ -461,9 +714,13 @@ _KIT_DIR = os.path.join(os.path.dirname(__file__), "develop_kit")
 KIT_SUBDIR = "scaffold-kit"
 KIT_DOC = """THE ENGINE'S KIT (installed for you at {kit}/ on every delivery -- use it, do not write your own):
 - `const remote = require('{kit}/remote');` -- for ANYTHING on another machine. `host = {{address, user}}`.
-  `remote.readFile(host, path)` -> text (sudo cat). `remote.writeFile(host, path, text, {{owner: 'user:group'}})`
-  (sudo tee, the text travels on stdin). `remote.exists(host, path)`. `remote.unit(host, 'stop'|'start'|'restart'|'is-active', unit)`.
-  Never build an ssh command line yourself; never quote content into one.
+  In a server, ALWAYS the promises form, awaited: `await remote.promises.readFile(host, path)` -> text (sudo cat).
+  `await remote.promises.writeFile(host, path, text, {{owner: 'user:group'}})` (sudo tee, the text travels on stdin).
+  `await remote.promises.exists(host, path)`. `await remote.promises.unit(host, 'stop'|'start'|'restart'|'is-active', unit)`.
+  `await remote.promises.run(host, ['pct', 'list'])` -> stdout of a command run as that user (no sudo).
+  The plain forms (`remote.readFile(...)`) and child_process's `execFileSync`/`execSync`/`spawnSync` BLOCK the
+  whole service while they wait -- every other request stalls behind them -- and are refused. Run independent
+  remote reads together with `Promise.all`. Never build an ssh command line yourself; never quote content into one.
 - `const ue = require('{kit}/ue_settings');` -- Unreal-engine settings files (one `[/Script/...]` header and one
   `OptionSettings=(k=v,...)` line; a value can itself be `(A,B,C)`). `ue.parse(text)` -> `{{header, settings}}`
   or null when the file has no OptionSettings line; `ue.serialize(doc)` -> the file text. parse(serialize(doc)) equals doc.
@@ -511,8 +768,22 @@ _FILL_PROG = ("import json, os, sys\n"
 RUNNER_HELD = "@runner"          # §17.1426 — the value lives in the runner's secret store, injected at run time
 
 
+def machine_read_for(name: str, services: Optional[list], inventory: Optional[dict]) -> Optional[str]:
+    """§17.1587 — the read of credential `name` off the machine that holds it (Radarr's key from its own
+    config.xml on its guest), located through the measured services or the pause's inventory names; None when the
+    engine has no such read or cannot place the service."""
+    from app.modules import machine_values as mv
+    r = mv.readable_for(name)
+    if r is None:
+        return None
+    gid = next((str(getattr(s, "guest", "")) for s in services or []
+                if str(getattr(s, "name", "") or "").lower() == r.app and getattr(s, "guest", "")), None)
+    gid = gid or mv.guest_for(r.app, inventory)
+    return r.read(str(gid)) if gid else None
+
+
 def credentials_for(services: Optional[list], runner_secrets: Optional[list] = None,
-                    node: Optional[dict] = None) -> dict[str, str]:
+                    node: Optional[dict] = None, inventory: Optional[dict] = None) -> dict[str, str]:
     """`{NAME: read command}` for the API keys the engine can read ON THE MACHINE for the measured
     services (Radarr's key from its own config.xml on its guest, …) -- the machine-values registry
     (§17.1332), never a value the engine or the model holds."""
@@ -531,8 +802,104 @@ def credentials_for(services: Optional[list], runner_secrets: Optional[list] = N
     text = _text(node)
     for n in runner_secrets or []:
         if re.fullmatch(r"[A-Z][A-Z0-9_]{2,60}", str(n)) and re.search(rf"\b{re.escape(str(n))}\b", text):
-            out[str(n)] = RUNNER_HELD
+            # §17.1585 — a value the MACHINE holds wins over a copy the runner stores: live (c2792d4b T4), the step
+            # named RADARR_API_KEY, the runner's copy replaced Radarr's own key as the read, and the delivered
+            # panel answered "Failed to fetch Radarr library: HTTP 401" exactly as before — the stored copy was
+            # stale while `read_apis` had just read Radarr's API with the key off its config.xml.
+            # §17.1587 — and the machine read is found through the inventory too: the step's services are the
+            # ones it names, and a key it names may live on a guest it does not.
+            out.setdefault(str(n), machine_read_for(str(n), services, inventory) or RUNNER_HELD)
     return out
+
+
+def marks_in(files: Optional[dict[str, str]]) -> list[str]:
+    """§17.1588 — every `@@SCAFFOLD:NAME@@` the files carry."""
+    return sorted({n for c in (files or {}).values() for n in _MARK_RE.findall(str(c or ""))})
+
+
+def refresh_credential_copies(files: dict[str, str], marked_workspace: dict[str, str], marked_paths: list[str],
+                              host: Host, node: Optional[dict]) -> tuple[dict[str, str], list[str]]:
+    """§17.1587 — a file that holds a COPY of a credential the engine holds is delivered with the live value.
+
+    Live (c2792d4b T4): the panel's config/media-request.json and its unit file both carried a stale Radarr key;
+    the model, shown the mark in both (§17.1583), had no reason to touch them, delivered other files, and Radarr
+    kept answering 401. The engine knows the authoritative read (§17.1585) and which files hold copies (the ones
+    `mark_held_credentials` marked): it delivers those too, marks and all, so the delivery fills them. A file the
+    model itself delivers is the model's; a path the develop flow may not write is left alone."""
+    out = dict(files or {})
+    added: list[str] = []
+    for p in marked_paths or []:
+        if p in out or p not in (marked_workspace or {}) or not allowed_path(p, host, node):
+            continue
+        out[p] = marked_workspace[p]
+        added.append(p)
+    return out, sorted(added)
+
+
+#: §17.1583 — a credential a workspace file carries in the clear: `"sonarrApiKey": "<hex>"`, `apiKey = '<hex>'`,
+#: `SONARR_API_KEY=<hex>`. The key's letters name the credential (sonarrApiKey ≡ SONARR_API_KEY).
+_FILE_CREDENTIAL_RE = re.compile(
+    r"(?P<pre>(?P<q>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=q)\s*[:=]\s*(?P<vq>[\"']?))(?P<val>[A-Za-z0-9_-]{16,128}|[A-Z][A-Z0-9_]{2,60})(?=[\"'\s,;}\]]|$)")
+#: §17.1588 — a key name that names no credential by itself; the FILE's name then says which one (scaffold-engine.json)
+_GENERIC_KEY_RE = re.compile(r"^(?:api_?key|api_?token|access_?token|token|key|secret|password|passwd|pass)$", re.I)
+
+
+def _cred_norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str],
+                          held: Optional[list] = None) -> tuple[dict[str, str], list[str], dict[str, str]]:
+    """§17.1583 — a credential the SERVICE'S OWN FILES carry in the clear reaches the model as its mark, not
+    its value, and comes back as its value at delivery.
+
+    Live (c2792d4b T4): `read_workspace` handed the model the panel's config/media-request.json with Sonarr's
+    key in it; the model wrote the file back whole, key included, and the value sat in the frame the operator
+    reads and in the record. The engine HOLDS that credential (`creds`: a machine read or a runner secret), and
+    the delivery already fills `@@SCAFFOLD:NAME@@` from it — so the file the model sees carries the mark where
+    the key's own name says which credential it is (`sonarrApiKey` ≡ `SONARR_API_KEY`). Returns the marked
+    workspace and the names marked. A value whose key names no credential the engine holds is left as it is
+    (and §17.1391's gate refuses it in a proposed file).
+
+    §17.1585 — `held`: every runner secret's NAME, not only the step's `creds`. Live (c2792d4b T5): T4's delivery
+    had written `Environment=RADARR_API_KEY=<key>` into the unit file; T5 names Sonarr, so RADARR_API_KEY was not
+    in its creds, the unit reached the model with the key in the clear, and the model copied it back twice
+    (§17.1391 refused; §17.1583 stalled). A held name found in the workspace is marked and joins `creds` as
+    runner-held, so the delivery can fill it. Returns (workspace, marked names, creds)."""
+    creds = dict(creds or {})
+    names = set(creds) | {str(h) for h in held or [] if re.fullmatch(r"[A-Z][A-Z0-9_]{2,60}", str(h))}
+    if not names or not workspace:
+        return dict(workspace or {}), [], creds
+    by_norm = {_cred_norm(n): n for n in sorted(names)}
+    out: dict[str, str] = {}
+    marked: set[str] = set()
+
+    def _by_file(path: str) -> Optional[str]:
+        # §17.1588 — `"apiKey": "sk-…"` in scaffold-engine.json: the key says nothing, the file's words name ONE credential
+        stem = set(re.findall(r"[a-z][a-z0-9]{2,}", path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower())) - {"config", "settings", "local", "default"}
+        hits = sorted({n for n in names if stem & set(re.findall(r"[a-z][a-z0-9]{2,}", n.lower()))})
+        return hits[0] if len(hits) == 1 else None
+
+    def _repl_for(path: str):
+        def _repl(m: "re.Match[str]") -> str:
+            key, val = m.group("key"), m.group("val")
+            name = by_norm.get(_cred_norm(key)) or (_by_file(path) if _GENERIC_KEY_RE.match(key) else None)
+            if not name:
+                return m.group(0)
+            # §17.1588 — a value that IS the credential's own name (live: Radarr's config.xml and the panel's unit both
+            # carry `RADARR_API_KEY` as the key, since job c75d77fa T30 wrote it so) is a copy too: it is marked, and the
+            # delivery fills it from the authoritative read — whatever that read holds today
+            if len(val) < 16 and val != name:
+                return m.group(0)
+            marked.add(name)
+            return m.group("pre") + SECRET_MARK.format(name=name)
+        return _repl
+    for path, body in (workspace or {}).items():
+        out[path] = (_FILE_CREDENTIAL_RE.sub(_repl_for(path), str(body or ""))
+                     if path and not path.endswith((".js.map", ".lock")) else body)
+    for n in marked:
+        creds.setdefault(n, RUNNER_HELD)          # a held name the files carry: the delivery fills it from the runner
+    return out, sorted(marked), creds
 
 
 def credentials_doc(creds: dict[str, str], services: Optional[list]) -> str:
@@ -564,11 +931,16 @@ _ARR_API = {"radarr": ("v3", ("rootfolder", "qualityprofile")),
 #: §17.1421 — services whose API answers WITHOUT a key on this home lab, probed by status: which path the
 #: installed version serves (live: Pi-hole v6.4.3 answers `/api/stats/summary` 200 and the v5
 #: `/admin/api.php?summary` 400; a round of ADD125 wrote the v5 path).
-_STATUS_PROBES = {"pihole": (80, ("/api/stats/summary", "/admin/api.php?summary"))}
+_STATUS_PROBES = {"pihole": (80, ("/api/stats/summary", "/admin/api.php?summary")),
+                  # §17.1594 — the engine-deployed proxies: Docker inside CT 107/108, probed from the HOST at their measured
+                  # address (the read channel cannot exec into those guests). Byparr's /health launches a browser: 8.3 s live.
+                  "flaresolverr": (8191, ("/",)), "byparr": (8191, ("/health", "/"))}
+_HOST_PROBED = frozenset({"flaresolverr", "byparr"})
 
 
 def status_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
-    """`(service, path, command)` -- `curl -o /dev/null -w %{http_code}` inside the service's own guest."""
+    """`(service, path, command)` -- `curl -o /dev/null -w "%{http_code} %{time_total}"` inside the service's own guest,
+    or from the host for a service the read channel cannot exec into (§17.1594: the engine-deployed proxies)."""
     out: list[tuple[str, str, str]] = []
     for svc in services or []:
         name, gid = str(getattr(svc, "name", "") or "").lower(), str(getattr(svc, "guest", "") or "")
@@ -576,8 +948,12 @@ def status_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
         if key is None or not gid or getattr(svc, "vm", False):
             continue
         port, paths = _STATUS_PROBES[key]
+        addr = str(getattr(svc, "address", "") or "")
         for path in paths:
-            out.append((key, path, f'pct exec {gid} -- curl -s -m 10 -o /dev/null -w %{{http_code}} "http://127.0.0.1:{port}{path}"'))
+            if key in _HOST_PROBED and addr:
+                out.append((key, path, f'curl -s -m 20 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://{addr}:{port}{path}"'))
+            else:
+                out.append((key, path, f'pct exec {gid} -- curl -s -m 10 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://127.0.0.1:{port}{path}"'))
     return out
 
 
@@ -628,10 +1004,130 @@ async def read_status(spec, services: Optional[list]) -> list[dict]:
     out: list[dict] = []
     for name, path, cmd in status_reads(services):
         ok, body = await st._probe(spec, cmd)
-        code = str(body or "").strip()[-3:] if ok else ""
+        code, seconds = parse_status_answer(body) if ok else ("", None)
         addr = next((getattr(s, "address", "") for s in services or []
                      if str(getattr(s, "name", "")).lower().startswith(name)), "")
-        out.append({"service": name, "path": path, "code": code if code.isdigit() else "", "address": addr})
+        out.append({"service": name, "path": path, "code": code, "address": addr, "seconds": seconds})
+    return out
+
+
+def parse_status_answer(body: str) -> tuple[str, Optional[float]]:
+    """§17.1594 — `"200 8.302806"` → ("200", 8.3); the older bare `200` → ("200", None); noise → ("", None)."""
+    toks = str(body or "").strip().split()
+    if not toks:
+        return "", None
+    code = toks[-2] if len(toks) >= 2 and re.fullmatch(r"\d{3}", toks[-2]) and re.fullmatch(r"[\d.]+", toks[-1]) else toks[-1][-3:]
+    secs = None
+    if len(toks) >= 2 and re.fullmatch(r"[\d.]+", toks[-1]) and re.fullmatch(r"\d{3}", toks[-2]):
+        try:
+            secs = round(float(toks[-1]), 1)
+        except ValueError:
+            secs = None
+    return (code if code.isdigit() else ""), secs
+
+
+#: §17.1596 — a path literal in code: `'/v1/status'`, `"/health"`
+_PATH_LITERAL_RE = re.compile(r"""['"`](/(?:[A-Za-z0-9_.-]+/?)*)['"`]""")
+
+
+def paths_called(files: dict[str, str], service) -> list[str]:
+    """§17.1596 — the upstream paths the proposed code calls on ``service``: the path literals in files that name the
+    service (by name or measured address), minus the panel's own `/api/…` routes and the bare `/`.
+
+    Live (c2792d4b T7/T11): the delivered byparr_route.js called a Byparr path that answers 404 — `/api/byparr/status`
+    answered 503 `{"error":"Byparr service is not available","detail":"HTTP 404: …"}` — and §17.1422's gate knew only
+    the two paths the engine probes itself (`/health`, `/`). The code says which paths it calls; the machine says
+    which of them answer."""
+    name, addr = str(getattr(service, "name", "") or "").lower(), str(getattr(service, "address", "") or "")
+    out: list[str] = []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        fname = path.rsplit("/", 1)[-1].lower()
+        # §17.1596c — the file must be the SERVICE'S OWN handler (byparr_route.js): an aggregator that mentions every
+        # service (health_route.js, overview_route.js) carries Radarr's `/api/v3/system/status` and Pi-hole's
+        # `/api/stats/summary`, which are not paths it calls on Byparr — live, both were probed on the proxies, 404'd,
+        # and the develop loop stalled on refusals no version could satisfy
+        if not (name and name in fname):
+            continue
+        if not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        # the file's OWN routes (`app.get('/api/byparr/status', …)`) are the panel's, not the upstream's — live, the
+        # upstream path was `/api/status` on Byparr itself, which a bare `/api/` exclusion hid (§17.1596's first cut)
+        own = {m.group(1).rstrip("/") for m in _ANY_ROUTE_DEF_RE.finditer(c)}
+        for m in _PATH_LITERAL_RE.finditer(c):
+            p = m.group(1).rstrip("/") or "/"
+            if p == "/" or p in own or p.startswith(("/opt/", "/etc/", "/tmp/", "/var/", "/usr/", "/home/", "/root/")):
+                continue
+            if p not in out:
+                out.append(p)
+    return out[:8]
+
+
+#: §17.1596 — every route the file itself registers, any verb
+_ANY_ROUTE_DEF_RE = re.compile(r"\b(?:app|router)\.(?:get|post|put|patch|delete|use|all)\(\s*['\"](/[^'\"\s]*)['\"]")
+
+
+async def probe_called_paths(spec, files: dict[str, str], services: Optional[list], status: Optional[list[dict]]) -> list[dict]:
+    """§17.1596 — `status` plus one timed probe, from the host, of every path the proposed code calls on an
+    engine-deployed proxy that the engine has not probed yet. Fail-soft: an unreadable probe adds nothing."""
+    from app.modules import service_truth as st
+    out = list(status or [])
+    seen = {(str(s.get("service")), str(s.get("path"))) for s in out}
+    for svc in services or []:
+        name = str(getattr(svc, "name", "") or "").lower()
+        key = next((k for k in _STATUS_PROBES if name.startswith(k)), None)
+        addr = str(getattr(svc, "address", "") or "")
+        if key not in _HOST_PROBED or not addr:
+            continue
+        port = _STATUS_PROBES[key][0]
+        for p in paths_called(files, svc):
+            if (key, p) in seen:
+                continue
+            seen.add((key, p))
+            try:
+                ok, body = await st._probe(spec, f'curl -s -m 20 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://{addr}:{port}{p}"')
+            except Exception:
+                ok, body = False, ""
+            code, secs = parse_status_answer(body) if ok else ("", None)
+            if code:
+                out.append({"service": key, "path": p, "code": code, "address": addr, "seconds": secs})
+    return out
+
+
+#: §17.1594 — a timeout literal the code gives an upstream call: ms unless the shape says seconds
+_TIMEOUT_MS_RE = re.compile(r"(?:\btimeout\s*[:=]\s*|setTimeout\([^,()]*,\s*|AbortSignal\.timeout\(\s*|\.timeout\(\s*)(\d{3,7})\b")
+_TIMEOUT_S_RE = re.compile(r"--max-time\s+(\d{1,4})\b|\btimeout\s*[:=]\s*(\d{1,3})(?:\s*s\b|\s*\*\s*1000)")
+
+
+def timeouts_shorter_than_measured(files: dict[str, str], status: Optional[list[dict]]) -> list[dict]:
+    """§17.1594 — the code gives an upstream LESS time than that upstream was measured to take.
+
+    Live (c2792d4b T7/T11): Byparr's /health answers 200 in 8.3 s (its health check launches a browser); the
+    panel's byparr route gave it a shorter timeout and answered `{"error":"Byparr service is not available",
+    "detail":"Request timeout"}` on every call, so the panel showed Byparr down while it was up and slow. The
+    measured latency was the engine's to tell; the file's timeout is the engine's to judge."""
+    out: list[dict] = []
+    slow = [s for s in status or [] if s.get("seconds") and float(s["seconds"]) >= 1.0 and s.get("code", "").startswith("2")]
+    if not slow:
+        return []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        low, fname = c.lower(), path.rsplit("/", 1)[-1].lower()
+        for s in slow:
+            name = str(s.get("service") or "").lower()
+            if not name or not (name in fname or name in low or (s.get("address") and str(s["address"]) in c)):
+                continue
+            ms = ([int(m.group(1)) for m in _TIMEOUT_MS_RE.finditer(c)]
+                  + [int(m.group(1) or m.group(2)) * 1000 for m in _TIMEOUT_S_RE.finditer(c)])
+            need = float(s["seconds"]) * 1000 * 1.5
+            short = sorted(v for v in ms if v < need)
+            if short:
+                out.append({"command": f"{path}: timeout {short[0]} ms", "why": (
+                    f"this gives {name} {short[0]} ms, and {name}'s {s['path']} answered HTTP {s['code']} in {s['seconds']} s when the "
+                    f"engine read it just now{f' at {s[chr(97)+chr(100)+chr(100)+chr(114)+chr(101)+chr(115)+chr(115)]}' if s.get('address') else ''}: "
+                    f"the call times out every time and the route reports a service that is up as down. Give it at least "
+                    f"{int(need)} ms, or check a faster path and say which.")})
+                break
     return out
 
 
@@ -695,11 +1191,15 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
     `/api/stats/summary` → 200 and `/admin/api.php?summary` → 400 (Pi-hole v6.4.3), the model still wrote
     the v5 path -- its step text asked for an "API token", a v5 notion -- and the sandbox, which reaches no
     machine, passed the route because it answered at all."""
-    alive = [s for s in status or [] if s.get("code", "").startswith("2")]
+    # §17.1595 — a 3xx is the service ANSWERING (Byparr's `/` → 301 /docs in 3 ms, live): alive, not dead. Live
+    # (c2792d4b T7), the model moved the health call from the 8 s `/health` to `/`, this gate refused `/` as dead,
+    # and the develop loop stalled between a timeout it may not give and a path it may not call.
+    # §17.1596 — and a 405 is a path that EXISTS for another method (FlareSolverr's and Byparr's POST-only `/v1`)
+    alive = [s for s in status or [] if s.get("code", "").startswith(("2", "3")) or s.get("code") == "405"]
     out: list[dict] = []
     for s in status or []:
         code = s.get("code", "")
-        if not code or code.startswith("2"):
+        if not code or code.startswith(("2", "3")) or code == "405":
             continue
         base = s["path"].split("?", 1)[0]
         hit = next((p for p, c in (files or {}).items() if base in (c or "")), None)
@@ -710,8 +1210,314 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
         out.append({"command": f"{hit}: {base}", "why": (
             f"this code calls `{base}` on {s['service']}{where}, "
             f"and the engine asked that path just now: it answers HTTP {code}, so the feature cannot work. "
-            + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx, no key)' for b in better)} -- use that, and "
+            + (f"What does answer: {', '.join(f'`{b}` (HTTP 2xx/3xx, no key)' for b in better)} -- use that, and "
                f"its own response fields." if better else "Use a path the service actually serves."))})
+    return out
+
+
+#: §17.1598 — files that run inside the server process (not the page the browser runs)
+_SERVER_FILE_RE = re.compile(r"\.(?:js|cjs|mjs|ts)$")
+_BLOCKING_CALL_RE = re.compile(r"\b(execFileSync|execSync|spawnSync)\s*\(")
+_KIT_BINDING_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"][^'\"]*scaffold-kit/remote(?:\.js)?['\"]\s*\)")
+
+
+def touches_server_code(files: Optional[dict[str, str]], host: Optional[Host], kit: Optional[dict[str, str]] = None) -> bool:
+    """§17.1599b — the version changes code the server runs (not the page, a config, the unit, or the kit)."""
+    ui = tuple(str(d).rstrip("/") + "/" for d in (getattr(host, "extra_dirs", ()) or ()))
+    return any(_SERVER_FILE_RE.search(p) and p not in (kit or {}) and "/scaffold-kit/" not in p
+               and not (ui and p.startswith(ui)) for p in (files or {}))
+
+
+def _service_files(files: dict[str, str], workspace: Optional[dict[str, str]], host: Optional[Host],
+                   kit: Optional[dict[str, str]]) -> list[tuple[str, str, bool]]:
+    """``(path, content, carried)`` for every file the service will run with after this version: the version's
+    own files, then the workspace files it leaves as they are (``carried``). The kit is the engine's and is
+    judged by its own tests, not here; the UI directories are the browser's."""
+    ui = tuple(str(d).rstrip("/") + "/" for d in (getattr(host, "extra_dirs", ()) or ()))
+    out = [(p, str(c or ""), False) for p, c in (files or {}).items()]
+    # §17.1599b — a carried file is this version's business only when the version changes the server's code: live,
+    # T9 "Fix UI data rendering" returned the page alone, and eight rounds were refused for health_dashboard_route.js,
+    # a backend file no UI step will touch. The backend step answers for the backend.
+    if touches_server_code(files, host, kit):
+        out += [(p, str(c or ""), True) for p, c in (workspace or {}).items() if p not in (files or {})]
+    return [(p, c, carried) for p, c, carried in out
+            if p not in (kit or {}) and "/scaffold-kit/" not in p and not (ui and p.startswith(ui))]
+
+
+def blocks_the_event_loop(files: dict[str, str], workspace: Optional[dict[str, str]] = None,
+                          host: Optional[Host] = None, kit: Optional[dict[str, str]] = None) -> list[dict]:
+    """§17.1598 — a server file that waits on another process SYNCHRONOUSLY: child_process's `*Sync` calls, or
+    the kit's blocking forms. Node runs every request on one thread, so the whole service stops while it waits.
+
+    Live (c2792d4b, 2026-10-15): network_ui_route.js made three `execFileSync('ssh', …)` calls in a row, 15 s
+    timeout each, to an address with no ssh. Every page load froze the panel for 45 s, so every section -- the
+    healthy ones too -- sat on "Loading…", and T11's route probe saw `/api/network-ui` AND `/api/network-view`
+    (Pi-hole, up) both time out. A file the version does not touch is judged too: the service runs with it."""
+    out: list[dict] = []
+    for path, c, carried in _service_files(files, workspace, host, kit):
+        if not _SERVER_FILE_RE.search(path):
+            continue
+        hits = [m.group(1) for m in _BLOCKING_CALL_RE.finditer(c)]
+        for b in dict.fromkeys(m.group(1) for m in _KIT_BINDING_RE.finditer(c)):
+            hits += [f"{b}.{m.group(1)}" for m in re.finditer(rf"(?<![\w$.]){re.escape(b)}\.(readFile|writeFile|exists|unit)\s*\(", c)]
+        if not hits:
+            continue
+        names = ", ".join(f"`{h}`" for h in dict.fromkeys(hits))
+        out.append({"command": f"{path}: {names}", "why": (
+            f"{'`' + path + '` (already on the machine, unchanged by this version)' if carried else '`' + path + '`'} "
+            f"calls {names}, which BLOCKS the whole Node service until the other process returns: every other "
+            f"request -- every section of the page -- waits behind it, and a machine that does not answer holds "
+            f"them for the full timeout. Return this file changed: use `await remote.promises.*` from the kit (or "
+            f"`util.promisify(execFile)`), make the handler `async`, and run independent reads together with "
+            f"`Promise.all`.")})
+    return out
+
+
+#: §17.1598 — an address in a server file, and the ports the file reaches it on
+_ADDR_FILE_RE = re.compile(r"\.(?:js|cjs|mjs|ts|json|py|conf|service|env|ya?ml)$")
+
+
+def _valid_ipv4(ip: str) -> bool:
+    return all(p.isdigit() and int(p) <= 255 for p in ip.split("."))
+
+
+def ports_for_address(content: str, ip: str) -> list[str]:
+    """The ports ``content`` reaches ``ip`` on: an explicit `ip:port`, a `port: N` within a few lines of it, 22 when
+    it is an ssh target (an `ssh` call or a kit host object), 80/443 for a bare `http(s)://ip`. Empty when the file
+    does not say -- and then nothing is judged."""
+    e = re.escape(ip)
+    ports = [m.group(1) for m in re.finditer(rf"(?<![\d.]){e}:(\d{{2,5}})\b", content)]
+    for m in re.finditer(rf"(?<![\d.]){e}(?![\d.])", content):
+        near = content[max(0, m.start() - 300):m.end() + 300]
+        ports += re.findall(r"\bport['\"]?\s*[:=]\s*['\"]?(\d{2,5})\b", near, re.I)
+        if re.search(r"\bssh\b|\baddress\s*:\s*['\"][^'\"]+['\"]\s*,\s*user\s*:", near):
+            ports.append("22")
+        if re.search(rf"https://{e}(?![\d.:])", content):
+            ports.append("443")
+        elif re.search(rf"http://{e}(?![\d.:])", content):
+            ports.append("80")
+    return list(dict.fromkeys(ports))[:4]
+
+
+def host_address(spec) -> str:
+    """§17.1598 — the Proxmox host's own address: the machine the runner answers on."""
+    m = re.search(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])", str(getattr(spec, "endpoint", "") or ""))
+    return m.group(1) if m else ""
+
+
+def machines_doc(spec) -> str:
+    """§17.1598 — the drafter is told where the Proxmox host is. Live, it was never told, and a route that lists the
+    host's guests was written against `192.168.1.2` -- a device on the LAN with no ssh -- not the host."""
+    addr = host_address(spec)
+    return (f"THE PROXMOX HOST: {addr} -- the machine where `pct` and `qm` run (and where the engine's runner is). "
+            f"Code that reads the host's guests or the host's own state reaches it at {addr}.") if addr else ""
+
+
+async def addresses_that_do_not_answer(spec, files: dict[str, str], workspace: Optional[dict[str, str]],
+                                       host: Optional[Host], held: Optional[list[str]] = None,
+                                       kit: Optional[dict[str, str]] = None,
+                                       cache: Optional[dict] = None, probe=None) -> list[dict]:
+    """§17.1598 — an address a server file reaches that NOTHING the engine measured names, and that does not accept
+    a connection on any port the file reaches it on, asked just now from the Proxmox host.
+
+    Live (c2792d4b): network_ui_route.js sent `pct list`/`qm list` over ssh to `192.168.1.2`. That address is a device
+    on the LAN (REACHABLE in the host's neighbour table) with port 22 closed; the host is 192.168.1.156. §17.1312's
+    unsourced-address gate never ran: this job has no ledger of facts, and it stays silent without one. Here the
+    machine is the source: a held address (a measured service, the host, the engine) is never probed, and an
+    address is refused only on the evidence of a refused connection -- a probe that could not run says nothing."""
+    from app.modules import service_truth as st
+    held_set = {str(a) for a in held or [] if a}
+    cache = cache if cache is not None else {}
+
+    async def _answers(ip: str, port: str) -> Optional[bool]:
+        if (ip, port) in cache:
+            return cache[(ip, port)]
+        try:
+            if probe is not None:
+                res = await probe(ip, port)
+            else:
+                ok, body = await st._probe(spec, f"nc -z -w2 {ip} {port} && echo OPEN || echo SHUT")
+                res = ("OPEN" in body) if ok and ("OPEN" in body or "SHUT" in body) else None
+        except Exception:
+            res = None
+        cache[(ip, port)] = res
+        return res
+
+    out: list[dict] = []
+    for path, c, carried in _service_files(files, workspace, host, kit):
+        if not _ADDR_FILE_RE.search(path):
+            continue
+        for ip in dict.fromkeys(re.findall(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])", c)):
+            last = ip.rsplit(".", 1)[1]
+            if (not _valid_ipv4(ip) or ip in held_set or ip.startswith("127.") or last in ("0", "1", "255")
+                    or ip in ("0.0.0.0",) or not ip.startswith(("10.", "172.", "192.168."))):
+                continue
+            ports = ports_for_address(c, ip)
+            if not ports:
+                continue
+            answers = [await _answers(ip, p) for p in ports]
+            if any(a is None for a in answers) or any(answers):
+                continue                       # unknown, or it answers: no judgment
+            line = next((ln.strip() for ln in c.splitlines() if ip in ln), "")[:120]
+            hint = (f" The Proxmox host is {host_address(spec)}." if host_address(spec) else "")
+            out.append({"command": f"{path}: {line}", "why": (
+                f"{'`' + path + '` (already on the machine, unchanged by this version)' if carried else '`' + path + '`'} "
+                f"reaches `{ip}` on port {', '.join(ports)}, and nothing the engine measured names that address: the "
+                f"engine asked it just now from the Proxmox host and it refused the connection on "
+                f"{'that port' if len(ports) == 1 else 'every one of those ports'}. The code would wait on a machine "
+                f"that is not the one it means.{hint} Use the address of the machine the code is about, from the "
+                f"facts, and return this file changed.")})
+    return out
+
+
+#: §17.1599 — a page function that fetches one of the service's own routes
+_PAGE_FETCH_RE = re.compile(r"""fetch\(\s*[`'"](?:\$\{[^}]+\})?(/api/[A-Za-z0-9_/-]+)[`'"]\s*\)""")
+_RES_JSON_LIT_RE = re.compile(r"\bres(?:\.status\(\s*\d+\s*\))?\.json\(\s*\{")
+
+
+def _balanced_body(text: str, open_at: int) -> str:
+    """The text inside the brace that opens at ``open_at`` (strings skipped)."""
+    depth, i, q = 0, open_at, ""
+    while i < len(text):
+        ch = text[i]
+        if q:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "'\"`":
+            q = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i]
+        i += 1
+    return ""
+
+
+def _top_level_keys(body: str) -> set[str]:
+    """The top-level keys of an object literal's body: `a: …`, `'a': …`, and shorthand `a,`."""
+    keys, depth, q, tok, i = set(), 0, "", "", 0
+    parts, start = [], 0
+    while i < len(body):
+        ch = body[i]
+        if q:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "'\"`":
+            q = ch
+        elif ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+        i += 1
+    parts.append(body[start:])
+    for p in parts:
+        p = p.strip()
+        if not p or p.startswith("..."):
+            if p.startswith("..."):
+                return set()           # a spread: the shape is not all here, judge nothing
+            continue
+        m = re.match(r"""^['"]?([A-Za-z_$][\w$-]*)['"]?\s*(?::|$)""", p)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def route_shapes(workspace: dict[str, str]) -> dict[str, set[str]]:
+    """`/api/x` -> the top-level keys every SUCCESS answer of its handler has, when each `res.json({...})` in the
+    handler is a literal with no spread. A route that answers anything else (a variable, an upstream body
+    passed through) is left out: nothing is judged about it."""
+    out: dict[str, set[str]] = {}
+    for path, c in (workspace or {}).items():
+        if not _SERVER_FILE_RE.search(path) or "/scaffold-kit/" in path:
+            continue
+        defs = list(re.finditer(r"\b(?:app|router)\.get\(\s*['\"](/api/[^'\"\s]+)['\"]", c))
+        for n, m in enumerate(defs):
+            end = defs[n + 1].start() if n + 1 < len(defs) else len(c)
+            handler = c[m.end():end]
+            shapes, opaque = [], False
+            for j in re.finditer(r"\bres(?:\.status\(\s*(\d+)\s*\))?\.json\(", handler):
+                code = j.group(1)
+                if code and not code.startswith("2"):
+                    continue                     # an error answer: the page's catch path, not its fields
+                rest = handler[j.end():].lstrip()
+                if not rest.startswith("{"):
+                    opaque = True
+                    break
+                k = _top_level_keys(_balanced_body(handler, handler.index("{", j.end())))
+                if not k:
+                    opaque = True
+                    break
+                shapes.append(k)
+            if shapes and not opaque:
+                out[m.group(1)] = set.intersection(*shapes) | set.union(*shapes)
+    return out
+
+
+def page_reads(workspace: dict[str, str]) -> dict[str, tuple[str, list[str]]]:
+    """`/api/x` -> (page file, the top-level fields the fetching function reads off its JSON). Only a function
+    that fetches ONE route and names its parsed body (`const data = await res.json()`) is read."""
+    out: dict[str, tuple[str, list[str]]] = {}
+    for path, c in (workspace or {}).items():
+        if not path.endswith((".html", ".htm")):
+            continue
+        # each function runs to the next function declaration: brace-matching is not safe on a page (a regex literal
+        # such as `/'/g` in an escape helper reads as an open string and swallows the rest of the file)
+        starts = [m.start() for m in re.finditer(r"(?:async\s+)?function\s+\w+\s*\(", c)]
+        for n, st in enumerate(starts):
+            body = c[st:starts[n + 1] if n + 1 < len(starts) else len(c)]
+            routes = set(_PAGE_FETCH_RE.findall(body))
+            if len(routes) != 1:
+                continue
+            var = re.search(r"\b(?:const|let|var)\s+(\w+)\s*=\s*await\s+\w+\.json\(\)", body)
+            if not var:
+                continue
+            v = var.group(1)
+            fields = list(dict.fromkeys(re.findall(rf"(?<![\w$.]){re.escape(v)}\.([A-Za-z_$][\w$]*)", body)))
+            fields = [f for f in fields if f not in ("error", "length", "message")]
+            if fields:
+                out[routes.pop()] = (path, fields)
+    return out
+
+
+def page_reads_what_no_route_returns(files: dict[str, str], workspace: Optional[dict[str, str]] = None) -> list[dict]:
+    """§17.1599 — a page section that reads fields its route's answer never has. The section then renders empty
+    ("No stats available", blank boxes) while the route is up -- as broken to the operator as "Loading…".
+
+    Live (c2792d4b, after §17.1598 made every route answer): the Network View function reads `data.dns_queries_today`,
+    `data.ads_blocked_today`, … (Pi-hole v5's flat summary); `/api/network-view` answers
+    `{status, service, host, port, response}` with Pi-hole v6's numbers nested under `response`. The page and the
+    route were developed in different steps (T9 at 14:34, T7 at 16:19) and nothing compared them. Judged on the
+    files the service will run with: the version's over the workspace's."""
+    if not any(p.endswith((".html", ".htm")) or (_SERVER_FILE_RE.search(p) and "/scaffold-kit/" not in p)
+               for p in (files or {})):
+        return []                     # §17.1599b — neither side changes here: not this version's business
+    merged = {**(workspace or {}), **(files or {})}
+    shapes = route_shapes(merged)
+    out: list[dict] = []
+    for route, (page, fields) in page_reads(merged).items():
+        keys = shapes.get(route)
+        if not keys:
+            continue
+        missing = [f for f in fields if f not in keys]
+        if not missing or len(missing) < max(1, len(fields) // 2):
+            continue                              # most of what it reads is there: an optional field, not a mismatch
+        out.append({"command": f"{page}: {route} -> {', '.join(missing[:6])}", "why": (
+            f"the page's section for `{route}` reads {', '.join(f'`{f}`' for f in missing[:6])} off the answer, and "
+            f"that route's handler answers with {', '.join(f'`{k}`' for k in sorted(keys))} -- so the section renders "
+            f"empty while the route is up. Make them agree: read the fields where the route puts them (nested under "
+            f"the key that carries them), or have the route answer the fields the page reads -- and return the file "
+            f"you change.")})
     return out
 
 
@@ -767,6 +1573,55 @@ def _resolve_served_dir(expr: str, base: str) -> Optional[str]:
         p = m.group(1)
         return p if p.startswith("/") else posixpath.normpath(posixpath.join(base, p))
     return None
+
+
+def served_dirs(workspace: dict[str, str]) -> list[str]:
+    """§17.1592 — the directories the backend SERVES (Express static, StaticFiles, nginx/Caddy root), whether or
+    not the engine has read them yet. Live (c2792d4b T8 "Fix UI fetch error handling"): the panel serves
+    `/opt/control-panel-ui` (a sibling of its WorkingDirectory); the brief this job ran with named no sibling dir,
+    so the workspace held 27 files and no HTML — the page the step is about was never read, never writable, and
+    no page check could be derived."""
+    import posixpath
+    dirs: list[str] = []
+    for path, content in (workspace or {}).items():
+        if not path.endswith((".js", ".ts", ".mjs", ".cjs", ".py", ".conf")):
+            continue
+        base = posixpath.dirname(path)
+        for key in ("express.static(", "serveStatic("):
+            i = (content or "").find(key)
+            while i >= 0:
+                arg, j = _balanced_arg(content, i + len(key))
+                d = _resolve_served_dir(arg.strip(), base)
+                if d:
+                    dirs.append(d.rstrip("/"))
+                i = content.find(key, j)
+        for m in re.finditer(r"(?:StaticFiles\(\s*directory\s*=|send_from_directory\(\s*)['\"]([^'\"]+)['\"]", content or ""):
+            d = m.group(1)
+            dirs.append((d if d.startswith("/") else posixpath.normpath(posixpath.join(base, d))).rstrip("/"))
+        for m in re.finditer(r"\broot\s+([^\s;*]+)\s*;", content or ""):
+            dirs.append(m.group(1).rstrip("/"))
+    return [d for d in dict.fromkeys(dirs) if d.startswith("/") and d not in ("/", "/tmp")]
+
+
+def widen_to_served(host: Host, workspace: dict[str, str]) -> tuple[Host, list[str]]:
+    """§17.1592 — the served directories join the host's extra_dirs (readable, writable) when they are not already
+    under the directories the workspace was read with. Returns the host and the dirs added."""
+    import dataclasses
+    have = [host.workdir.rstrip("/"), *(d.rstrip("/") for d in host.extra_dirs)]
+    add = [d for d in served_dirs(workspace) if not any(d == h or d.startswith(h + "/") for h in have)]
+    if not add:
+        return host, []
+    return dataclasses.replace(host, extra_dirs=(*host.extra_dirs, *add)), add
+
+
+_PROXY_NAMES = ("flaresolverr", "byparr")
+
+
+def proxies_in_workspace(workspace: dict[str, str]) -> list[str]:
+    """§17.1592 — the engine-deployed proxies the service's OWN files name (byparr.json, byparr_route.js), whether or
+    not the step's text does: live, T7's text said FlareSolverr and not Byparr, so byparr.json kept its dead address."""
+    stems = [p.rsplit("/", 1)[-1].lower() for p in (workspace or {})]
+    return [n for n in _PROXY_NAMES if any(n in s for s in stems)]
 
 
 def served_entries(workspace: dict[str, str]) -> list[str]:
@@ -874,7 +1729,10 @@ async def read_apis(spec, services: Optional[list], status: Optional[list[dict]]
     for s in (status if status is not None else await read_status(spec, services)):   # §17.1421
         where = f" ({s['address']})" if s.get("address") else ""
         lines.append(f"- {s['service']}{where} GET {s['path']} without a key: "
-                     + (f"HTTP {s['code']}" if s.get("code") else "(could not be read just now)"))
+                     + ((f"HTTP {s['code']}" + (f" in {s['seconds']} s" if s.get("seconds") is not None else "")
+                         + (" (a redirect: the service is UP — follow it, or count 2xx/3xx as up; never report a 3xx as down)"
+                            if str(s['code']).startswith("3") else "")) if s.get("code")                      # §17.1597
+                        else "(could not be read just now)"))   # §17.1594 — the latency too, so a timeout is sized to it
     if not lines:
         return ""
     return ("THE APIS YOUR CODE CALLS, AS THEY ARE NOW (read off the machine just now). Where your code needs one of "
@@ -1005,6 +1863,12 @@ def score(frame: dict, report: Optional[dict]) -> int:
 
 def evidence_of(frame: dict) -> str:
     return "\n".join(f"- {' '.join(str(r.get('why') or '').split())[:1500]}" for r in frame.get("refused") or [])
+
+
+def stalled(previous: str, now: str) -> bool:
+    """§17.1583 — a round whose refusals are exactly the previous round's brings the model nothing new."""
+    p, n = " ".join(str(previous or "").split()), " ".join(str(now or "").split())
+    return bool(n) and p == n
 
 
 def nothing_refusal(evidence: str) -> list[dict]:

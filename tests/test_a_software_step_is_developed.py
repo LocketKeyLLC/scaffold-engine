@@ -214,7 +214,8 @@ def test_the_pause_develops_instead_of_drafting_and_the_chain_stands_aside():
     assert "preconditions=await _pre_for(rb)" in src and "develop.render_delivery(" in src
     for guard in ("if fix and not _developed:", "_rehearsal_only(frame) and not _developed:",
                   'if not frame.get("commands") and not _developed:', 'or _developed) else supervised_runs.verify_not_runnable',
-                  '_ro = "" if _developed else', "_missing = [] if _developed else"):
+                  '_ro = "" if (_developed or frame.get("expects")) else',           # §17.1577 — a capability's frame is final too
+                  '_missing = [] if (_developed or frame.get("expects")) else'):
         assert guard in src, guard
 
 
@@ -247,7 +248,7 @@ def test_the_prompt_documents_the_kit_at_its_real_path():
 def test_the_kit_is_delivered_with_every_version_and_the_model_cannot_overwrite_it():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "files = {p: c for p, c in files.items() if p not in kit}" in src
-    assert "develop.render_delivery(run_node, host, {**files, **kit}, checks," in src
+    assert "develop.render_delivery(run_node, host, {**files, **kit}, _checks," in src     # §17.1584 — the delivery's own checks
     rb = dv.render_delivery(ADD122, HOST, {**FILES, **dv.kit_for(HOST, WS)}, ["true"])
     staged = {f["path"] for f in sr.file_writes(rb)}
     assert _staged("/opt/control-panel-backend/scaffold-kit/remote.js") in staged

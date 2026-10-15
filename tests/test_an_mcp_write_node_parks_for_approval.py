@@ -113,3 +113,39 @@ async def test_execute_mcp_node_still_runs_a_read_node(monkeypatch):
                                        "args": {"command": "curl -s http://x/Items"}})}
     res = await mcp_node.execute_mcp_node(db, node=node, upstream_outputs={}, brief={}, job_id="j")
     assert res["status"] == "done"
+
+
+# ── §17.1573b — a step defined by "the table / the unit" inherits its dependencies' text (two levels) ─────────
+@pytest.mark.asyncio
+async def test_an_anaphoric_step_inherits_its_dependency_and_that_dependencys_dependency():
+    rows = {
+        "T2": {"node_key": "T2", "title": "Write nftables rule file", "description": "Dedicated bridge-family table 'block_ra'. "
+               "prerouting chain drops RA frames forwarded to guests on vmbr0; input chain drops RA frames delivered to the host.",
+               "prompt_template": "", "depends_on": ["T1"]},
+        "T3": {"node_key": "T3", "title": "Write systemd unit file", "description": "Small oneshot unit that loads the dedicated table at boot.",
+               "prompt_template": "", "depends_on": ["T2"]},
+    }
+
+    async def _execute(stmt, params):
+        q = str(stmt)
+        res = MagicMock()
+        if "SELECT depends_on" in q:
+            res.scalar = MagicMock(return_value=rows[params["k"]]["depends_on"])
+            return res
+        keys = params.get("keys") or []
+        res.mappings = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[rows[k] for k in keys if k in rows])))
+        return res
+
+    db = MagicMock(); db.execute = AsyncMock(side_effect=_execute)
+    # a Shell step with no command of its own: nothing but "the table" says what it is about
+    t4 = {"node_key": "T4", "title": "Enable and start unit", "description": "Loads the table now and ensures it loads at boot.",
+          "prompt_template": "", "depends_on": ["T3"], "tool": "Shell"}
+    out = await sr.inherit_referenced_step_text(db, "job", t4)
+    assert "[as in T3: Write systemd unit file" in out["description"]            # its dependency
+    assert "[as in T2: Write nftables rule file" in out["description"]           # and the one that defines "the table"
+    assert out["description"].startswith("Loads the table now")                 # own text first
+    # a step that names its object inherits nothing
+    named = dict(t4, description="Enable scaffold-rafilter.service now.")
+    db2 = MagicMock(); db2.execute = AsyncMock(side_effect=_execute)
+    assert (await sr.inherit_referenced_step_text(db2, "job", named))["description"] == "Enable scaffold-rafilter.service now."
+    db2.execute.assert_not_called()

@@ -1561,7 +1561,7 @@ def edits_a_config_the_service_rewrites(commands: list[str], files: Optional[lis
 #: the apps a step's own words name, so a service that holds no port is measured too
 _NAME_RE = re.compile(r"\b(radarr|sonarr|prowlarr|lidarr|readarr|bazarr|jellyfin|plex|emby|qbittorrent(?:-nox)?|"
                       r"transmission(?:-daemon)?|deluged?|sabnzbd|caddy|nginx|pihole|pihole-FTL|unbound|"
-                      r"palworld|control-panel|jackett|overseerr|tautulli)\b", re.I)
+                      r"palworld|control-panel|jackett|overseerr|tautulli|flaresolverr|byparr)\b", re.I)   # §17.1590 — the proxies too
 
 
 #: §17.1421 — spellings people use for a service, for MEASURING it. Kept out of `_NAME_RE` on purpose:
@@ -1577,7 +1577,9 @@ def names_in(node: Optional[dict]) -> list[str]:
     §17.1421 — "Pi-hole" is how people (and ADD125) spell it; the service listens as `pihole-FTL`. The
     hyphenated spelling matched nothing, so the step's Pi-hole was never measured: no guest, no address,
     and the model wrote `192.168.1.130` (the guest ID) and then a `<PIHOLE_IP>`."""
-    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    # §17.1590 — the step's whole text: the planner wrote c2792d4b T7's "(… FlareSolverr)" into prompt_template, so
+    # neither proxy was measured and the handlers kept a dead address
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     hits = [(m.start(), m.group(1).lower()) for m in _NAME_RE.finditer(text)]
     hits += [(m.start(), _ALIASES[m.group(1).lower()]) for m in _ALIAS_RE.finditer(text)]
     return list(dict.fromkeys(n for _, n in sorted(hits)))

@@ -54,12 +54,32 @@ async def delegated_decisions(db: AsyncSession, job_id: str) -> list[str]:
     return [k for k, v in decisions.items() if isinstance(v, dict) and v.get("by") == "engine"]
 
 
+#: §17.1581 — words that ask the operator something
+_ASKS_RE = re.compile(r"\?|\b(?:decide|decision|choose|choice|which|whether|should\s+(?:we|i|the)|do\s+you|would\s+you|"
+                      r"operator|pick\s+(?:one|a|the)|option|prefer|confirm|approve|go\s+ahead)\b", re.I)
+
+
+def asks_the_operator(node: dict) -> bool:
+    """§17.1581 — does this "decision" node ask the operator anything?
+
+    The planner marks a node `decision` when the operator must choose; live (c2792d4b T3 "Identify
+    loading failure causes — correlate each endpoint's failure with backend code … produce a per-endpoint
+    cause list") it marked WORK so. The pause then asked "How should I proceed?", the answer closed the
+    node `done` with the decision text as its whole output, and the fix steps drafted with no cause list.
+    A node whose words carry no question and no choice is a task: it runs."""
+    text_value = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    return bool(_ASKS_RE.search(text_value))
+
+
 async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
     """The first dep-satisfied pending decision node the operator has not
     delegated — the same NOT EXISTS shape as ``_claim_ready_nodes`` so the
-    pause fires exactly where a claim would have."""
+    pause fires exactly where a claim would have.
+
+    §17.1581 — a `decision` node that asks the operator nothing is demoted to a
+    `task` here (and logged), so the executor claims and RUNS it."""
     delegated = await delegated_decisions(db, job_id)
-    row = (await db.execute(
+    rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.execution_order
             FROM dag_nodes n
@@ -75,11 +95,21 @@ async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
                   )
               )
             ORDER BY n.execution_order ASC
-            LIMIT 1
         """),
         {"jid": job_id, "delegated": delegated},
-    )).mappings().first()
-    return dict(row) if row else None
+    )).mappings().all()
+    for row in rows:
+        node = dict(row)
+        if asks_the_operator(node):
+            return node
+        await db.execute(
+            text("UPDATE dag_nodes SET node_type = 'task', updated_at = NOW() "
+                 "WHERE job_id = :jid AND node_key = :nk AND node_type = 'decision' AND status = 'pending'"),
+            {"jid": job_id, "nk": node["node_key"]})
+        await db.commit()
+        logger.warning("decision_node_is_work job=%s node=%s title=%r — asks the operator nothing; now a task (§17.1581)",
+                       job_id, node["node_key"], str(node.get("title") or "")[:60])
+    return None
 
 
 # ── framing the question ────────────────────────────────────────────────
@@ -192,7 +222,7 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
         "node_key": node["node_key"], "title": node.get("title") or "",
         # §17.1396 — the done-condition travels with the question, so the judge
         # that reads the run's checks sees what the operator decided
-        "description": node.get("description") or "",
+        "description": node.get("description") or node.get("prompt_template") or "",   # §17.1593 — the step's text (§17.1550's rule)
         # §17.1407 — and what it stands on, so the answer can re-check it with no extra read
         "depends_on": list(node.get("depends_on") or []),
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,

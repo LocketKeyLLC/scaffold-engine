@@ -181,13 +181,13 @@ async def execute_mcp_node(
     # approval instead (supervised_runs.is_mcp_write → pending_hands_on → _pause_for_decision), and the
     # approved path mints the approval and runs it. Reaching here means that pause was bypassed — fail
     # clearly rather than call the tool unapproved.
-    from app.modules.assist_supervised import WRITE_TOOL
-    if tool_name == WRITE_TOOL:
+    from app.modules.assist_supervised import WRITE_TOOL, WRITE_FILE_TOOL
+    if tool_name in (WRITE_TOOL, WRITE_FILE_TOOL):      # §17.1573 — the file write is a write too
         return await _fail(
             db, node_id, node_key, title,
-            f"a machine-write MCP node (tool {WRITE_TOOL!r}) runs through the operator-approved "
+            f"a machine-write MCP node (tool {tool_name!r}) runs through the operator-approved "
             "supervised pause, not as a deterministic MCP call; it reached execution without that "
-            "pause (§17.1551)",
+            "pause (§17.1551/§17.1573)",
         )
 
     try:
@@ -208,6 +208,22 @@ async def execute_mcp_node(
     why = _lr.not_evidence(output, getattr(result, "is_error", False) is True)
     if not why and tool_name == "run_readonly" and only_shell_errors(output):
         why = "the machine answered only with shell errors, not a result"
+    if why and tool_name == "run_readonly" and why.startswith("the runner is not allowed to read this"):
+        # §17.1574b — the READ needs root (the runner is unprivileged on the read channel: live, T8 of
+        # 9e1c2c68 `pve-firewall status; pve-firewall compile` → "ipcc_send_rec failed"). That is not a
+        # failed step — it is a read the OPERATOR may approve on the root channel. Mark the node so the
+        # frontier holds it (`mcp_needs_the_pause` → `needs_root`), put it back to pending, and report
+        # `needs_approval` like any hands-on step; the drained loop frames it with its own command.
+        cfg2 = dict(cfg); cfg2["needs_root"] = True
+        await db.execute(
+            text("UPDATE dag_nodes SET tool_config = CAST(:cfg AS jsonb), status = 'pending', started_at = NULL, "
+                 "last_verification_reason = :r, updated_at = NOW() WHERE id = :nid AND status = 'running'"),
+            {"cfg": json.dumps(cfg2), "nid": str(node_id),
+             "r": f"the read-only channel refused this read for privilege (§17.1574b); it now asks for approval to run as root: {output.strip()[:200]}"})
+        await db.commit()
+        logger.info("mcp_read_needs_root node=%s cmd=%r", node_key, str((rendered or {}).get("command") or "")[:90])
+        return {"status": "needs_approval", "node_key": node_key, "title": title, "tool": "MCP",
+                "reason": "the read needs root: handed back for approval (§17.1574b)"}
     if why:
         return await _fail(db, node_id, node_key, title,
                            f"{why} (§17.1556): {output.strip()[:400]}")

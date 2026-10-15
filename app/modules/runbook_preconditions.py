@@ -207,11 +207,25 @@ async def read_inventory(spec) -> Optional[dict]:
     if spec is None:
         return None
     pct_out, qm_out = await _read(spec, "pct list"), await _read(spec, "qm list")
+    # §17.1575 — ONE listing refused or hung while the other answered (live, c2792d4b T2, 90 s after the host
+    # rebooted: `pct list` hung for its 15 s and `qm list` answered, so the host "had" three VMs and no
+    # containers, and the probe of container 111 was refused "there is no guest 111"). Read the silent one
+    # once more; if it still says nothing, its FAMILY is unread — unknown, not empty — and every rule that
+    # would refuse a guest for being absent from it says nothing (`inv["unread"]`, `known_guest`).
+    if bool(pct_out.strip()) != bool(qm_out.strip()):
+        if not pct_out.strip():
+            pct_out = await _read(spec, "pct list")
+        else:
+            qm_out = await _read(spec, "qm list")
     cts, vms = parse_pct_list(pct_out), parse_qm_list(qm_out)
     if not cts and not vms:
         logger.warning("preconditions_unreadable — nothing refused")
         return None
-    inv = {"cts": cts, "vms": vms, "names": {**parse_pct_names(pct_out), **parse_qm_names(qm_out)}}   # §17.1316 — containers have names too
+    unread = [fam for fam, out in (("cts", pct_out), ("vms", qm_out)) if not out.strip()]
+    if unread:
+        logger.warning("preconditions_half_blind unread=%s — nothing refused for being absent from it", unread)
+    inv = {"cts": cts, "vms": vms, "names": {**parse_pct_names(pct_out), **parse_qm_names(qm_out)},   # §17.1316 — containers have names too
+           "unread": unread}                                                                            # §17.1575
     # §17.1288p — and what is ON the guests' disks, cheaply: a thin volume at
     # Data% 0.00 has never been written, so the guest it belongs to has no OS.
     lvs_out = await _read(spec, "lvs --noheadings -o lv_name,lv_size,data_percent pve")
@@ -970,6 +984,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     if (not guests and not subjects) or not inv:
         return out
     cts, vms = inv["cts"], inv["vms"]
+    unread = set(inv.get("unread") or ())                   # §17.1575 — a family the host would not list
     # §17.1288f — the step is about a stopped guest, the block needs it up
     # (an ssh, or a wait for `running`) and nothing in the block starts it.
     # Live: the script waited 60 s for VM 106 to be running, then swept and
@@ -1069,6 +1084,9 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             out.append({"command": cmd, "why": (
                 f"{gid} is a container on this host, not a VM — `qm` cannot address it. Use `pct {verb}`.")})
         elif not is_ct and not is_vm:
+            if unread:                                      # §17.1575 — it may well be in the listing that was not read
+                logger.warning("preconditions_half_blind gid=%s unread=%s — not refused", gid, sorted(unread))
+                continue
             out.append({"command": cmd, "why": f"there is no guest {gid} on this host — `pct list` and `qm list` do not have it."})
         elif verb in _NEEDS_RUNNING:
             status = cts.get(gid) if is_ct else vms.get(gid)

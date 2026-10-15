@@ -24,7 +24,7 @@ def test_the_live_v5_call_is_refused_and_told_what_answers():
     assert len(refs) == 1
     why = refs[0]["why"]
     assert "`/admin/api.php` on pihole (192.168.1.30)" in why and "HTTP 400" in why
-    assert "`/api/stats/summary` (HTTP 2xx, no key)" in why
+    assert "`/api/stats/summary` (HTTP 2xx/3xx, no key)" in why     # §17.1595 — a redirect answers too
 
 
 def test_the_v6_call_passes():

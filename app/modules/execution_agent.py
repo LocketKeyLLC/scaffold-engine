@@ -21,6 +21,7 @@ Error recovery cascade (per spec):
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import AsyncGenerator, Literal
@@ -2861,7 +2862,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         else:
             _reading.note("the guests on the host",
                           f"{len((_inv or {}).get('cts') or {})} container(s), "
-                          f"{len((_inv or {}).get('vms') or {})} VM(s)")
+                          f"{len((_inv or {}).get('vms') or {})} VM(s)"
+                          + (f"; NOT read: {', '.join((_inv or {}).get('unread'))}" if (_inv or {}).get("unread") else ""))   # §17.1575
         try:
             from app.modules import machine_truth as _mt0
             from app.modules import runbook_templates as _rt
@@ -2908,6 +2910,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     # what `read_services` goes on.
                     _services += await _st.read_services(spec, _g, mentioned=_named,
                                                         reading=_reading, vm=_g in _vms and _g not in _cts)
+            # §17.1591 — the engine's own deploys (Docker inside CT 107/108) are services the step may name
+            _own = supervised_runs.engine_deployed_services(_named, _services)
+            if _own:
+                _services += _own
+                logger.info("services_from_engine_deploys job=%s names=%s", job_id, [s.name for s in _own])
         except Exception as exc:
             logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
@@ -3067,22 +3074,60 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             and the best version go back to the model."""
             from app.modules import service_truth as _st_dev
             _nk_dev = str(run_node.get("node_key") or "")
-            _no_check = develop.own_check_refusal(run_node, host)      # §17.1418 — no check, no run
+            workspace = await develop.read_workspace(spec, host)
+            # §17.1592 — the directory the backend SERVES joins the workspace (read, and writable), so a UI step can
+            # read the page it is about and the page check can be derived
+            host, _widened = develop.widen_to_served(host, workspace)
+            if _widened:
+                logger.warning("develop_served_dirs_added job=%s node=%s dirs=%s", job_id, _nk_dev, _widened)
+                workspace = await develop.read_workspace(spec, host)
+            # §17.1592 — a proxy the service's own files name is a service in play, named by the step or not
+            _ws_proxies = supervised_runs.engine_deployed_services(develop.proxies_in_workspace(workspace), _services)
+            if _ws_proxies:
+                _services.extend(_ws_proxies)
+                logger.info("services_from_engine_deploys_by_workspace job=%s node=%s names=%s", job_id, _nk_dev, [s.name for s in _ws_proxies])
+            # §17.1582 — a check the step's text never named, read off the service's own routes
+            _port = develop.service_port(host, _services)
+            _derived = develop.derived_checks(run_node, host, workspace, _port)
+            if not _derived:        # §17.1591 — say why, so an empty derivation is not a silent stuck
+                logger.warning("develop_no_derived_check job=%s node=%s port=%r files=%d html=%d services=%s", job_id, _nk_dev, _port,
+                               len(workspace), sum(1 for p in workspace if p.endswith((".html", ".htm"))),
+                               [(str(getattr(s, "name", "")), str(getattr(s, "guest", "")), tuple(getattr(s, "ports", ()) or ())) for s in _services or []][:6])
+            if _derived:
+                logger.warning("develop_checks_derived job=%s node=%s checks=%s", job_id, _nk_dev, [c[-60:] for c in _derived])
+            _no_check = develop.own_check_refusal(run_node, host, _derived)      # §17.1418 — no check, no run
             if _no_check:
                 logger.warning("develop_no_own_check job=%s node=%s", job_id, _nk_dev)
                 return {**empty_frame, "refused": list(empty_frame.get("refused") or []) + _no_check,
                         "suggested": "myself"}
-            workspace = await develop.read_workspace(spec, host)
-            checks = develop.done_checks(run_node, host)
+            checks = develop.with_journal(develop.done_checks(run_node, host, _derived), host)   # §17.1586
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
             # §17.1426/§17.1427 — the runner's own secrets file AND the engine's encrypted store (`held`): the
             # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it
             creds = develop.credentials_for(_services, list((policy or {}).get("secrets") or [])
-                                            + list((policy or {}).get("held") or []), run_node)
+                                            + list((policy or {}).get("held") or []), run_node, inventory=_inv)   # §17.1587
+            # §17.1583 — a credential the workspace carries in the clear travels to the model as its mark
+            _ws_raw = dict(workspace)
+            workspace, _marked, creds = develop.mark_held_credentials(
+                workspace, creds, list((policy or {}).get("secrets") or []) + list((policy or {}).get("held") or []))
+            _marked_paths = sorted(p for p in workspace if workspace.get(p) != _ws_raw.get(p))
+            # §17.1587 — a marked name the step never named still gets the machine's own read when the engine has one
+            for _n in _marked:
+                if creds.get(_n) == develop.RUNNER_HELD:
+                    creds[_n] = develop.machine_read_for(_n, _services, _inv) or develop.RUNNER_HELD
+            if _marked:
+                logger.warning("develop_credentials_marked job=%s node=%s names=%s paths=%s", job_id, _nk_dev, _marked, _marked_paths)
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
                 facts = f"{facts}\n\n{develop.engine_doc(run_node)}"
+            if develop.machines_doc(spec):                      # §17.1598 — and where the Proxmox host is
+                facts = f"{facts}\n\n{develop.machines_doc(spec)}"
+            # §17.1598 — the addresses the engine measured: never probed, never refused
+            _held_addrs = ([str(getattr(s, "address", "") or "") for s in _services or []]
+                           + [develop.host_address(spec), _eaddr, os.environ.get("SCAFFOLD_LAN_ADDRESS")]
+                           + [a for v in ((_inv or {}).get("addresses") or {}).values() for a in v])
+            _addr_probes: dict = {}
             _served = develop.served_entries(workspace)                # §17.1546 — what the browser actually gets
             _served_doc = develop.served_files_doc(_served)
             if _served_doc:
@@ -3112,15 +3157,45 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     continue
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
-                rb = develop.render_delivery(run_node, host, {**files, **kit}, checks,
+                # §17.1588 — a mark the MODEL wrote for a held name the step never named: resolved here, not failed at
+                # delivery ("the engine cannot read RADARR_API_KEY on any machine" — live T5, with Radarr's read in hand)
+                for _n in develop.marks_in(files):
+                    if _n not in creds:
+                        _held_names = list((policy or {}).get("secrets") or []) + list((policy or {}).get("held") or [])
+                        _r = develop.machine_read_for(_n, _services, _inv) or (develop.RUNNER_HELD if _n in _held_names else "")
+                        if _r:
+                            creds[_n] = _r
+                            logger.warning("develop_mark_resolved job=%s node=%s name=%s via=%s", job_id, _nk_dev, _n, "machine" if _r != develop.RUNNER_HELD else "runner")
+                # §17.1587 — the files that hold a copy of a held credential are delivered with the live value
+                files, _refreshed = develop.refresh_credential_copies(files, workspace, _marked_paths, host, run_node)
+                if _refreshed:
+                    logger.warning("develop_credential_copies_refreshed job=%s node=%s paths=%s", job_id, _nk_dev, _refreshed)
+                # §17.1590 — a config named after a measured service that points it elsewhere is delivered with the measured address
+                files, _readdr = develop.refresh_address_copies(files, workspace, _services, host, run_node)
+                if _readdr:
+                    logger.warning("develop_address_copies_refreshed job=%s node=%s paths=%s", job_id, _nk_dev, _readdr)
+                # §17.1584 — the routes the CHANGED files define are this delivery's feature; the word-derived
+                # permit (§17.1582) stands in only when they define none (a UI file)
+                _own = develop.derived_from_files(host, files, _port) if _derived else []
+                _checks = develop.with_journal(develop.done_checks(run_node, host, _own), host) if _own else checks
+                rb = develop.render_delivery(run_node, host, {**files, **kit}, _checks,
                                              develop.acceptance_checks(run_node), creds)
                 fr = await asyncio.to_thread(supervised_runs.frame_run, run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
-                _dead = (develop.calls_a_dead_path(files, status)         # §17.1422
+                # §17.1596 — the paths THIS version calls on an engine-deployed proxy are probed too, so a 404 is caught here
+                status = await develop.probe_called_paths(spec, files, _services, status)
+                _dead = (develop.stale_service_addresses(files, _services)   # §17.1590
+                         + develop.timeouts_shorter_than_measured(files, status)   # §17.1594
+                         + develop.calls_a_dead_path(files, status)         # §17.1422
                          + develop.values_put_into_html_attributes(files)   # §17.1424
                          + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427
+                         + develop.blocks_the_event_loop(files, workspace, host, kit)   # §17.1598
+                         + develop.page_reads_what_no_route_returns(files, workspace)   # §17.1599
+                         + develop.writes_a_secret_file(files)                          # §17.1603c
+                         + await develop.addresses_that_do_not_answer(spec, files, workspace, host, _held_addrs,
+                                                                      kit, _addr_probes)   # §17.1598
                          + develop.restyle_missed_the_served_file(run_node, files, _served, workspace))  # §17.1546
                 if _dead:
                     fr = {**fr, "refused": list(fr.get("refused") or []) + _dead, "suggested": "myself"}
@@ -3131,6 +3206,13 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 if best is None or sc <= best[0]:          # a tie goes to the newer version
                     best = (sc, fr, files)
                 if sc == 0:
+                    break
+                # §17.1583 — the same refusal twice running is a round the model cannot change (live, T4: eight
+                # rounds, each refused for the ENGINE'S OWN held-login check — `IFS= read` on the verify channel —
+                # a shape no file of the model's touches). Nothing new to show it: stop, and park with the reason.
+                _this_ev = develop.evidence_of(fr)
+                if develop.stalled(evidence, _this_ev):
+                    logger.warning("develop_rounds_stalled job=%s node=%s round=%d why=%r", job_id, _nk_dev, round_no, _this_ev[:300])
                     break
                 current, evidence = best[2], develop.evidence_of(best[1])
             if best is None:
@@ -3360,7 +3442,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # `frame["runbook"]` is DISPLAY text (cut at 12 000 chars with a note); the
             # rehearsed drafts are kept whole -- find the one this frame was rendered from
             for _rb0 in _rh_reports:
-                if supervised_runs._runbook_for_display(_rb0, fr.get("commands") or []) == fr.get("runbook"):
+                if str(fr.get("runbook") or "").endswith(supervised_runs._runbook_for_display(_rb0, fr.get("commands") or [])):   # §17.1577 — or follows the engine's block
                     return _rb0
             return str(fr.get("runbook") or "")
 
@@ -3458,7 +3540,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # redrafting for the checks swapped a correct budget refusal for a
             # draft of invalid Python: two unrunnable frames, the second one less
             # informative. The refusal path above owns that case.
-            _nv = "" if (frame.get("refused") or _developed) else supervised_runs.verify_not_runnable(runbook)
+            _nv = "" if (frame.get("expects") or frame.get("refused") or _developed) else supervised_runs.verify_not_runnable(runbook)   # §17.1577
             if _nv:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))
@@ -3483,7 +3565,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # for a step that must change something would be approved, run cleanly
         # and mark the step done having done nothing.
         try:
-            _ro = "" if _developed else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            # §17.1577 — a frame a capability drafted (`expects`, §17.1570g) is the engine's own shape: never redrafted by the model
+            _ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
             if _ro:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
@@ -3510,7 +3593,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = [] if _developed else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])
+            _missing = [] if (_developed or frame.get("expects")) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])

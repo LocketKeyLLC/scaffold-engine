@@ -488,6 +488,13 @@ def guests_the_host_is_told_to_touch(node: dict, services: Optional[list] = None
     operator: "the engine already knows the information anyways."
     """
     out = {m.group(1) for m in _HOST_INTO_GUEST_RE.finditer(_text(node))}
+    # §17.1581 — a step whose words place the work ON one guest touches that guest; the services it names
+    # are what it talks to (live, T4: "edit the Radarr handler on container 111" is panel work, not Radarr's)
+    from app.modules.machine_truth import place_guest
+    _place = place_guest(node)
+    if _place:
+        out.add(_place)
+        return out
     if services:
         try:
             from app.modules.service_truth import names_in
@@ -635,6 +642,10 @@ def logs_in_with_a_stored_secret(node: dict) -> bool:
     return bool(names) and bool(_CREDENTIAL_USE_RE.search(work)) and not _SECRET_AS_FILE_RE.search(work)
 
 
+#: §17.1603 — Proxmox's own administration tools exist only on the host
+_HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b")
+
+
 def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
     """The first template whose ``applies`` holds for this step and this
     measured guest; None means today's model-written path."""
@@ -644,9 +655,15 @@ def select_template(node: dict, truth, services: Optional[list] = None) -> Optio
         return None
     if not subject_gid(node, truth):
         return None
+    # §17.1603 — a step whose own text names a Proxmox HOST command (`pveum`, `pvesh create`, `pct push`, …) runs on the
+    # host: no in-guest template. Live (c2792d4b T14), "pveum user token add" was wrapped to run inside CT 111.
+    host_admin = bool(_HOST_ADMIN_RE.search(" ".join(str((node or {}).get(k) or "")
+                                                      for k in ("title", "description", "prompt_template"))))
     login = logs_in_with_a_stored_secret(node)       # §17.1495 — the login runs from the host, on stdin
     for t in TEMPLATES:
         try:
+            if host_admin and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+                continue
             if t.applies(node, truth):
                 # only the general in-guest templates: an OS install or a console read carries its own secrets
                 if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):

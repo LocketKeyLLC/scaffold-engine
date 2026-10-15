@@ -142,6 +142,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: refusal-producing function and fails when one's text matches nothing here.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "takes loopback down with it",                   # §17.1570d
+                   "prints a new secret once", "a file named as a secret",   # §17.1603
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -181,6 +182,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
+                   "reads every `$UPPER` reference as a secret",     # §17.1578
+                   "writes the secret's NAME where its VALUE belongs",   # §17.1581
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
@@ -287,6 +290,9 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
 #: what stops this recurring in a fifth costume
 #: ([[feedback_failsafes_are_a_registry]]).
 _WHOSE_GAP: dict[str, str] = {
+    # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
+    "reads every `$UPPER` reference as a secret": "drafter",
+    "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
     # ── the machine contradicts the block ────────────────────────────────────
     "is stopped (`": "machine",
     "fails before it starts": "machine",
@@ -316,6 +322,8 @@ _WHOSE_GAP: dict[str, str] = {
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
     "takes loopback down with it": "drafter",                     # §17.1570d — name the interface, not `all`
+    "prints a new secret once": "drafter",                        # §17.1603 — send the minted secret only to a file
+    "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -696,10 +704,20 @@ def is_mcp_write(node: Optional[dict]) -> bool:
     frames it with ``mcp_write_runbook``), and the approved supervised path mints the approval and runs
     it secret-safely — the same gate every hands-on write already passes. Live: Jellyfin metadata-pass
     job 263e920a, T4, which hard-failed with ``approval Field required``."""
-    from app.modules.assist_supervised import WRITE_TOOL
+    from app.modules.assist_supervised import WRITE_TOOL, WRITE_FILE_TOOL
     cfg = _mcp_cfg(node)
     args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
-    return str(cfg.get("tool") or "") == WRITE_TOOL and bool(str((args or {}).get("command") or "").strip())
+    tool = str(cfg.get("tool") or "")
+    if tool == WRITE_TOOL:
+        return bool(str((args or {}).get("command") or "").strip())
+    # §17.1573 — the runner's FILE write is a write too. Live (job 9e1c2c68, T2/T3): the planner chose
+    # `write_file` for the rule file and the unit; this predicate knew one tool name, so the node was
+    # dispatched deterministically, the runner refused it (`approval Field required`) three times, and
+    # the job went blocked with nothing parked for the operator. A gate that matches one word, not the
+    # payload's kind (a write), is how the same defect returns under a new name.
+    if tool == WRITE_FILE_TOOL:
+        return bool(str((args or {}).get("path") or "").strip())
+    return False
 
 
 #: §17.1555 — a shell command that splices another node's output in: `${upstream.T3}`, `${brief.x}`,
@@ -725,10 +743,31 @@ def mcp_splices_an_upstream(node: Optional[dict]) -> bool:
     return str(cfg.get("tool") or "") == "run_readonly" and bool(_UPSTREAM_SPLICE_RE.search(cmd))
 
 
+def a_capability_claims(node: Optional[dict]) -> bool:
+    """§17.1573 — True when one of the engine's deterministic host-level capabilities would replace this
+    step's commands (the same rewrites ``frame_run`` applies). A runner-read MCP node such a capability
+    claims must PARK and be framed by it, not run the planner's raw command: live (job 9e1c2c68), T5's
+    `nft list table bridge block_ra` read a table by the plan's working name, which the engine's install
+    (§17.1571, `scaffold_rafilter`) never created — a deterministic failure the capability layer could
+    see and the dispatcher could not. Only capabilities that need no measured services/inventory."""
+    n = dict(node) if hasattr(node, "keys") else {}
+    if not n:
+        return False
+    for fn in (rewrite_drop_router_adverts_on_the_bridge, rewrite_verify_router_adverts_dropped):
+        try:
+            if fn(n, ["x"], ["y"], None, None)[2]:
+                return True
+        except Exception:                                      # a classifier must never break dispatch
+            continue
+    return False
+
+
 def mcp_needs_the_pause(node: Optional[dict]) -> bool:
-    """§17.1551/§17.1555 — an MCP node the frontier must HOLD for the operator rather than call:
-    a runner write, or a runner read that splices an upstream output into its command."""
-    return is_mcp_write(node) or mcp_splices_an_upstream(node)
+    """§17.1551/§17.1555/§17.1573 — an MCP node the frontier must HOLD for the operator rather than call:
+    a runner write (command or file), a runner read that splices an upstream output into its command,
+    or a runner read one of the engine's own capabilities claims."""
+    return (is_mcp_write(node) or mcp_splices_an_upstream(node) or a_capability_claims(node)
+            or bool(_mcp_cfg(node).get("needs_root")))             # §17.1574b — a read the read channel refused for privilege
 
 
 def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], brief: Any) -> Optional[str]:
@@ -746,6 +785,13 @@ def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], br
     cfg = parse_tool_config((node or {}).get("tool_config"))
     rendered = render_args(cfg.get("args") or {}, upstream_outputs or {}, brief or {})
     cmd = str((rendered or {}).get("command") or "").strip() if isinstance(rendered, dict) else ""
+    if not cmd and isinstance(rendered, dict) and str(rendered.get("path") or "").strip():
+        # §17.1573 — a `write_file` node as the shell write it is, so the frame offers it, the
+        # capabilities may replace it, and the gates judge it like any file a step leaves behind.
+        path = str(rendered.get("path")).strip()
+        body = str(rendered.get("content") or "")
+        cmd = (f"mkdir -p {shlex.quote(os.path.dirname(path) or '/')} && "
+               f"printf '%s\\n' {shlex.quote(body.rstrip(chr(10)))} > {shlex.quote(path)}")
     return "## Run this\n```bash\n" + cmd + "\n```" if cmd else None
 
 
@@ -801,8 +847,10 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
         # hands-on step rather than running deterministically with no engine↔runner approval.
         # §17.1555 — so does a runner-read whose command splices another node's output in.
         if mcp_needs_the_pause(node):
-            node["hands_on_reason"] = "mcp:runner-write" if is_mcp_write(node) else "mcp:spliced-read"
-            return node
+            node["hands_on_reason"] = ("mcp:runner-write" if is_mcp_write(node)
+                                       else "mcp:spliced-read" if mcp_splices_an_upstream(node)
+                                       else "mcp:needs-root" if _mcp_cfg(node).get("needs_root") else "mcp:capability")
+            return await inherit_referenced_step_text(db, job_id, node)     # §17.1573b
         _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
         on, why = step_is_hands_on(node, develops_codegen=_dc)
         if on and not why.startswith("tool:human"):
@@ -815,7 +863,14 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
 _REFERENCED_STEP_RE = re.compile(r"\b(?:same\s+(?:\w+\s+){0,3}as|as\s+in|like|identical\s+to|mirror(?:s|ing)?)\s+(T\d+(?:v\d+)?)\b", re.I)
 
 
-async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict) -> dict:
+#: §17.1573b — a step whose object is "the table / the unit / the rule / the file …" (a definite reference)
+_ANAPHORIC_RE = re.compile(r"\bthe\s+(?:dedicated\s+|new\s+|same\s+)?(?:table|unit|rule(?:\s*file)?|file|service|config(?:uration)?|"
+                           r"counter|drop\s+rule|systemd\s+unit)\b", re.I)
+#: … and one that names it anyway (a path, a unit file, a table name, a step reference) needs nothing inherited
+_NAMES_ITS_OBJECT_RE = re.compile(r"/(?:etc|opt|usr|var|home|root)/\S+|\b[\w.-]+\.(?:service|timer|conf|nft)\b|\btable\s+(?:bridge|inet|ip6?)\s+\w+|\[as in T\d+", re.I)
+
+
+async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict, *, _depth: int = 0) -> dict:
     """§17.1570c — a step whose text points at another step carries that step's text.
 
     Live (job eff80f98): the planner wrote the work once — T2 "Writes the sysctl config file … Contents:
@@ -826,7 +881,14 @@ async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict
     and text are appended to the node's description (once), so the capabilities and gates see the whole
     specification. Fail-soft: an unreadable reference leaves the node as it was."""
     own = _node_text(node)
-    refs = sorted({m.group(1) for m in _REFERENCED_STEP_RE.finditer(own)} - {str(node.get("node_key") or "")})
+    refs = {m.group(1) for m in _REFERENCED_STEP_RE.finditer(own)}
+    # §17.1573b — a step that speaks of "the table", "the unit", "the rule file" it never names is defined by
+    # the step it depends on (live, job 9e1c2c68: T3 "oneshot unit that loads the dedicated table", T4 "Loads
+    # the table now", T7 "Confirms the unit is active"). Its direct dependencies' text is inherited the same
+    # way; a dependency that is itself such a step brings its own dependencies (one more level).
+    if _ANAPHORIC_RE.search(own) and not _NAMES_ITS_OBJECT_RE.search(own):
+        refs |= {str(d) for d in (node.get("depends_on") or []) if re.fullmatch(r"T\d+(?:v\d+)?", str(d))}
+    refs = sorted(refs - {str(node.get("node_key") or "")})
     if not refs:
         return node
     try:
@@ -842,6 +904,22 @@ async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict
         body = " ".join(str(r.get(k) or "").strip() for k in ("title", "description", "prompt_template") if r.get(k))
         if body and f"[as in {r['node_key']}:" not in str(node.get("description") or ""):
             extra.append(f"[as in {r['node_key']}: {body[:1200]}]")
+            # §17.1573b — one more level when the dependency is itself anaphoric ("loads the table")
+            if _depth == 0 and _ANAPHORIC_RE.search(body) and not _NAMES_ITS_OBJECT_RE.search(body):
+                try:
+                    deps = (await db.execute(
+                        text("SELECT depends_on FROM dag_nodes WHERE job_id = :jid AND node_key = :k"),
+                        {"jid": job_id, "k": r["node_key"]})).scalar()
+                    up = (await db.execute(
+                        text("SELECT node_key, title, description, prompt_template FROM dag_nodes "
+                             "WHERE job_id = :jid AND node_key = ANY(:keys)"),
+                        {"jid": job_id, "keys": [str(d) for d in (deps or [])]})).mappings().all()
+                    for u in up:
+                        ub = " ".join(str(u.get(k) or "").strip() for k in ("title", "description", "prompt_template") if u.get(k))
+                        if ub and f"[as in {u['node_key']}:" not in str(node.get("description") or ""):
+                            extra.append(f"[as in {u['node_key']}: {ub[:1200]}]")
+                except Exception as exc:
+                    logger.warning("referenced_step_lookup_failed job=%s node=%s err=%r", job_id, node.get("node_key"), exc)
     if extra:
         node = dict(node)
         node["description"] = (str(node.get("description") or "").rstrip() + "\n" + "\n".join(extra)).strip()
@@ -1412,6 +1490,8 @@ def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
     on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
     if not on:
         return ""                                  # a reading step may legitimately only read
+    if not step_says_it_changes(node):
+        return ""                                  # §17.1577 — hands-on is not "changes": a probe only reads
     for c in cmds:
         for seg in split_segments(c):
             if seg.strip() and not read_only(seg)[0]:
@@ -1432,6 +1512,34 @@ def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
         "one line instead of drafting a block that looks busy and changes nothing.",
     ]
     return "\n".join(lines)
+
+
+#: §17.1577 — the step's own words say it changes nothing
+_NO_CHANGE_RE = re.compile(
+    r"\b(?:do not|don'?t|never|without)\s+(?:modify(?:ing)?|chang(?:e|ing)|alter(?:ing)?|touch(?:ing)?|writ(?:e|ing))\b"
+    r"|\bread[- ]only\b", re.I)
+
+
+def step_says_it_changes(node: dict) -> bool:
+    """§17.1577 — does the step's TEXT say it changes a machine?
+
+    `step_is_hands_on` answers a different question — does this need a machine — and says yes to every
+    Shell/MCP node for its TOOL alone (`tool:shell`). §17.1254 read that yes as "must change something".
+    Live (c2792d4b T2 "Probe each endpoint authenticated … record status code … Do not modify anything",
+    tool Shell): the engine's own read-only probe (§17.1574c) was sent back as "EVERY COMMAND ONLY LOOKS
+    AT THINGS", the model was asked for a write, and the operator was shown a cookie draft in place of
+    the block that would run. Here the tool is put out of the way and the classifier's own TEXT analysis
+    answers (a change verb opening a title that names a service, a command that writes — not a template
+    the engine owns, which fits reads too), or a change verb opening the title; an observation verb opening it, or "do not modify"
+    / "read-only" in its words, says no."""
+    from app.modules.step_classify import step_is_hands_on, _LEADING_CHANGE_RE, _LEADING_OBSERVE_RE
+    n = dict(node) if hasattr(node, "keys") else {}
+    title = str(n.get("title") or "")
+    text = " ".join(str(n.get(k) or "") for k in ("title", "description", "prompt_template"))
+    if _LEADING_OBSERVE_RE.match(title) or _NO_CHANGE_RE.search(text):
+        return False
+    _on, why = step_is_hands_on({**n, "tool": "LLM"})
+    return str(why or "").startswith(("verb:", "writes:")) or bool(_LEADING_CHANGE_RE.match(title))
 
 
 #: §17.1255 — an inline interpreter script whose quoting cannot work.
@@ -2510,6 +2618,12 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         ids = [g for g in ids if known_guest(g, inventory, text + "\n" + "\n".join(str(c) for c in commands or []))]
     if not ids or not commands:
         return []
+    # §17.1603b — a step whose own text names Proxmox's admin tools (`pveum`, `pvesh create`, `pct push`, …) is the
+    # HOST's work for the guest: those tools exist only there. Live (c2792d4b T14, "create the panel's API token …
+    # push it into container 111"), the right host-side draft was refused as "would change the HOST instead of guest 111".
+    from app.modules.runbook_templates import _HOST_ADMIN_RE
+    if _HOST_ADMIN_RE.search(text):
+        return []
     cmds = [str(c) for c in commands]
     writes = [c for c in cmds if writing_segments(c) and not _REACH_TOOL_INSTALL_RE.search(c)]
     # §17.1287c — a loop of reads is not a write. §17.1288i — installing the
@@ -3015,6 +3129,15 @@ def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[
         f"swallows an error into a one-line summary.")
 
 
+#: §17.1576 — a step whose title says it REPORTS: it quotes the commands upstream steps ran as its evidence.
+#: Live, T12 "Compile verification report" (9e1c2c68) cited `systemctl is-active` from T7's output and was failed
+#: three times "produced INSTRUCTIONS, not work" — the job ended blocked with every check met. Like §17.1484's
+#: document, a report's commands are its content. Tight on purpose: "Report the library count" is a read, not this.
+_REPORT_TITLE_RE = re.compile(
+    r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*|the\s+)?(?:compile|aggregate|summari[sz]e|collate)\b"
+    r"|\b(?:verification|status|final|summary|evidence|completion)\s+report\b|\breport\s*$", re.I)
+
+
 async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) -> Optional[str]:
     """§17.1259 — a step that wrote a runbook for a machine the engine can reach.
 
@@ -3049,6 +3172,8 @@ async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) ->
     from app.modules.inventory_report import _DOC_RE
     if _DOC_RE.search(str((node or {}).get("title") or "")):
         return None
+    if _REPORT_TITLE_RE.search(str((node or {}).get("title") or "")):
+        return None                      # §17.1576 — a report quotes what ran
     try:
         from app.modules.step_classify import step_is_hands_on
         cmds = runbook_commands(text_value)
@@ -4262,6 +4387,54 @@ _QUOTED_ARG_RE = re.compile(r"""\s(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _ENV_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,60})\}?")
 
 
+#: §17.1603 — commands that MINT a secret and print it once
+_SECRET_MINT_RE = re.compile(r"\bpveum\s+(?:user\s+)?token\s+add\b|\bpvesh\s+create\s+\S*/token/|\bopenssl\s+rand\b|\bpwgen\b")
+#: a file whose name says it holds a secret
+_SECRET_FILE_NAME_RE = re.compile(r"(?:token|secret|passw(?:or)?d|credential|api[-_]?key|private[-_]?key|\.key\b|\.pem\b(?<!ca\.pem))", re.I)
+_CAT_FILE_RE = re.compile(r"\b(?:cat|head|tail|less|more|strings|xxd|od|base64)\s+(?:-\S+\s+(?:\d+\s+)?)*([^\s|;&><'\"]+)")
+
+
+def prints_a_secret(commands: list[str], verify: Optional[list[str]] = None,
+                    files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1603 — a block that puts a secret into its own output, which is the run's record, the frame and the log.
+
+    Live (c2792d4b T14, "Create a read-only Proxmox API token for the panel"): the draft ran
+    `pveum user token add … | tee /root/panel-api-token.txt` -- the token's secret, shown once, printed by `tee` --
+    and its check was `cat /root/panel-api-token.txt`. Two shapes:
+    * a command that MINTS a secret whose output is not sent wholly into a file (`tee` prints it; no `>` prints it);
+    * a command or check that reads a file NAMED as a secret (`cat …token…`, `…secret…`, `…password…`, `….key`)."""
+    texts = [("command", str(c)) for c in commands or []] + [("check", str(v)) for v in verify or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    out: list[dict] = []
+    for where, body in texts:
+        for line in body.splitlines():
+            ln = line.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            m = _SECRET_MINT_RE.search(ln)
+            if m and ln[:m.start()].count("$(") > ln[:m.start()].count(")"):
+                m = None                          # captured into a variable (`PW=$(pwgen 20 1)`): nothing printed
+            if m:
+                rest = ln[m.end():]
+                if re.search(r"\btee\b", rest) or not re.search(r"(?<![0-9&])>{1,2}\s*\S", rest):
+                    out.append({"command": f"{where}: {ln[:160]}", "why": (
+                        f"`{m.group(0)}` prints a new secret once, and this line lets it reach the output "
+                        f"({'`tee` copies it to the screen' if 'tee' in rest else 'nothing sends it into a file'}): "
+                        f"the run's record, the frame and the log would hold it. Send the output ONLY into a file "
+                        f"(`… > /path/file` with mode 600, or through a filter that writes the file), and print "
+                        f"nothing of it.")})
+                    break
+            for cm in _CAT_FILE_RE.finditer(ln):
+                path = cm.group(1)
+                if _SECRET_FILE_NAME_RE.search(path.rsplit("/", 1)[-1]):
+                    out.append({"command": f"{where}: {ln[:160]}", "why": (
+                        f"this reads `{path}` -- a file named as a secret -- into the output, which is the run's "
+                        f"record and the log. Prove it WORKS instead: use it (call the API with it, log in with it) "
+                        f"and print only the result, or check it exists and its mode (`stat -c '%a %U' {path}`).")})
+                    break
+    return out
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -4655,7 +4828,7 @@ def secret_inside_a_guest_script(files: Optional[list[dict]], secret_names: set[
         if not body:
             continue
         for name in sorted(secret_names or ()):
-            if re.search(rf"\$\{{?{re.escape(name)}\b", body.group(1)):
+            if re.search(rf"\$\{{?{re.escape(name)}\b|<{re.escape(name)}>", body.group(1)):   # §17.1589 — or its placeholder
                 gid, vm = m.group(2), m.group(1) == "vm"
                 into = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c 'umask 077; cat > <PATH>'" if vm else
                         f"pct exec {gid} -- sh -c 'umask 077; cat > <PATH>'")
@@ -5059,6 +5232,82 @@ def a_shell_runs_it(cmd: str, path: str, body: str) -> bool:
     return path.endswith((".sh", ".bash"))
 
 
+#: §17.1578 — the first runner whose `secret_refs` leaves the names a block binds itself alone
+_RUNNER_LEAVES_BOUND_NAMES = 23
+
+
+def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> list[dict]:
+    """§17.1578 — an UPPERCASE name the block sets and then reads, on a runner that demands a value for
+    EVERY `$UPPER` reference.
+
+    Live (c2792d4b T2, helper 22): the engine's own probe opened `CPW=$(cat); … PORT=$(grep …)` and used
+    `$CPW`/`$PORT`; the runner's `secret_refs` reads every `$[A-Z]…` as a secret it must resolve, found
+    neither in its file nor sent, and refused the approved block — "this command needs $PORT, $CPW, which
+    neither the engine sent nor this runner's secrets file holds". The engine's own gate (§17.1348) knew
+    the names were bound and said nothing, so Run was offered for a block that could not run. Helper 23's
+    `secret_refs` subtracts the names a block binds; until the machine runs it, the frame says so and
+    Run is off. Names the runner or the engine HOLDS are not this: those it resolves whatever the block
+    does with them."""
+    helper = str((policy or {}).get("helper") or "").strip()
+    try:
+        if helper and int(helper) >= _RUNNER_LEAVES_BOUND_NAMES:
+            return []
+    except ValueError:
+        pass
+    held = ({str(x) for x in ((policy or {}).get("secrets") or [])}
+            | {str(x) for x in ((policy or {}).get("held") or [])} | set(_SHELL_VARS))
+    out: list[dict] = []
+    for cmd in commands or []:
+        text_value = str(cmd or "")
+        bound = {m.group("name") for m in _VAR_SET_RE.finditer(text_value)
+                 if not _SELF_ASSIGN_RE.match(text_value[m.start("name"):])}
+        bound |= {g for m in _VAR_BIND_RE.finditer(text_value)
+                  for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        hits = sorted({m.group(1) for m in _SECRET_REF_RE.finditer(text_value)} & bound - held)
+        if hits:
+            names = ", ".join(f"`${n}`" for n in hits)
+            out.append({"command": text_value[:200], "why": (
+                f"{names} {'is a name' if len(hits) == 1 else 'are names'} this block sets itself, but the runner at hand "
+                f"(helper {helper or '?'}) reads every `$UPPER` reference as a secret it must hold and refuses the block: "
+                f"\"this command needs {', '.join('$' + n for n in hits)}, which neither the engine sent nor this runner's "
+                f"secrets file holds\". Name the block's own variables in lowercase (`{hits[0].lower()}`), or update the "
+                f"runner — helper {_RUNNER_LEAVES_BOUND_NAMES} leaves the names a block binds alone.")})
+    return out
+
+
+def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
+                                       verify: Optional[list[str]] = None) -> list[dict]:
+    """§17.1581 — a held secret's NAME typed where its VALUE belongs.
+
+    Live (c2792d4b T4): the draft's in-guest script ran `sed -i 's|<ApiKey>.*</ApiKey>|<ApiKey>RADARR_API_KEY
+    </ApiKey>|' /var/lib/radarr/config.xml` — the WORD `RADARR_API_KEY` as Radarr's new key, after stopping
+    Radarr. §17.1391 catches a VALUE typed in; this catches the name: `>NAME<`, `=NAME`, `"NAME"`, `: NAME`.
+    `$NAME`/`${NAME}` (the runner resolves it) and `<NAME>` (the engine's placeholder) are the right forms and
+    pass; so does `NAME=…` (an assignment to it)."""
+    held = sorted({str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])})
+    if not held:
+        return []
+    pat = re.compile(r"(?<![$<{\w])(?:(?<=[>=:'\"`])|(?<=[>=:'\"`]\s))(" + "|".join(re.escape(h) for h in held) + r")(?=['\"`<]|[ \t]*(?:$|[;&|)}\],]))(?!\s*=[^=])", re.M)   # §17.1588 — the name ENDS the value: `'NAME not configured'` is prose
+    texts = ([str(c) for c in commands or []] + [str(v) for v in verify or []]
+             + [str((f or {}).get("content") or "") for f in files or []])
+    out: list[dict] = []
+    seen: set[str] = set()
+    for t in texts:
+        for m in pat.finditer(t):
+            name = m.group(1)
+            if name in seen:
+                continue
+            seen.add(name)
+            line = next((ln for ln in t.splitlines() if name in ln), t)
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: `{name}` is the word itself, not the value "
+                f"the engine holds under that name. Written into a config or a header it replaces a working credential "
+                f"with the string `{name}`. Reference it so the runner resolves it — `$"
+                f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
+                f"machine with `$( … )`; never the bare word.")})
+    return out
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -5206,11 +5455,20 @@ def inputs_for(commands: list[str], verify: list[str], runbook: str,
     return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)} for n in placeholders(texts)]
 
 
-def secrets_in_files(files: Optional[list[dict]], inputs: list[dict]) -> list[dict]:
+def is_develop_delivery(files: Optional[list[dict]]) -> bool:
+    """§17.1589 — the block delivers files the develop flow staged (`/tmp/scaffold-dev-<step>--…`)."""
+    return any(str((f or {}).get("path") or "").startswith("/tmp/scaffold-dev") for f in files or [])
+
+
+def secrets_in_files(files: Optional[list[dict]], inputs: list[dict], resolved: Optional[list[str]] = None) -> list[dict]:
     """§17.1280 — a SECRET placeholder inside a file cannot be filled: the runner
     expands `$NAME` in a COMMAND's environment, never inside a file's bytes, and
-    writing the value into a file on disk is the leak §17.1191 exists to stop."""
-    secret = {i["name"] for i in inputs or [] if i.get("secret")}
+    writing the value into a file on disk is the leak §17.1191 exists to stop.
+
+    §17.1589 — `resolved`: the names a store ALREADY holds. `apply_runner_secrets` removes them from `inputs`
+    (nothing to type), so a `<RADARR_API_KEY>` in a file the block writes passed this gate, Run was offered,
+    and the run refused "missing (used in the file …)" — live (c2792d4b T8), a driver looped on it."""
+    secret = {i["name"] for i in inputs or [] if i.get("secret")} | {str(n) for n in resolved or []}
     out: list[dict] = []
     for f in files or []:
         found = [n for n in placeholders([str((f or {}).get("content") or "")]) if n in secret]
@@ -5472,6 +5730,20 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
               f"the two seem to disagree.")
 
 
+def _rewritten_for_display(runbook: str, cmds: list[str], verify: list[str], files: list[dict], repairs: list) -> str:
+    """§17.1577 — a capability replaced the model's draft: the operator approves what they READ, so the
+    frame's prose opens with the block that will run (§17.1569's record head: commands, checks, files,
+    the engine's own drafting notes) and carries the model's draft after it, marked as replaced.
+
+    Live (c2792d4b T2): the frame's `commands` was the engine's probe with the held login, its `runbook`
+    the model's `-b "connect.sid=<PANEL_COOKIE>"` prose asking for a cookie nobody holds — two stories, and
+    the one on top was the one that would not run. The draft is kept whole underneath, so the rehearsal
+    path can still find the text a frame was rendered from (`_full_runbook` matches the tail)."""
+    head = _frame_runbook({"files": [{"path": (f or {}).get("path")} for f in files or []], "engine_fixed": list(repairs or [])},
+                          cmds, verify)
+    return head + "\n\n---\n\n## The model's draft, replaced by the block above\n\n" + _runbook_for_display(runbook, cmds)
+
+
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
               units: Optional[list[str]] = None, inventory: Optional[dict] = None,
@@ -5514,6 +5786,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
     # the gaps deterministically, instead of the model's lookup/add/true draft. Runs
     # BEFORE the key reader so `<APP_API_KEY>` is filled in the guest it now runs in.
+    _orig_cmds, _orig_verify = list(cmds), list(verify)          # §17.1589 — kept, for a delivery no capability may rewrite
     _comp_cmds, _comp_verify, _comp_notes = rewrite_completeness_check(node, cmds, verify, services, inventory)
     if _comp_notes:
         cmds, verify = _comp_cmds, _comp_verify
@@ -5606,11 +5879,38 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _v6_notes:
         cmds, verify = _v6_cmds, _v6_verify
         _comp_notes = list(_comp_notes) + _v6_notes
+    # §17.1571 — "drop the gateway's IPv6 router advertisements at the bridge": an nft bridge table + oneshot unit.
+    _ra_cmds, _ra_verify, _ra_notes = rewrite_drop_router_adverts_on_the_bridge(node, cmds, verify, services, inventory)
+    if _ra_notes:
+        cmds, verify = _ra_cmds, _ra_verify
+        _comp_notes = list(_comp_notes) + _ra_notes
+    # §17.1573 — a verify step about the RA filter reads the filter the engine installed, by its name.
+    _rv_cmds, _rv_verify, _rv_notes = rewrite_verify_router_adverts_dropped(node, cmds, verify, services, inventory)
+    if _rv_notes:
+        cmds, verify = _rv_cmds, _rv_verify
+        _comp_notes = list(_comp_notes) + _rv_notes
+    # §17.1572 — "inventory the endpoints/routes of <service>": the engine reads the measured service's own code.
+    _ri_cmds, _ri_verify, _ri_notes = rewrite_inventory_service_routes(node, cmds, verify, services, inventory)
+    if _ri_notes:
+        cmds, verify = _ri_cmds, _ri_verify
+        _comp_notes = list(_comp_notes) + _ri_notes
+    # §17.1574c — "probe each endpoint authenticated": the engine presents the login it holds to every GET route.
+    _pe_cmds, _pe_verify, _pe_notes = rewrite_probe_service_endpoints(
+        node, cmds, verify, services, inventory, logins=(policy or {}).get("held_logins") or [])
+    if _pe_notes:
+        cmds, verify = _pe_cmds, _pe_verify
+        _comp_notes = list(_comp_notes) + _pe_notes
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
     # with `net.ipv6.conf.all.disable_ipv6 = 1` inside — stayed on the frame, the §17.1570d gate refused it,
     # and the run would have written it to the host anyway. The rewrites never declare files.
+    # §17.1589 — a DEVELOPED delivery (its files staged under /tmp/scaffold-dev-…) is the develop flow's: read the live
+    # files, proposed whole, gated, rehearsed, judged by its journal. No capability's shape replaces it. Live, T7's
+    # delivery was swapped for the FlareSolverr deploy by the chain above.
+    if _comp_notes and is_develop_delivery(files):
+        logger.warning("capability_rewrite_skipped_on_delivery node=%s notes=%d", (node or {}).get("node_key"), len(_comp_notes))
+        cmds, verify, _comp_notes = _orig_cmds, _orig_verify, []
     if _comp_notes and files:
         logger.info("rewrite_dropped_drafted_files node=%s files=%d", (node or {}).get("node_key"), len(files))
         files = []
@@ -5690,7 +5990,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # real values. A secret placeholder in a file has no fill and is refused.
     shape_files = ([{**f, "content": substitute([str(f.get("content") or "")], _dummies)[0]} for f in files]
                    if _dummies else files)
-    _secret_files = secrets_in_files(files, inputs)
+    _secret_files = secrets_in_files(files, inputs, secrets_resolved)   # §17.1589 — a resolved secret in a file is still in a file
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     # §17.1346 — the services the engine MEASURED on these machines judge the block's
     # values: a port or a data dir that belongs to another guest, and an edit to a
@@ -5743,6 +6043,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
+    refused = refused + locals_the_runner_reads_as_secrets(list(cmds) + list(verify), policy)   # §17.1578
+    refused = refused + a_secret_name_written_as_its_value(cmds, files, policy, verify)         # §17.1581
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
@@ -5808,6 +6110,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1367 — a value read from a machine, pasted into a shell word.
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
+    refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
@@ -5967,7 +6270,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         # like one built on a complete one -- to the drafter, to the gates, to the
         # operator and to the post-run judge.
         "not_measured": (reading.gaps() if reading is not None else []),
-        "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
+        # §17.1577 — when a capability REPLACED the draft, the operator reads the block that will run first
+        "runbook": (_rewritten_for_display(runbook, cmds, verify, files, _repairs) if _comp_notes
+                    else _runbook_for_display(runbook, cmds)),
+        "allow": list(policy.get("allow") or []),
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
         "expects": _expects,                      # §17.1570g — what a rewrite's check shows when the goal holds
@@ -6308,7 +6614,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 # claim that the check never ran. The looser form flipped a
                 # unit test whose probe dicts carry no `ran` at all.
                 _never_ran = [x for x in (ran or []) if x.get("ran") is False]
-                if verify_cmds and len(_never_ran) == len(verify_cmds):
+                if verify_cmds and len(_never_ran) == len(verify_cmds) and the_run_is_the_read(waiting, executed):
+                    # §17.1574e — a READ the read-only channel refused for privilege (§17.1574b) just ran, approved, on
+                    # the root channel: its own output IS the reading. Re-running the same command as a "check" on the
+                    # unprivileged channel is refused again by construction — that refusal says nothing about the work.
+                    # Live (job 9e1c2c68, T8/T10): `pve-firewall status; pve-firewall compile` printed the whole
+                    # ruleset as root and the step was then recorded failed for "nothing confirmed the work".
+                    verify_out = ("(the run is the read: it ran as root with the operator's approval and its output above "
+                                  "is the reading; the read-only channel cannot repeat it — §17.1574e)")
+                    logger.info("supervised_run_read_as_root job=%s node=%s", job_id, node_key)
+                elif verify_cmds and len(_never_ran) == len(verify_cmds):
                     _unverified = (
                         f"the {len(verify_cmds)} check(s) this step offered were all refused by "
                         f"{spec.name} and never ran, so nothing confirmed the work: "
@@ -7277,7 +7592,8 @@ async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]
 #: what was sent; the value never survives.
 _CREDENTIAL_LITERAL_RE = re.compile(
     r"((?:X-(?:Api-Key|Emby-Token|MediaBrowser-Token|Plex-Token)|Authorization)\s*:\s*"
-    r"(?:Bearer\s+)?|(?:api_?key|access_?token)\s*=\s*)"
+    r"(?:Bearer\s+)?|(?:api_?key|access_?token)\s*=\s*"
+    r"|[\"']?\w*api_?key[\"']?\s*:\s*[\"'])"              # §17.1583 — `"sonarrApiKey": "<hex>"` in a JSON/JS file
     r"(?!\$)([A-Za-z0-9_-]{16,128})", re.I)
 
 
@@ -8273,7 +8589,7 @@ _FS_LAST = (
 # tail keywords: "Add FlareSolverr and Byparr services" (a control-panel FEATURE step, developed on
 # CT 111) matched both and was hijacked into a `pct create 107` deploy. Real deploy titles still
 # match via a deploy verb ("Deploy/Install/Create/Set up FlareSolverr") or a container/lxc tail.
-_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc)\b", re.I)
+_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*flare\s*solverr|flare\s*solverr(?:\s+\w+){0,2}\s+(?:container|lxc)\b", re.I)   # §17.1589 — adjacent, not anywhere
 
 
 #: §17.1535 — deploy Byparr, the Camoufox-based FlareSolverr drop-in (ghcr.io/thephaseless/byparr),
@@ -8286,6 +8602,24 @@ _FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|st
 #: the official image, detached install across wait phases, idempotent create + recover.
 _BYPARR_VMID = "108"
 _BYPARR_IP = "192.168.1.27"
+
+
+def engine_deployed_services(names: list[str], measured: Optional[list] = None) -> list:
+    """§17.1591 — the services the ENGINE'S OWN DEPLOYS put on this host, as measured services, for a step that names
+    them and whose unit-based measurement cannot see them (they run as Docker containers inside guests the read
+    channel cannot exec into). Live (c2792d4b T7): FlareSolverr and Byparr were named, nothing was measured, the
+    facts carried no address, and the model wrote `192.168.1.107` and kept `192.168.1.25:8192` — the engine had put
+    them on CT 107 (192.168.1.26:8191, §17.1516) and CT 108 (192.168.1.27:8191, §17.1535) itself."""
+    from app.modules.service_truth import ServiceTruth as Service
+    have = {str(getattr(s, "name", "") or "").lower() for s in measured or []}
+    known = {"flaresolverr": (_FS_VMID, _FS_IP), "byparr": (_BYPARR_VMID, _BYPARR_IP)}
+    out = []
+    for n in names or []:
+        key = str(n or "").lower()
+        if key in known and key not in have:
+            gid, ip = known[key]
+            out.append(Service(guest=gid, unit="", name=key, state="running", address=ip, ports=("8191",)))   # both on :8191 (docker run -p 8191:8191)
+    return out
 _BYPARR_CREATE = (
     "sh -c '"
     f"if pct status {_BYPARR_VMID} >/dev/null 2>&1; then echo \"CT {_BYPARR_VMID} already exists: $(pct status {_BYPARR_VMID})\"; "
@@ -8348,7 +8682,7 @@ _BYPARR_LAST = (
 # §17.1542 — same tightening for Byparr: a genuine container deploy only, not "add … Byparr
 # services". Dropped "add"/"wire" lead verbs and the "service"/"deploy"/"install"/"proxy" tail.
 # "Deploy byparr-proxy as a new LXC" still matches (deploy verb + "new LXC" tail).
-_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*\bbyparr\b|\bbyparr\b.*\b(?:container|lxc)\b", re.I)
+_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*\bbyparr\b|\bbyparr\b(?:\s+\w+){0,2}\s+(?:container|lxc)\b", re.I)   # §17.1589
 
 
 def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: list[str],
@@ -8360,6 +8694,9 @@ def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: lis
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not (_BYPARR_RE.search(title) or _BYPARR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    from app.modules.machine_truth import place_guest as _pg
+    if _pg(node) and str(_pg(node)) != str(_BYPARR_VMID):          # §17.1589 — placed elsewhere: not this deploy
         return list(commands or []), list(verify or []), []
     run = [_BYPARR_CREATE, _BYPARR_START, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT,
            _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_LAST]
@@ -8436,6 +8773,12 @@ def rewrite_deploy_flaresolverr(node: Optional[dict], commands: list[str], verif
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not (_FLARESOLVERR_RE.search(title) or _FLARESOLVERR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1589 — a step PLACED on another guest ("… fix its handler on container 111 … FlareSolverr") is that
+    # guest's work, not this deploy: live, c2792d4b T7 "Fix remaining endpoint backends" was hijacked into a
+    # re-deploy of CT 107 (stop/start, docker run) and recorded done while the panel's handlers were never touched.
+    from app.modules.machine_truth import place_guest as _pg
+    if _pg(node) and str(_pg(node)) != str(_FS_VMID):
         return list(commands or []), list(verify or []), []
     # §17.1518 — create (host), then the detached install polled across six wait phases + a last
     # phase that fails the step if the unit failed. Six waits (~15 min) cover apt + the image pull.
@@ -8550,6 +8893,9 @@ def _node_text(node: Optional[dict]) -> str:
     cfg = _mcp_cfg(n)
     args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
     parts.append(str((args or {}).get("command") or ""))
+    # §17.1573 — a `write_file` node's path and content are its text too (the unit it writes names the table it loads)
+    parts.append(str((args or {}).get("path") or ""))
+    parts.append(str((args or {}).get("content") or "")[:2000])
     return " ".join(parts)
 
 
@@ -9260,6 +9606,286 @@ def disables_loopback_ipv6(commands: list[str], files: Optional[list[dict]] = No
     return out
 
 
+#: §17.1571 — stop the gateway's IPv6 router advertisements where the engine can reach them: on the
+#: Proxmox bridge every guest hangs off, with an nftables BRIDGE-family table of its own (coexists with
+#: pve-firewall, iptables or nft mode) that drops `nd-router-advert` frames being forwarded to the guests
+#: and delivered to the host. Persisted as a scoped systemd oneshot (`ExecStartPre=-nft delete table …`,
+#: `ExecStart=nft -f …`), so it survives reboot and never touches another ruleset. Reversible: disable the
+#: unit, delete the table. Measured (pve, 2026-10-15): RAs from fe80::4eab:f8ff:fed1:5491 (the Spectrum
+#: gateway, no LAN admin surface) reach every veth on vmbr0; the host itself keeps no RA route.
+_RAFILTER_FILE = "/etc/scaffold/rafilter.nft"
+_RAFILTER_UNIT = "scaffold-rafilter.service"
+_RAFILTER_TABLE = "bridge scaffold_rafilter"
+_RAFILTER_NFT = (
+    "table bridge scaffold_rafilter {\\n"
+    "  chain forward {\\n"
+    "    type filter hook forward priority -200; policy accept;\\n"
+    "    icmpv6 type nd-router-advert counter drop comment \\\"scaffold: the gateway IPv6 RA routes nowhere (sec 17.1571)\\\"\\n"
+    "  }\\n"
+    "  chain input {\\n"
+    "    type filter hook input priority -200; policy accept;\\n"
+    "    icmpv6 type nd-router-advert counter drop\\n"
+    "  }\\n"
+    "}\\n")
+_RAFILTER_UNIT_TEXT = (
+    "[Unit]\\nDescription=scaffold: drop IPv6 router advertisements on the bridge (sec 17.1571)\\n"
+    "After=network-online.target\\nWants=network-online.target\\n\\n"
+    "[Service]\\nType=oneshot\\nRemainAfterExit=yes\\n"
+    "ExecStartPre=-/usr/sbin/nft delete table bridge scaffold_rafilter\\n"
+    "ExecStart=/usr/sbin/nft -f /etc/scaffold/rafilter.nft\\n"
+    "ExecStop=-/usr/sbin/nft delete table bridge scaffold_rafilter\\n\\n"
+    "[Install]\\nWantedBy=multi-user.target\\n")
+_RA_DROP_RE = re.compile(r"\b(?:drop|block|filter|stop|refuse|discard|suppress)\w*\b[^.;\n]{0,60}\b(?:router\s+advertisements?|\bRAs?\b|nd-router-advert)"
+                         r"|\b(?:router\s+advertisements?|nd-router-advert)\b[^.;\n]{0,60}\b(?:drop|block|filter|stop|refuse|discard|suppress)", re.I)
+_RA_WHERE_RE = re.compile(r"\bbridge\b|\bvmbr\d*\b|\bproxmox\s+host\b|\bthe\s+host\b|\bhypervisor\b|\bgateway\b|\bnftables?\b", re.I)
+#: §17.1573 — the filter's own names, the engine's or the planner's: a step that writes/loads/enables/verifies
+#: "block-ra" / "rafilter" / the RA table or unit is a piece of this one install (live, job 9e1c2c68: T2 wrote
+#: the rule file, T3 the unit, T4 enabled it, T5–T7 verified each — fragments of one capability).
+_RA_NAMED_RE = re.compile(r"\bblock[-_ ]?ra\b|\brafilter\b|\bnd-router-advert\b|\brouter[- ]advert", re.I)
+_RA_PIECE_RE = re.compile(r"\b(?:nft|nftables|table|unit|oneshot|service|systemd|rule|counter|enable|start|load)\w*\b", re.I)
+#: … but IN-GUEST IPv6 work ("stop accepting router advertisements in container 102", sysctl, eth0) is §17.1570's, not this
+_IN_GUEST_IPV6_RE = re.compile(r"\bcontainer\s+\d+|\bCT\s*\d+\b|\bpct\s+exec\b|disable[_-]ipv6|\bsysctl\b|\baccept_ra\b|\bautoconf\b|"
+                               r"\bin\s+(?:the\s+|each\s+|every\s+)?(?:guest|container|LXC)s?\b|\beth0\b|\bgai\.conf\b", re.I)
+
+
+def _rafilter_check() -> str:
+    """§17.1574 — the check runs on the READ-ONLY channel, which is unprivileged: `nft list` there answers
+    `netlink: Error: cache initialization failed: Operation not permitted` (live, T2–T7 of 9e1c2c68). The
+    oneshot is `RemainAfterExit`, so `active` means `nft -f` loaded the table; the files are read back; the
+    counter is read in the approved RUN, whose channel is root (T6 saw `counter packets 12`)."""
+    return (f"systemctl is-active {_RAFILTER_UNIT}; systemctl is-enabled {_RAFILTER_UNIT}; "
+            f"cat {_RAFILTER_FILE}; cat /etc/systemd/system/{_RAFILTER_UNIT}; "
+            f"systemctl is-active {_RAFILTER_UNIT} | grep -qx active && grep -q nd-router-advert {_RAFILTER_FILE} "
+            f"&& echo STATE-OK || echo STATE-WRONG")
+
+
+def rewrite_verify_router_adverts_dropped(node: Optional[dict], commands: list[str], verify: list[str],
+                                          services: Optional[list] = None,
+                                          inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1573 — a verify/check step about the RA filter (its table, rule, counter or unit, by the engine's
+    name or the planner's "block-ra") reads the filter as installed: run == check == `_rafilter_check()`,
+    expecting STATE-OK. The planner's own read named ITS table (`nft list table bridge block_ra`), which
+    does not exist once §17.1571 installed `scaffold_rafilter`; the engine reads what it built."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_JF_OBSERVE_TITLE_RE.search(title) and _RA_NAMED_RE.search(text) and _RA_PIECE_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    own = _own_step_text(node)
+    if _IN_GUEST_IPV6_RE.search(own):
+        return list(commands or []), list(verify or []), []          # a guest's IPv6 state: §17.1570's verify
+    if re.search(r"\bpve-firewall\b|nftables\.conf|\bguests?\s+(?:untouched|unchanged|were\s+not)", own, re.I) \
+            and not _RA_NAMED_RE.search(own):
+        return list(commands or []), list(verify or []), []          # a different thing is being checked
+    check = _rafilter_check()
+    run = f"nft list table {_RAFILTER_TABLE}; {check}"          # the root channel lists the table and its counter
+    note = [{"expect": {check: "STATE-OK"}, "why": (
+        f"drafted the check from the engine's own shape (§17.1573): it lists the installed table {_RAFILTER_TABLE} — the "
+        f"rule's counter grows with every advertisement dropped — the unit's active/enabled state, and both files, ending "
+        f"STATE-OK. The draft read a table by the plan's working name, which is not the one the engine installed.")}]
+    return [run], [check], note
+
+
+def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: list[str], verify: list[str],
+                                              services: Optional[list] = None,
+                                              inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1571 — a "drop/block the IPv6 router advertisements at the bridge/host/gateway" step installs
+    the bridge filter on the Proxmox host, deterministically.
+
+    Operator (2026-10-15): "fix the IPv6 router advertisements at the gateway through the engine." The
+    gateway is a Spectrum router with no LAN admin page or API (the operator's standing note), so the
+    nearest point the engine controls is the bridge: an nftables bridge table dropping nd-router-advert
+    in the forward hook (to the guests) and the input hook (to the host), persisted as its own oneshot
+    unit. The counter on the rule is the witness — it grows with every advertisement dropped — and the
+    check prints it with one verdict word. Runs on the HOST (no pct exec), as the runner itself does."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if _JF_OBSERVE_TITLE_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    if _IN_GUEST_IPV6_RE.search(_own_step_text(node)):
+        return list(commands or []), list(verify or []), []          # in-guest IPv6 work is §17.1570's
+    # the whole ("drop the RAs at the bridge") or a piece of it ("write the block-ra unit", "enable block-ra.service")
+    whole = bool(_RA_DROP_RE.search(text) and _RA_WHERE_RE.search(text))
+    piece = bool(_RA_NAMED_RE.search(text) and _RA_PIECE_RE.search(text))
+    if not (whole or piece):
+        return list(commands or []), list(verify or []), []
+    run = (f"test -x /usr/sbin/nft || {{ echo 'FAILED: /usr/sbin/nft is not installed on this host'; exit 1; }}; "
+           f"mkdir -p /etc/scaffold && printf '{_RAFILTER_NFT}' > {_RAFILTER_FILE} && "
+           f"printf '{_RAFILTER_UNIT_TEXT}' > /etc/systemd/system/{_RAFILTER_UNIT} && "
+           f"systemctl daemon-reload && systemctl enable {_RAFILTER_UNIT} && systemctl restart {_RAFILTER_UNIT} && "
+           f"nft list table {_RAFILTER_TABLE} && "
+           f"echo 'RESULT: IPv6 router advertisements are dropped on the bridge (forward to guests, input to host); "
+           f"persisted as {_RAFILTER_UNIT}; existing SLAAC addresses in guests age out by their own lifetimes'")
+    # The CHECK runs on the read-only channel (`nft list` is a read form there — measured: the runner ran
+    # `nft list ruleset` for T1 of job 9e1c2c68): the table as loaded, with its counter; the oneshot's state
+    # (RemainAfterExit: `active` only when `nft -f` succeeded); both files read back; one verdict word.
+    check = _rafilter_check()
+    note = [{"expect": {check: "STATE-OK"}, "why": (
+        f"drafted from the engine's own shape (§17.1571): on the Proxmox host it writes {_RAFILTER_FILE} — an nftables "
+        f"BRIDGE table that drops nd-router-advert frames forwarded to the guests and delivered to the host — and "
+        f"{_RAFILTER_UNIT}, a oneshot that loads it at boot (delete-then-load, so it is idempotent and touches no "
+        f"other ruleset, pve-firewall included). The gateway (fe80::…:5491, a Spectrum router) has no LAN admin "
+        f"surface, so the bridge is the nearest point the engine controls. The check lists the table — its counter "
+        f"grows with every advertisement dropped — and ends with STATE-OK. Reversible: disable the unit, delete the table.")}]
+    return [run], [check], note
+
+
+def _guest_by_name_fragment(text: str, services: Optional[list], inventory: Optional[dict]) -> tuple[str, str, str]:
+    """§17.1572 — the guest whose measured-service or inventory NAME shares a word (4+ letters) with the step:
+    "the panel backend" → control-panel (111). Fallback after `_named_guest`; "" when nothing matches."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", text or "")}
+    for s in services or []:
+        nm = str(getattr(s, "name", "") or "").lower()
+        if nm and getattr(s, "guest", "") and any(t in words for t in re.split(r"[^a-z0-9]+", nm) if len(t) >= 4):
+            return nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or "")
+    for g, nm in ((inventory or {}).get("names") or {}).items():
+        nm_s = str(nm or "").lower()
+        if nm_s and any(t in words for t in re.split(r"[^a-z0-9]+", nm_s) if len(t) >= 4):
+            unit = next((str(getattr(s, "unit", "") or "") for s in services or []
+                         if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
+            return nm_s, str(g), unit
+    return "", "", ""
+
+
+#: §17.1572 — "inventory / list / map the endpoints|routes|API of <service>" is a READ the engine owns:
+#: grep the service's route registrations and its config keys under its /opt/<name>* directories.
+#: §17.1602 — `read` the verb, never the adjective: "Create a read-only Proxmox API token" matched "read … API"
+_ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read(?![-‐ ]only|[-‐ ]write)|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
+                                 r"\b(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
+_ROUTE_SERVICE_RE = re.compile(r"\b(control-?panel|panel|backend|express|node|flask|fastapi)\b", re.I)
+
+
+#: §17.1602 — a step whose title opens with a change is never rewritten into a read-only template: live (c2792d4b T14
+#: "Create a read-only Proxmox API token for the panel"), the inventory read replaced the draft and would have recorded
+#: the step done with no token created.
+_CHANGE_TITLE_RE = re.compile(r"^\s*(?:create|add|set|install|configure|fix|change|write|deploy|enable|disable|remove|"
+                              r"delete|grant|give|update|replace|rotate|build|implement|make|move|rename|restart|issue|"
+                              r"generate|provision|register|store|put|push)\b", re.I)
+
+
+def title_changes_something(node: Optional[dict]) -> bool:
+    return bool(_CHANGE_TITLE_RE.match(str((node or {}).get("title") or "")))
+
+
+def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1572 — an "inventory the panel's endpoints" step reads the measured service's own code,
+    deterministically: every route registration (`app|router.get|post|put|delete|use(`) under the
+    service's /opt/<name>* directories, the config directory's files and the key NAMES they hold
+    (never values), and the served page's fetch targets.
+
+    Live (job c2792d4b, T1): the model drafted 24 exploratory `find / -maxdepth 5 … | xargs grep` commands
+    with no check — refused, `suggested: myself`. The engine already knows the service, its guest and
+    its directories (service_truth / develop.read_workspace); a model cannot read remote files and need
+    not guess where they are. A read, settled by STATE-OK when at least one route was found."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    own = _own_step_text(node)
+    name, gid, _unit = _named_guest(own, services, inventory)
+    if not gid:
+        name, gid, _unit = _guest_by_name_fragment(own, services, inventory)    # "the panel backend" → control-panel
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
+    routes = "(app|router)\\.(get|post|put|patch|delete|use)\\("
+    inc = "--include='*.js' --include='*.ts' --include='*.py' --exclude-dir=node_modules --exclude-dir='*.bak*'"
+    # plain reads over the service's /opt/<stem>* glob: no loops, no substitutions, so the read-only channel takes it;
+    # the develop flow's `.bak.<stamp>` copies are left out (live, T1 of c2792d4b listed three of them)
+    payload = (
+        f"echo '--- service dirs ---'; ls -d /opt/{stem}* | grep -v '\\.bak'; "
+        f"echo '--- routes ---'; grep -rnE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | head -n 150; "
+        f"echo '--- served page fetch targets ---'; grep -rhoE 'fetch\\([^)]{{0,120}}\\)' /opt/{stem}* --include='*.html' --include='*.js' --exclude-dir='*.bak*' 2>/dev/null | grep -v node_modules | sort | uniq -c | sort -rn | head -n 40; "
+        f"echo '--- config files and key names (values never printed) ---'; ls /opt/{stem}*/config 2>/dev/null; "
+        f"grep -rhoE '\"[A-Za-z_]*([Kk]ey|[Tt]oken|[Pp]assword|[Uu]rl|[Aa]ddress)\"' /opt/{stem}*/config 2>/dev/null | sort | uniq -c; "
+        f"echo '--- route files ---'; grep -rlE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | grep -c . && echo STATE-OK || echo STATE-WRONG")
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    note = [{"expect": {run: "STATE-OK"}, "why": (
+        f"drafted the inventory from the engine's own shape (§17.1572): inside guest {gid} ({name}) it lists the "
+        f"service's /opt/{stem}* directories, every route registration in them, the served page's fetch targets, "
+        f"and the config files with the NAMES of the keys they hold (values are never printed) — a read, settled by "
+        f"STATE-OK when at least one route file was found. The draft was 24 `find / … | xargs grep` guesses with no check.")}]
+    return [run], [run], note
+
+
+#: §17.1574c — "probe / call / test each endpoint, authenticated as <the login user>": the engine presents the
+#: login it holds and reads every GET route the service's own code registers.
+_PROBE_ENDPOINTS_RE = re.compile(r"\b(?:probe|call|test|exercise|query|hit|fetch|request|curl)\w*\b[^.;\n]{0,40}\b(?:endpoints?|routes?|api)\b", re.I)
+_AUTHENTICATED_RE = re.compile(r"\bauthenticated\b|\blogged[- ]in\b|\bbasic[- ]auth\b|\bas\s+the\s+\w+\s+user\b|\bwith\s+(?:the\s+)?(?:login|credentials?)\b", re.I)
+
+
+def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], verify: list[str],
+                                    services: Optional[list] = None, inventory: Optional[dict] = None,
+                                    logins: Optional[list] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1574c — a "probe each endpoint authenticated" step for a service the engine holds a login for.
+
+    Live (job c2792d4b, T2): the model drafted a loop over endpoints it guessed, with
+    `-H "Cookie: <PANEL_SESSION_COOKIE>"` (a value nobody holds) and no check — refused. The engine holds
+    the login (PANEL_PASSWORD, user `panel`, §17.1548's `logins_from_held`) and can read the routes off
+    the service's own code, so inside the guest it: lists every GET route registered under /opt/<stem>*,
+    curls each on the measured loopback port with HTTP Basic auth — the password fed on stdin as the
+    runner-resolved `<NAME>` placeholder, never in the command — and prints `HTTP <code> in <s>` with the
+    tail of the body; STATE-OK when every route answered (any code is an answer; 000 is not). The same
+    line is run and check: it changes nothing."""
+    from app.modules import machine_values as _mv
+    text = _node_text(node)
+    if title_changes_something(node) or not (_PROBE_ENDPOINTS_RE.search(text) and _AUTHENTICATED_RE.search(text)):
+        return list(commands or []), list(verify or []), []   # §17.1602 — a change is not a probe
+    own = _own_step_text(node)
+    name, gid, _unit = _named_guest(own, services, inventory)
+    if not gid:
+        name, gid, _unit = _guest_by_name_fragment(own, services, inventory)
+    if not gid or not logins:
+        return list(commands or []), list(verify or []), []
+    guard = _mv._guarded_ports(services, list(logins))
+    mine = [(port, secret, user) for port, (secret, user, g, vm) in guard.items() if str(g) == str(gid) and not vm]
+    stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
+    if mine:
+        port, secret, user = sorted(mine)[0]
+        port_expr = f"port={port}; "
+    else:
+        # §17.1574d — no MEASURED service for this guest (live, c2792d4b: the job named no service, so nothing was
+        # measured): the login whose stem names the guest (`PANEL_PASSWORD` → `panel` ∈ `control-panel`) is still the
+        # engine's, and the service's own code says which port it listens on — read at run time, in the guest.
+        _gn = _mv._norm(name)
+        fits = [L for L in logins if _mv._login_stem(L.get("name", "")) and _gn
+                and (_mv._login_stem(L.get("name", "")) in _gn or _gn in _mv._norm(L.get("hint", "")))]
+        if not fits or not str(fits[0].get("user") or "").strip():
+            return list(commands or []), list(verify or []), []
+        secret, user = str(fits[0]["name"]), str(fits[0]["user"])
+        # §17.1579 — the port is what LISTENS in the guest, read off the machine first (live: the panel's server.js
+        # says `app.listen(PORT…)`, no literal; `ss` in CT 111 says node listens on 3001), then the code's literal.
+        port_expr = ('port=$(ss -ltnpH 2>/dev/null | grep -E "users:...(node|python|gunicorn|uvicorn|deno|bun|java|ruby|php)" '
+                     '| grep -oE ":[0-9]+ " | head -n 1 | tr -d ": "); '
+                     f'test -n "$port" || port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/{stem}* --include="*.js" --include="*.ts" --include="*.py" '
+                     f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "[0-9]+" | head -n 1); '
+                     'test -n "$port" || echo "FAILED: no app listener in the guest and no listen(<port>) in the service code"; ')   # an empty port → every curl 000 → STATE-WRONG
+    # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
+    payload = (
+        'cpw=$(cat); fails=""; n=0; ' + port_expr +     # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
+        # §17.1578 — the block's own names are LOWERCASE: the runner reads every `$UPPER` reference as a secret it must
+        # hold and refused `$CPW`/`$PORT` live ("neither the engine sent nor this runner's secrets file holds")
+        # the route's quote is matched with `.` and stripped with tr's octal `\047`: no quote character of either kind
+        # appears in the payload, so `_sq_payload` wraps it once with no `'\''` escapes
+        f'for ep in $(grep -rhoE "(app|router)\\.get\\(.(/[^,)]*)" /opt/{stem}* --include="*.js" --include="*.ts" '
+        f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "/[^,)]*" | tr -d "\\047\\042" | sort -u); do '
+        f'echo "=== $ep ==="; out=$(curl -s -m 20 -u "{user}:$cpw" -w "\\nHTTP %{{http_code}} in %{{time_total}}s" "http://127.0.0.1:$port$ep" 2>&1); '
+        'n=$((n+1)); case "$out" in *"HTTP 000"*) fails="$fails $ep";; esac; printf "%s\\n" "$out" | tail -c 400; echo; done; '
+        # §17.1580 — the probe's verdict is that it PROBED (a port, at least one route): a route that hangs is the
+        # finding the next step needs, not this step's failure (live, c2792d4b T2: three routes hang; that is the bug)
+        'echo "unanswered:$fails"; echo "probed:$n"; test -n "$port" && test "$n" -gt 0 && echo STATE-OK || echo STATE-WRONG')
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)} <<< \"<{secret}>\""
+    note = [{"expect": {run: "STATE-OK"}, "why": (
+        f"drafted the probe from the engine's own shape (§17.1574c): inside guest {gid} ({name}) it reads every GET route "
+        f"the service's code registers under /opt/{stem}*, calls each on the service's loopback port as user `{user}` with the login the "
+        f"engine holds ({secret}, fed on stdin as a runner-resolved placeholder — never in the command or a log), and prints "
+        f"`HTTP <code> in <s>` with the tail of each body and lists the routes that did not answer (`unanswered:`); STATE-OK "
+        f"when the probe ran — a hanging route is this step's finding, not its failure. The draft guessed the routes "
+        f"and sent a session cookie nobody holds, with no check.")}]
+    return [run], [run], note
+
+
 def a_validating_endpoint_sent_an_empty_body(
         commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     r"""§17.1378b — a `/test` endpoint called with `{}` when it validates the object.
@@ -9540,6 +10166,17 @@ def with_own_checks(node: Optional[dict], verify: list) -> list[str]:
         if c not in out and (into.match(c) or host_level):
             out.append(c)
     return out
+
+
+def the_run_is_the_read(waiting: Optional[dict], executed: Optional[list]) -> bool:
+    """§17.1574e — True when the approved RUN of this frame was itself the reading: a root-needing MCP read
+    (`hands_on_reason` mcp:needs-root, §17.1574b) whose commands all ran and printed something. Its check is the
+    same command on the unprivileged channel — refused by construction — so that refusal is not "unverified"."""
+    w = waiting or {}
+    if str(w.get("hands_on_reason") or "") != "mcp:needs-root":
+        return False
+    ex = [e for e in (executed or []) if isinstance(e, dict)]
+    return bool(ex) and all(e.get("ok") is not False and str(e.get("output") or "").strip() for e in ex)
 
 
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
