@@ -106,3 +106,40 @@ def test_a_delivery_refreshes_every_file_that_holds_a_copy_of_a_held_credential(
     assert src.index("_marked_paths = sorted(") < src.index("refresh_credential_copies(files, workspace") < src.index("develop.derived_from_files(host, files, _port)")
     assert 'creds[_n] = develop.machine_read_for(_n, _services, _inv) or develop.RUNNER_HELD' in src
     assert "run_node, inventory=_inv)" in src
+
+
+# ── §17.1588 — the name as the value, a generic key named by its file, a mark the model wrote, and prose ─────────
+def test_a_value_that_is_the_credentials_own_name_is_a_copy_too():
+    unit = {"/etc/systemd/system/control-panel.service": "[Service]\nEnvironment=NODE_ENV=production\nEnvironment=RADARR_API_KEY=RADARR_API_KEY\nType=simple\n"}
+    ws, marked, creds = dv.mark_held_credentials(unit, {}, ["RADARR_API_KEY"])
+    assert marked == ["RADARR_API_KEY"] and "Environment=RADARR_API_KEY=@@SCAFFOLD:RADARR_API_KEY@@" in ws["/etc/systemd/system/control-panel.service"]
+    assert "Environment=NODE_ENV=production" in ws["/etc/systemd/system/control-panel.service"] and "Type=simple" in ws["/etc/systemd/system/control-panel.service"]
+    xml = {"/var/lib/radarr/config.xml": "<Config>\n  <ApiKey>RADARR_API_KEY</ApiKey>\n</Config>\n"}
+    assert dv.mark_held_credentials(xml, {}, ["RADARR_API_KEY"])[1] == []        # an XML element is not a key=value: left to §17.1581's gate
+    assert dv.mark_held_credentials({"/x": "FOO=BAR\n"}, {}, ["FOO"])[1] == []  # another short word is not a copy
+
+
+def test_a_generic_key_is_named_by_its_file():
+    cfg = {"/opt/control-panel-backend/config/scaffold-engine.json": '{\n  "engineAddress": "http://192.168.1.43:8000",\n  "apiKey": "sk-scaffold-0123456789abcdefABCDEF"\n}\n',
+           "/opt/control-panel-backend/config/media-request.json": '{"apiKey": "sk-scaffold-0123456789abcdefABCDEF"}'}
+    ws, marked, creds = dv.mark_held_credentials(cfg, {}, ["SCAFFOLD_PANEL_KEY", "RADARR_API_KEY", "PANEL_PASSWORD"])
+    assert marked == ["SCAFFOLD_PANEL_KEY"] and '"apiKey": "@@SCAFFOLD:SCAFFOLD_PANEL_KEY@@"' in ws["/opt/control-panel-backend/config/scaffold-engine.json"]
+    assert "sk-scaffold" in ws["/opt/control-panel-backend/config/media-request.json"]      # media-request names no one credential
+    assert creds == {"SCAFFOLD_PANEL_KEY": dv.RUNNER_HELD}
+
+
+def test_a_mark_the_model_wrote_for_an_unnamed_credential_is_resolved_not_failed():
+    assert dv.marks_in({"/u": "Environment=X=@@SCAFFOLD:RADARR_API_KEY@@\n", "/c": '"k": "@@SCAFFOLD:SONARR_API_KEY@@"'}) == ["RADARR_API_KEY", "SONARR_API_KEY"]
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "for _n in develop.marks_in(files):" in src and 'develop.machine_read_for(_n, _services, _inv) or (develop.RUNNER_HELD if _n in _held_names else "")' in src
+    assert src.index("develop.marks_in(files)") < src.index("refresh_credential_copies(files, workspace")
+
+
+def test_the_name_as_value_gate_leaves_prose_alone_and_still_bites():
+    policy = {"held": ["SCAFFOLD_PANEL_KEY", "RADARR_API_KEY"]}
+    prose = ["return res.status(500).json({ error: 'SCAFFOLD_PANEL_KEY not configured' });", 'echo "RADARR_API_KEY is read from the environment"']
+    assert sr.a_secret_name_written_as_its_value(prose, [], policy) == []
+    assert sr.a_secret_name_written_as_its_value([], [{"path": "/u", "content": "Environment=RADARR_API_KEY=RADARR_API_KEY\nEnvironment=X=1\n"}], policy)
+    assert sr.a_secret_name_written_as_its_value([], [{"path": "/c.json", "content": '{"radarrApiKey": "RADARR_API_KEY",\n "x": 1}'}], policy)
+    assert sr.a_secret_name_written_as_its_value(["sed -i 's|<ApiKey>.*</ApiKey>|<ApiKey>RADARR_API_KEY</ApiKey>|' /var/lib/radarr/config.xml"], [], policy)

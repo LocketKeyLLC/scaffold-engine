@@ -681,6 +681,11 @@ def credentials_for(services: Optional[list], runner_secrets: Optional[list] = N
     return out
 
 
+def marks_in(files: Optional[dict[str, str]]) -> list[str]:
+    """§17.1588 — every `@@SCAFFOLD:NAME@@` the files carry."""
+    return sorted({n for c in (files or {}).values() for n in _MARK_RE.findall(str(c or ""))})
+
+
 def refresh_credential_copies(files: dict[str, str], marked_workspace: dict[str, str], marked_paths: list[str],
                               host: Host, node: Optional[dict]) -> tuple[dict[str, str], list[str]]:
     """§17.1587 — a file that holds a COPY of a credential the engine holds is delivered with the live value.
@@ -703,7 +708,9 @@ def refresh_credential_copies(files: dict[str, str], marked_workspace: dict[str,
 #: §17.1583 — a credential a workspace file carries in the clear: `"sonarrApiKey": "<hex>"`, `apiKey = '<hex>'`,
 #: `SONARR_API_KEY=<hex>`. The key's letters name the credential (sonarrApiKey ≡ SONARR_API_KEY).
 _FILE_CREDENTIAL_RE = re.compile(
-    r"(?P<pre>(?P<q>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=q)\s*[:=]\s*(?P<vq>[\"']?))(?P<val>[A-Za-z0-9_-]{16,128})(?=[\"'\s,;}\]]|$)")
+    r"(?P<pre>(?P<q>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=q)\s*[:=]\s*(?P<vq>[\"']?))(?P<val>[A-Za-z0-9_-]{16,128}|[A-Z][A-Z0-9_]{2,60})(?=[\"'\s,;}\]]|$)")
+#: §17.1588 — a key name that names no credential by itself; the FILE's name then says which one (scaffold-engine.json)
+_GENERIC_KEY_RE = re.compile(r"^(?:api_?key|api_?token|access_?token|token|key|secret|password|passwd|pass)$", re.I)
 
 
 def _cred_norm(s: str) -> str:
@@ -736,14 +743,29 @@ def mark_held_credentials(workspace: dict[str, str], creds: dict[str, str],
     out: dict[str, str] = {}
     marked: set[str] = set()
 
-    def _repl(m: "re.Match[str]") -> str:
-        name = by_norm.get(_cred_norm(m.group("key")))
-        if not name:
-            return m.group(0)
-        marked.add(name)
-        return m.group("pre") + SECRET_MARK.format(name=name)
+    def _by_file(path: str) -> Optional[str]:
+        # §17.1588 — `"apiKey": "sk-…"` in scaffold-engine.json: the key says nothing, the file's words name ONE credential
+        stem = set(re.findall(r"[a-z][a-z0-9]{2,}", path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower())) - {"config", "settings", "local", "default"}
+        hits = sorted({n for n in names if stem & set(re.findall(r"[a-z][a-z0-9]{2,}", n.lower()))})
+        return hits[0] if len(hits) == 1 else None
+
+    def _repl_for(path: str):
+        def _repl(m: "re.Match[str]") -> str:
+            key, val = m.group("key"), m.group("val")
+            name = by_norm.get(_cred_norm(key)) or (_by_file(path) if _GENERIC_KEY_RE.match(key) else None)
+            if not name:
+                return m.group(0)
+            # §17.1588 — a value that IS the credential's own name (live: Radarr's config.xml and the panel's unit both
+            # carry `RADARR_API_KEY` as the key, since job c75d77fa T30 wrote it so) is a copy too: it is marked, and the
+            # delivery fills it from the authoritative read — whatever that read holds today
+            if len(val) < 16 and val != name:
+                return m.group(0)
+            marked.add(name)
+            return m.group("pre") + SECRET_MARK.format(name=name)
+        return _repl
     for path, body in (workspace or {}).items():
-        out[path] = _FILE_CREDENTIAL_RE.sub(_repl, str(body or "")) if path and not path.endswith((".js.map", ".lock")) else body
+        out[path] = (_FILE_CREDENTIAL_RE.sub(_repl_for(path), str(body or ""))
+                     if path and not path.endswith((".js.map", ".lock")) else body)
     for n in marked:
         creds.setdefault(n, RUNNER_HELD)          # a held name the files carry: the delivery fills it from the runner
     return out, sorted(marked), creds

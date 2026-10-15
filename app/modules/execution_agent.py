@@ -3129,6 +3129,15 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     continue
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
+                # §17.1588 — a mark the MODEL wrote for a held name the step never named: resolved here, not failed at
+                # delivery ("the engine cannot read RADARR_API_KEY on any machine" — live T5, with Radarr's read in hand)
+                for _n in develop.marks_in(files):
+                    if _n not in creds:
+                        _held_names = list((policy or {}).get("secrets") or []) + list((policy or {}).get("held") or [])
+                        _r = develop.machine_read_for(_n, _services, _inv) or (develop.RUNNER_HELD if _n in _held_names else "")
+                        if _r:
+                            creds[_n] = _r
+                            logger.warning("develop_mark_resolved job=%s node=%s name=%s via=%s", job_id, _nk_dev, _n, "machine" if _r != develop.RUNNER_HELD else "runner")
                 # §17.1587 — the files that hold a copy of a held credential are delivered with the live value
                 files, _refreshed = develop.refresh_credential_copies(files, workspace, _marked_paths, host, run_node)
                 if _refreshed:

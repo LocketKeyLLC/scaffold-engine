@@ -5230,7 +5230,7 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
     held = sorted({str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])})
     if not held:
         return []
-    pat = re.compile(r"(?<![$<{\w])(?:(?<=[>=:'\"`])|(?<=[>=:'\"`]\s))(" + "|".join(re.escape(h) for h in held) + r")(?=[<'\"`\s;&|)]|$)(?!\s*=[^=])")
+    pat = re.compile(r"(?<![$<{\w])(?:(?<=[>=:'\"`])|(?<=[>=:'\"`]\s))(" + "|".join(re.escape(h) for h in held) + r")(?=['\"`<]|[ \t]*(?:$|[;&|)}\],]))(?!\s*=[^=])", re.M)   # §17.1588 — the name ENDS the value: `'NAME not configured'` is prose
     texts = ([str(c) for c in commands or []] + [str(v) for v in verify or []]
              + [str((f or {}).get("content") or "") for f in files or []])
     out: list[dict] = []
