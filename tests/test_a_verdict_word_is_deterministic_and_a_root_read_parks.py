@@ -151,3 +151,16 @@ def test_frame_run_runs_the_probe_rewrite_with_the_held_logins_before_the_key_re
     src = inspect.getsource(sr)
     assert 'rewrite_probe_service_endpoints(\n        node, cmds, verify, services, inventory, logins=(policy or {}).get("held_logins") or [])' in src
     assert src.index("rewrite_probe_service_endpoints(\n        node, cmds") < src.index("read_on_the_machine(cmds")
+
+
+# ── 1574e — the approved root run of a refused read is the reading; its refused re-check is not "unverified" ─────
+def test_the_root_run_of_a_refused_read_is_the_reading():
+    w = {"hands_on_reason": "mcp:needs-root", "title": "Verify pve-firewall untouched"}
+    ran = [{"command": "pve-firewall status; pve-firewall compile", "output": "Status: enabled/running\nipset cmdlist: …", "exit": 0, "ok": True}]
+    assert sr.the_run_is_the_read(w, ran)
+    assert not sr.the_run_is_the_read(w, [{"command": "x", "output": "", "exit": 0, "ok": True}])      # printed nothing
+    assert not sr.the_run_is_the_read(w, [{"command": "x", "output": "boom", "exit": 1, "ok": False}])  # failed
+    assert not sr.the_run_is_the_read({"hands_on_reason": "tool:shell"}, ran)                           # a change: checks stand
+    import inspect
+    src = inspect.getsource(sr)
+    assert "and the_run_is_the_read(waiting, executed):" in src and src.index("the_run_is_the_read(waiting, executed)") < src.index('_unverified = (')

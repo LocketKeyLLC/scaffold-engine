@@ -6399,7 +6399,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 # claim that the check never ran. The looser form flipped a
                 # unit test whose probe dicts carry no `ran` at all.
                 _never_ran = [x for x in (ran or []) if x.get("ran") is False]
-                if verify_cmds and len(_never_ran) == len(verify_cmds):
+                if verify_cmds and len(_never_ran) == len(verify_cmds) and the_run_is_the_read(waiting, executed):
+                    # §17.1574e — a READ the read-only channel refused for privilege (§17.1574b) just ran, approved, on
+                    # the root channel: its own output IS the reading. Re-running the same command as a "check" on the
+                    # unprivileged channel is refused again by construction — that refusal says nothing about the work.
+                    # Live (job 9e1c2c68, T8/T10): `pve-firewall status; pve-firewall compile` printed the whole
+                    # ruleset as root and the step was then recorded failed for "nothing confirmed the work".
+                    verify_out = ("(the run is the read: it ran as root with the operator's approval and its output above "
+                                  "is the reading; the read-only channel cannot repeat it — §17.1574e)")
+                    logger.info("supervised_run_read_as_root job=%s node=%s", job_id, node_key)
+                elif verify_cmds and len(_never_ran) == len(verify_cmds):
                     _unverified = (
                         f"the {len(verify_cmds)} check(s) this step offered were all refused by "
                         f"{spec.name} and never ran, so nothing confirmed the work: "
@@ -9892,6 +9901,17 @@ def with_own_checks(node: Optional[dict], verify: list) -> list[str]:
         if c not in out and (into.match(c) or host_level):
             out.append(c)
     return out
+
+
+def the_run_is_the_read(waiting: Optional[dict], executed: Optional[list]) -> bool:
+    """§17.1574e — True when the approved RUN of this frame was itself the reading: a root-needing MCP read
+    (`hands_on_reason` mcp:needs-root, §17.1574b) whose commands all ran and printed something. Its check is the
+    same command on the unprivileged channel — refused by construction — so that refusal is not "unverified"."""
+    w = waiting or {}
+    if str(w.get("hands_on_reason") or "") != "mcp:needs-root":
+        return False
+    ex = [e for e in (executed or []) if isinstance(e, dict)]
+    return bool(ex) and all(e.get("ok") is not False and str(e.get("output") or "").strip() for e in ex)
 
 
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
