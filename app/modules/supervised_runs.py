@@ -142,6 +142,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: refusal-producing function and fails when one's text matches nothing here.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "takes loopback down with it",                   # §17.1570d
+                   "prints a new secret once", "a file named as a secret",   # §17.1603
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -321,6 +322,8 @@ _WHOSE_GAP: dict[str, str] = {
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
     "forgets a host key and pins nothing": "drafter",              # §17.1399
     "takes loopback down with it": "drafter",                     # §17.1570d — name the interface, not `all`
+    "prints a new secret once": "drafter",                        # §17.1603 — send the minted secret only to a file
+    "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -4378,6 +4381,54 @@ _QUOTED_ARG_RE = re.compile(r"""\s(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _ENV_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,60})\}?")
 
 
+#: §17.1603 — commands that MINT a secret and print it once
+_SECRET_MINT_RE = re.compile(r"\bpveum\s+(?:user\s+)?token\s+add\b|\bpvesh\s+create\s+\S*/token/|\bopenssl\s+rand\b|\bpwgen\b")
+#: a file whose name says it holds a secret
+_SECRET_FILE_NAME_RE = re.compile(r"(?:token|secret|passw(?:or)?d|credential|api[-_]?key|private[-_]?key|\.key\b|\.pem\b(?<!ca\.pem))", re.I)
+_CAT_FILE_RE = re.compile(r"\b(?:cat|head|tail|less|more|strings|xxd|od|base64)\s+(?:-\S+\s+(?:\d+\s+)?)*([^\s|;&><'\"]+)")
+
+
+def prints_a_secret(commands: list[str], verify: Optional[list[str]] = None,
+                    files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1603 — a block that puts a secret into its own output, which is the run's record, the frame and the log.
+
+    Live (c2792d4b T14, "Create a read-only Proxmox API token for the panel"): the draft ran
+    `pveum user token add … | tee /root/panel-api-token.txt` -- the token's secret, shown once, printed by `tee` --
+    and its check was `cat /root/panel-api-token.txt`. Two shapes:
+    * a command that MINTS a secret whose output is not sent wholly into a file (`tee` prints it; no `>` prints it);
+    * a command or check that reads a file NAMED as a secret (`cat …token…`, `…secret…`, `…password…`, `….key`)."""
+    texts = [("command", str(c)) for c in commands or []] + [("check", str(v)) for v in verify or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    out: list[dict] = []
+    for where, body in texts:
+        for line in body.splitlines():
+            ln = line.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            m = _SECRET_MINT_RE.search(ln)
+            if m and ln[:m.start()].count("$(") > ln[:m.start()].count(")"):
+                m = None                          # captured into a variable (`PW=$(pwgen 20 1)`): nothing printed
+            if m:
+                rest = ln[m.end():]
+                if re.search(r"\btee\b", rest) or not re.search(r"(?<![0-9&])>{1,2}\s*\S", rest):
+                    out.append({"command": f"{where}: {ln[:160]}", "why": (
+                        f"`{m.group(0)}` prints a new secret once, and this line lets it reach the output "
+                        f"({'`tee` copies it to the screen' if 'tee' in rest else 'nothing sends it into a file'}): "
+                        f"the run's record, the frame and the log would hold it. Send the output ONLY into a file "
+                        f"(`… > /path/file` with mode 600, or through a filter that writes the file), and print "
+                        f"nothing of it.")})
+                    break
+            for cm in _CAT_FILE_RE.finditer(ln):
+                path = cm.group(1)
+                if _SECRET_FILE_NAME_RE.search(path.rsplit("/", 1)[-1]):
+                    out.append({"command": f"{where}: {ln[:160]}", "why": (
+                        f"this reads `{path}` -- a file named as a secret -- into the output, which is the run's "
+                        f"record and the log. Prove it WORKS instead: use it (call the API with it, log in with it) "
+                        f"and print only the result, or check it exists and its mode (`stat -c '%a %U' {path}`).")})
+                    break
+    return out
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -6053,6 +6104,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1367 — a value read from a machine, pasted into a shell word.
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
+    refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
