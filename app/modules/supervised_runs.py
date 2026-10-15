@@ -3085,6 +3085,15 @@ def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[
         f"swallows an error into a one-line summary.")
 
 
+#: §17.1576 — a step whose title says it REPORTS: it quotes the commands upstream steps ran as its evidence.
+#: Live, T12 "Compile verification report" (9e1c2c68) cited `systemctl is-active` from T7's output and was failed
+#: three times "produced INSTRUCTIONS, not work" — the job ended blocked with every check met. Like §17.1484's
+#: document, a report's commands are its content. Tight on purpose: "Report the library count" is a read, not this.
+_REPORT_TITLE_RE = re.compile(
+    r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*|the\s+)?(?:compile|aggregate|summari[sz]e|collate)\b"
+    r"|\b(?:verification|status|final|summary|evidence|completion)\s+report\b|\breport\s*$", re.I)
+
+
 async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) -> Optional[str]:
     """§17.1259 — a step that wrote a runbook for a machine the engine can reach.
 
@@ -3119,6 +3128,8 @@ async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) ->
     from app.modules.inventory_report import _DOC_RE
     if _DOC_RE.search(str((node or {}).get("title") or "")):
         return None
+    if _REPORT_TITLE_RE.search(str((node or {}).get("title") or "")):
+        return None                      # §17.1576 — a report quotes what ran
     try:
         from app.modules.step_classify import step_is_hands_on
         cmds = runbook_commands(text_value)

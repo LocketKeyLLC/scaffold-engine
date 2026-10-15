@@ -365,8 +365,8 @@ def known_guest(gid: str, inventory: Optional[dict], text: str = "") -> bool:
     if inventory is None:
         return True
     have = set((inventory.get("cts") or {})) | set((inventory.get("vms") or {})) | set((inventory.get("names") or {}))
-    if not have:
-        return True                        # unreadable listings: no judgment
+    if not have or inventory.get("unread"):
+        return True                        # unreadable listings (§17.1575: or one of the two): no judgment
     return str(gid) in {str(h) for h in have} or any(m.group(1) == str(gid) for m in _CREATES_RE.finditer(text or ""))
 
 

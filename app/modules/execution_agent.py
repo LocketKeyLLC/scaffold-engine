@@ -2861,7 +2861,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         else:
             _reading.note("the guests on the host",
                           f"{len((_inv or {}).get('cts') or {})} container(s), "
-                          f"{len((_inv or {}).get('vms') or {})} VM(s)")
+                          f"{len((_inv or {}).get('vms') or {})} VM(s)"
+                          + (f"; NOT read: {', '.join((_inv or {}).get('unread'))}" if (_inv or {}).get("unread") else ""))   # §17.1575
         try:
             from app.modules import machine_truth as _mt0
             from app.modules import runbook_templates as _rt
