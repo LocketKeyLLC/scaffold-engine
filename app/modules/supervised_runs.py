@@ -5556,6 +5556,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _p4_notes:
         cmds, verify = _p4_cmds, _p4_verify
         _comp_notes = list(_comp_notes) + _p4_notes
+    # §17.1570 — "disable IPv6 on container N": a persisted sysctl.d drop-in applied live, loopback untouched.
+    _d6_cmds, _d6_verify, _d6_notes = rewrite_disable_ipv6_in_guest(node, cmds, verify, services, inventory)
+    if _d6_notes:
+        cmds, verify = _d6_cmds, _d6_verify
+        _comp_notes = list(_comp_notes) + _d6_notes
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -8978,6 +8983,9 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
     # restart the unit once more per check. Live plan 977a8a38: 6 appends, 6 restarts, 6 verifies.
     if _JF_OBSERVE_TITLE_RE.search(str((node or {}).get("title") or "")):
         return list(commands or []), list(verify or []), []
+    # §17.1570 — a step that DISABLES IPv6 is that capability's, not a preference tweak
+    if _DISABLE_IPV6_RE.search(text):
+        return list(commands or []), list(verify or []), []
     app = next((a for a in _PREFER_IPV4_APPS if re.search(rf"\b{a}\b", text, re.I)), "")
     gid = _arr_guest(app, services, inventory) if app else None
     unit = f"{app}.service" if app else ""
@@ -9021,6 +9029,84 @@ def rewrite_prefer_ipv4_in_guest(node: Optional[dict], commands: list[str], veri
         f"{host}'s AAAA records first, and {app}'s HTTP client waited out its timeout on every call — curl -6 got no "
         f"answer while curl -4 did. The check reads the line back, shows which family `getent` orders first, and "
         f"asks {host} over the default stack.")}]
+    return [run], [check], note
+
+
+def _named_guest(text: str, services: Optional[list], inventory: Optional[dict]) -> tuple[str, str, str]:
+    """§17.1570 — the guest a step names, as ``(name, gid, unit)``: a known app, a MEASURED service
+    (name + unit), an inventory name, or "container N". ``unit`` is "" when none was measured."""
+    for a in _PREFER_IPV4_APPS:
+        if re.search(rf"\b{a}\b", text, re.I):
+            gid = _arr_guest(a, services, inventory)
+            if gid:
+                return a, gid, f"{a}.service"
+    for s in services or []:
+        nm = str(getattr(s, "name", "") or "").lower()
+        if nm and re.search(rf"\b{re.escape(nm)}\b", text, re.I) and getattr(s, "guest", ""):
+            return nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or "")
+    names = (inventory or {}).get("names") or {}
+    m_ct = re.search(r"\b(?:container|ct|lxc)\s*(\d{3})\b", text, re.I)
+    for g, nm in names.items():
+        nm_s = str(nm or "")
+        if (nm_s and re.search(rf"\b{re.escape(nm_s)}\b", text, re.I)) or (m_ct and str(g) == m_ct.group(1)):
+            unit = next((str(getattr(s, "unit", "") or "") for s in services or []
+                         if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
+            return nm_s.lower() or f"guest {g}", str(g), unit
+    if m_ct:
+        return f"guest {m_ct.group(1)}", m_ct.group(1), ""
+    return "", "", ""
+
+
+#: §17.1570 — switch IPv6 OFF in a guest whose IPv6 route is dead: a persisted sysctl.d drop-in that
+#: disables IPv6 on the LAN interface and on interfaces created later, and stops accepting router
+#: advertisements, applied live. Loopback is left alone, so a service bound to ::1 keeps working.
+#: Measured (CT 101, 2026-10-15): net0 carries no ip6 setting, `eth0` has accept_ra=1 autoconf=1 and
+#: two SLAAC addresses from the gateway's RAs — the cause behind §17.1563's symptom.
+_DISABLE_IPV6_FILE = "/etc/sysctl.d/99-scaffold-disable-ipv6.conf"
+_DISABLE_IPV6_RE = re.compile(r"\b(?:disabl(?:e|es|ed|ing)|turn(?:s|ed|ing)?\s+off|switch(?:es|ed|ing)?\s+off|stop\s+(?:accepting|using))\b[^.;\n]{0,40}\bipv6\b"
+                              r"|\bipv6\b[^.;\n]{0,30}\b(?:off|disabled)\b|\bno\s+ipv6\b", re.I)
+
+
+def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], verify: list[str],
+                                  services: Optional[list] = None,
+                                  inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1570 — a "disable IPv6 on container N / in <service>'s guest" step does it deterministically:
+    writes ``/etc/sysctl.d/99-scaffold-disable-ipv6.conf`` (eth0 + default disable_ipv6, accept_ra and
+    autoconf off), applies it with ``sysctl -p``, and prints the live state. Reversible: delete the file
+    and reboot (or set the sysctls back). No service restart, no interface reset.
+
+    Operator (2026-10-15), after §17.1563 had treated the symptom on seven guests: "disable IPv6 on the
+    LXCs through the engine" — remove the cause (a dead IPv6 route from the gateway's advertisements)
+    rather than keep preferring around it. The verify reads the change back: the sysctl value, the count
+    of global IPv6 addresses left, and the drop-in's contents."""
+    text = _node_text(node)
+    if not _DISABLE_IPV6_RE.search(text):
+        return list(commands or []), list(verify or []), []
+    if _JF_OBSERVE_TITLE_RE.search(str((node or {}).get("title") or "")):
+        return list(commands or []), list(verify or []), []
+    name, gid, _unit = _named_guest(text, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    m_if = re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", text)
+    iface = m_if.group(1) if m_if else "eth0"
+    body = (f"net.ipv6.conf.{iface}.disable_ipv6 = 1\\nnet.ipv6.conf.default.disable_ipv6 = 1\\n"
+            f"net.ipv6.conf.{iface}.accept_ra = 0\\nnet.ipv6.conf.default.accept_ra = 0\\nnet.ipv6.conf.all.accept_ra = 0\\n"
+            f"net.ipv6.conf.{iface}.autoconf = 0\\nnet.ipv6.conf.default.autoconf = 0\\nnet.ipv6.conf.all.autoconf = 0\\n")
+    run_payload = (f"printf '{body}' > {_DISABLE_IPV6_FILE} && sysctl -q -p {_DISABLE_IPV6_FILE} && "
+                   f"echo \"disable_ipv6({iface})=$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6) "
+                   f"accept_ra({iface})=$(cat /proc/sys/net/ipv6/conf/{iface}/accept_ra)\" && "
+                   f"echo \"global IPv6 addresses left: $(ip -6 addr show scope global | grep -c inet6 || true)\" && "
+                   f"echo 'RESULT: IPv6 disabled on {iface} in guest {gid} ({name}); persisted in {_DISABLE_IPV6_FILE}; loopback untouched'")
+    run = f"pct exec {gid} -- sh -c {_sq_payload(run_payload)}"
+    check_payload = (f"cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6; cat /proc/sys/net/ipv6/conf/{iface}/accept_ra; "
+                     f"ip -6 addr show scope global | grep -c inet6 || true; cat {_DISABLE_IPV6_FILE}")
+    check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+    note = [{"why": (
+        f"drafted from the engine's own shape (§17.1570): inside guest {gid} ({name}) it writes {_DISABLE_IPV6_FILE} "
+        f"— IPv6 off on {iface} and on interfaces created later, router advertisements and autoconf off — applies it "
+        f"live with sysctl -p, and prints the resulting state. Loopback keeps IPv6 so a service bound to ::1 is "
+        f"unaffected; nothing is restarted. Measured: the guest took SLAAC addresses from the gateway's advertisements "
+        f"over a route that answers nothing. Reversible: remove the file and reboot the guest.")}]
     return [run], [check], note
 
 
