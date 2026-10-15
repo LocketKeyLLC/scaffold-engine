@@ -5606,6 +5606,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _v6_notes:
         cmds, verify = _v6_cmds, _v6_verify
         _comp_notes = list(_comp_notes) + _v6_notes
+    # §17.1571 — "drop the gateway's IPv6 router advertisements at the bridge": an nft bridge table + oneshot unit.
+    _ra_cmds, _ra_verify, _ra_notes = rewrite_drop_router_adverts_on_the_bridge(node, cmds, verify, services, inventory)
+    if _ra_notes:
+        cmds, verify = _ra_cmds, _ra_verify
+        _comp_notes = list(_comp_notes) + _ra_notes
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
@@ -9258,6 +9263,77 @@ def disables_loopback_ipv6(commands: list[str], files: Optional[list[dict]] = No
                     "`all` and `lo` at 0.")})
                 break
     return out
+
+
+#: §17.1571 — stop the gateway's IPv6 router advertisements where the engine can reach them: on the
+#: Proxmox bridge every guest hangs off, with an nftables BRIDGE-family table of its own (coexists with
+#: pve-firewall, iptables or nft mode) that drops `nd-router-advert` frames being forwarded to the guests
+#: and delivered to the host. Persisted as a scoped systemd oneshot (`ExecStartPre=-nft delete table …`,
+#: `ExecStart=nft -f …`), so it survives reboot and never touches another ruleset. Reversible: disable the
+#: unit, delete the table. Measured (pve, 2026-10-15): RAs from fe80::4eab:f8ff:fed1:5491 (the Spectrum
+#: gateway, no LAN admin surface) reach every veth on vmbr0; the host itself keeps no RA route.
+_RAFILTER_FILE = "/etc/scaffold/rafilter.nft"
+_RAFILTER_UNIT = "scaffold-rafilter.service"
+_RAFILTER_TABLE = "bridge scaffold_rafilter"
+_RAFILTER_NFT = (
+    "table bridge scaffold_rafilter {\\n"
+    "  chain forward {\\n"
+    "    type filter hook forward priority -200; policy accept;\\n"
+    "    icmpv6 type nd-router-advert counter drop comment \\\"scaffold: the gateway IPv6 RA routes nowhere (sec 17.1571)\\\"\\n"
+    "  }\\n"
+    "  chain input {\\n"
+    "    type filter hook input priority -200; policy accept;\\n"
+    "    icmpv6 type nd-router-advert counter drop\\n"
+    "  }\\n"
+    "}\\n")
+_RAFILTER_UNIT_TEXT = (
+    "[Unit]\\nDescription=scaffold: drop IPv6 router advertisements on the bridge (sec 17.1571)\\n"
+    "After=network-online.target\\nWants=network-online.target\\n\\n"
+    "[Service]\\nType=oneshot\\nRemainAfterExit=yes\\n"
+    "ExecStartPre=-/usr/sbin/nft delete table bridge scaffold_rafilter\\n"
+    "ExecStart=/usr/sbin/nft -f /etc/scaffold/rafilter.nft\\n"
+    "ExecStop=-/usr/sbin/nft delete table bridge scaffold_rafilter\\n\\n"
+    "[Install]\\nWantedBy=multi-user.target\\n")
+_RA_DROP_RE = re.compile(r"\b(?:drop|block|filter|stop|refuse|discard|suppress)\w*\b[^.;\n]{0,60}\b(?:router\s+advertisements?|\bRAs?\b|nd-router-advert)"
+                         r"|\b(?:router\s+advertisements?|nd-router-advert)\b[^.;\n]{0,60}\b(?:drop|block|filter|stop|refuse|discard|suppress)", re.I)
+_RA_WHERE_RE = re.compile(r"\bbridge\b|\bvmbr\d*\b|\bproxmox\s+host\b|\bthe\s+host\b|\bhypervisor\b|\bgateway\b|\bnftables?\b", re.I)
+
+
+def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: list[str], verify: list[str],
+                                              services: Optional[list] = None,
+                                              inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1571 — a "drop/block the IPv6 router advertisements at the bridge/host/gateway" step installs
+    the bridge filter on the Proxmox host, deterministically.
+
+    Operator (2026-10-15): "fix the IPv6 router advertisements at the gateway through the engine." The
+    gateway is a Spectrum router with no LAN admin page or API (the operator's standing note), so the
+    nearest point the engine controls is the bridge: an nftables bridge table dropping nd-router-advert
+    in the forward hook (to the guests) and the input hook (to the host), persisted as its own oneshot
+    unit. The counter on the rule is the witness — it grows with every advertisement dropped — and the
+    check prints it with one verdict word. Runs on the HOST (no pct exec), as the runner itself does."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_RA_DROP_RE.search(text) and _RA_WHERE_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    if _JF_OBSERVE_TITLE_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    run = (f"test -x /usr/sbin/nft || {{ echo 'FAILED: /usr/sbin/nft is not installed on this host'; exit 1; }}; "
+           f"mkdir -p /etc/scaffold && printf '{_RAFILTER_NFT}' > {_RAFILTER_FILE} && "
+           f"printf '{_RAFILTER_UNIT_TEXT}' > /etc/systemd/system/{_RAFILTER_UNIT} && "
+           f"systemctl daemon-reload && systemctl enable {_RAFILTER_UNIT} && systemctl restart {_RAFILTER_UNIT} && "
+           f"nft list table {_RAFILTER_TABLE} && "
+           f"echo 'RESULT: IPv6 router advertisements are dropped on the bridge (forward to guests, input to host); "
+           f"persisted as {_RAFILTER_UNIT}; existing SLAAC addresses in guests age out by their own lifetimes'")
+    check = (f"nft list table {_RAFILTER_TABLE}; systemctl is-active {_RAFILTER_UNIT}; cat /etc/systemd/system/{_RAFILTER_UNIT}; "
+             f"nft list table {_RAFILTER_TABLE} | grep -q nd-router-advert && echo STATE-OK || echo STATE-WRONG")
+    note = [{"expect": {check: "STATE-OK"}, "why": (
+        f"drafted from the engine's own shape (§17.1571): on the Proxmox host it writes {_RAFILTER_FILE} — an nftables "
+        f"BRIDGE table that drops nd-router-advert frames forwarded to the guests and delivered to the host — and "
+        f"{_RAFILTER_UNIT}, a oneshot that loads it at boot (delete-then-load, so it is idempotent and touches no "
+        f"other ruleset, pve-firewall included). The gateway (fe80::…:5491, a Spectrum router) has no LAN admin "
+        f"surface, so the bridge is the nearest point the engine controls. The check lists the table — its counter "
+        f"grows with every advertisement dropped — and ends with STATE-OK. Reversible: disable the unit, delete the table.")}]
+    return [run], [check], note
 
 
 def a_validating_endpoint_sent_an_empty_body(
