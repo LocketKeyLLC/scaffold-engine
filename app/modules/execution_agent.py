@@ -3192,6 +3192,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                          + develop.values_put_into_html_attributes(files)   # §17.1424
                          + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427
                          + develop.blocks_the_event_loop(files, workspace, host, kit)   # §17.1598
+                         + develop.page_reads_what_no_route_returns(files, workspace)   # §17.1599
                          + await develop.addresses_that_do_not_answer(spec, files, workspace, host, _held_addrs,
                                                                       kit, _addr_probes)   # §17.1598
                          + develop.restyle_missed_the_served_file(run_node, files, _served, workspace))  # §17.1546

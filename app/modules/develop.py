@@ -46,6 +46,8 @@ ROUNDS = int(os.environ.get("DEVELOP_ROUNDS", "8"))
 STAGE_ROOT = "/tmp/scaffold-dev"
 
 _SKIP_RE = re.compile(r"/node_modules/|/\.git/|/(?:venv|\.venv|site-packages|__pycache__|dist|build)/|\.bak(?:\.|$)|\.log$|/package-lock\.json$|\.tgz$")
+#: §17.1600 — files a browser fetches as-is: read last, if the budget allows
+_ASSET_RE = re.compile(r"\.(?:png|jpe?g|gif|ico|svg|webp|woff2?|ttf|eot|map)$", re.I)
 _PATH_IN_TEXT_RE = re.compile(r"(?<![\w.-])(/(?:opt|srv|var/www|etc/systemd/system)/[A-Za-z0-9_./-]+)")
 #: a check the step itself names (`pct exec 111 -- curl -s http://…`) -- read-only by construction
 _CHECK_RE = re.compile(r"`((?:pct exec \d+ --|qm guest exec \d+ --)\s*[^`]+)`")
@@ -250,9 +252,13 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
         d = d.rstrip("/")
         ok, listing = await st._probe(spec, rehearsal.listing_command(st.in_guest(host.guest, host.vm), d))
         if ok:
-            per_dir.append([p.strip() for p in (listing or "").split("\n")
-                            if p.strip().startswith(d + "/") and not p.strip().endswith("/")
-                            and not _SKIP_RE.search(p.strip())])
+            # §17.1600 — code before assets, shallow before deep: live, CT 111's UI dir listed 26 files (images,
+            # svgs, a Vite src/) and the 40-file budget ran out before the page the browser is served
+            # (/opt/control-panel-ui/index.html) was read at all
+            per_dir.append(sorted((p.strip() for p in (listing or "").split("\n")
+                                   if p.strip().startswith(d + "/") and not p.strip().endswith("/")
+                                   and not _SKIP_RE.search(p.strip())),
+                                  key=lambda p: (bool(_ASSET_RE.search(p)), p.count("/"), p)))
     # §17.1544 — round-robin across the dirs so the MAX_SEED_FILES budget is not spent entirely on the
     # first (backend) dir, leaving a sibling UI dir unread; each dir is represented.
     paths = [p for group in zip_longest(*per_dir) for p in group if p]
@@ -1311,6 +1317,154 @@ async def addresses_that_do_not_answer(spec, files: dict[str, str], workspace: O
                 f"{'that port' if len(ports) == 1 else 'every one of those ports'}. The code would wait on a machine "
                 f"that is not the one it means.{hint} Use the address of the machine the code is about, from the "
                 f"facts, and return this file changed.")})
+    return out
+
+
+#: §17.1599 — a page function that fetches one of the service's own routes
+_PAGE_FETCH_RE = re.compile(r"""fetch\(\s*[`'"](?:\$\{[^}]+\})?(/api/[A-Za-z0-9_/-]+)[`'"]\s*\)""")
+_RES_JSON_LIT_RE = re.compile(r"\bres(?:\.status\(\s*\d+\s*\))?\.json\(\s*\{")
+
+
+def _balanced_body(text: str, open_at: int) -> str:
+    """The text inside the brace that opens at ``open_at`` (strings skipped)."""
+    depth, i, q = 0, open_at, ""
+    while i < len(text):
+        ch = text[i]
+        if q:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "'\"`":
+            q = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i]
+        i += 1
+    return ""
+
+
+def _top_level_keys(body: str) -> set[str]:
+    """The top-level keys of an object literal's body: `a: …`, `'a': …`, and shorthand `a,`."""
+    keys, depth, q, tok, i = set(), 0, "", "", 0
+    parts, start = [], 0
+    while i < len(body):
+        ch = body[i]
+        if q:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "'\"`":
+            q = ch
+        elif ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+        i += 1
+    parts.append(body[start:])
+    for p in parts:
+        p = p.strip()
+        if not p or p.startswith("..."):
+            if p.startswith("..."):
+                return set()           # a spread: the shape is not all here, judge nothing
+            continue
+        m = re.match(r"""^['"]?([A-Za-z_$][\w$-]*)['"]?\s*(?::|$)""", p)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def route_shapes(workspace: dict[str, str]) -> dict[str, set[str]]:
+    """`/api/x` -> the top-level keys every SUCCESS answer of its handler has, when each `res.json({...})` in the
+    handler is a literal with no spread. A route that answers anything else (a variable, an upstream body
+    passed through) is left out: nothing is judged about it."""
+    out: dict[str, set[str]] = {}
+    for path, c in (workspace or {}).items():
+        if not _SERVER_FILE_RE.search(path) or "/scaffold-kit/" in path:
+            continue
+        defs = list(re.finditer(r"\b(?:app|router)\.get\(\s*['\"](/api/[^'\"\s]+)['\"]", c))
+        for n, m in enumerate(defs):
+            end = defs[n + 1].start() if n + 1 < len(defs) else len(c)
+            handler = c[m.end():end]
+            shapes, opaque = [], False
+            for j in re.finditer(r"\bres(?:\.status\(\s*(\d+)\s*\))?\.json\(", handler):
+                code = j.group(1)
+                if code and not code.startswith("2"):
+                    continue                     # an error answer: the page's catch path, not its fields
+                rest = handler[j.end():].lstrip()
+                if not rest.startswith("{"):
+                    opaque = True
+                    break
+                k = _top_level_keys(_balanced_body(handler, handler.index("{", j.end())))
+                if not k:
+                    opaque = True
+                    break
+                shapes.append(k)
+            if shapes and not opaque:
+                out[m.group(1)] = set.intersection(*shapes) | set.union(*shapes)
+    return out
+
+
+def page_reads(workspace: dict[str, str]) -> dict[str, tuple[str, list[str]]]:
+    """`/api/x` -> (page file, the top-level fields the fetching function reads off its JSON). Only a function
+    that fetches ONE route and names its parsed body (`const data = await res.json()`) is read."""
+    out: dict[str, tuple[str, list[str]]] = {}
+    for path, c in (workspace or {}).items():
+        if not path.endswith((".html", ".htm")):
+            continue
+        # each function runs to the next function declaration: brace-matching is not safe on a page (a regex literal
+        # such as `/'/g` in an escape helper reads as an open string and swallows the rest of the file)
+        starts = [m.start() for m in re.finditer(r"(?:async\s+)?function\s+\w+\s*\(", c)]
+        for n, st in enumerate(starts):
+            body = c[st:starts[n + 1] if n + 1 < len(starts) else len(c)]
+            routes = set(_PAGE_FETCH_RE.findall(body))
+            if len(routes) != 1:
+                continue
+            var = re.search(r"\b(?:const|let|var)\s+(\w+)\s*=\s*await\s+\w+\.json\(\)", body)
+            if not var:
+                continue
+            v = var.group(1)
+            fields = list(dict.fromkeys(re.findall(rf"(?<![\w$.]){re.escape(v)}\.([A-Za-z_$][\w$]*)", body)))
+            fields = [f for f in fields if f not in ("error", "length", "message")]
+            if fields:
+                out[routes.pop()] = (path, fields)
+    return out
+
+
+def page_reads_what_no_route_returns(files: dict[str, str], workspace: Optional[dict[str, str]] = None) -> list[dict]:
+    """§17.1599 — a page section that reads fields its route's answer never has. The section then renders empty
+    ("No stats available", blank boxes) while the route is up -- as broken to the operator as "Loading…".
+
+    Live (c2792d4b, after §17.1598 made every route answer): the Network View function reads `data.dns_queries_today`,
+    `data.ads_blocked_today`, … (Pi-hole v5's flat summary); `/api/network-view` answers
+    `{status, service, host, port, response}` with Pi-hole v6's numbers nested under `response`. The page and the
+    route were developed in different steps (T9 at 14:34, T7 at 16:19) and nothing compared them. Judged on the
+    files the service will run with: the version's over the workspace's."""
+    merged = {**(workspace or {}), **(files or {})}
+    shapes = route_shapes(merged)
+    out: list[dict] = []
+    for route, (page, fields) in page_reads(merged).items():
+        keys = shapes.get(route)
+        if not keys:
+            continue
+        missing = [f for f in fields if f not in keys]
+        if not missing or len(missing) < max(1, len(fields) // 2):
+            continue                              # most of what it reads is there: an optional field, not a mismatch
+        out.append({"command": f"{page}: {route} -> {', '.join(missing[:6])}", "why": (
+            f"the page's section for `{route}` reads {', '.join(f'`{f}`' for f in missing[:6])} off the answer, and "
+            f"that route's handler answers with {', '.join(f'`{k}`' for k in sorted(keys))} -- so the section renders "
+            f"empty while the route is up. Make them agree: read the fields where the route puts them (nested under "
+            f"the key that carries them), or have the route answer the fields the page reads -- and return the file "
+            f"you change.")})
     return out
 
 
