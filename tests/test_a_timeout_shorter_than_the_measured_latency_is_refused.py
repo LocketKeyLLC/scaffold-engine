@@ -51,3 +51,29 @@ def test_a_redirect_is_a_live_answer_not_a_dead_path():
              "/opt/control-panel-backend/network_route.js": "fetch('http://192.168.1.30/admin/api.php?summary')\n"}
     out = dv.calls_a_dead_path(files, status)
     assert len(out) == 1 and out[0]["command"].endswith(": /admin/api.php") and "HTTP 400" in out[0]["why"]      # the 400 is dead; the 301 is not
+
+
+def test_the_paths_the_code_calls_on_a_proxy_are_probed_and_a_404_is_dead_while_a_405_is_not():
+    """§17.1596 — live: the delivered byparr_route.js called a Byparr path that answers 404; the gate knew only /health and /."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    files = {"/opt/control-panel-backend/byparr_route.js": ("const cfg = readConfig(); // byparr\nconst h = await httpRequest(cfg.host, cfg.port, '/health');\n"
+                                                          "const s = await httpRequest(cfg.host, cfg.port, '/v1/status');\napp.get('/api/byparr/status', fn);\n"
+                                                          "const v = await httpRequest(cfg.host, cfg.port, '/v1', 'POST');\n"),
+             "/opt/control-panel-backend/palworld_route.js": "fetch('/palworld/thing')\n"}
+    assert dv.paths_called(files, BYPARR) == ["/health", "/v1/status", "/v1"]              # the panel's own /api/… and the other file: not Byparr's
+    answers = {"/v1/status": "404 0.004", "/v1": "405 0.003"}
+
+    async def _probe(spec, cmd):
+        p = next((k for k in answers if cmd.endswith(f'8191{k}"')), None)
+        return (True, answers[p]) if p else (False, "")
+    status = [{"service": "byparr", "path": "/health", "code": "200", "address": "192.168.1.27", "seconds": 8.3}]
+    with patch("app.modules.service_truth._probe", new=AsyncMock(side_effect=_probe)):
+        merged = asyncio.run(dv.probe_called_paths(object(), files, [BYPARR, FLARE, PIHOLE], status))
+    assert {(s["path"], s["code"]) for s in merged} == {("/health", "200"), ("/v1/status", "404"), ("/v1", "405")}
+    dead = dv.calls_a_dead_path(files, merged)
+    assert len(dead) == 1 and "/v1/status" in dead[0]["command"] and "HTTP 404" in dead[0]["why"]       # the 405 (POST-only /v1) is alive
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "status = await develop.probe_called_paths(spec, files, _services, status)" in src
+    assert src.index("probe_called_paths(spec, files, _services, status)") < src.index("develop.calls_a_dead_path(files, status)")

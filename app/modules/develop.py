@@ -977,6 +977,62 @@ def parse_status_answer(body: str) -> tuple[str, Optional[float]]:
     return (code if code.isdigit() else ""), secs
 
 
+#: §17.1596 — a path literal in code: `'/v1/status'`, `"/health"`
+_PATH_LITERAL_RE = re.compile(r"""['"`](/(?:[A-Za-z0-9_.-]+/?)*)['"`]""")
+
+
+def paths_called(files: dict[str, str], service) -> list[str]:
+    """§17.1596 — the upstream paths the proposed code calls on ``service``: the path literals in files that name the
+    service (by name or measured address), minus the panel's own `/api/…` routes and the bare `/`.
+
+    Live (c2792d4b T7/T11): the delivered byparr_route.js called a Byparr path that answers 404 — `/api/byparr/status`
+    answered 503 `{"error":"Byparr service is not available","detail":"HTTP 404: …"}` — and §17.1422's gate knew only
+    the two paths the engine probes itself (`/health`, `/`). The code says which paths it calls; the machine says
+    which of them answer."""
+    name, addr = str(getattr(service, "name", "") or "").lower(), str(getattr(service, "address", "") or "")
+    out: list[str] = []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        if not (name and name in c.lower()) and not (addr and addr in c):
+            continue
+        if not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        for m in _PATH_LITERAL_RE.finditer(c):
+            p = m.group(1).rstrip("/") or "/"
+            if p == "/" or p.startswith("/api/") or p.startswith("/opt/") or p.startswith("/etc/") or p.startswith("/tmp/") or p.startswith("/var/"):
+                continue
+            if p not in out:
+                out.append(p)
+    return out[:8]
+
+
+async def probe_called_paths(spec, files: dict[str, str], services: Optional[list], status: Optional[list[dict]]) -> list[dict]:
+    """§17.1596 — `status` plus one timed probe, from the host, of every path the proposed code calls on an
+    engine-deployed proxy that the engine has not probed yet. Fail-soft: an unreadable probe adds nothing."""
+    from app.modules import service_truth as st
+    out = list(status or [])
+    seen = {(str(s.get("service")), str(s.get("path"))) for s in out}
+    for svc in services or []:
+        name = str(getattr(svc, "name", "") or "").lower()
+        key = next((k for k in _STATUS_PROBES if name.startswith(k)), None)
+        addr = str(getattr(svc, "address", "") or "")
+        if key not in _HOST_PROBED or not addr:
+            continue
+        port = _STATUS_PROBES[key][0]
+        for p in paths_called(files, svc):
+            if (key, p) in seen:
+                continue
+            seen.add((key, p))
+            try:
+                ok, body = await st._probe(spec, f'curl -s -m 20 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://{addr}:{port}{p}"')
+            except Exception:
+                ok, body = False, ""
+            code, secs = parse_status_answer(body) if ok else ("", None)
+            if code:
+                out.append({"service": key, "path": p, "code": code, "address": addr, "seconds": secs})
+    return out
+
+
 #: §17.1594 — a timeout literal the code gives an upstream call: ms unless the shape says seconds
 _TIMEOUT_MS_RE = re.compile(r"(?:\btimeout\s*[:=]\s*|setTimeout\([^,()]*,\s*|AbortSignal\.timeout\(\s*|\.timeout\(\s*)(\d{3,7})\b")
 _TIMEOUT_S_RE = re.compile(r"--max-time\s+(\d{1,4})\b|\btimeout\s*[:=]\s*(\d{1,3})(?:\s*s\b|\s*\*\s*1000)")
@@ -1077,11 +1133,12 @@ def calls_a_dead_path(files: dict[str, str], status: Optional[list[dict]]) -> li
     # §17.1595 — a 3xx is the service ANSWERING (Byparr's `/` → 301 /docs in 3 ms, live): alive, not dead. Live
     # (c2792d4b T7), the model moved the health call from the 8 s `/health` to `/`, this gate refused `/` as dead,
     # and the develop loop stalled between a timeout it may not give and a path it may not call.
-    alive = [s for s in status or [] if s.get("code", "").startswith(("2", "3"))]
+    # §17.1596 — and a 405 is a path that EXISTS for another method (FlareSolverr's and Byparr's POST-only `/v1`)
+    alive = [s for s in status or [] if s.get("code", "").startswith(("2", "3")) or s.get("code") == "405"]
     out: list[dict] = []
     for s in status or []:
         code = s.get("code", "")
-        if not code or code.startswith(("2", "3")):
+        if not code or code.startswith(("2", "3")) or code == "405":
             continue
         base = s["path"].split("?", 1)[0]
         hit = next((p for p, c in (files or {}).items() if base in (c or "")), None)

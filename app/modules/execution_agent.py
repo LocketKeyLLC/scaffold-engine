@@ -3176,6 +3176,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
+                # §17.1596 — the paths THIS version calls on an engine-deployed proxy are probed too, so a 404 is caught here
+                status = await develop.probe_called_paths(spec, files, _services, status)
                 _dead = (develop.stale_service_addresses(files, _services)   # §17.1590
                          + develop.timeouts_shorter_than_measured(files, status)   # §17.1594
                          + develop.calls_a_dead_path(files, status)         # §17.1422
