@@ -1081,7 +1081,11 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
         exp = " ".join((probed[cid].get("expect") or "").split()).lower()
         neg = negative_evidence(probed[cid].get("command") or "", txt, probed[cid].get("claim") or "")
         exp_raw = str(probed[cid].get("expect") or "").strip()
-        if len(exp) >= 6 and exp in " ".join(txt.split()).lower():
+        # §17.1580 — the OUTPUT, not the prompt echo: a paste that opens `$ <command>` (the run path's record, an
+        # operator's terminal) carries the command's own `echo STATE-OK || echo STATE-WRONG`, and the expected word
+        # was found in that line while the output's last line said STATE-WRONG (live, c2792d4b T2: recorded done).
+        body = "\n".join(ln for ln in txt.splitlines() if not ln.startswith("$ "))
+        if len(exp) >= 6 and exp in " ".join(body.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
         elif neg:
             # §17.1310 — a health check that answered "Cannot GET /api/health" is not
@@ -1096,7 +1100,7 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
             # goal", so five steps were recorded already met over their own verdict word.
             verdicts[cid].update({"verdict": "contradicted",
                                   "reason": f"the check did not print its verdict word '{exp_raw[:40]}' "
-                                            f"(its last line: {(txt.strip().splitlines() or [''])[-1][:80]!r})"})
+                                            f"(its last line: {(body.strip().splitlines() or [''])[-1][:80]!r})"})
         else:
             verdicts[cid]["reason"] = "the judge returned no verdict for this check"
             to_judge[cid] = txt

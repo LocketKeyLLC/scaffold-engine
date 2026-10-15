@@ -9712,7 +9712,7 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
                      'test -n "$port" || echo "FAILED: no app listener in the guest and no listen(<port>) in the service code"; ')   # an empty port → every curl 000 → STATE-WRONG
     # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
     payload = (
-        'cpw=$(cat); fails=""; ' + port_expr +          # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
+        'cpw=$(cat); fails=""; n=0; ' + port_expr +     # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
         # §17.1578 — the block's own names are LOWERCASE: the runner reads every `$UPPER` reference as a secret it must
         # hold and refused `$CPW`/`$PORT` live ("neither the engine sent nor this runner's secrets file holds")
         # the route's quote is matched with `.` and stripped with tr's octal `\047`: no quote character of either kind
@@ -9720,14 +9720,17 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
         f'for ep in $(grep -rhoE "(app|router)\\.get\\(.(/[^,)]*)" /opt/{stem}* --include="*.js" --include="*.ts" '
         f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "/[^,)]*" | tr -d "\\047\\042" | sort -u); do '
         f'echo "=== $ep ==="; out=$(curl -s -m 20 -u "{user}:$cpw" -w "\\nHTTP %{{http_code}} in %{{time_total}}s" "http://127.0.0.1:$port$ep" 2>&1); '
-        'case "$out" in *"HTTP 000"*) fails="$fails $ep";; esac; printf "%s\\n" "$out" | tail -c 400; echo; done; '
-        'echo "unanswered:$fails"; test -z "$fails" && echo STATE-OK || echo STATE-WRONG')
+        'n=$((n+1)); case "$out" in *"HTTP 000"*) fails="$fails $ep";; esac; printf "%s\\n" "$out" | tail -c 400; echo; done; '
+        # §17.1580 — the probe's verdict is that it PROBED (a port, at least one route): a route that hangs is the
+        # finding the next step needs, not this step's failure (live, c2792d4b T2: three routes hang; that is the bug)
+        'echo "unanswered:$fails"; echo "probed:$n"; test -n "$port" && test "$n" -gt 0 && echo STATE-OK || echo STATE-WRONG')
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)} <<< \"<{secret}>\""
     note = [{"expect": {run: "STATE-OK"}, "why": (
         f"drafted the probe from the engine's own shape (§17.1574c): inside guest {gid} ({name}) it reads every GET route "
         f"the service's code registers under /opt/{stem}*, calls each on the service's loopback port as user `{user}` with the login the "
         f"engine holds ({secret}, fed on stdin as a runner-resolved placeholder — never in the command or a log), and prints "
-        f"`HTTP <code> in <s>` with the tail of each body; STATE-OK when every route answered. The draft guessed the routes "
+        f"`HTTP <code> in <s>` with the tail of each body and lists the routes that did not answer (`unanswered:`); STATE-OK "
+        f"when the probe ran — a hanging route is this step's finding, not its failure. The draft guessed the routes "
         f"and sent a session cookie nobody holds, with no check.")}]
     return [run], [run], note
 

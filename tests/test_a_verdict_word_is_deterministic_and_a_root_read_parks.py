@@ -39,6 +39,12 @@ async def test_an_absent_verdict_word_contradicts_without_a_judge(monkeypatch):
     assert not called
     ok = await asc.judge_outputs(probes, "== V:1 ==\nactive\nSTATE-OK\n")
     assert ok[0]["verdict"] == "confirmed"
+    # §17.1580 — the run path's record opens each section `$ <command>`; the command's own `echo STATE-OK` is not output
+    echoed = f"== V:1 ==\n$ {chk}\ncounter packets 12\nactive\nSTATE-WRONG\n"
+    bad = await asc.judge_outputs(probes, echoed)
+    assert bad[0]["verdict"] == "contradicted" and "STATE-WRONG" in bad[0]["reason"], bad[0]
+    good = await asc.judge_outputs(probes, f"== V:1 ==\n$ {chk}\nactive\nSTATE-OK\n")
+    assert good[0]["verdict"] == "confirmed"
     # a prose expectation still goes to the judge path (no deterministic contradiction)
     prose = [{"id": "V:1", "kind": "state", "claim": "c", "command": "cat /etc/x", "expect": "the file holds the key"}]
     res = await asc.judge_outputs(prose, "== V:1 ==\nsomething else\n")
@@ -113,7 +119,8 @@ def test_the_probe_presents_the_held_login_to_every_registered_get_route():
     assert "/opt/control*" in c and '--exclude-dir="*.bak*"' in c and "HTTP %{http_code} in %{time_total}s" in c
     assert "'\\''" not in c                                                 # no quote-inside-quote escapes
     assert " -o " not in c and "PANEL_SESSION_COOKIE" not in c and "<PANEL_PASSWORD>" not in c.split("<<<")[0]
-    assert c.split("<<<")[0].rstrip().rstrip("'").endswith("echo STATE-OK || echo STATE-WRONG")
+    assert c.split("<<<")[0].rstrip().rstrip("'").endswith('echo "probed:$n"; test -n "$port" && test "$n" -gt 0 && echo STATE-OK || echo STATE-WRONG')
+    assert 'test -z "$fails"' not in c and "unanswered:$fails" in c       # §17.1580 — a hanging route is the finding, not the failure
     assert notes[0]["expect"] == {c: "STATE-OK"}
     assert subprocess.run(["bash", "-n", "-c", c], capture_output=True, text=True).returncode == 0
 
