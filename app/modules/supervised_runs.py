@@ -9146,8 +9146,15 @@ def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], ver
                    f"echo \"global IPv6 addresses left: $(ip -6 addr show scope global | grep -c inet6 || true)\" && "
                    f"echo 'RESULT: IPv6 disabled on {iface} in guest {gid} ({name}); persisted in {_DISABLE_IPV6_FILE}; loopback untouched'")
     run = f"pct exec {gid} -- sh -c {_sq_payload(run_payload)}"
-    check_payload = (f"cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6; cat /proc/sys/net/ipv6/conf/{iface}/accept_ra; "
-                     f"ip -6 addr show scope global | grep -c inet6 || true; cat {_DISABLE_IPV6_FILE}")
+    # §17.1570f — the check reads BOTH halves of the claim: the LAN interface off AND loopback still on
+    # (`lo.disable_ipv6` must read 0 and `::1` must be present). Live, T6 was recorded "already met" off a
+    # check that read only the eth0 half while 102's loopback IPv6 was down from a prior blanket disable.
+    check_payload = (f"echo {iface}.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6) "
+                     f"{iface}.accept_ra=$(cat /proc/sys/net/ipv6/conf/{iface}/accept_ra) "
+                     f"lo.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6) "
+                     f"all.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6); "
+                     f"echo global_ipv6_on_{iface}=$(ip -6 addr show dev {iface} scope global 2>/dev/null | grep -c inet6); "
+                     f"echo loopback_::1=$(ip -6 addr show dev lo 2>/dev/null | grep -c ::1); cat {_DISABLE_IPV6_FILE}")
     check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
     note = [{"why": (
         f"drafted from the engine's own shape (§17.1570): inside guest {gid} ({name}) it writes {_DISABLE_IPV6_FILE} "

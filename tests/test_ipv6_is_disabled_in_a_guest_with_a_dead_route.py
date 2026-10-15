@@ -43,8 +43,10 @@ def test_the_verify_reads_the_change_back_read_only():
     from app.modules.assist_state_check import read_only_command
     cmds, verify, _ = rewrite_disable_ipv6_in_guest(STEP, ["x"], ["y"], SERVICES, INV)
     v = verify[0]
-    assert "cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6" in v and "accept_ra" in v
-    assert "ip -6 addr show scope global | grep -c inet6" in v and "cat /etc/sysctl.d/99-scaffold-disable-ipv6.conf" in v
+    assert "cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6" in v and "eth0.accept_ra" in v
+    # §17.1570f — both halves of the claim: eth0 off AND loopback still on
+    assert "lo.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6)" in v and "loopback_::1=" in v
+    assert "ip -6 addr show dev eth0 scope global" in v and "cat /etc/sysctl.d/99-scaffold-disable-ipv6.conf" in v
     assert read_only_command(v)
     assert subprocess.run(["bash", "-n", "-c", v], capture_output=True, text=True).returncode == 0
     # §17.1365 — the keys the block writes are read back by the check (the drop-in is cat'ed), so the pre-pass
