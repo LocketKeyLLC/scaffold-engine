@@ -5599,6 +5599,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _d6_notes:
         cmds, verify = _d6_cmds, _d6_verify
         _comp_notes = list(_comp_notes) + _d6_notes
+    # §17.1570h — "Verify IPv6 disabled on <guest>": the engine's own state read, settled by STATE-OK.
+    _v6_cmds, _v6_verify, _v6_notes = rewrite_verify_ipv6_disabled(node, cmds, verify, services, inventory)
+    if _v6_notes:
+        cmds, verify = _v6_cmds, _v6_verify
+        _comp_notes = list(_comp_notes) + _v6_notes
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
@@ -6325,8 +6330,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 # Asymmetric on purpose: only a `contradicted` verdict downgrades
                 # a step. An ambiguous check must never fail work that really
                 # happened, so `unknown` leaves the outcome alone.
+                # §17.1570g — the post-run judge gets the rewrite's stated expectation too (STATE-OK), so a
+                # capability's check is settled deterministically, not read against the step's title.
                 _against = contradicted(await _verify_verdicts(
-                    goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted))
+                    goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted,
+                    expects={str(k): str(v) for k, v in (waiting.get("expects") or {}).items()}))
                 if _against:
                     ok = False
                     refuted = _against
@@ -6485,7 +6493,11 @@ def goal_claim(title: str, description: str = "") -> str:
     # s" -- the decision and the done-condition were both past it, so even the
     # already-met path never saw them. Wider, and the done-condition is carried
     # whole when the middle has to go: it is the sentence that settles a check.
-    desc = " ".join(str(description or "").split())
+    # §17.1570h — text a step INHERITED from another step (§17.1570c's `[as in T2: …]`) is specification
+    # for the drafter and the capabilities, not part of this step's claim: live, T17 "Write sysctl config
+    # caddy-proxy" was judged "the claim says container 101 (jellyfin) … but the command ran pct exec 120"
+    # — T2's text, read as T17's goal — and a step that had landed was recorded failed.
+    desc = " ".join(re.sub(r"\[as in T\d+(?:v\d+)?: .*?\]", " ", str(description or ""), flags=re.S).split())
     if not desc:
         return str(title or "")
     if len(desc) > _CLAIM_CAP:
@@ -9120,6 +9132,53 @@ _DISABLE_IPV6_RE = re.compile(r"\b(?:disabl(?:e|es|ed|ing)|turn(?:s|ed|ing)?\s+o
                               r"|\bdisable_ipv6\b|\bnet\.ipv6\.conf\.|disable-ipv6\.conf\b|\bsysctl\b[^.;\n]{0,60}\bipv6\b", re.I)
 
 
+def _ipv6_state_check(gid: str, iface: str) -> str:
+    """§17.1570g — the read that settles the IPv6-off claim with one verdict word: the LAN interface off,
+    router advertisements refused, loopback still on, the drop-in present."""
+    check_payload = (f"echo {iface}.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6) "
+                     f"{iface}.accept_ra=$(cat /proc/sys/net/ipv6/conf/{iface}/accept_ra) "
+                     f"lo.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6) "
+                     f"all.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6); "
+                     f"echo global_ipv6_on_{iface}=$(ip -6 addr show dev {iface} scope global 2>/dev/null | grep -c inet6); "
+                     f"echo loopback_::1=$(ip -6 addr show dev lo 2>/dev/null | grep -c ::1); cat {_DISABLE_IPV6_FILE}; "
+                     f"test \"$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6)\" = 1 && "
+                     f"test \"$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6)\" = 0 && echo STATE-OK || echo STATE-WRONG")
+    return f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+
+
+def rewrite_verify_ipv6_disabled(node: Optional[dict], commands: list[str], verify: list[str],
+                                 services: Optional[list] = None,
+                                 inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1570h — a "Verify IPv6 disabled on <guest>" checkpoint is the engine's own read, settled by a
+    verdict word, not a model draft judged by a model.
+
+    Live (job eff80f98): T4 (model-drafted) died on `grep -c inet6` exiting 1 for the DESIRED count of
+    zero under `set -e`; T10 and T16 printed the right state and were judged "IPv6 not disabled on
+    all/lo" — the judge read "Verify IPv6 disabled" as every interface while the step only ever
+    claimed eth0. Both the run and the check are the same read-only state probe (§17.1570g), the
+    expectation is STATE-OK, so the pre-pass, the post-run judge and the operator all read one word."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_JF_OBSERVE_TITLE_RE.search(title) and _DISABLE_IPV6_RE.search(text) or
+            (_JF_OBSERVE_TITLE_RE.search(title) and re.search(r"\bipv6\b", text, re.I) and re.search(r"\bdisabled?\b|\boff\b", text, re.I))):
+        return list(commands or []), list(verify or []), []
+    if re.search(r"\bloopback\b|\blo\b", title, re.I) and not re.search(r"\beth\d|\bens\d", text):
+        return list(commands or []), list(verify or []), []          # the loopback-intact check is its own step
+    own = _own_step_text(node)
+    name, gid, _unit = _named_guest(own, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    m_if = re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", own) or re.search(r"\b(eth\d+|ens\d+|enp\w+|net\d+)\b", text)
+    iface = m_if.group(1) if m_if else "eth0"
+    check = _ipv6_state_check(gid, iface)
+    note = [{"expect": {check: "STATE-OK"}, "why": (
+        f"drafted the check from the engine's own shape (§17.1570h): inside guest {gid} ({name}) it prints {iface}'s "
+        f"disable_ipv6 and accept_ra, loopback's disable_ipv6, the count of global IPv6 addresses left on {iface}, "
+        f"whether ::1 is present, the drop-in, and one verdict word — STATE-OK only when {iface} is off AND loopback "
+        f"is still on. A read, settled by that word; a count of zero is the goal, not a failure.")}]
+    return [check], [check], note
+
+
 def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], verify: list[str],
                                   services: Optional[list] = None,
                                   inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
@@ -9156,19 +9215,10 @@ def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], ver
                    f"echo \"global IPv6 addresses left: $(ip -6 addr show scope global | grep -c inet6 || true)\" && "
                    f"echo 'RESULT: IPv6 disabled on {iface} in guest {gid} ({name}); persisted in {_DISABLE_IPV6_FILE}; loopback untouched'")
     run = f"pct exec {gid} -- sh -c {_sq_payload(run_payload)}"
-    # §17.1570f — the check reads BOTH halves of the claim: the LAN interface off AND loopback still on
-    # (`lo.disable_ipv6` must read 0 and `::1` must be present). Live, T6 was recorded "already met" off a
-    # check that read only the eth0 half while 102's loopback IPv6 was down from a prior blanket disable.
-    check_payload = (f"echo {iface}.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6) "
-                     f"{iface}.accept_ra=$(cat /proc/sys/net/ipv6/conf/{iface}/accept_ra) "
-                     f"lo.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6) "
-                     f"all.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6); "
-                     f"echo global_ipv6_on_{iface}=$(ip -6 addr show dev {iface} scope global 2>/dev/null | grep -c inet6); "
-                     f"echo loopback_::1=$(ip -6 addr show dev lo 2>/dev/null | grep -c ::1); cat {_DISABLE_IPV6_FILE}; "
-                     # §17.1570g — one deterministic verdict word the judge needs no model for
-                     f"test \"$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6)\" = 1 && "
-                     f"test \"$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6)\" = 0 && echo STATE-OK || echo STATE-WRONG")
-    check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
+    # §17.1570f/g — the check reads BOTH halves of the claim (the LAN interface off AND loopback still on)
+    # and ends with one verdict word. Live, T6 was recorded "already met" off a check that read only the
+    # eth0 half while 102's loopback IPv6 was down from a prior blanket disable.
+    check = _ipv6_state_check(gid, iface)
     note = [{"expect": {check: "STATE-OK"}, "why": (
         f"drafted from the engine's own shape (§17.1570): inside guest {gid} ({name}) it writes {_DISABLE_IPV6_FILE} "
         f"— IPv6 off on {iface} and on interfaces created later, router advertisements and autoconf off — applies it "

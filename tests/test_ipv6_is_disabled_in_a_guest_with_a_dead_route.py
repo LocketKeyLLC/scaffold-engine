@@ -179,6 +179,45 @@ def test_the_check_ends_with_a_verdict_word_the_frame_carries_as_an_expectation(
     assert '(frame or {}).get("expects")' in src                         # the pre-pass reads it
 
 
+def test_a_verify_ipv6_disabled_checkpoint_is_the_engines_own_read_settled_by_a_verdict_word():
+    """§17.1570h — live: T4 (model-drafted) died on `grep -c inet6` exiting 1 for the desired zero; T10/T16
+    printed the right state and were judged 'IPv6 not disabled on all/lo' — the judge read the title as every
+    interface while the step only claimed eth0."""
+    import inspect
+    from app.modules import supervised_runs as sr
+    from app.modules.assist_state_check import read_only_command
+    t10 = {"node_key": "T10", "title": "Verify IPv6 disabled radarr", "tool": "Shell", "node_type": "checkpoint",
+           "prompt_template": "Starts from T9. Checks /proc/sys/net/ipv6/conf/eth0/disable_ipv6 reads 1 and ip -6 addr show dev eth0 "
+                              "shows no global IPv6 address in container 103 only."}
+    inv = {"names": {"103": "radarr"}}
+    cmds, verify, notes = sr.rewrite_verify_ipv6_disabled(t10, ["<model>"], ["chk"], [], inv)
+    assert notes and "§17.1570h" in notes[0]["why"] and cmds == verify and len(cmds) == 1
+    assert cmds[0].startswith("pct exec 103 -- ") and cmds[0].rstrip("'").endswith("echo STATE-OK || echo STATE-WRONG")
+    assert notes[0]["expect"] == {verify[0]: "STATE-OK"} and read_only_command(cmds[0])
+    # the disable capability does not claim a verify; the loopback-intact checkpoint is left to its own draft
+    assert not sr.rewrite_disable_ipv6_in_guest(t10, ["x"], ["y"], [], inv)[2]
+    t23 = {"node_key": "T23", "title": "Verify loopback IPv6 intact", "tool": "Shell", "node_type": "checkpoint",
+           "prompt_template": "Checks that /proc/sys/net/ipv6/conf/lo/disable_ipv6 reads 0 and ::1 is still present on lo in each of the seven containers."}
+    assert not sr.rewrite_verify_ipv6_disabled(t23, ["x"], ["y"], [], inv)[2]
+    # the post-run judge gets the frame's expectation too
+    src = inspect.getsource(sr.resolve_run)
+    assert 'expects={str(k): str(v) for k, v in (waiting.get("expects") or {}).items()}' in src
+    src_all = inspect.getsource(sr)
+    assert src_all.index("rewrite_verify_ipv6_disabled(node, cmds") < src_all.index("read_on_the_machine(cmds")
+
+
+def test_inherited_text_is_specification_not_claim():
+    """§17.1570h — T17 'Write sysctl config caddy-proxy' was judged against T2's inherited text ('container 101
+    (jellyfin)') and a landed step was recorded failed."""
+    from app.modules.supervised_runs import goal_claim
+    claim = goal_claim("Write sysctl config caddy-proxy",
+                       "Writes the sysctl config file inside container 120 (caddy-proxy) only. Same contents as T2.\n"
+                       "[as in T2: Write sysctl config jellyfin Writes the sysctl config file inside container 101 (jellyfin) only. "
+                       "Contents: net.ipv6.conf.eth0.disable_ipv6=1]")
+    assert "container 120" in claim and "Same contents as T2" in claim
+    assert "101" not in claim and "jellyfin" not in claim and "[as in" not in claim
+
+
 def test_frame_run_runs_the_disable_ipv6_rewrite_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr
