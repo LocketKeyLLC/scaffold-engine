@@ -3070,7 +3070,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             _nk_dev = str(run_node.get("node_key") or "")
             workspace = await develop.read_workspace(spec, host)
             # §17.1582 — a check the step's text never named, read off the service's own routes
-            _derived = develop.derived_checks(run_node, host, workspace, develop.service_port(host, _services))
+            _port = develop.service_port(host, _services)
+            _derived = develop.derived_checks(run_node, host, workspace, _port)
             if _derived:
                 logger.warning("develop_checks_derived job=%s node=%s checks=%s", job_id, _nk_dev, [c[-60:] for c in _derived])
             _no_check = develop.own_check_refusal(run_node, host, _derived)      # §17.1418 — no check, no run
@@ -3121,7 +3122,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     continue
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
-                rb = develop.render_delivery(run_node, host, {**files, **kit}, checks,
+                # §17.1584 — the routes the CHANGED files define are this delivery's feature; the word-derived
+                # permit (§17.1582) stands in only when they define none (a UI file)
+                _own = develop.derived_from_files(host, files, _port) if _derived else []
+                _checks = develop.done_checks(run_node, host, _own) if _own else checks
+                rb = develop.render_delivery(run_node, host, {**files, **kit}, _checks,
                                              develop.acceptance_checks(run_node), creds)
                 fr = await asyncio.to_thread(supervised_runs.frame_run, run_node, rb, spec, policy, env=_env,
                                                preconditions=await _pre_for(rb), upstream=up_block,

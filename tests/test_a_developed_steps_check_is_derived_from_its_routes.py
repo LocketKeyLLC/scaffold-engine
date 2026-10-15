@@ -21,6 +21,8 @@ WS = {
     "/opt/control-panel-backend/palworld_route.js": "module.exports = (app) => { app.get('/api/palworld/status', (req, res) => {}); app.post('/api/palworld/start', (req, res) => {}); };\n",
     "/opt/control-panel-backend/network_view_route.js": "module.exports = (app) => { app.get('/api/network-view', async (req, res) => {}); };\n",
     "/opt/control-panel-backend/server.js": "app.use(basicAuth);\napp.get('/api/capabilities', (req, res) => {});\n",
+    "/opt/control-panel-backend/scaffold_engine_route.js": "module.exports = (app) => { app.get('/api/scaffold-engine', async (req, res) => {}); };\n",
+    "/opt/control-panel-backend/overview_route.js": "// aggregates radarr, sonarr, pihole\nmodule.exports = (app) => { app.get('/api/overview', async (req, res) => {}); };\n",
     "/opt/control-panel-ui/index.html": "<html><div id='overview'>Loading overview...</div></html>",
     "/opt/control-panel-backend/node_modules/express/lib/router/index.js": "app.get('/x', fn)",
 }
@@ -36,8 +38,11 @@ BASE = "pct exec 111 -- curl -s --fail-with-body --max-time 20 http://127.0.0.1:
 
 def test_the_routes_whose_handler_names_the_steps_feature_are_its_checks():
     assert dv.service_port(HOST, [PANEL]) == "3001" and dv.service_port(HOST, []) == ""
-    assert dv.derived_checks(T4, HOST, WS, "3001") == [f"{BASE}/api/media-library"]        # radarr: the GET route, not the POST
-    assert dv.derived_checks(T6, HOST, WS, "3001") == [f"{BASE}/api/scaffold/health", f"{BASE}/api/scaffold/jobs"]
+    t4 = dv.derived_checks(T4, HOST, WS, "3001")
+    assert f"{BASE}/api/media-library" in t4 and f"{BASE}/api/overview" in t4                 # every handler that mentions radarr: the PERMIT
+    assert f"{BASE}/api/scaffold-engine" not in t4                                             # §17.1584 — "engine-held" is not scaffold_engine_route.js
+    assert f"{BASE}/api/media-request" not in t4                                               # a POST is not a read check
+    assert dv.derived_checks(T6, HOST, WS, "3001") == [f"{BASE}/api/scaffold-engine", f"{BASE}/api/scaffold/health", f"{BASE}/api/scaffold/jobs"]
     t7 = dv.derived_checks(T7, HOST, WS, "3001")
     assert f"{BASE}/api/palworld/status" in t7 and f"{BASE}/api/network-view" in t7 and f"{BASE}/api/media-library" in t7
     assert not any("capabilities" in c or "node_modules" in c or "/x" in c for c in t7)
@@ -49,6 +54,20 @@ def test_the_routes_whose_handler_names_the_steps_feature_are_its_checks():
     assert all(read_only_command(c) for c in t7)
 
 
+def test_the_deliverys_own_checks_are_the_routes_its_changed_files_define():
+    changed = {"/opt/control-panel-backend/media_library_route.js": WS["/opt/control-panel-backend/media_library_route.js"],
+               "/opt/control-panel-backend/media_request_route.js": WS["/opt/control-panel-backend/media_request_route.js"],
+               "/opt/control-panel-backend/scaffold-kit/remote.js": "app.get('/kit', fn)"}
+    assert dv.derived_from_files(HOST, changed, "3001") == [f"{BASE}/api/media-library"]      # not /api/overview: another step's bug
+    assert dv.derived_from_files(HOST, {"/opt/control-panel-ui/index.html": "<html>"}, "3001") == []   # a UI file: the permit stands in
+    assert dv.derived_from_files(HOST, changed, "") == []
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "_own = develop.derived_from_files(host, files, _port) if _derived else []" in src
+    assert "_checks = develop.done_checks(run_node, host, _own) if _own else checks" in src
+    assert "develop.render_delivery(run_node, host, {**files, **kit}, _checks," in src
+
+
 def test_a_derived_check_lifts_the_no_own_check_refusal_and_rides_the_done_checks():
     assert dv.own_check_refusal(T4, HOST)                                          # the text names none: refused, as before
     derived = dv.derived_checks(T4, HOST, WS, "3001")
@@ -58,6 +77,6 @@ def test_a_derived_check_lifts_the_no_own_check_refusal_and_rides_the_done_check
     assert dv.done_checks(T4, HOST) == ["pct exec 111 -- systemctl is-active control-panel.service"]
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
-    assert "_derived = develop.derived_checks(run_node, host, workspace, develop.service_port(host, _services))" in src
+    assert "_derived = develop.derived_checks(run_node, host, workspace, _port)" in src
     assert src.index("workspace = await develop.read_workspace(spec, host)") < src.index("develop.own_check_refusal(run_node, host, _derived)")
     assert "checks = develop.done_checks(run_node, host, _derived)" in src

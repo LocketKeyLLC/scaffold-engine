@@ -248,7 +248,7 @@ def test_the_prompt_documents_the_kit_at_its_real_path():
 def test_the_kit_is_delivered_with_every_version_and_the_model_cannot_overwrite_it():
     src = inspect.getsource(execution_agent._pause_for_decision)
     assert "files = {p: c for p, c in files.items() if p not in kit}" in src
-    assert "develop.render_delivery(run_node, host, {**files, **kit}, checks," in src
+    assert "develop.render_delivery(run_node, host, {**files, **kit}, _checks," in src     # §17.1584 — the delivery's own checks
     rb = dv.render_delivery(ADD122, HOST, {**FILES, **dv.kit_for(HOST, WS)}, ["true"])
     staged = {f["path"] for f in sr.file_writes(rb)}
     assert _staged("/opt/control-panel-backend/scaffold-kit/remote.js") in staged

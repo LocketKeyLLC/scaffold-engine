@@ -294,6 +294,31 @@ _UI_WORDS = frozenset({"ui", "frontend", "page", "html", "index", "render", "ren
                        "fetch", "loading", "css", "theme", "dom", "browser"})
 
 
+#: §17.1584 — name words every route file has: a step saying "engine-held secrets" is not about scaffold_engine_route.js
+_GENERIC_STEMS = frozenset({"server", "index", "main", "app", "api", "engine", "route", "routes", "view", "ui", "status",
+                            "request", "requests", "library", "backend", "dashboard", "settings", "health", "handler", "controller"})
+
+
+def derived_from_files(host: Host, files: Optional[dict[str, str]], port: str) -> list[str]:
+    """§17.1584 — the feature check of a DELIVERY: the GET routes defined in the files it rewrites.
+
+    Live (c2792d4b T4): the word-derived permit (§17.1582) named five routes whose handlers mention Radarr —
+    /api/overview among them, which hangs for a reason of its own — so this step's verify would have failed on
+    another step's bug. The files the model changed (media_library_route.js) say exactly which routes this
+    delivery touches; those are what its checks read. Empty when the changed files define no route (a UI
+    file): the caller keeps the word-derived checks."""
+    if not port:
+        return []
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    base = f"{tool} curl -s --fail-with-body --max-time 20 http://127.0.0.1:{port}"
+    routes: list[str] = []
+    for path, body in sorted((files or {}).items()):
+        if "node_modules" in path or "scaffold-kit" in path or not path.endswith((".js", ".ts", ".mjs", ".py")):
+            continue
+        routes += _ROUTE_DEF_RE.findall(str(body or ""))
+    return [f"{base}{r}" for r in dict.fromkeys(routes)]
+
+
 def service_port(host: Host, services: Optional[list]) -> str:
     """§17.1582 — the measured loopback port of the service `host` develops on, or ''."""
     for s in services or []:
@@ -340,7 +365,7 @@ def derived_checks(node: Optional[dict], host: Host, workspace: Optional[dict[st
         low, fname = str(body or "").lower(), path.rsplit("/", 1)[-1].lower()
         # the title's words (and the services the step names) in the file — or, the other way round, the file's
         # OWN name words in the step's text ("… Palworld, media, network, FlareSolverr" → network_view_route.js)
-        stem_words = set(re.findall(r"[a-z][a-z0-9]{2,}", fname.rsplit(".", 1)[0])) - _FEATURE_STOP - {"server", "index", "main", "app"}
+        stem_words = set(re.findall(r"[a-z][a-z0-9]{2,}", fname.rsplit(".", 1)[0])) - _FEATURE_STOP - _GENERIC_STEMS
         if any(w in fname or w in low for w in feature_words) or (stem_words and stem_words & step_words):
             routes += found
     out = [f"{base}{r}" for r in dict.fromkeys(routes)]
