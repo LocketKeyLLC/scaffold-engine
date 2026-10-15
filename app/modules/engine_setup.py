@@ -1260,9 +1260,40 @@ RUNNER_SCRIPT_FALLBACK_URL = "https://raw.githubusercontent.com/LocketKeyLLC/sca
 
 
 def _url_is_local(url: str) -> bool:
+    """An address another machine on the LAN cannot reach this engine at.
+
+    §17.1604 — not only loopback: a single-label name (`scaffold-orchestrator`, the compose service name) resolves only
+    on the engine's own Docker network, and an address in one of this container's own subnets is the Docker bridge.
+    Live (2026-10-15): a request that came from the pipelines container taught the engine `http://scaffold-orchestrator:8000`;
+    the Machines page's install line then told the Proxmox host to `curl` it — "Could not resolve host:
+    scaffold-orchestrator" — and the helper-23 update could not be installed."""
+    import ipaddress
     from urllib.parse import urlparse
     host = (urlparse(url or "").hostname or "").lower()
-    return host in ("", "localhost", "127.0.0.1", "::1", "0.0.0.0")
+    if host in ("", "localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host                       # a single-label name lives on the Docker network only
+    if ip.is_loopback or ip.is_unspecified or ip.is_link_local:
+        return True
+    return any(ip in net for net in _own_subnets())
+
+
+def _own_subnets() -> list:
+    """The /16s of this container's own IPv4 addresses (the Docker bridges it sits on)."""
+    import ipaddress
+    import socket
+    nets = []
+    try:
+        for a in socket.gethostbyname_ex(socket.gethostname())[2]:
+            ip = ipaddress.ip_address(a)
+            if not ip.is_loopback:
+                nets.append(ipaddress.ip_network(f"{a}/16", strict=False))
+    except Exception:
+        pass
+    return nets
 
 
 async def remember_engine_url(db, session_id: str, base_url: str) -> None:
