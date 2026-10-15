@@ -342,6 +342,7 @@ _READ_ONLY_HEADS = frozenset({
     "namei", "tree",
     # shell meta with no effect
     "echo", "printf", "true", "false", "test", "[", "[[", ":", "seq", "expr",
+    "read",      # §17.1574c — the shell builtin that reads STDIN into a variable (`IFS= read -r CPW`, §17.1548's login shape)
     "date", "sleep", "which", "type", "pwd", "id", "groups", "whoami",
     "logname", "getent", "locale", "tty", "printenv",
     # system state
@@ -1052,6 +1053,10 @@ _JUDGE_OPENING = (
 )
 
 
+#: §17.1574a — a verdict word: ALL-CAPS with a hyphen/underscore (`STATE-OK`, `RESULT-DONE`), never prose.
+_VERDICT_WORD_RE = re.compile(r"[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+")
+
+
 @tagged_calls("assist.state_check.judge_outputs")
 async def judge_outputs(probes: list[dict], pasted: str, *,
                         model_overrides: Optional[dict] = None) -> list[dict]:
@@ -1076,6 +1081,7 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
     for cid, txt in with_output.items():
         exp = " ".join((probed[cid].get("expect") or "").split()).lower()
         neg = negative_evidence(probed[cid].get("command") or "", txt, probed[cid].get("claim") or "")
+        exp_raw = str(probed[cid].get("expect") or "").strip()
         if len(exp) >= 6 and exp in " ".join(txt.split()).lower():
             verdicts[cid].update({"verdict": "confirmed", "reason": f"output contains the expected '{exp[:80]}'"})
         elif neg:
@@ -1083,6 +1089,15 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
             # ambiguous; live the model judge called it unknown and a step that did
             # nothing stood as done.
             verdicts[cid].update({"verdict": "contradicted", "reason": neg})
+        elif _VERDICT_WORD_RE.fullmatch(exp_raw):
+            # §17.1574a — the expectation is a VERDICT WORD (`STATE-OK`, a rewrite's own last line, §17.1570g):
+            # the check prints it when the goal holds and its complement when it does not. Absent, the claim is
+            # contradicted deterministically — the judge never sees it. Live (job 9e1c2c68, T3–T7): the check
+            # ended `STATE-WRONG` and the model judge still read the counter lines above it as "confirms the
+            # goal", so five steps were recorded already met over their own verdict word.
+            verdicts[cid].update({"verdict": "contradicted",
+                                  "reason": f"the check did not print its verdict word '{exp_raw[:40]}' "
+                                            f"(its last line: {(txt.strip().splitlines() or [''])[-1][:80]!r})"})
         else:
             verdicts[cid]["reason"] = "the judge returned no verdict for this check"
             to_judge[cid] = txt

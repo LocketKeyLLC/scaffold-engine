@@ -758,7 +758,8 @@ def mcp_needs_the_pause(node: Optional[dict]) -> bool:
     """§17.1551/§17.1555/§17.1573 — an MCP node the frontier must HOLD for the operator rather than call:
     a runner write (command or file), a runner read that splices an upstream output into its command,
     or a runner read one of the engine's own capabilities claims."""
-    return is_mcp_write(node) or mcp_splices_an_upstream(node) or a_capability_claims(node)
+    return (is_mcp_write(node) or mcp_splices_an_upstream(node) or a_capability_claims(node)
+            or bool(_mcp_cfg(node).get("needs_root")))             # §17.1574b — a read the read channel refused for privilege
 
 
 def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], brief: Any) -> Optional[str]:
@@ -839,7 +840,8 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
         # §17.1555 — so does a runner-read whose command splices another node's output in.
         if mcp_needs_the_pause(node):
             node["hands_on_reason"] = ("mcp:runner-write" if is_mcp_write(node)
-                                       else "mcp:spliced-read" if mcp_splices_an_upstream(node) else "mcp:capability")
+                                       else "mcp:spliced-read" if mcp_splices_an_upstream(node)
+                                       else "mcp:needs-root" if _mcp_cfg(node).get("needs_root") else "mcp:capability")
             return await inherit_referenced_step_text(db, job_id, node)     # §17.1573b
         _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
         on, why = step_is_hands_on(node, develops_codegen=_dc)
@@ -5689,6 +5691,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _ri_notes:
         cmds, verify = _ri_cmds, _ri_verify
         _comp_notes = list(_comp_notes) + _ri_notes
+    # §17.1574c — "probe each endpoint authenticated": the engine presents the login it holds to every GET route.
+    _pe_cmds, _pe_verify, _pe_notes = rewrite_probe_service_endpoints(
+        node, cmds, verify, services, inventory, logins=(policy or {}).get("held_logins") or [])
+    if _pe_notes:
+        cmds, verify = _pe_cmds, _pe_verify
+        _comp_notes = list(_comp_notes) + _pe_notes
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
@@ -9389,9 +9397,13 @@ _IN_GUEST_IPV6_RE = re.compile(r"\bcontainer\s+\d+|\bCT\s*\d+\b|\bpct\s+exec\b|d
 
 
 def _rafilter_check() -> str:
-    return (f"nft list table {_RAFILTER_TABLE}; systemctl is-active {_RAFILTER_UNIT}; systemctl is-enabled {_RAFILTER_UNIT}; "
+    """§17.1574 — the check runs on the READ-ONLY channel, which is unprivileged: `nft list` there answers
+    `netlink: Error: cache initialization failed: Operation not permitted` (live, T2–T7 of 9e1c2c68). The
+    oneshot is `RemainAfterExit`, so `active` means `nft -f` loaded the table; the files are read back; the
+    counter is read in the approved RUN, whose channel is root (T6 saw `counter packets 12`)."""
+    return (f"systemctl is-active {_RAFILTER_UNIT}; systemctl is-enabled {_RAFILTER_UNIT}; "
             f"cat {_RAFILTER_FILE}; cat /etc/systemd/system/{_RAFILTER_UNIT}; "
-            f"nft list table {_RAFILTER_TABLE} | grep -q nd-router-advert && systemctl is-active {_RAFILTER_UNIT} | grep -qx active "
+            f"systemctl is-active {_RAFILTER_UNIT} | grep -qx active && grep -q nd-router-advert {_RAFILTER_FILE} "
             f"&& echo STATE-OK || echo STATE-WRONG")
 
 
@@ -9413,11 +9425,12 @@ def rewrite_verify_router_adverts_dropped(node: Optional[dict], commands: list[s
             and not _RA_NAMED_RE.search(own):
         return list(commands or []), list(verify or []), []          # a different thing is being checked
     check = _rafilter_check()
+    run = f"nft list table {_RAFILTER_TABLE}; {check}"          # the root channel lists the table and its counter
     note = [{"expect": {check: "STATE-OK"}, "why": (
         f"drafted the check from the engine's own shape (§17.1573): it lists the installed table {_RAFILTER_TABLE} — the "
         f"rule's counter grows with every advertisement dropped — the unit's active/enabled state, and both files, ending "
         f"STATE-OK. The draft read a table by the plan's working name, which is not the one the engine installed.")}]
-    return [check], [check], note
+    return [run], [check], note
 
 
 def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: list[str], verify: list[str],
@@ -9512,12 +9525,13 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
         return list(commands or []), list(verify or []), []
     stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
     routes = "(app|router)\\.(get|post|put|patch|delete|use)\\("
-    inc = "--include='*.js' --include='*.ts' --include='*.py'"
-    # plain reads over the service's /opt/<stem>* glob: no loops, no substitutions, so the read-only channel takes it
+    inc = "--include='*.js' --include='*.ts' --include='*.py' --exclude-dir=node_modules --exclude-dir='*.bak*'"
+    # plain reads over the service's /opt/<stem>* glob: no loops, no substitutions, so the read-only channel takes it;
+    # the develop flow's `.bak.<stamp>` copies are left out (live, T1 of c2792d4b listed three of them)
     payload = (
-        f"echo '--- service dirs ---'; ls -d /opt/{stem}*; "
+        f"echo '--- service dirs ---'; ls -d /opt/{stem}* | grep -v '\\.bak'; "
         f"echo '--- routes ---'; grep -rnE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | head -n 150; "
-        f"echo '--- served page fetch targets ---'; grep -rhoE 'fetch\\([^)]{{0,120}}\\)' /opt/{stem}* --include='*.html' --include='*.js' 2>/dev/null | grep -v node_modules | sort | uniq -c | sort -rn | head -n 40; "
+        f"echo '--- served page fetch targets ---'; grep -rhoE 'fetch\\([^)]{{0,120}}\\)' /opt/{stem}* --include='*.html' --include='*.js' --exclude-dir='*.bak*' 2>/dev/null | grep -v node_modules | sort | uniq -c | sort -rn | head -n 40; "
         f"echo '--- config files and key names (values never printed) ---'; ls /opt/{stem}*/config 2>/dev/null; "
         f"grep -rhoE '\"[A-Za-z_]*([Kk]ey|[Tt]oken|[Pp]assword|[Uu]rl|[Aa]ddress)\"' /opt/{stem}*/config 2>/dev/null | sort | uniq -c; "
         f"echo '--- route files ---'; grep -rlE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | grep -c . && echo STATE-OK || echo STATE-WRONG")
@@ -9527,6 +9541,61 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
         f"service's /opt/{stem}* directories, every route registration in them, the served page's fetch targets, "
         f"and the config files with the NAMES of the keys they hold (values are never printed) — a read, settled by "
         f"STATE-OK when at least one route file was found. The draft was 24 `find / … | xargs grep` guesses with no check.")}]
+    return [run], [run], note
+
+
+#: §17.1574c — "probe / call / test each endpoint, authenticated as <the login user>": the engine presents the
+#: login it holds and reads every GET route the service's own code registers.
+_PROBE_ENDPOINTS_RE = re.compile(r"\b(?:probe|call|test|exercise|query|hit|fetch|request|curl)\w*\b[^.;\n]{0,40}\b(?:endpoints?|routes?|api)\b", re.I)
+_AUTHENTICATED_RE = re.compile(r"\bauthenticated\b|\blogged[- ]in\b|\bbasic[- ]auth\b|\bas\s+the\s+\w+\s+user\b|\bwith\s+(?:the\s+)?(?:login|credentials?)\b", re.I)
+
+
+def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], verify: list[str],
+                                    services: Optional[list] = None, inventory: Optional[dict] = None,
+                                    logins: Optional[list] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1574c — a "probe each endpoint authenticated" step for a service the engine holds a login for.
+
+    Live (job c2792d4b, T2): the model drafted a loop over endpoints it guessed, with
+    `-H "Cookie: <PANEL_SESSION_COOKIE>"` (a value nobody holds) and no check — refused. The engine holds
+    the login (PANEL_PASSWORD, user `panel`, §17.1548's `logins_from_held`) and can read the routes off
+    the service's own code, so inside the guest it: lists every GET route registered under /opt/<stem>*,
+    curls each on the measured loopback port with HTTP Basic auth — the password fed on stdin as the
+    runner-resolved `<NAME>` placeholder, never in the command — and prints `HTTP <code> in <s>` with the
+    tail of the body; STATE-OK when every route answered (any code is an answer; 000 is not). The same
+    line is run and check: it changes nothing."""
+    from app.modules import machine_values as _mv
+    text = _node_text(node)
+    if not (_PROBE_ENDPOINTS_RE.search(text) and _AUTHENTICATED_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    own = _own_step_text(node)
+    name, gid, _unit = _named_guest(own, services, inventory)
+    if not gid:
+        name, gid, _unit = _guest_by_name_fragment(own, services, inventory)
+    if not gid or not logins:
+        return list(commands or []), list(verify or []), []
+    guard = _mv._guarded_ports(services, list(logins))
+    mine = [(port, secret, user) for port, (secret, user, g, vm) in guard.items() if str(g) == str(gid) and not vm]
+    if not mine:
+        return list(commands or []), list(verify or []), []
+    port, secret, user = sorted(mine)[0]
+    stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
+    # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
+    payload = (
+        'IFS= read -r CPW; fails=""; '
+        # the route's quote is matched with `.` and stripped with tr's octal `\047`: no quote character of either kind
+        # appears in the payload, so `_sq_payload` wraps it once with no `'\''` escapes
+        f'for ep in $(grep -rhoE "(app|router)\\.get\\(.(/[^,)]*)" /opt/{stem}* --include="*.js" --include="*.ts" '
+        f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "/[^,)]*" | tr -d "\\047\\042" | sort -u); do '
+        f'echo "=== $ep ==="; out=$(curl -s -m 20 -u "{user}:$CPW" -w "\\nHTTP %{{http_code}} in %{{time_total}}s" "http://127.0.0.1:{port}$ep" 2>&1); '
+        'case "$out" in *"HTTP 000"*) fails="$fails $ep";; esac; printf "%s\\n" "$out" | tail -c 400; echo; done; '
+        'echo "unanswered:$fails"; test -z "$fails" && echo STATE-OK || echo STATE-WRONG')
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)} <<< \"<{secret}>\""
+    note = [{"expect": {run: "STATE-OK"}, "why": (
+        f"drafted the probe from the engine's own shape (§17.1574c): inside guest {gid} ({name}) it reads every GET route "
+        f"the service's code registers under /opt/{stem}*, calls each on 127.0.0.1:{port} as user `{user}` with the login the "
+        f"engine holds ({secret}, fed on stdin as a runner-resolved placeholder — never in the command or a log), and prints "
+        f"`HTTP <code> in <s>` with the tail of each body; STATE-OK when every route answered. The draft guessed the routes "
+        f"and sent a session cookie nobody holds, with no check.")}]
     return [run], [run], note
 
 

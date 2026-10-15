@@ -40,11 +40,13 @@ def test_the_verify_lists_the_table_and_ends_with_a_verdict_word_read_only():
     from app.modules.assist_state_check import read_only_command
     cmds, verify, notes = rewrite_drop_router_adverts_on_the_bridge(STEP, ["x"], ["y"], [], {})
     v = verify[0]
-    # `nft list` is a read form on the read-only channel (measured: the runner ran `nft list ruleset` for T1 of 9e1c2c68)
-    assert v.startswith("nft list table bridge scaffold_rafilter;") and "systemctl is-active scaffold-rafilter.service" in v
-    assert "systemctl is-enabled scaffold-rafilter.service" in v and "cat /etc/scaffold/rafilter.nft" in v
-    assert v.endswith("&& echo STATE-OK || echo STATE-WRONG") and "grep -q nd-router-advert" in v
-    assert "nft list table bridge scaffold_rafilter" in cmds[0]          # the counter is read in the RUN too
+    # §17.1574 — the read-only channel is unprivileged (`nft list` there: "cache initialization failed: Operation not
+    # permitted", live T2–T7 of 9e1c2c68): the check reads the oneshot's state and the files; the RUN lists the table
+    assert "nft" not in v.replace("rafilter.nft", "")
+    assert v.startswith("systemctl is-active scaffold-rafilter.service;") and "systemctl is-enabled scaffold-rafilter.service" in v
+    assert "cat /etc/scaffold/rafilter.nft" in v and "cat /etc/systemd/system/scaffold-rafilter.service" in v
+    assert v.endswith("grep -q nd-router-advert /etc/scaffold/rafilter.nft && echo STATE-OK || echo STATE-WRONG")
+    assert "nft list table bridge scaffold_rafilter" in cmds[0]          # the counter is read in the RUN (root)
     assert notes[0]["expect"] == {v: "STATE-OK"}
     assert read_only_command(v)
     assert subprocess.run(["bash", "-n", "-c", v], capture_output=True, text=True).returncode == 0
@@ -115,7 +117,8 @@ def test_the_pieces_of_the_install_are_claimed_by_the_same_capability():
 def test_a_verify_of_the_filter_reads_what_the_engine_installed_and_parks():
     for step in (T5, T7):
         cmds, verify, notes = rewrite_verify_router_adverts_dropped(step, ["x"], ["y"], None, None)
-        assert notes and cmds == verify == [_rafilter_check()] and notes[0]["expect"] == {_rafilter_check(): "STATE-OK"}, step["node_key"]
+        assert notes and verify == [_rafilter_check()] and notes[0]["expect"] == {_rafilter_check(): "STATE-OK"}, step["node_key"]
+        assert cmds == [f"nft list table bridge scaffold_rafilter; {_rafilter_check()}"]      # the counter, on the root channel
         assert "block_ra" not in cmds[0] and a_capability_claims(step) and mcp_needs_the_pause(step)
     # verifies of OTHER things run as planned: no claim, no pause
     for step in (T8, T10):
