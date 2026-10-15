@@ -60,8 +60,10 @@ def test_the_paths_the_code_calls_on_a_proxy_are_probed_and_a_404_is_dead_while_
     files = {"/opt/control-panel-backend/byparr_route.js": ("const cfg = readConfig(); // byparr\nconst h = await httpRequest(cfg.host, cfg.port, '/health');\n"
                                                           "const s = await httpRequest(cfg.host, cfg.port, '/api/status');\napp.get('/api/byparr/status', fn);\n"
                                                           "const v = await httpRequest(cfg.host, cfg.port, '/v1', 'POST');\n"),
-             "/opt/control-panel-backend/palworld_route.js": "fetch('/palworld/thing')\n"}
-    assert dv.paths_called(files, BYPARR) == ["/health", "/api/status", "/v1"]             # the file's OWN route and the other file: not Byparr's; Byparr's /api/status is
+             "/opt/control-panel-backend/palworld_route.js": "fetch('/palworld/thing')\n",
+             "/opt/control-panel-backend/health_route.js": "// byparr, radarr, pihole\ncheck(radarr, '/api/v3/system/status'); check(pihole, '/api/stats/summary'); check(byparr, '/health');\n"}
+    assert dv.paths_called(files, BYPARR) == ["/health", "/api/status", "/v1"]             # the file's OWN route and the other files: not Byparr's; Byparr's /api/status is
+    assert dv.paths_called({"/x/health_route.js": files["/opt/control-panel-backend/health_route.js"]}, BYPARR) == []   # §17.1596c — an aggregator's paths are not Byparr's
     answers = {"/api/status": "404 0.004", "/v1": "405 0.003"}
 
     async def _probe(spec, cmd):

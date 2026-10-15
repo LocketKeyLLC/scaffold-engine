@@ -993,7 +993,12 @@ def paths_called(files: dict[str, str], service) -> list[str]:
     out: list[str] = []
     for path, content in (files or {}).items():
         c = str(content or "")
-        if not (name and name in c.lower()) and not (addr and addr in c):
+        fname = path.rsplit("/", 1)[-1].lower()
+        # §17.1596c — the file must be the SERVICE'S OWN handler (byparr_route.js): an aggregator that mentions every
+        # service (health_route.js, overview_route.js) carries Radarr's `/api/v3/system/status` and Pi-hole's
+        # `/api/stats/summary`, which are not paths it calls on Byparr — live, both were probed on the proxies, 404'd,
+        # and the develop loop stalled on refusals no version could satisfy
+        if not (name and name in fname):
             continue
         if not path.endswith((".js", ".ts", ".mjs", ".py")):
             continue
