@@ -5607,6 +5607,15 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _comp_notes and files:
         logger.info("rewrite_dropped_drafted_files node=%s files=%d", (node or {}).get("node_key"), len(files))
         files = []
+    # §17.1570g — a rewrite may say what its check SHOWS when the goal holds (`{"expect": {check: text}}`);
+    # the frame carries it to `already_met`, whose judge then has a deterministic verdict instead of
+    # reading the step's title. Live, T6 was recorded "already met" twice off a check that printed
+    # `lo.disable_ipv6=1` — the judge confirmed "Apply sysctl live prowlarr" because the title says
+    # nothing about loopback; the capability knows the invariant and now states it.
+    _expects: dict[str, str] = {}
+    for _n in _comp_notes or []:
+        if isinstance(_n, dict) and isinstance(_n.get("expect"), dict):
+            _expects.update({str(k): str(v) for k, v in _n["expect"].items()})
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -5954,6 +5963,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
+        "expects": _expects,                      # §17.1570g — what a rewrite's check shows when the goal holds
     }
 
 
@@ -9154,9 +9164,12 @@ def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], ver
                      f"lo.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6) "
                      f"all.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6); "
                      f"echo global_ipv6_on_{iface}=$(ip -6 addr show dev {iface} scope global 2>/dev/null | grep -c inet6); "
-                     f"echo loopback_::1=$(ip -6 addr show dev lo 2>/dev/null | grep -c ::1); cat {_DISABLE_IPV6_FILE}")
+                     f"echo loopback_::1=$(ip -6 addr show dev lo 2>/dev/null | grep -c ::1); cat {_DISABLE_IPV6_FILE}; "
+                     # §17.1570g — one deterministic verdict word the judge needs no model for
+                     f"test \"$(cat /proc/sys/net/ipv6/conf/{iface}/disable_ipv6)\" = 1 && "
+                     f"test \"$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6)\" = 0 && echo STATE-OK || echo STATE-WRONG")
     check = f"pct exec {gid} -- sh -c {_sq_payload(check_payload)}"
-    note = [{"why": (
+    note = [{"expect": {check: "STATE-OK"}, "why": (
         f"drafted from the engine's own shape (§17.1570): inside guest {gid} ({name}) it writes {_DISABLE_IPV6_FILE} "
         f"— IPv6 off on {iface} and on interfaces created later, router advertisements and autoconf off — applies it "
         f"live with sysctl -p, and prints the resulting state. Loopback keeps IPv6 so a service bound to ::1 is "
@@ -9519,8 +9532,10 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         return None
     title = str((node or {}).get("title") or (frame or {}).get("node_key") or "")
     claim = goal_claim(title, str((node or {}).get("description") or ""))
+    # §17.1570g — the runbook's own "`cmd` shows `text`" bullets, plus what a rewrite declared on the frame
     verdicts = await _verify_verdicts(claim, verify_cmds, pasted,
-                                      expects=verify_expectations(str((frame or {}).get("runbook") or "")))
+                                      expects={**verify_expectations(str((frame or {}).get("runbook") or "")),
+                                               **{str(k): str(v) for k, v in ((frame or {}).get("expects") or {}).items()}})
     if not verdicts or len(verdicts) != len(verify_cmds):
         return None
     kinds = [str(v.get("verdict") or "") for v in verdicts]

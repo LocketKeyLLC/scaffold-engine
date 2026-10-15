@@ -157,6 +157,28 @@ def test_a_rewrite_drops_the_drafts_files_so_the_frame_is_the_engines_block_alon
     assert not frame.get("refused") and "run" in [o["id"] for o in frame["options"]]
 
 
+def test_the_check_ends_with_a_verdict_word_the_frame_carries_as_an_expectation():
+    """§17.1570g — live, T6 was recorded 'already met' twice: the judge confirmed 'Apply sysctl live prowlarr'
+    off a check printing lo.disable_ipv6=1, because the title says nothing about loopback. The capability
+    states the invariant: the check prints STATE-OK only when eth0 is off AND lo is on, and the frame carries
+    that expectation to already_met's deterministic pre-pass."""
+    import inspect
+    from unittest.mock import MagicMock
+    from app.modules import supervised_runs as sr
+    cmds, verify, notes = rewrite_disable_ipv6_in_guest(STEP, ["x"], ["y"], SERVICES, INV)
+    assert verify[0].rstrip("'").endswith("echo STATE-OK || echo STATE-WRONG")
+    assert 'test "$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6)" = 0' in verify[0]
+    assert notes[0]["expect"] == {verify[0]: "STATE-OK"}
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(verify[0])
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    frame = sr.frame_run(STEP, "## Run this\n```bash\necho draft\n```\n", spec, {"allow": ["ANY"], "sudo": False, "helper": "22"},
+                         inventory={"names": {"101": "jellyfin"}})
+    assert frame["expects"] == {frame["verify"][0]: "STATE-OK"}
+    src = inspect.getsource(sr.already_met)
+    assert '(frame or {}).get("expects")' in src                         # the pre-pass reads it
+
+
 def test_frame_run_runs_the_disable_ipv6_rewrite_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr
