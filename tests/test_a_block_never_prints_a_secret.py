@@ -63,3 +63,38 @@ def test_the_gate_is_wired_into_frame_run():
     import inspect
     from app.modules import supervised_runs
     assert "prints_a_secret(cmds, verify, shape_files)" in inspect.getsource(supervised_runs.frame_run)
+
+
+# §17.1603b — the host's admin work for a guest is not "changing the host instead of the guest"
+def test_the_live_host_side_token_draft_is_not_refused_as_missing_the_guest():
+    from app.modules.supervised_runs import commands_never_reach_the_guest
+    node = json.loads((pathlib.Path(__file__).parent / "fixtures" / "panel_t14_node_2026_10_15.json").read_text())
+    cmds = ["pveum user list --output-format json | grep -q '\"userid\": \"panel@pve\"' || pveum user add panel@pve",
+            "pveum acl modify / --roles PVEAuditor --users panel@pve",
+            "umask 077; pveum user token add panel@pve panel --privsep 0 --output-format json > /tmp/panel-token.json",
+            "pct push 111 /tmp/panel-token.json /opt/panel/config/proxmox-token.json",
+            "rm -f /tmp/panel-token.json"]
+    assert commands_never_reach_the_guest(cmds, node) == []
+    assert prints_a_secret(cmds) == []
+    other = {"title": "Install the agent in VM 106", "description": "apt-get install qemu-guest-agent"}
+    assert commands_never_reach_the_guest(["apt-get install -y qemu-guest-agent"], other) != [], "the rule still bites"
+
+
+# §17.1603c — the develop flow never shows the model a secret file's value, and never writes one
+def test_a_secret_file_reaches_the_model_as_its_shape_only():
+    from app.modules import develop as dv
+    body = '{"full-tokenid": "panel@pve!panel", "info": {"privsep": "0"}, "value": "real-secret-value"}'
+    shown = dv.mask_secret_file("/opt/panel/config/proxmox-token.json", body)
+    assert "real-secret-value" not in shown and "panel@pve!panel" not in shown
+    assert json.loads(shown) == {"full-tokenid": dv.SECRET_MASK, "info": {"privsep": dv.SECRET_MASK}, "value": dv.SECRET_MASK}
+    assert dv.mask_secret_file("/opt/panel/config/api-key.txt", "abc") == dv.SECRET_MASK + "\n"
+    assert dv.mask_secret_file("/opt/panel/config/network-view.json", '{"a": 1}') == '{"a": 1}', "others untouched"
+
+
+def test_a_version_that_writes_a_secret_file_is_refused():
+    from app.modules import develop as dv
+    assert dv.writes_a_secret_file({"/opt/panel/config/proxmox-token.json": "{}"}) != []
+    assert dv.writes_a_secret_file({"/opt/panel/network_ui_route.js": "x", "/opt/panel/config/media-request.json": "{}"}) == []
+    import inspect
+    from app.modules import execution_agent
+    assert "develop.writes_a_secret_file(files)" in inspect.getsource(execution_agent)

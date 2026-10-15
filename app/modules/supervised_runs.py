@@ -2618,6 +2618,12 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         ids = [g for g in ids if known_guest(g, inventory, text + "\n" + "\n".join(str(c) for c in commands or []))]
     if not ids or not commands:
         return []
+    # §17.1603b — a step whose own text names Proxmox's admin tools (`pveum`, `pvesh create`, `pct push`, …) is the
+    # HOST's work for the guest: those tools exist only there. Live (c2792d4b T14, "create the panel's API token …
+    # push it into container 111"), the right host-side draft was refused as "would change the HOST instead of guest 111".
+    from app.modules.runbook_templates import _HOST_ADMIN_RE
+    if _HOST_ADMIN_RE.search(text):
+        return []
     cmds = [str(c) for c in commands]
     writes = [c for c in cmds if writing_segments(c) and not _REACH_TOOL_INSTALL_RE.search(c)]
     # §17.1287c — a loop of reads is not a write. §17.1288i — installing the

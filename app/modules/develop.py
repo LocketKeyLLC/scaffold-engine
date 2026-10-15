@@ -247,6 +247,40 @@ def allowed_path(path: str, host: Host, node: Optional[dict]) -> bool:
     return False
 
 
+#: §17.1603c — a file whose NAME says it holds a secret (the machine's own, minted there: a Proxmox API token)
+SECRET_FILE_RE = re.compile(r"(?:token|secret|passw(?:or)?d|credential|api[-_]?key|private[-_]?key)[^/]*$|\.key$", re.I)
+SECRET_MASK = "@@MASKED: kept on the machine@@"
+
+
+def mask_secret_file(path: str, body: str) -> str:
+    """§17.1603c — what the model is shown of a secret file: a JSON file's KEYS with every value masked (the code can
+    be written against its shape), anything else replaced whole. The value never enters a prompt."""
+    if not SECRET_FILE_RE.search(path.rsplit("/", 1)[-1]):
+        return body
+    import json
+    try:
+        doc = json.loads(body)
+    except Exception:
+        return f"{SECRET_MASK}\n"
+
+    def _mask(v):
+        if isinstance(v, dict):
+            return {k: _mask(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_mask(x) for x in v]
+        return SECRET_MASK
+    return json.dumps(_mask(doc), indent=2) + "\n"
+
+
+def writes_a_secret_file(files: dict[str, str]) -> list[dict]:
+    """§17.1603c — a version may not write a file named as a secret: the machine holds it (and the model saw only its
+    masked shape -- writing it back would replace the real value with the mask)."""
+    return [{"command": f"{p}: (secret file)", "why": (
+        f"`{p}` is named as a secret and the machine holds its value; the version would overwrite it (the model was "
+        f"shown it masked). Leave it out of the version and READ it at run time.")}
+        for p in files or {} if SECRET_FILE_RE.search(p.rsplit("/", 1)[-1])]
+
+
 async def read_workspace(spec, host: Host) -> dict[str, str]:
     """The service directory's code and config as it is NOW, read through the read-only channel."""
     from app.modules import rehearsal
@@ -270,7 +304,7 @@ async def read_workspace(spec, host: Host) -> dict[str, str]:
     for p in list(dict.fromkeys(paths))[:rehearsal.MAX_SEED_FILES]:
         body = await rehearsal._cat(spec, host.guest, host.vm, p)
         if body is not None and len(body) <= rehearsal.MAX_SEED_BYTES:
-            out[p] = body
+            out[p] = mask_secret_file(p, body)          # §17.1603c — a secret file reaches the model as its shape
     unit = await rehearsal._cat(spec, host.guest, host.vm, f"/etc/systemd/system/{host.unit}")
     if unit is not None:
         out[f"/etc/systemd/system/{host.unit}"] = unit
