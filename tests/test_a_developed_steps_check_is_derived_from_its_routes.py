@@ -64,7 +64,7 @@ def test_the_deliverys_own_checks_are_the_routes_its_changed_files_define():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
     assert "_own = develop.derived_from_files(host, files, _port) if _derived else []" in src
-    assert "_checks = develop.done_checks(run_node, host, _own) if _own else checks" in src
+    assert "_checks = develop.with_journal(develop.done_checks(run_node, host, _own), host) if _own else checks" in src
     assert "develop.render_delivery(run_node, host, {**files, **kit}, _checks," in src
 
 
@@ -79,4 +79,4 @@ def test_a_derived_check_lifts_the_no_own_check_refusal_and_rides_the_done_check
     src = inspect.getsource(ea._pause_for_decision)
     assert "_derived = develop.derived_checks(run_node, host, workspace, _port)" in src
     assert src.index("workspace = await develop.read_workspace(spec, host)") < src.index("develop.own_check_refusal(run_node, host, _derived)")
-    assert "checks = develop.done_checks(run_node, host, _derived)" in src
+    assert "checks = develop.with_journal(develop.done_checks(run_node, host, _derived), host)" in src

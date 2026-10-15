@@ -319,6 +319,27 @@ def derived_from_files(host: Host, files: Optional[dict[str, str]], port: str) -
     return [f"{base}{r}" for r in dict.fromkeys(routes)]
 
 
+def journal_check(host: Host) -> str:
+    """§17.1586 — the unit's own journal since the restart: what the service SAID while the checks called it."""
+    tool = f"qm guest exec {host.guest} --" if host.vm else f"pct exec {host.guest} --"
+    return f"{tool} sh -c 'journalctl -u {host.unit} --since -3min --no-pager -o cat | tail -n 40'"
+
+
+def with_journal(checks: list[str], host: Host) -> list[str]:
+    """§17.1586 — a developed delivery is judged by its unit's journal too, read AFTER the route checks have
+    called it and before `is-active`.
+
+    Live (c2792d4b T4): `/api/media-library` answered 200 and the step would have been recorded done, while the
+    panel's journal said "Failed to fetch Radarr library: HTTP 401" five seconds after the restart — the handler
+    swallows the upstream failure and answers an empty list. The route check cannot see that; the journal can,
+    and the judge reads it against the step's goal (`negative_evidence` knows a log line's error shapes)."""
+    j = journal_check(host)
+    out = [c for c in checks or [] if c != j]
+    tail = [c for c in out if c.endswith(f"systemctl is-active {host.unit}")]
+    body = [c for c in out if c not in tail]
+    return body + [j] + tail
+
+
 def service_port(host: Host, services: Optional[list]) -> str:
     """§17.1582 — the measured loopback port of the service `host` develops on, or ''."""
     for s in services or []:

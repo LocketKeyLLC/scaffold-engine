@@ -3079,7 +3079,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("develop_no_own_check job=%s node=%s", job_id, _nk_dev)
                 return {**empty_frame, "refused": list(empty_frame.get("refused") or []) + _no_check,
                         "suggested": "myself"}
-            checks = develop.done_checks(run_node, host, _derived)
+            checks = develop.with_journal(develop.done_checks(run_node, host, _derived), host)   # §17.1586
             kit = develop.kit_for(host, workspace)            # §17.1413 — engine-owned building blocks
             # §17.1426/§17.1427 — the runner's own secrets file AND the engine's encrypted store (`held`): the
             # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it
@@ -3126,7 +3126,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 # §17.1584 — the routes the CHANGED files define are this delivery's feature; the word-derived
                 # permit (§17.1582) stands in only when they define none (a UI file)
                 _own = develop.derived_from_files(host, files, _port) if _derived else []
-                _checks = develop.done_checks(run_node, host, _own) if _own else checks
+                _checks = develop.with_journal(develop.done_checks(run_node, host, _own), host) if _own else checks
                 rb = develop.render_delivery(run_node, host, {**files, **kit}, _checks,
                                              develop.acceptance_checks(run_node), creds)
                 fr = await asyncio.to_thread(supervised_runs.frame_run, run_node, rb, spec, policy, env=_env,

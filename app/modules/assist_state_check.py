@@ -956,6 +956,13 @@ _UNDOES_RE = re.compile(r"\b(?:stop|stopp(?:ed|ing)|disabl\w*|pause\w*|turn(?:ed
                         r"remov\w*|delet\w*|uninstall\w*|purg\w*|mask\w*|kill\w*)\b", re.I)
 
 
+#: §17.1586 — error shapes a service writes to its journal (an HTTP status it got, a socket error, an uncaught exception)
+_NEG_LOG_RE = re.compile(
+    r"HTTP(?:/[\d.]+)?\s*(?:Error\s*)?[45]\d\d\b|\bE(?:CONNREFUSED|CONNRESET|TIMEDOUT|NOTFOUND|HOSTUNREACH|ACCES|ADDRINUSE)\b"
+    r"|\b(?:Unhandled(?:Promise)?Rejection|TypeError|ReferenceError|SyntaxError|Traceback \(most recent call last\)|FATAL|fatal:|panic:)"
+    r"|\b(?:Failed|failed) to (?:fetch|connect|load|read|start|bind|listen)\b|\bexited with (?:code|status) [1-9]\d*|\bcode=exited, status=[1-9]")
+
+
 def negative_evidence(command: str, output: str, claim: str = "") -> str:
     """The reason a check's output CONTRADICTS its claim with no model, or ``""``.
 
@@ -973,6 +980,10 @@ def negative_evidence(command: str, output: str, claim: str = "") -> str:
             pass
     if re.search(r"(?<![\w-])(?:curl|wget)(?![\w-])", head) and _NEG_HTTP_RE.search(out):
         return f"the check answered an error, not the service: {_NEG_HTTP_RE.search(out).group(0)!r}"
+    # §17.1586 — a service's JOURNAL since its restart that carries an error line is the service saying its work
+    # did not land (live: "Failed to fetch Radarr library: HTTP 401" under a route that answered 200)
+    if re.search(r"(?<![\w-])journalctl(?![\w-])", head) and not undoes and _NEG_LOG_RE.search(out):
+        return f"the service's journal since the restart carries an error: {_NEG_LOG_RE.search(out).group(0)!r}"
     if "is-active" in head and not undoes and re.fullmatch(r"\s*(?:inactive|failed|unknown|deactivating)\s*", out):
         return f"systemctl is-active says {out.strip()!r}"
     if re.search(r"(?<![\w-])(?:test|which|ls|cat|stat|command -v)(?![\w-])", head) and not undoes and _NEG_FS_RE.search(out):
