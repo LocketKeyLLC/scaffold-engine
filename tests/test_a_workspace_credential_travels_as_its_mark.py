@@ -77,3 +77,32 @@ def test_a_value_the_machine_holds_wins_over_the_runners_copy():
     assert creds["RADARR_API_KEY"] != dv.RUNNER_HELD and "103" in creds["RADARR_API_KEY"] and "config.xml" in creds["RADARR_API_KEY"]
     assert "PANEL_PASSWORD" not in creds                                            # not named by the step
     assert dv.credentials_for([], ["RADARR_API_KEY"], node) == {"RADARR_API_KEY": dv.RUNNER_HELD}   # no machine read: the runner's copy
+
+
+# ── §17.1587 — the engine locates the machine read itself, and delivers every file that holds a copy ─────────────
+def test_a_credential_the_step_never_named_still_gets_the_machines_read_through_the_inventory():
+    inv = {"cts": {"103": "running", "104": "running"}, "vms": {}, "names": {"103": "radarr", "104": "sonarr"}, "unread": []}
+    r = dv.machine_read_for("RADARR_API_KEY", [], inv)
+    assert r and "103" in r and "config.xml" in r
+    assert dv.machine_read_for("RADARR_API_KEY", [], None) is None and dv.machine_read_for("PANEL_PASSWORD", [], inv) is None
+    node = {"title": "Fix Radarr endpoint backend", "prompt_template": "read RADARR_API_KEY from engine-held secrets"}
+    assert dv.credentials_for([], ["RADARR_API_KEY"], node, inventory=inv)["RADARR_API_KEY"] == r      # not the runner's stale copy
+    assert dv.credentials_for([], ["RADARR_API_KEY"], node) == {"RADARR_API_KEY": dv.RUNNER_HELD}       # nothing to place it: the copy
+
+
+def test_a_delivery_refreshes_every_file_that_holds_a_copy_of_a_held_credential():
+    host = dv.Host(guest="111", workdir="/opt/control-panel-backend", unit="control-panel.service", vm=False)
+    marked_ws = {"/opt/control-panel-backend/config/media-request.json": '{"radarrApiKey": "@@SCAFFOLD:RADARR_API_KEY@@"}',
+                 "/etc/systemd/system/control-panel.service": "[Service]\nEnvironment=RADARR_API_KEY=@@SCAFFOLD:RADARR_API_KEY@@\n",
+                 "/etc/other/thing.conf": "key=@@SCAFFOLD:RADARR_API_KEY@@"}
+    files = {"/opt/control-panel-backend/media_library_route.js": "// model's", "/opt/control-panel-backend/config/media-request.json": "{\"model\": 1}"}
+    out, added = dv.refresh_credential_copies(files, marked_ws, sorted(marked_ws), host, {"title": "t"})
+    assert added == ["/etc/systemd/system/control-panel.service"]                      # the unit: refreshed; the config: the model's own version stands
+    assert out["/opt/control-panel-backend/config/media-request.json"] == "{\"model\": 1}" and "/etc/other/thing.conf" not in out
+    assert out["/etc/systemd/system/control-panel.service"].endswith("@@SCAFFOLD:RADARR_API_KEY@@\n")
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "files, _refreshed = develop.refresh_credential_copies(files, workspace, _marked_paths, host, run_node)" in src
+    assert src.index("_marked_paths = sorted(") < src.index("refresh_credential_copies(files, workspace") < src.index("develop.derived_from_files(host, files, _port)")
+    assert 'creds[_n] = develop.machine_read_for(_n, _services, _inv) or develop.RUNNER_HELD' in src
+    assert "run_node, inventory=_inv)" in src

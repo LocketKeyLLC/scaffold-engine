@@ -637,8 +637,22 @@ _FILL_PROG = ("import json, os, sys\n"
 RUNNER_HELD = "@runner"          # §17.1426 — the value lives in the runner's secret store, injected at run time
 
 
+def machine_read_for(name: str, services: Optional[list], inventory: Optional[dict]) -> Optional[str]:
+    """§17.1587 — the read of credential `name` off the machine that holds it (Radarr's key from its own
+    config.xml on its guest), located through the measured services or the pause's inventory names; None when the
+    engine has no such read or cannot place the service."""
+    from app.modules import machine_values as mv
+    r = mv.readable_for(name)
+    if r is None:
+        return None
+    gid = next((str(getattr(s, "guest", "")) for s in services or []
+                if str(getattr(s, "name", "") or "").lower() == r.app and getattr(s, "guest", "")), None)
+    gid = gid or mv.guest_for(r.app, inventory)
+    return r.read(str(gid)) if gid else None
+
+
 def credentials_for(services: Optional[list], runner_secrets: Optional[list] = None,
-                    node: Optional[dict] = None) -> dict[str, str]:
+                    node: Optional[dict] = None, inventory: Optional[dict] = None) -> dict[str, str]:
     """`{NAME: read command}` for the API keys the engine can read ON THE MACHINE for the measured
     services (Radarr's key from its own config.xml on its guest, …) -- the machine-values registry
     (§17.1332), never a value the engine or the model holds."""
@@ -661,8 +675,29 @@ def credentials_for(services: Optional[list], runner_secrets: Optional[list] = N
             # named RADARR_API_KEY, the runner's copy replaced Radarr's own key as the read, and the delivered
             # panel answered "Failed to fetch Radarr library: HTTP 401" exactly as before — the stored copy was
             # stale while `read_apis` had just read Radarr's API with the key off its config.xml.
-            out.setdefault(str(n), RUNNER_HELD)
+            # §17.1587 — and the machine read is found through the inventory too: the step's services are the
+            # ones it names, and a key it names may live on a guest it does not.
+            out.setdefault(str(n), machine_read_for(str(n), services, inventory) or RUNNER_HELD)
     return out
+
+
+def refresh_credential_copies(files: dict[str, str], marked_workspace: dict[str, str], marked_paths: list[str],
+                              host: Host, node: Optional[dict]) -> tuple[dict[str, str], list[str]]:
+    """§17.1587 — a file that holds a COPY of a credential the engine holds is delivered with the live value.
+
+    Live (c2792d4b T4): the panel's config/media-request.json and its unit file both carried a stale Radarr key;
+    the model, shown the mark in both (§17.1583), had no reason to touch them, delivered other files, and Radarr
+    kept answering 401. The engine knows the authoritative read (§17.1585) and which files hold copies (the ones
+    `mark_held_credentials` marked): it delivers those too, marks and all, so the delivery fills them. A file the
+    model itself delivers is the model's; a path the develop flow may not write is left alone."""
+    out = dict(files or {})
+    added: list[str] = []
+    for p in marked_paths or []:
+        if p in out or p not in (marked_workspace or {}) or not allowed_path(p, host, node):
+            continue
+        out[p] = marked_workspace[p]
+        added.append(p)
+    return out, sorted(added)
 
 
 #: §17.1583 — a credential a workspace file carries in the clear: `"sonarrApiKey": "<hex>"`, `apiKey = '<hex>'`,

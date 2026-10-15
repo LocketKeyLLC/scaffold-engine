@@ -3084,12 +3084,18 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # §17.1426/§17.1427 — the runner's own secrets file AND the engine's encrypted store (`held`): the
             # operator's PANEL_PASSWORD went to the store, and reading `secrets` alone never offered it
             creds = develop.credentials_for(_services, list((policy or {}).get("secrets") or [])
-                                            + list((policy or {}).get("held") or []), run_node)
+                                            + list((policy or {}).get("held") or []), run_node, inventory=_inv)   # §17.1587
             # §17.1583 — a credential the workspace carries in the clear travels to the model as its mark
+            _ws_raw = dict(workspace)
             workspace, _marked, creds = develop.mark_held_credentials(
                 workspace, creds, list((policy or {}).get("secrets") or []) + list((policy or {}).get("held") or []))
+            _marked_paths = sorted(p for p in workspace if workspace.get(p) != _ws_raw.get(p))
+            # §17.1587 — a marked name the step never named still gets the machine's own read when the engine has one
+            for _n in _marked:
+                if creds.get(_n) == develop.RUNNER_HELD:
+                    creds[_n] = develop.machine_read_for(_n, _services, _inv) or develop.RUNNER_HELD
             if _marked:
-                logger.warning("develop_credentials_marked job=%s node=%s names=%s", job_id, _nk_dev, _marked)
+                logger.warning("develop_credentials_marked job=%s node=%s names=%s paths=%s", job_id, _nk_dev, _marked, _marked_paths)
             kit_text = (develop.kit_doc(host, kit) + "\n\n" + develop.credentials_doc(creds, _services)).strip()
             facts = _st_dev.table(_services, _reading)
             if develop.engine_doc(run_node):                    # §17.1418 — the engine's own address
@@ -3123,6 +3129,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     continue
                 # the kit is the engine's: delivered with every version, never the model's to rewrite
                 files = {p: c for p, c in files.items() if p not in kit}
+                # §17.1587 — the files that hold a copy of a held credential are delivered with the live value
+                files, _refreshed = develop.refresh_credential_copies(files, workspace, _marked_paths, host, run_node)
+                if _refreshed:
+                    logger.warning("develop_credential_copies_refreshed job=%s node=%s paths=%s", job_id, _nk_dev, _refreshed)
                 # §17.1584 — the routes the CHANGED files define are this delivery's feature; the word-derived
                 # permit (§17.1582) stands in only when they define none (a UI file)
                 _own = develop.derived_from_files(host, files, _port) if _derived else []
