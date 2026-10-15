@@ -3177,6 +3177,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
                 _dead = (develop.stale_service_addresses(files, _services)   # §17.1590
+                         + develop.timeouts_shorter_than_measured(files, status)   # §17.1594
                          + develop.calls_a_dead_path(files, status)         # §17.1422
                          + develop.values_put_into_html_attributes(files)   # §17.1424
                          + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427

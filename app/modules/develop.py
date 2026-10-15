@@ -882,11 +882,16 @@ _ARR_API = {"radarr": ("v3", ("rootfolder", "qualityprofile")),
 #: §17.1421 — services whose API answers WITHOUT a key on this home lab, probed by status: which path the
 #: installed version serves (live: Pi-hole v6.4.3 answers `/api/stats/summary` 200 and the v5
 #: `/admin/api.php?summary` 400; a round of ADD125 wrote the v5 path).
-_STATUS_PROBES = {"pihole": (80, ("/api/stats/summary", "/admin/api.php?summary"))}
+_STATUS_PROBES = {"pihole": (80, ("/api/stats/summary", "/admin/api.php?summary")),
+                  # §17.1594 — the engine-deployed proxies: Docker inside CT 107/108, probed from the HOST at their measured
+                  # address (the read channel cannot exec into those guests). Byparr's /health launches a browser: 8.3 s live.
+                  "flaresolverr": (8191, ("/",)), "byparr": (8191, ("/health", "/"))}
+_HOST_PROBED = frozenset({"flaresolverr", "byparr"})
 
 
 def status_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
-    """`(service, path, command)` -- `curl -o /dev/null -w %{http_code}` inside the service's own guest."""
+    """`(service, path, command)` -- `curl -o /dev/null -w "%{http_code} %{time_total}"` inside the service's own guest,
+    or from the host for a service the read channel cannot exec into (§17.1594: the engine-deployed proxies)."""
     out: list[tuple[str, str, str]] = []
     for svc in services or []:
         name, gid = str(getattr(svc, "name", "") or "").lower(), str(getattr(svc, "guest", "") or "")
@@ -894,8 +899,12 @@ def status_reads(services: Optional[list]) -> list[tuple[str, str, str]]:
         if key is None or not gid or getattr(svc, "vm", False):
             continue
         port, paths = _STATUS_PROBES[key]
+        addr = str(getattr(svc, "address", "") or "")
         for path in paths:
-            out.append((key, path, f'pct exec {gid} -- curl -s -m 10 -o /dev/null -w %{{http_code}} "http://127.0.0.1:{port}{path}"'))
+            if key in _HOST_PROBED and addr:
+                out.append((key, path, f'curl -s -m 20 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://{addr}:{port}{path}"'))
+            else:
+                out.append((key, path, f'pct exec {gid} -- curl -s -m 10 -o /dev/null -w "%{{http_code}} %{{time_total}}" "http://127.0.0.1:{port}{path}"'))
     return out
 
 
@@ -946,10 +955,62 @@ async def read_status(spec, services: Optional[list]) -> list[dict]:
     out: list[dict] = []
     for name, path, cmd in status_reads(services):
         ok, body = await st._probe(spec, cmd)
-        code = str(body or "").strip()[-3:] if ok else ""
+        code, seconds = parse_status_answer(body) if ok else ("", None)
         addr = next((getattr(s, "address", "") for s in services or []
                      if str(getattr(s, "name", "")).lower().startswith(name)), "")
-        out.append({"service": name, "path": path, "code": code if code.isdigit() else "", "address": addr})
+        out.append({"service": name, "path": path, "code": code, "address": addr, "seconds": seconds})
+    return out
+
+
+def parse_status_answer(body: str) -> tuple[str, Optional[float]]:
+    """§17.1594 — `"200 8.302806"` → ("200", 8.3); the older bare `200` → ("200", None); noise → ("", None)."""
+    toks = str(body or "").strip().split()
+    if not toks:
+        return "", None
+    code = toks[-2] if len(toks) >= 2 and re.fullmatch(r"\d{3}", toks[-2]) and re.fullmatch(r"[\d.]+", toks[-1]) else toks[-1][-3:]
+    secs = None
+    if len(toks) >= 2 and re.fullmatch(r"[\d.]+", toks[-1]) and re.fullmatch(r"\d{3}", toks[-2]):
+        try:
+            secs = round(float(toks[-1]), 1)
+        except ValueError:
+            secs = None
+    return (code if code.isdigit() else ""), secs
+
+
+#: §17.1594 — a timeout literal the code gives an upstream call: ms unless the shape says seconds
+_TIMEOUT_MS_RE = re.compile(r"(?:\btimeout\s*[:=]\s*|setTimeout\([^,()]*,\s*|AbortSignal\.timeout\(\s*|\.timeout\(\s*)(\d{3,7})\b")
+_TIMEOUT_S_RE = re.compile(r"--max-time\s+(\d{1,4})\b|\btimeout\s*[:=]\s*(\d{1,3})(?:\s*s\b|\s*\*\s*1000)")
+
+
+def timeouts_shorter_than_measured(files: dict[str, str], status: Optional[list[dict]]) -> list[dict]:
+    """§17.1594 — the code gives an upstream LESS time than that upstream was measured to take.
+
+    Live (c2792d4b T7/T11): Byparr's /health answers 200 in 8.3 s (its health check launches a browser); the
+    panel's byparr route gave it a shorter timeout and answered `{"error":"Byparr service is not available",
+    "detail":"Request timeout"}` on every call, so the panel showed Byparr down while it was up and slow. The
+    measured latency was the engine's to tell; the file's timeout is the engine's to judge."""
+    out: list[dict] = []
+    slow = [s for s in status or [] if s.get("seconds") and float(s["seconds"]) >= 1.0 and s.get("code", "").startswith("2")]
+    if not slow:
+        return []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        low, fname = c.lower(), path.rsplit("/", 1)[-1].lower()
+        for s in slow:
+            name = str(s.get("service") or "").lower()
+            if not name or not (name in fname or name in low or (s.get("address") and str(s["address"]) in c)):
+                continue
+            ms = ([int(m.group(1)) for m in _TIMEOUT_MS_RE.finditer(c)]
+                  + [int(m.group(1) or m.group(2)) * 1000 for m in _TIMEOUT_S_RE.finditer(c)])
+            need = float(s["seconds"]) * 1000 * 1.5
+            short = sorted(v for v in ms if v < need)
+            if short:
+                out.append({"command": f"{path}: timeout {short[0]} ms", "why": (
+                    f"this gives {name} {short[0]} ms, and {name}'s {s['path']} answered HTTP {s['code']} in {s['seconds']} s when the "
+                    f"engine read it just now{f' at {s[chr(97)+chr(100)+chr(100)+chr(114)+chr(101)+chr(115)+chr(115)]}' if s.get('address') else ''}: "
+                    f"the call times out every time and the route reports a service that is up as down. Give it at least "
+                    f"{int(need)} ms, or check a faster path and say which.")})
+                break
     return out
 
 
@@ -1241,7 +1302,8 @@ async def read_apis(spec, services: Optional[list], status: Optional[list[dict]]
     for s in (status if status is not None else await read_status(spec, services)):   # §17.1421
         where = f" ({s['address']})" if s.get("address") else ""
         lines.append(f"- {s['service']}{where} GET {s['path']} without a key: "
-                     + (f"HTTP {s['code']}" if s.get("code") else "(could not be read just now)"))
+                     + ((f"HTTP {s['code']}" + (f" in {s['seconds']} s" if s.get("seconds") is not None else "")) if s.get("code")
+                        else "(could not be read just now)"))   # §17.1594 — the latency too, so a timeout is sized to it
     if not lines:
         return ""
     return ("THE APIS YOUR CODE CALLS, AS THEY ARE NOW (read off the machine just now). Where your code needs one of "
