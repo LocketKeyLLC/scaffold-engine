@@ -4771,7 +4771,7 @@ def secret_inside_a_guest_script(files: Optional[list[dict]], secret_names: set[
         if not body:
             continue
         for name in sorted(secret_names or ()):
-            if re.search(rf"\$\{{?{re.escape(name)}\b", body.group(1)):
+            if re.search(rf"\$\{{?{re.escape(name)}\b|<{re.escape(name)}>", body.group(1)):   # §17.1589 — or its placeholder
                 gid, vm = m.group(2), m.group(1) == "vm"
                 into = (f"qm guest exec {gid} --pass-stdin 1 -- sh -c 'umask 077; cat > <PATH>'" if vm else
                         f"pct exec {gid} -- sh -c 'umask 077; cat > <PATH>'")
@@ -5398,11 +5398,20 @@ def inputs_for(commands: list[str], verify: list[str], runbook: str,
     return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)} for n in placeholders(texts)]
 
 
-def secrets_in_files(files: Optional[list[dict]], inputs: list[dict]) -> list[dict]:
+def is_develop_delivery(files: Optional[list[dict]]) -> bool:
+    """§17.1589 — the block delivers files the develop flow staged (`/tmp/scaffold-dev-<step>--…`)."""
+    return any(str((f or {}).get("path") or "").startswith("/tmp/scaffold-dev") for f in files or [])
+
+
+def secrets_in_files(files: Optional[list[dict]], inputs: list[dict], resolved: Optional[list[str]] = None) -> list[dict]:
     """§17.1280 — a SECRET placeholder inside a file cannot be filled: the runner
     expands `$NAME` in a COMMAND's environment, never inside a file's bytes, and
-    writing the value into a file on disk is the leak §17.1191 exists to stop."""
-    secret = {i["name"] for i in inputs or [] if i.get("secret")}
+    writing the value into a file on disk is the leak §17.1191 exists to stop.
+
+    §17.1589 — `resolved`: the names a store ALREADY holds. `apply_runner_secrets` removes them from `inputs`
+    (nothing to type), so a `<RADARR_API_KEY>` in a file the block writes passed this gate, Run was offered,
+    and the run refused "missing (used in the file …)" — live (c2792d4b T8), a driver looped on it."""
+    secret = {i["name"] for i in inputs or [] if i.get("secret")} | {str(n) for n in resolved or []}
     out: list[dict] = []
     for f in files or []:
         found = [n for n in placeholders([str((f or {}).get("content") or "")]) if n in secret]
@@ -5720,6 +5729,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
     # the gaps deterministically, instead of the model's lookup/add/true draft. Runs
     # BEFORE the key reader so `<APP_API_KEY>` is filled in the guest it now runs in.
+    _orig_cmds, _orig_verify = list(cmds), list(verify)          # §17.1589 — kept, for a delivery no capability may rewrite
     _comp_cmds, _comp_verify, _comp_notes = rewrite_completeness_check(node, cmds, verify, services, inventory)
     if _comp_notes:
         cmds, verify = _comp_cmds, _comp_verify
@@ -5838,6 +5848,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
     # with `net.ipv6.conf.all.disable_ipv6 = 1` inside — stayed on the frame, the §17.1570d gate refused it,
     # and the run would have written it to the host anyway. The rewrites never declare files.
+    # §17.1589 — a DEVELOPED delivery (its files staged under /tmp/scaffold-dev-…) is the develop flow's: read the live
+    # files, proposed whole, gated, rehearsed, judged by its journal. No capability's shape replaces it. Live, T7's
+    # delivery was swapped for the FlareSolverr deploy by the chain above.
+    if _comp_notes and is_develop_delivery(files):
+        logger.warning("capability_rewrite_skipped_on_delivery node=%s notes=%d", (node or {}).get("node_key"), len(_comp_notes))
+        cmds, verify, _comp_notes = _orig_cmds, _orig_verify, []
     if _comp_notes and files:
         logger.info("rewrite_dropped_drafted_files node=%s files=%d", (node or {}).get("node_key"), len(files))
         files = []
@@ -5917,7 +5933,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # real values. A secret placeholder in a file has no fill and is refused.
     shape_files = ([{**f, "content": substitute([str(f.get("content") or "")], _dummies)[0]} for f in files]
                    if _dummies else files)
-    _secret_files = secrets_in_files(files, inputs)
+    _secret_files = secrets_in_files(files, inputs, secrets_resolved)   # §17.1589 — a resolved secret in a file is still in a file
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     # §17.1346 — the services the engine MEASURED on these machines judge the block's
     # values: a port or a data dir that belongs to another guest, and an edit to a
@@ -8515,7 +8531,7 @@ _FS_LAST = (
 # tail keywords: "Add FlareSolverr and Byparr services" (a control-panel FEATURE step, developed on
 # CT 111) matched both and was hijacked into a `pct create 107` deploy. Real deploy titles still
 # match via a deploy verb ("Deploy/Install/Create/Set up FlareSolverr") or a container/lxc tail.
-_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*flare\s*solverr|flare\s*solverr.*\b(?:container|lxc)\b", re.I)
+_FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*flare\s*solverr|flare\s*solverr(?:\s+\w+){0,2}\s+(?:container|lxc)\b", re.I)   # §17.1589 — adjacent, not anywhere
 
 
 #: §17.1535 — deploy Byparr, the Camoufox-based FlareSolverr drop-in (ghcr.io/thephaseless/byparr),
@@ -8590,7 +8606,7 @@ _BYPARR_LAST = (
 # §17.1542 — same tightening for Byparr: a genuine container deploy only, not "add … Byparr
 # services". Dropped "add"/"wire" lead verbs and the "service"/"deploy"/"install"/"proxy" tail.
 # "Deploy byparr-proxy as a new LXC" still matches (deploy verb + "new LXC" tail).
-_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*\bbyparr\b|\bbyparr\b.*\b(?:container|lxc)\b", re.I)
+_BYPARR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|stand\s*up)\b.*\bbyparr\b|\bbyparr\b(?:\s+\w+){0,2}\s+(?:container|lxc)\b", re.I)   # §17.1589
 
 
 def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: list[str],
@@ -8602,6 +8618,9 @@ def rewrite_deploy_byparr(node: Optional[dict], commands: list[str], verify: lis
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not (_BYPARR_RE.search(title) or _BYPARR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    from app.modules.machine_truth import place_guest as _pg
+    if _pg(node) and str(_pg(node)) != str(_BYPARR_VMID):          # §17.1589 — placed elsewhere: not this deploy
         return list(commands or []), list(verify or []), []
     run = [_BYPARR_CREATE, _BYPARR_START, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT,
            _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_WAIT, _BYPARR_LAST]
@@ -8678,6 +8697,12 @@ def rewrite_deploy_flaresolverr(node: Optional[dict], commands: list[str], verif
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not (_FLARESOLVERR_RE.search(title) or _FLARESOLVERR_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1589 — a step PLACED on another guest ("… fix its handler on container 111 … FlareSolverr") is that
+    # guest's work, not this deploy: live, c2792d4b T7 "Fix remaining endpoint backends" was hijacked into a
+    # re-deploy of CT 107 (stop/start, docker run) and recorded done while the panel's handlers were never touched.
+    from app.modules.machine_truth import place_guest as _pg
+    if _pg(node) and str(_pg(node)) != str(_FS_VMID):
         return list(commands or []), list(verify or []), []
     # §17.1518 — create (host), then the detached install polled across six wait phases + a last
     # phase that fails the step if the unit failed. Six waits (~15 min) cover apt + the image pull.

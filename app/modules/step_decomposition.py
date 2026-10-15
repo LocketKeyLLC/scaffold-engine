@@ -159,7 +159,8 @@ _PRESENCE_RE = re.compile(
     r"^\s*(?:(?:pct\s+exec|qm\s+guest\s+exec)\s+\d+\s+--\s+(?:(?:ba)?sh\s+-c\s+['\"])?)?"
     r"(?:grep\b|ls\b|test\b|\[\s|cat\b|stat\b|head\b|wc\b|systemctl\s+is-(?:active|enabled)\b)")
 #: a step that builds something that DOES something: a route, an API, a page, a capability
-_CAPABILITY_BUILD_RE = re.compile(r"\b(?:route|endpoint|api\b|capabilit|proxy|page|frontend|backend|authentication|reverse proxy)", re.I)
+_CAPABILITY_BUILD_RE = re.compile(r"\b(?:route|endpoint|api\b|capabilit|proxy|page|frontend|backend|authentication|reverse proxy"
+                                  r"|ui\b|user[- ]interface|index\.html|web ?page|front-?end|render(?:s|ed|ing)?\b)", re.I)   # §17.1589 — a UI edit is software
 
 
 def presence_only(check: str) -> bool:

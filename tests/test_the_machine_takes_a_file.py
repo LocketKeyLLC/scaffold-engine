@@ -1029,7 +1029,7 @@ def test_every_payload_gate_in_frame_run_judges_the_filled_files():
     for g in ("file_writes_will_not_work", "script_secret_not_passed", "loops_the_network_without_a_budget",
               "loop_dies_on_one_dead_party", "classifies_by_key_presence"):
         assert f"{g}(cmds, shape_files)" in body or f"{g}(shape_files)" in body, g
-    assert "secrets_in_files(files, inputs)" in body
+    assert "secrets_in_files(files, inputs, secrets_resolved)" in body   # §17.1589
 
 
 # ───── §17.1281 — a check that answers nothing is not a check; a secret never reaches the record
