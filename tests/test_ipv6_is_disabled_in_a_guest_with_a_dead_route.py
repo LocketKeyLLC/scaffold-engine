@@ -72,6 +72,24 @@ def test_other_steps_are_left_alone_and_prefer_ipv4_is_not_this():
     assert not rewrite_disable_ipv6_in_guest({"title": "Set onboot on VM 110", "description": "qm set 110 --onboot 1"}, ["x"], ["y"], SERVICES, INV)[2]
 
 
+def test_the_planners_own_shapes_are_claimed_by_disable_not_by_prefer_ipv4():
+    """§17.1570b — live (job eff80f98): the planner wrote the WORK into prompt_template as the sysctl keys and the
+    drop-in's path; the phrase regex missed `disable_ipv6` and §17.1563 claimed the step with a gai.conf block."""
+    t2 = {"node_key": "T2", "title": "Write sysctl config jellyfin", "tool": "Shell", "description": "",
+          "prompt_template": "Starts from T1 decision. Writes the sysctl config file inside container 101 (jellyfin) only. "
+                             "Contents: net.ipv6.conf.eth0.disable_ipv6=1, net.ipv6.conf.eth0.accept_ra=0, net.ipv6.conf.eth0.autoconf=0. "
+                             "Does NOT apply settings, does NOT touch other containers."}
+    t3 = {"node_key": "T3", "title": "Apply sysctl live jellyfin", "tool": "Shell", "description": "",
+          "prompt_template": "Starts from T2. Runs sysctl -p /etc/sysctl.d/99-scaffold-disable-ipv6.conf inside container 101 only. Does NOT reboot."}
+    for n in (t2, t3):
+        cmds, _, notes = rewrite_disable_ipv6_in_guest(n, ["x"], ["y"], SERVICES, INV)
+        assert notes and "§17.1570" in notes[0]["why"] and cmds[0].startswith("pct exec 101 -- "), n["title"]
+        assert not rewrite_prefer_ipv4_in_guest(n, ["x"], ["y"], SERVICES, INV)[2], n["title"]
+    t4 = {"node_key": "T4", "title": "Verify IPv6 disabled jellyfin", "tool": "Shell",
+          "prompt_template": "Checks /proc/sys/net/ipv6/conf/eth0/disable_ipv6 reads 1 in container 101 only."}
+    assert not rewrite_disable_ipv6_in_guest(t4, ["x"], ["y"], SERVICES, INV)[2]        # a verify is a read
+
+
 def test_frame_run_runs_the_disable_ipv6_rewrite_before_the_key_reader():
     import inspect
     from app.modules import supervised_runs as sr

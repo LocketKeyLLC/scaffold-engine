@@ -9063,8 +9063,13 @@ def _named_guest(text: str, services: Optional[list], inventory: Optional[dict])
 #: Measured (CT 101, 2026-10-15): net0 carries no ip6 setting, `eth0` has accept_ra=1 autoconf=1 and
 #: two SLAAC addresses from the gateway's RAs — the cause behind §17.1563's symptom.
 _DISABLE_IPV6_FILE = "/etc/sysctl.d/99-scaffold-disable-ipv6.conf"
+#: §17.1570b — and the shapes a PLANNER writes for the same work: the sysctl key itself (`disable_ipv6`,
+#: `net.ipv6.conf.…`), the drop-in's name, "sysctl … ipv6". Live (job eff80f98, T2 "Write sysctl config
+#: jellyfin": "Contents: net.ipv6.conf.eth0.disable_ipv6=1, …"): the phrase regex saw no word boundary inside
+#: `disable_ipv6`, so §17.1563's prefer-IPv4 block claimed the step instead.
 _DISABLE_IPV6_RE = re.compile(r"\b(?:disabl(?:e|es|ed|ing)|turn(?:s|ed|ing)?\s+off|switch(?:es|ed|ing)?\s+off|stop\s+(?:accepting|using))\b[^.;\n]{0,40}\bipv6\b"
-                              r"|\bipv6\b[^.;\n]{0,30}\b(?:off|disabled)\b|\bno\s+ipv6\b", re.I)
+                              r"|\bipv6\b[^.;\n]{0,30}\b(?:off|disabled)\b|\bno\s+ipv6\b"
+                              r"|\bdisable_ipv6\b|\bnet\.ipv6\.conf\.|disable-ipv6\.conf\b|\bsysctl\b[^.;\n]{0,60}\bipv6\b", re.I)
 
 
 def rewrite_disable_ipv6_in_guest(node: Optional[dict], commands: list[str], verify: list[str],
