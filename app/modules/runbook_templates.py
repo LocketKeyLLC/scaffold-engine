@@ -41,6 +41,9 @@ _HOST_SIDE_RE = re.compile(
     r"\b(?:(?:qm|pct) resize|resize (?:the )?(?:vm \d+'?s? )?(?:disk|volume)|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
     r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"
+    # §17.1609c — a guest's RAM/CPU raised or lowered is the host's `qm set`: live (job 0fb4ea7f T4) "Expand ai-vm RAM:
+    # Increase VM 110's RAM from 16 GB to …" matched nothing and was routed into the guest
+    r"|(?:increase|raise|grow|expand|add|give|change|reduce|lower|bump)\s+(?:the\s+)?(?:(?:vm|ct)\s+\d+'?s?\s+|[\w-]+'?s?\s+)?(?:ram|memory|cpus?|cores|vcpus?)\b(?![\s_-]*limit)"
     # §17.1335 — `qm`, `pct`, `pvesm`, `pvesh` and `pveum` do not exist inside a guest, so a step
     # whose own text names one of them with a subcommand is host-side work. Live, after the host
     # rebooted, "Make the machines that serve the operator's goals start on boot" names
@@ -459,7 +462,11 @@ TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_
 
 
 def _text(node: dict) -> str:
-    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    # §17.1609 — and the step's specification: the planner may write it in `prompt_template` with an empty
+    # description. Live (job 0fb4ea7f T3 "Expand ai-vm disk", spec "Grow VM 110's disk from 100 GB to 2 TB …" in
+    # prompt_template only): the router read "Expand ai-vm disk", saw no host-side verb, and drafted
+    # growpart/resize2fs INSIDE the guest -- the next step's work -- instead of the host's `qm resize`.
+    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
 
 
 #: §17.1329 — in-guest work: a service/unit/package INSIDE the guest, or a port it binds.
@@ -528,7 +535,16 @@ def spans_guests(node: dict) -> bool:
     template, which drafted work in the wrong machine. Two guests addressed from
     the host is host-side work, whatever words are in view.
     """
-    return len(guests_the_host_is_told_to_touch(node)) >= 2 or bool(_WHOLE_SYSTEM_RE.search(_text(node)))
+    t = _text(node)
+    # §17.1609b — "Inside VM 110: docker compose up … Stops at all containers running" is ONE guest's own stack: the
+    # whole-system phrase ("all containers running") is about the lab only when the step does not say which guest
+    # it works inside. Live (job 0fb4ea7f T14 "Deploy engine services"), it was routed host-side.
+    whole = bool(_WHOLE_SYSTEM_RE.search(t)) and not _INSIDE_ONE_GUEST_RE.search(t)
+    return len(guests_the_host_is_told_to_touch(node)) >= 2 or whole
+
+
+#: §17.1609b — the step names the one guest its work is inside
+_INSIDE_ONE_GUEST_RE = re.compile(r"\b(?:inside|within)\s+(?:the\s+)?(?:vm|ct|lxc|container|guest)\s*\d{3,5}\b", re.I)
 
 
 #: §17.1473 — a step about the whole build, not one machine. Live, T37 "Validate entire build" ("Check all services
