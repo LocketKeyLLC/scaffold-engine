@@ -88,7 +88,7 @@ def test_the_page_reads_survive_a_quote_in_a_regex_literal():
 
 
 def test_bites_on_the_live_mismatch_and_passes_the_sections_that_agree():
-    out = dv.page_reads_what_no_route_returns({}, WS)
+    out = dv.page_reads_what_no_route_returns({"/opt/panel-ui/index.html": PAGE}, WS)
     assert [o["command"].split(": ", 1)[1].split(" ->")[0] for o in out] == ["/api/network-view"]
     assert "`dns_queries_today`" in out[0]["why"] and "`response`" in out[0]["why"]
 
@@ -104,6 +104,17 @@ def test_a_route_changed_to_answer_the_pages_fields_passes():
     flat = ROUTE_VIEW.replace("res.json({ status: 'ok', service: 'pihole', host: addr, port: 80, response: summary });",
                               "res.json({ dns_queries_today: 1, ads_blocked_today: 2, domains_being_blocked: 3 });")
     assert dv.page_reads_what_no_route_returns({"/opt/panel-backend/network_view_route.js": flat}, WS) == []
+
+
+def test_a_version_changing_neither_side_is_not_judged_for_it():
+    """§17.1599b — a version that changes only a config is not refused for a page/route pair it never touched."""
+    assert dv.page_reads_what_no_route_returns({"/opt/panel-backend/config/x.json": "{}"}, WS) == []
+    assert dv.page_reads_what_no_route_returns({}, WS) == []
+
+
+def test_a_backend_version_answers_for_the_pair_too():
+    out = dv.page_reads_what_no_route_returns({"/opt/panel-backend/other_route.js": "module.exports = () => {};"}, WS)
+    assert len(out) == 1, "the route side can fix it, so a backend version is judged"
 
 
 def test_a_spread_answer_judges_nothing():

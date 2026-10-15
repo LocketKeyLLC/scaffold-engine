@@ -83,6 +83,19 @@ def test_a_file_the_version_leaves_alone_is_judged_too_and_says_so():
     assert "already on the machine, unchanged by this version" in out[0]["why"]
 
 
+def test_a_page_only_version_is_not_refused_for_a_carried_backend_file():
+    """§17.1599b — live, T9 ("Fix UI data rendering") returned the page alone and eight rounds were refused for a
+    backend route no UI step touches. The backend's step answers for the backend."""
+    ws = {"/opt/panel-backend/game_route.js": CARRIED_KIT_SYNC, "/opt/panel-backend/network_ui_route.js": LIVE_ROUTE}
+    page_only = {"/opt/panel-ui/index.html": "<html></html>", "/opt/panel-backend/config/x.json": "{}",
+                 "/etc/systemd/system/panel.service": "[Service]"}
+    assert not dv.touches_server_code(page_only, HOST, {})
+    assert dv.blocks_the_event_loop(page_only, ws, HOST, {}) == []
+    probe, calls = _probe({("10.9.8.2", "22"): False})
+    spec = type("S", (), {"endpoint": ""})()
+    assert _run(dv.addresses_that_do_not_answer(spec, page_only, ws, HOST, [], {}, {}, probe)) == [] and calls == []
+
+
 def test_the_kit_itself_and_the_browsers_files_are_not_judged():
     kit = dv.kit_for(HOST, {"/etc/systemd/system/panel.service": "ExecStart=/usr/bin/node server.js"})
     assert kit, "a Node service gets the kit"

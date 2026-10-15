@@ -1182,6 +1182,13 @@ _BLOCKING_CALL_RE = re.compile(r"\b(execFileSync|execSync|spawnSync)\s*\(")
 _KIT_BINDING_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"][^'\"]*scaffold-kit/remote(?:\.js)?['\"]\s*\)")
 
 
+def touches_server_code(files: Optional[dict[str, str]], host: Optional[Host], kit: Optional[dict[str, str]] = None) -> bool:
+    """§17.1599b — the version changes code the server runs (not the page, a config, the unit, or the kit)."""
+    ui = tuple(str(d).rstrip("/") + "/" for d in (getattr(host, "extra_dirs", ()) or ()))
+    return any(_SERVER_FILE_RE.search(p) and p not in (kit or {}) and "/scaffold-kit/" not in p
+               and not (ui and p.startswith(ui)) for p in (files or {}))
+
+
 def _service_files(files: dict[str, str], workspace: Optional[dict[str, str]], host: Optional[Host],
                    kit: Optional[dict[str, str]]) -> list[tuple[str, str, bool]]:
     """``(path, content, carried)`` for every file the service will run with after this version: the version's
@@ -1189,7 +1196,11 @@ def _service_files(files: dict[str, str], workspace: Optional[dict[str, str]], h
     judged by its own tests, not here; the UI directories are the browser's."""
     ui = tuple(str(d).rstrip("/") + "/" for d in (getattr(host, "extra_dirs", ()) or ()))
     out = [(p, str(c or ""), False) for p, c in (files or {}).items()]
-    out += [(p, str(c or ""), True) for p, c in (workspace or {}).items() if p not in (files or {})]
+    # §17.1599b — a carried file is this version's business only when the version changes the server's code: live,
+    # T9 "Fix UI data rendering" returned the page alone, and eight rounds were refused for health_dashboard_route.js,
+    # a backend file no UI step will touch. The backend step answers for the backend.
+    if touches_server_code(files, host, kit):
+        out += [(p, str(c or ""), True) for p, c in (workspace or {}).items() if p not in (files or {})]
     return [(p, c, carried) for p, c, carried in out
             if p not in (kit or {}) and "/scaffold-kit/" not in p and not (ui and p.startswith(ui))]
 
@@ -1449,6 +1460,9 @@ def page_reads_what_no_route_returns(files: dict[str, str], workspace: Optional[
     `{status, service, host, port, response}` with Pi-hole v6's numbers nested under `response`. The page and the
     route were developed in different steps (T9 at 14:34, T7 at 16:19) and nothing compared them. Judged on the
     files the service will run with: the version's over the workspace's."""
+    if not any(p.endswith((".html", ".htm")) or (_SERVER_FILE_RE.search(p) and "/scaffold-kit/" not in p)
+               for p in (files or {})):
+        return []                     # §17.1599b — neither side changes here: not this version's business
     merged = {**(workspace or {}), **(files or {})}
     shapes = route_shapes(merged)
     out: list[dict] = []
