@@ -141,6 +141,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: correct, unregistered, and therefore a dead end. A test below walks every
 #: refusal-producing function and fails when one's text matches nothing here.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
+                   "takes loopback down with it",                   # §17.1570d
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
