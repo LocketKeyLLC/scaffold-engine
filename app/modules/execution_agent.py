@@ -2991,6 +2991,16 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                job_id, run_node.get("node_key"), len(_before))
         except Exception as exc:
             logger.warning("previous_attempt_skipped job=%s err=%r", job_id, exc)
+        # §17.1611 — what earlier steps of this job read on the same guest (not only the declared upstream)
+        try:
+            from app.modules import guest_evidence as _ge
+            async with async_session() as _db_ge:
+                _ev = await _ge.earlier_reads(_db_ge, job_id, run_node, _inv)
+            if _ev:
+                up_block = (up_block + "\n\n" + _ev).strip()
+                logger.warning("guest_evidence_carried job=%s node=%s chars=%d", job_id, run_node.get("node_key"), len(_ev))
+        except Exception as exc:
+            logger.warning("guest_evidence_skipped job=%s err=%r", job_id, exc)
         # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
         if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2

@@ -1,0 +1,56 @@
+"""§17.1611 — a step is drafted with what earlier steps of its job READ on the same guest.
+
+Live (job 0fb4ea7f, 2026-10-15): T2 "Verify ai-vm resources" measured the root filesystem on `/dev/sda2`; T5 "Resize
+ai-vm filesystem" depends only on T3 (the host-side disk grow), so its drafter saw T3's output and nothing of T2's, and
+wrote `growpart /dev/sda 1; resize2fs /dev/sda1` -- a guess, on the wrong partition. The measurement was in the job's
+own record. A plan's edges say what must run FIRST; they do not say what the drafter may know.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from sqlalchemy import text
+
+logger = logging.getLogger("scaffold")
+
+#: per earlier step, the tail of its record (the reads are at the end) and how many steps
+PER_STEP_CHARS = 2500
+MAX_STEPS = 4
+
+
+def guest_of(node: dict, inventory: Optional[dict]) -> str:
+    from app.modules.machine_truth import subject_guest
+    try:
+        return str(subject_guest(node, inventory) or "")
+    except Exception:
+        return ""
+
+
+def block(rows: list[dict], gid: str, skip: set[str]) -> str:
+    """The evidence block from done rows of the same job whose subject is `gid` (newest last), minus `skip`."""
+    picked = [r for r in rows if str(r.get("node_key")) not in skip and r.get("output_text")][-MAX_STEPS:]
+    if not gid or not picked:
+        return ""
+    parts = [f"## What earlier steps of this job measured on guest {gid}",
+             "Read off the machine by finished steps (not this step's upstream). Use these values; do not guess them."]
+    for r in picked:
+        out = str(r["output_text"])
+        tail = out[-PER_STEP_CHARS:]
+        # the records hold their own ``` fences (runbooks, outputs): a tilde fence cannot be closed by them
+        parts.append(f"### {r['node_key']} — {r.get('title') or ''}\n~~~~\n{tail.replace('~~~~', '~ ~ ~ ~')}\n~~~~")
+    return "\n\n".join(parts)
+
+
+async def earlier_reads(db, job_id: str, run_node: dict, inventory: Optional[dict]) -> str:
+    gid = guest_of(run_node, inventory)
+    if not gid:
+        return ""
+    res = await db.execute(text(
+        "SELECT node_key, title, description, prompt_template, output_text FROM dag_nodes "
+        "WHERE job_id = :j AND status = 'done' AND output_text IS NOT NULL ORDER BY completed_at NULLS LAST"),
+        {"j": job_id})
+    rows = [dict(r) for r in res.mappings().all()]
+    same = [r for r in rows if guest_of(r, inventory) == gid]
+    skip = {str(k) for k in (run_node.get("depends_on") or [])} | {str(run_node.get("node_key"))}
+    return block(same, gid, skip)
