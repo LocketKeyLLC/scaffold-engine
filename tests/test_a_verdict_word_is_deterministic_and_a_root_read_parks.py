@@ -109,7 +109,7 @@ def test_the_probe_presents_the_held_login_to_every_registered_get_route():
     assert notes and "§17.1574c" in notes[0]["why"] and cmds == verify and len(cmds) == 1
     c = cmds[0]
     assert c.startswith("pct exec 111 -- sh -c '") and c.endswith(' <<< "<PANEL_PASSWORD>"')
-    assert "IFS= read -r CPW" in c and '-u "panel:$CPW"' in c and "127.0.0.1:3001$ep" in c
+    assert "IFS= read -r CPW" in c and '-u "panel:$CPW"' in c and "PORT=3001; " in c and "127.0.0.1:$PORT$ep" in c
     assert "/opt/control*" in c and '--exclude-dir="*.bak*"' in c and "HTTP %{http_code} in %{time_total}s" in c
     assert "'\\''" not in c                                                 # no quote-inside-quote escapes
     assert " -o " not in c and "PANEL_SESSION_COOKIE" not in c and "<PANEL_PASSWORD>" not in c.split("<<<")[0]
@@ -122,6 +122,18 @@ def test_the_probe_is_a_read_the_read_only_channel_takes():
     from app.modules.assist_state_check import read_only_command
     cmds, _, _ = sr.rewrite_probe_service_endpoints(T2, ["x"], [], SERVICES, INV, logins=LOGINS)
     assert read_only_command(cmds[0])
+
+
+def test_without_a_measured_service_the_port_is_read_off_the_code_in_the_guest():
+    # §17.1574d — live (c2792d4b): nothing was measured for 111, yet the login names the guest ("panel" in control-panel)
+    cmds, verify, notes = sr.rewrite_probe_service_endpoints(T2, ["x"], [], [], INV, logins=LOGINS)
+    assert notes and cmds == verify and cmds[0].startswith("pct exec 111 -- sh -c '") and cmds[0].endswith(' <<< "<PANEL_PASSWORD>"')
+    c = cmds[0]
+    assert 'PORT=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/control*' in c and "127.0.0.1:$PORT$ep" in c
+    assert 'test -n "$PORT" ||' in c and "'\\''" not in c
+    assert subprocess.run(["bash", "-n", "-c", c], capture_output=True, text=True).returncode == 0
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(c)
 
 
 def test_the_probe_needs_a_held_login_for_that_service_and_the_right_words():
