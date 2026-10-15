@@ -3142,6 +3142,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 files, _refreshed = develop.refresh_credential_copies(files, workspace, _marked_paths, host, run_node)
                 if _refreshed:
                     logger.warning("develop_credential_copies_refreshed job=%s node=%s paths=%s", job_id, _nk_dev, _refreshed)
+                # §17.1590 — a config named after a measured service that points it elsewhere is delivered with the measured address
+                files, _readdr = develop.refresh_address_copies(files, workspace, _services, host, run_node)
+                if _readdr:
+                    logger.warning("develop_address_copies_refreshed job=%s node=%s paths=%s", job_id, _nk_dev, _readdr)
                 # §17.1584 — the routes the CHANGED files define are this delivery's feature; the word-derived
                 # permit (§17.1582) stands in only when they define none (a UI file)
                 _own = develop.derived_from_files(host, files, _port) if _derived else []
@@ -3152,7 +3156,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                preconditions=await _pre_for(rb), upstream=up_block,
                                                units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                inventory=_inv, engine_address=_eaddr, services=_services)
-                _dead = (develop.calls_a_dead_path(files, status)         # §17.1422
+                _dead = (develop.stale_service_addresses(files, _services)   # §17.1590
+                         + develop.calls_a_dead_path(files, status)         # §17.1422
                          + develop.values_put_into_html_attributes(files)   # §17.1424
                          + develop.a_secret_written_in_the_clear(files, creds)   # §17.1427
                          + develop.restyle_missed_the_served_file(run_node, files, _served, workspace))  # §17.1546

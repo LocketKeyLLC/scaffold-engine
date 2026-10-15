@@ -63,6 +63,7 @@ class Host:
     user: str = ""
     group: str = ""
     name: str = ""
+    port: str = ""          # §17.1590 — the measured loopback port, so a step naming no service still has one
     # §17.1544 — sibling app directories the brief names (e.g. a Vite UI at
     # /opt/control-panel-ui beside the backend's WorkingDirectory /opt/control-panel-backend). The
     # app spans more than the unit's one WorkingDirectory; read_workspace reads these too and
@@ -217,6 +218,7 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
     return Host(guest=str(pick.guest), vm=bool(getattr(pick, "vm", False)), workdir=str(pick.workdir).rstrip("/"),
                 unit=str(pick.unit), user=str(getattr(pick, "user", "") or ""),
                 group=str(getattr(pick, "group", "") or ""), name=str(getattr(pick, "name", "") or ""),
+                port=str(next((p for p in (getattr(pick, "ports", ()) or ()) if str(p).strip()), "")),   # §17.1590
                 extra_dirs=extra)
 
 
@@ -347,7 +349,72 @@ def service_port(host: Host, services: Optional[list]) -> str:
             ports = [str(p) for p in (getattr(s, "ports", ()) or ()) if str(p).strip()]
             if ports:
                 return ports[0]
-    return ""
+    return str(getattr(host, "port", "") or "")      # §17.1590 — the host remembers the port the picker saw
+
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _service_named_by(path: str, services: Optional[list]):
+    stem = path.rsplit("/", 1)[-1].lower()
+    hits = [s for s in services or [] if str(getattr(s, "name", "") or "").lower() and str(getattr(s, "name", "")).lower() in stem]
+    return hits[0] if len(hits) == 1 else None
+
+
+def stale_service_addresses(files: dict[str, str], services: Optional[list]) -> list[dict]:
+    """§17.1590 — a delivered file points a measured service at an address it is not at.
+
+    Live (c2792d4b T7): byparr_route.js and config/byparr.json carried `192.168.1.25:8192` while Byparr sits on
+    192.168.1.27 (measured: `pct list` 108 byparr, its guest's IPv4, `ss` 8192) — the delivery's own check answered
+    `connect ECONNREFUSED 192.168.1.25:8192`. Two shapes: `<ip>:<port>` where the port is the service's and the ip
+    is not its address; and an IPv4 in a file NAMED after the service (byparr.json) that is not its address."""
+    out: list[dict] = []
+    for path, content in (files or {}).items():
+        c = str(content or "")
+        for s in services or []:
+            addr, ports = str(getattr(s, "address", "") or ""), {str(p) for p in (getattr(s, "ports", ()) or ())}
+            if not addr:
+                continue
+            for m in re.finditer(r"\b((?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})\b", c):
+                if m.group(2) in ports and m.group(1) != addr:
+                    out.append({"command": f"{path}: {m.group(0)}", "why": (
+                        f"this points {s.name} at `{m.group(0)}`, and {s.name} is at {addr} (measured on guest "
+                        f"{getattr(s, 'guest', '?')}: its address, and `ss` lists :{m.group(2)} there). Nothing answers at "
+                        f"{m.group(1)}:{m.group(2)}; the engine's facts above carry the measured address — use it.")})
+                    break
+        named = _service_named_by(path, services)
+        if named and getattr(named, "address", ""):
+            others = sorted({ip for ip in _IPV4_RE.findall(c) if ip != named.address and not ip.startswith("127.")})
+            if others and not any(o["command"].startswith(path + ":") for o in out):
+                out.append({"command": f"{path}: {others[0]}", "why": (
+                    f"this file is {named.name}'s and carries `{others[0]}`, but {named.name} is at {named.address} "
+                    f"(measured on guest {getattr(named, 'guest', '?')}). Use the measured address.")})
+    return out
+
+
+def refresh_address_copies(files: dict[str, str], workspace: dict[str, str], services: Optional[list],
+                           host: Host, node: Optional[dict]) -> tuple[dict[str, str], list[str]]:
+    """§17.1590 — a workspace file NAMED after a measured service (config/byparr.json) that carries another
+    address for it is delivered with the measured one, unless the model delivers its own version. The engine
+    measured where the service is; the copy in the config is a fact of the machine it owns, like a credential copy."""
+    out = dict(files or {})
+    added: list[str] = []
+    for path, content in sorted((workspace or {}).items()):
+        if path in out or not allowed_path(path, host, node):
+            continue
+        s = _service_named_by(path, services)
+        addr = str(getattr(s, "address", "") or "") if s else ""
+        if not addr:
+            continue
+        c = str(content or "")
+        stale = sorted({ip for ip in _IPV4_RE.findall(c) if ip != addr and not ip.startswith("127.")})
+        if not stale:
+            continue
+        for ip in stale:
+            c = c.replace(ip, addr)
+        out[path] = c
+        added.append(path)
+    return out, added
 
 
 def derived_checks(node: Optional[dict], host: Host, workspace: Optional[dict[str, str]], port: str) -> list[str]:
