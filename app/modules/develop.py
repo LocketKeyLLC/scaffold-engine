@@ -1087,6 +1087,55 @@ def _resolve_served_dir(expr: str, base: str) -> Optional[str]:
     return None
 
 
+def served_dirs(workspace: dict[str, str]) -> list[str]:
+    """§17.1592 — the directories the backend SERVES (Express static, StaticFiles, nginx/Caddy root), whether or
+    not the engine has read them yet. Live (c2792d4b T8 "Fix UI fetch error handling"): the panel serves
+    `/opt/control-panel-ui` (a sibling of its WorkingDirectory); the brief this job ran with named no sibling dir,
+    so the workspace held 27 files and no HTML — the page the step is about was never read, never writable, and
+    no page check could be derived."""
+    import posixpath
+    dirs: list[str] = []
+    for path, content in (workspace or {}).items():
+        if not path.endswith((".js", ".ts", ".mjs", ".cjs", ".py", ".conf")):
+            continue
+        base = posixpath.dirname(path)
+        for key in ("express.static(", "serveStatic("):
+            i = (content or "").find(key)
+            while i >= 0:
+                arg, j = _balanced_arg(content, i + len(key))
+                d = _resolve_served_dir(arg.strip(), base)
+                if d:
+                    dirs.append(d.rstrip("/"))
+                i = content.find(key, j)
+        for m in re.finditer(r"(?:StaticFiles\(\s*directory\s*=|send_from_directory\(\s*)['\"]([^'\"]+)['\"]", content or ""):
+            d = m.group(1)
+            dirs.append((d if d.startswith("/") else posixpath.normpath(posixpath.join(base, d))).rstrip("/"))
+        for m in re.finditer(r"\broot\s+([^\s;*]+)\s*;", content or ""):
+            dirs.append(m.group(1).rstrip("/"))
+    return [d for d in dict.fromkeys(dirs) if d.startswith("/") and d not in ("/", "/tmp")]
+
+
+def widen_to_served(host: Host, workspace: dict[str, str]) -> tuple[Host, list[str]]:
+    """§17.1592 — the served directories join the host's extra_dirs (readable, writable) when they are not already
+    under the directories the workspace was read with. Returns the host and the dirs added."""
+    import dataclasses
+    have = [host.workdir.rstrip("/"), *(d.rstrip("/") for d in host.extra_dirs)]
+    add = [d for d in served_dirs(workspace) if not any(d == h or d.startswith(h + "/") for h in have)]
+    if not add:
+        return host, []
+    return dataclasses.replace(host, extra_dirs=(*host.extra_dirs, *add)), add
+
+
+_PROXY_NAMES = ("flaresolverr", "byparr")
+
+
+def proxies_in_workspace(workspace: dict[str, str]) -> list[str]:
+    """§17.1592 — the engine-deployed proxies the service's OWN files name (byparr.json, byparr_route.js), whether or
+    not the step's text does: live, T7's text said FlareSolverr and not Byparr, so byparr.json kept its dead address."""
+    stems = [p.rsplit("/", 1)[-1].lower() for p in (workspace or {})]
+    return [n for n in _PROXY_NAMES if any(n in s for s in stems)]
+
+
 def served_entries(workspace: dict[str, str]) -> list[str]:
     """§17.1546 — the file(s) the service SERVES to the browser, found from the backend's own static-file
     directive in the workspace it was read with. Live (control-panel ae721781): the backend does

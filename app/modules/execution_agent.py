@@ -3074,6 +3074,17 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules import service_truth as _st_dev
             _nk_dev = str(run_node.get("node_key") or "")
             workspace = await develop.read_workspace(spec, host)
+            # §17.1592 — the directory the backend SERVES joins the workspace (read, and writable), so a UI step can
+            # read the page it is about and the page check can be derived
+            host, _widened = develop.widen_to_served(host, workspace)
+            if _widened:
+                logger.warning("develop_served_dirs_added job=%s node=%s dirs=%s", job_id, _nk_dev, _widened)
+                workspace = await develop.read_workspace(spec, host)
+            # §17.1592 — a proxy the service's own files name is a service in play, named by the step or not
+            _ws_proxies = supervised_runs.engine_deployed_services(develop.proxies_in_workspace(workspace), _services)
+            if _ws_proxies:
+                _services.extend(_ws_proxies)
+                logger.info("services_from_engine_deploys_by_workspace job=%s node=%s names=%s", job_id, _nk_dev, [s.name for s in _ws_proxies])
             # §17.1582 — a check the step's text never named, read off the service's own routes
             _port = develop.service_port(host, _services)
             _derived = develop.derived_checks(run_node, host, workspace, _port)
