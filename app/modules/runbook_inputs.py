@@ -262,8 +262,33 @@ def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "") -> l
         pinned = next((s["value"] for s in sugg if s["confidence"] == "pinned"), "")
         stepped = [s["value"] for s in sugg if s["confidence"] == "step"]
         value = pinned or (stepped[0] if len(stepped) == 1 else "")
+        if not value:
+            acct = homelab_account(str(i.get("name") or ""), env or {})
+            if acct:
+                value, src = acct
+                sugg = [{"value": value, "source": src, "confidence": "homelab"}] + [x for x in sugg if x.get("value") != value]
         out.append({**i, "suggestions": sugg, "value": value})
     return out
+
+
+def homelab_account(name: str, env: dict) -> Optional[tuple[str, str]]:
+    """§17.1606 — a guest's login account the operator never pinned for THAT guest, when every `<GUEST>_USER` pin they
+    did make names the same account: ``(account, source)``, else None.
+
+    Live (job 0fb4ea7f T2, "Verify ai-vm resources", 2026-10-15): the frame asked for `AI_USER`. The engine held
+    `PALWORLD_USER = aedefruscio` and `MASS_PASSWORD` ("the one password used for every container/VM that needs one"),
+    and the operator: "The engine already has ALL of that information." One account across every pinned guest is the
+    homelab's account; two different ones is a real question and nothing is filled."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*_USER", name or ""):
+        return None
+    subs = (env or {}).get("substitutions") or {}
+    pins = {str(k): str(v).strip() for k, v in (subs.items() if isinstance(subs, dict) else [])
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*_USER", str(k)) and str(v or "").strip()}
+    accounts = set(pins.values())
+    if len(accounts) != 1:
+        return None
+    acct = accounts.pop()
+    return acct, f"the one account every pinned guest login names ({', '.join(sorted(pins))} = {acct})"
 
 
 #: §17.1473 — "Operator decision 2026-10-10 (…): only the control panel is reachable from the internet; …"
@@ -331,7 +356,26 @@ async def _job_environment_ledger(db, job_id: str) -> dict:
             if env.get("facts") or env.get("substitutions") or env.get("system_state"):
                 return env
         row = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :jid"), {"jid": job_id})).mappings().first()
-        return _environment_from_metadata((row or {}).get("metadata")) if row else {}
+        env = _environment_from_metadata((row or {}).get("metadata")) if row else {}
+        if env.get("facts") or env.get("substitutions") or env.get("system_state"):
+            return env
+        # §17.1607 — a job with no ledger of its own (started from the API, or a job no assist session drove) reads
+        # its OWNER's newest ledger: the operator's machines, pins and facts are theirs, not one session's. Live
+        # (job 0fb4ea7f, 2026-10-15): T2 asked for ai-vm's login while the operator's ledger held PALWORLD_USER and
+        # 40 facts -- "The engine already has ALL of that information"; the panel job c2792d4b ran with no ledger
+        # too, which is why §17.1312's address gate stayed silent there.
+        row = (await db.execute(text("""
+            SELECT s.id, s.metadata FROM assist_sessions s
+              JOIN jobs j ON j.id = s.job_id
+             WHERE j.owner IS NOT DISTINCT FROM (SELECT owner FROM jobs WHERE id = :jid)
+               AND (jsonb_array_length(COALESCE(s.metadata->'environment'->'facts', '[]'::jsonb)) > 0
+                    OR COALESCE(s.metadata->'environment'->'substitutions', '{}'::jsonb) <> '{}'::jsonb)
+             ORDER BY s.updated_at DESC LIMIT 1"""), {"jid": job_id})).mappings().first()
+        if row and row.get("metadata"):
+            inherited = _environment_from_metadata(row["metadata"])
+            if inherited.get("facts") or inherited.get("substitutions") or inherited.get("system_state"):
+                return {**inherited, "inherited_from": str(row["id"])}
+        return env
     except Exception:
         return {}
 
