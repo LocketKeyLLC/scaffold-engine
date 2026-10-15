@@ -9603,7 +9603,7 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
                      'test -n "$PORT" || echo "FAILED: no listen(<port>) in the service code"; ')   # an empty PORT → every curl 000 → STATE-WRONG
     # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
     payload = (
-        'IFS= read -r CPW; fails=""; ' + port_expr +
+        'CPW=$(cat); fails=""; ' + port_expr +          # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
         # the route's quote is matched with `.` and stripped with tr's octal `\047`: no quote character of either kind
         # appears in the payload, so `_sq_payload` wraps it once with no `'\''` escapes
         f'for ep in $(grep -rhoE "(app|router)\\.get\\(.(/[^,)]*)" /opt/{stem}* --include="*.js" --include="*.ts" '

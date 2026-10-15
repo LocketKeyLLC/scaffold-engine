@@ -342,7 +342,6 @@ _READ_ONLY_HEADS = frozenset({
     "namei", "tree",
     # shell meta with no effect
     "echo", "printf", "true", "false", "test", "[", "[[", ":", "seq", "expr",
-    "read",      # §17.1574c — the shell builtin that reads STDIN into a variable (`IFS= read -r CPW`, §17.1548's login shape)
     "date", "sleep", "which", "type", "pwd", "id", "groups", "whoami",
     "logname", "getent", "locale", "tty", "printenv",
     # system state

@@ -109,7 +109,7 @@ def test_the_probe_presents_the_held_login_to_every_registered_get_route():
     assert notes and "§17.1574c" in notes[0]["why"] and cmds == verify and len(cmds) == 1
     c = cmds[0]
     assert c.startswith("pct exec 111 -- sh -c '") and c.endswith(' <<< "<PANEL_PASSWORD>"')
-    assert "IFS= read -r CPW" in c and '-u "panel:$CPW"' in c and "PORT=3001; " in c and "127.0.0.1:$PORT$ep" in c
+    assert "CPW=$(cat); " in c and '-u "panel:$CPW"' in c and "PORT=3001; " in c and "127.0.0.1:$PORT$ep" in c
     assert "/opt/control*" in c and '--exclude-dir="*.bak*"' in c and "HTTP %{http_code} in %{time_total}s" in c
     assert "'\\''" not in c                                                 # no quote-inside-quote escapes
     assert " -o " not in c and "PANEL_SESSION_COOKIE" not in c and "<PANEL_PASSWORD>" not in c.split("<<<")[0]
