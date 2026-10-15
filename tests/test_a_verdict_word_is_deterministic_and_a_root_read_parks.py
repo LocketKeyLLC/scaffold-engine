@@ -129,8 +129,11 @@ def test_without_a_measured_service_the_port_is_read_off_the_code_in_the_guest()
     cmds, verify, notes = sr.rewrite_probe_service_endpoints(T2, ["x"], [], [], INV, logins=LOGINS)
     assert notes and cmds == verify and cmds[0].startswith("pct exec 111 -- sh -c '") and cmds[0].endswith(' <<< "<PANEL_PASSWORD>"')
     c = cmds[0]
-    assert 'port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/control*' in c and "127.0.0.1:$port$ep" in c
-    assert 'test -n "$port" ||' in c and "'\\''" not in c
+    # §17.1579 — what LISTENS in the guest first (live: server.js has no literal; `ss` says node on 3001), then the code
+    assert 'port=$(ss -ltnpH 2>/dev/null | grep -E "users:...(node|python|' in c and "127.0.0.1:$port$ep" in c
+    assert 'test -n "$port" || port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/control*' in c
+    assert c.index("ss -ltnpH") < c.index('grep -rhoE "listen') and 'test -n "$port" || echo "FAILED: no app listener' in c
+    assert "'\\''" not in c
     assert subprocess.run(["bash", "-n", "-c", c], capture_output=True, text=True).returncode == 0
     from app.modules.assist_state_check import read_only_command
     assert read_only_command(c)

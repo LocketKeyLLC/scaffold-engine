@@ -9703,9 +9703,13 @@ def rewrite_probe_service_endpoints(node: Optional[dict], commands: list[str], v
         if not fits or not str(fits[0].get("user") or "").strip():
             return list(commands or []), list(verify or []), []
         secret, user = str(fits[0]["name"]), str(fits[0]["user"])
-        port_expr = (f'port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/{stem}* --include="*.js" --include="*.ts" --include="*.py" '
+        # §17.1579 — the port is what LISTENS in the guest, read off the machine first (live: the panel's server.js
+        # says `app.listen(PORT…)`, no literal; `ss` in CT 111 says node listens on 3001), then the code's literal.
+        port_expr = ('port=$(ss -ltnpH 2>/dev/null | grep -E "users:...(node|python|gunicorn|uvicorn|deno|bun|java|ruby|php)" '
+                     '| grep -oE ":[0-9]+ " | head -n 1 | tr -d ": "); '
+                     f'test -n "$port" || port=$(grep -rhoE "listen\\(\\s*[0-9]+" /opt/{stem}* --include="*.js" --include="*.ts" --include="*.py" '
                      f'--exclude-dir=node_modules --exclude-dir="*.bak*" 2>/dev/null | grep -oE "[0-9]+" | head -n 1); '
-                     'test -n "$port" || echo "FAILED: no listen(<port>) in the service code"; ')   # an empty port → every curl 000 → STATE-WRONG
+                     'test -n "$port" || echo "FAILED: no app listener in the guest and no listen(<port>) in the service code"; ')   # an empty port → every curl 000 → STATE-WRONG
     # double quotes only inside the payload: `_sq_payload` wraps it once, so no `'\''` escapes appear
     payload = (
         'cpw=$(cat); fails=""; ' + port_expr +          # the password arrives on stdin (`cat` is a reader at both ends; `read` is not on the runner's table)
