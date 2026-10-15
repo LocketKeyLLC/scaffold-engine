@@ -68,6 +68,30 @@ def _unquote(s: str) -> str:
     return m.group(2) if m else s
 
 
+def _word_value(node, src: bytes) -> str:
+    """§17.1572b — the VALUE of an argument word, a concatenation resolved child by child.
+
+    Live: `pct exec 111 -- sh -c 'echo '\\''--- a ---'\\''; ls /opt'` — the standard idiom for a single
+    quote inside a single-quoted script — was refused by `read_only_command` although every piece of
+    the script reads. tree-sitter parses that argument as a `concatenation` (raw_string, `\\'` word,
+    raw_string, …) and `_unquote` on its raw text kept the quoting verbatim; the gate then re-quoted
+    the wrapper's remainder around it and the inner parse failed → fail-closed → "not read-only".
+    The value is each raw_string's content, each string's content, and each bare word with its
+    backslash escapes resolved — what the shell itself would hand the command."""
+    if node.type == "concatenation":
+        parts = []
+        for ch in node.children:
+            if ch.type == "raw_string":
+                parts.append(_text(ch, src)[1:-1])
+            elif ch.type == "string":
+                raw = _text(ch, src)
+                parts.append(raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == '"' else raw)
+            else:
+                parts.append(re.sub(r"\\(.)", r"\1", _text(ch, src)))
+        return "".join(parts)
+    return _unquote(_text(node, src))
+
+
 def analyze(cmd: str, *, _depth: int = 0) -> ShellFacts:
     facts = ShellFacts()
     src = (cmd or "").encode("utf-8")
@@ -91,7 +115,7 @@ def analyze(cmd: str, *, _depth: int = 0) -> ShellFacts:
             for ch in node.children:
                 if ch.type in ("command_name", "word", "string", "raw_string", "concatenation", "number"):
                     raw = _text(ch, src)
-                    argv.append(_unquote(raw))
+                    argv.append(_word_value(ch, src))
                     # quoted arguments are DATA: they never extend the head
                     if head_open and ch.type not in ("string", "raw_string") and len(head) < 4:
                         head.append(raw)
@@ -138,7 +162,7 @@ def analyze(cmd: str, *, _depth: int = 0) -> ShellFacts:
             if ch.type in (">", ">>", "<>", ">|", "&>", "&>>"):
                 op = ch.type
             elif ch.type in ("word", "string", "raw_string", "concatenation", "number"):
-                target = _unquote(_text(ch, src))
+                target = _word_value(ch, src)
         if op and target and target not in ("/dev/null",) and not re.fullmatch(r"&\d+", target):
             facts.redirect_targets.append(target)
 

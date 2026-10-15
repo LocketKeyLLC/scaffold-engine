@@ -43,3 +43,19 @@ def test_parse_error_fails_closed_and_facts_are_structural():
     f = analyze("cat /etc/hosts > /tmp/out 2>/dev/null; bash -c 'ls /x'; echo $(uname -r) | sh")
     assert ["cat", "/etc/hosts"] in f.commands and ["ls", "/x"] in f.commands and ["uname", "-r"] in f.commands
     assert f.redirect_targets == ["/tmp/out"] and f.piped_to_interpreter
+
+
+# §17.1572b — a single quote inside a single-quoted script (`'\''`) is a concatenation whose VALUE the gate judges
+def test_the_quote_inside_a_quoted_script_idiom_is_judged_on_its_value():
+    from app.modules.assist_state_check import read_only_command
+    from app.modules.shell_ast import analyze
+    wrapped = "pct exec 111 -- sh -c 'echo '\\''--- a ---'\\''; ls /opt'"
+    assert analyze(wrapped).commands[0][-1] == "echo '--- a ---'; ls /opt"          # the shell's own value
+    assert read_only_command(wrapped)                                               # a read is a read
+    assert read_only_command("sh -c 'grep -rhoE '\\''\"[A-Za-z_]*[Kk]ey\"'\\'' /opt/x/config | sort | uniq -c'")
+    # and the same idiom around a mutation is still refused, inside the guest and at top level
+    assert not read_only_command("pct exec 111 -- sh -c 'echo '\\''x'\\''; rm -rf /opt/x'")
+    assert not read_only_command("sh -c 'echo '\\''x'\\'' > /etc/motd'")
+    assert not read_only_command("bash -c 'systemctl '\\''restart'\\'' nginx'")
+    # a double-quoted piece keeps its content inside a concatenation
+    assert analyze('echo "a b"\'c\'').commands[0] == ["echo", "a bc"]

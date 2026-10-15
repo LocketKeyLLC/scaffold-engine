@@ -181,13 +181,13 @@ async def execute_mcp_node(
     # approval instead (supervised_runs.is_mcp_write → pending_hands_on → _pause_for_decision), and the
     # approved path mints the approval and runs it. Reaching here means that pause was bypassed — fail
     # clearly rather than call the tool unapproved.
-    from app.modules.assist_supervised import WRITE_TOOL
-    if tool_name == WRITE_TOOL:
+    from app.modules.assist_supervised import WRITE_TOOL, WRITE_FILE_TOOL
+    if tool_name in (WRITE_TOOL, WRITE_FILE_TOOL):      # §17.1573 — the file write is a write too
         return await _fail(
             db, node_id, node_key, title,
-            f"a machine-write MCP node (tool {WRITE_TOOL!r}) runs through the operator-approved "
+            f"a machine-write MCP node (tool {tool_name!r}) runs through the operator-approved "
             "supervised pause, not as a deterministic MCP call; it reached execution without that "
-            "pause (§17.1551)",
+            "pause (§17.1551/§17.1573)",
         )
 
     try:

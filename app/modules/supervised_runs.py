@@ -696,10 +696,20 @@ def is_mcp_write(node: Optional[dict]) -> bool:
     frames it with ``mcp_write_runbook``), and the approved supervised path mints the approval and runs
     it secret-safely — the same gate every hands-on write already passes. Live: Jellyfin metadata-pass
     job 263e920a, T4, which hard-failed with ``approval Field required``."""
-    from app.modules.assist_supervised import WRITE_TOOL
+    from app.modules.assist_supervised import WRITE_TOOL, WRITE_FILE_TOOL
     cfg = _mcp_cfg(node)
     args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
-    return str(cfg.get("tool") or "") == WRITE_TOOL and bool(str((args or {}).get("command") or "").strip())
+    tool = str(cfg.get("tool") or "")
+    if tool == WRITE_TOOL:
+        return bool(str((args or {}).get("command") or "").strip())
+    # §17.1573 — the runner's FILE write is a write too. Live (job 9e1c2c68, T2/T3): the planner chose
+    # `write_file` for the rule file and the unit; this predicate knew one tool name, so the node was
+    # dispatched deterministically, the runner refused it (`approval Field required`) three times, and
+    # the job went blocked with nothing parked for the operator. A gate that matches one word, not the
+    # payload's kind (a write), is how the same defect returns under a new name.
+    if tool == WRITE_FILE_TOOL:
+        return bool(str((args or {}).get("path") or "").strip())
+    return False
 
 
 #: §17.1555 — a shell command that splices another node's output in: `${upstream.T3}`, `${brief.x}`,
@@ -725,10 +735,30 @@ def mcp_splices_an_upstream(node: Optional[dict]) -> bool:
     return str(cfg.get("tool") or "") == "run_readonly" and bool(_UPSTREAM_SPLICE_RE.search(cmd))
 
 
+def a_capability_claims(node: Optional[dict]) -> bool:
+    """§17.1573 — True when one of the engine's deterministic host-level capabilities would replace this
+    step's commands (the same rewrites ``frame_run`` applies). A runner-read MCP node such a capability
+    claims must PARK and be framed by it, not run the planner's raw command: live (job 9e1c2c68), T5's
+    `nft list table bridge block_ra` read a table by the plan's working name, which the engine's install
+    (§17.1571, `scaffold_rafilter`) never created — a deterministic failure the capability layer could
+    see and the dispatcher could not. Only capabilities that need no measured services/inventory."""
+    n = dict(node) if hasattr(node, "keys") else {}
+    if not n:
+        return False
+    for fn in (rewrite_drop_router_adverts_on_the_bridge, rewrite_verify_router_adverts_dropped):
+        try:
+            if fn(n, ["x"], ["y"], None, None)[2]:
+                return True
+        except Exception:                                      # a classifier must never break dispatch
+            continue
+    return False
+
+
 def mcp_needs_the_pause(node: Optional[dict]) -> bool:
-    """§17.1551/§17.1555 — an MCP node the frontier must HOLD for the operator rather than call:
-    a runner write, or a runner read that splices an upstream output into its command."""
-    return is_mcp_write(node) or mcp_splices_an_upstream(node)
+    """§17.1551/§17.1555/§17.1573 — an MCP node the frontier must HOLD for the operator rather than call:
+    a runner write (command or file), a runner read that splices an upstream output into its command,
+    or a runner read one of the engine's own capabilities claims."""
+    return is_mcp_write(node) or mcp_splices_an_upstream(node) or a_capability_claims(node)
 
 
 def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], brief: Any) -> Optional[str]:
@@ -746,6 +776,13 @@ def mcp_write_runbook(node: Optional[dict], upstream_outputs: Optional[dict], br
     cfg = parse_tool_config((node or {}).get("tool_config"))
     rendered = render_args(cfg.get("args") or {}, upstream_outputs or {}, brief or {})
     cmd = str((rendered or {}).get("command") or "").strip() if isinstance(rendered, dict) else ""
+    if not cmd and isinstance(rendered, dict) and str(rendered.get("path") or "").strip():
+        # §17.1573 — a `write_file` node as the shell write it is, so the frame offers it, the
+        # capabilities may replace it, and the gates judge it like any file a step leaves behind.
+        path = str(rendered.get("path")).strip()
+        body = str(rendered.get("content") or "")
+        cmd = (f"mkdir -p {shlex.quote(os.path.dirname(path) or '/')} && "
+               f"printf '%s\\n' {shlex.quote(body.rstrip(chr(10)))} > {shlex.quote(path)}")
     return "## Run this\n```bash\n" + cmd + "\n```" if cmd else None
 
 
@@ -801,8 +838,9 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
         # hands-on step rather than running deterministically with no engine↔runner approval.
         # §17.1555 — so does a runner-read whose command splices another node's output in.
         if mcp_needs_the_pause(node):
-            node["hands_on_reason"] = "mcp:runner-write" if is_mcp_write(node) else "mcp:spliced-read"
-            return node
+            node["hands_on_reason"] = ("mcp:runner-write" if is_mcp_write(node)
+                                       else "mcp:spliced-read" if mcp_splices_an_upstream(node) else "mcp:capability")
+            return await inherit_referenced_step_text(db, job_id, node)     # §17.1573b
         _dc = str(node.get("tool") or "").strip().lower() == "codegen" and bool(_deploy_target)
         on, why = step_is_hands_on(node, develops_codegen=_dc)
         if on and not why.startswith("tool:human"):
@@ -815,7 +853,14 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
 _REFERENCED_STEP_RE = re.compile(r"\b(?:same\s+(?:\w+\s+){0,3}as|as\s+in|like|identical\s+to|mirror(?:s|ing)?)\s+(T\d+(?:v\d+)?)\b", re.I)
 
 
-async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict) -> dict:
+#: §17.1573b — a step whose object is "the table / the unit / the rule / the file …" (a definite reference)
+_ANAPHORIC_RE = re.compile(r"\bthe\s+(?:dedicated\s+|new\s+|same\s+)?(?:table|unit|rule(?:\s*file)?|file|service|config(?:uration)?|"
+                           r"counter|drop\s+rule|systemd\s+unit)\b", re.I)
+#: … and one that names it anyway (a path, a unit file, a table name, a step reference) needs nothing inherited
+_NAMES_ITS_OBJECT_RE = re.compile(r"/(?:etc|opt|usr|var|home|root)/\S+|\b[\w.-]+\.(?:service|timer|conf|nft)\b|\btable\s+(?:bridge|inet|ip6?)\s+\w+|\[as in T\d+", re.I)
+
+
+async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict, *, _depth: int = 0) -> dict:
     """§17.1570c — a step whose text points at another step carries that step's text.
 
     Live (job eff80f98): the planner wrote the work once — T2 "Writes the sysctl config file … Contents:
@@ -826,7 +871,14 @@ async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict
     and text are appended to the node's description (once), so the capabilities and gates see the whole
     specification. Fail-soft: an unreadable reference leaves the node as it was."""
     own = _node_text(node)
-    refs = sorted({m.group(1) for m in _REFERENCED_STEP_RE.finditer(own)} - {str(node.get("node_key") or "")})
+    refs = {m.group(1) for m in _REFERENCED_STEP_RE.finditer(own)}
+    # §17.1573b — a step that speaks of "the table", "the unit", "the rule file" it never names is defined by
+    # the step it depends on (live, job 9e1c2c68: T3 "oneshot unit that loads the dedicated table", T4 "Loads
+    # the table now", T7 "Confirms the unit is active"). Its direct dependencies' text is inherited the same
+    # way; a dependency that is itself such a step brings its own dependencies (one more level).
+    if _ANAPHORIC_RE.search(own) and not _NAMES_ITS_OBJECT_RE.search(own):
+        refs |= {str(d) for d in (node.get("depends_on") or []) if re.fullmatch(r"T\d+(?:v\d+)?", str(d))}
+    refs = sorted(refs - {str(node.get("node_key") or "")})
     if not refs:
         return node
     try:
@@ -842,6 +894,22 @@ async def inherit_referenced_step_text(db: AsyncSession, job_id: str, node: dict
         body = " ".join(str(r.get(k) or "").strip() for k in ("title", "description", "prompt_template") if r.get(k))
         if body and f"[as in {r['node_key']}:" not in str(node.get("description") or ""):
             extra.append(f"[as in {r['node_key']}: {body[:1200]}]")
+            # §17.1573b — one more level when the dependency is itself anaphoric ("loads the table")
+            if _depth == 0 and _ANAPHORIC_RE.search(body) and not _NAMES_ITS_OBJECT_RE.search(body):
+                try:
+                    deps = (await db.execute(
+                        text("SELECT depends_on FROM dag_nodes WHERE job_id = :jid AND node_key = :k"),
+                        {"jid": job_id, "k": r["node_key"]})).scalar()
+                    up = (await db.execute(
+                        text("SELECT node_key, title, description, prompt_template FROM dag_nodes "
+                             "WHERE job_id = :jid AND node_key = ANY(:keys)"),
+                        {"jid": job_id, "keys": [str(d) for d in (deps or [])]})).mappings().all()
+                    for u in up:
+                        ub = " ".join(str(u.get(k) or "").strip() for k in ("title", "description", "prompt_template") if u.get(k))
+                        if ub and f"[as in {u['node_key']}:" not in str(node.get("description") or ""):
+                            extra.append(f"[as in {u['node_key']}: {ub[:1200]}]")
+                except Exception as exc:
+                    logger.warning("referenced_step_lookup_failed job=%s node=%s err=%r", job_id, node.get("node_key"), exc)
     if extra:
         node = dict(node)
         node["description"] = (str(node.get("description") or "").rstrip() + "\n" + "\n".join(extra)).strip()
@@ -5611,6 +5679,16 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _ra_notes:
         cmds, verify = _ra_cmds, _ra_verify
         _comp_notes = list(_comp_notes) + _ra_notes
+    # §17.1573 — a verify step about the RA filter reads the filter the engine installed, by its name.
+    _rv_cmds, _rv_verify, _rv_notes = rewrite_verify_router_adverts_dropped(node, cmds, verify, services, inventory)
+    if _rv_notes:
+        cmds, verify = _rv_cmds, _rv_verify
+        _comp_notes = list(_comp_notes) + _rv_notes
+    # §17.1572 — "inventory the endpoints/routes of <service>": the engine reads the measured service's own code.
+    _ri_cmds, _ri_verify, _ri_notes = rewrite_inventory_service_routes(node, cmds, verify, services, inventory)
+    if _ri_notes:
+        cmds, verify = _ri_cmds, _ri_verify
+        _comp_notes = list(_comp_notes) + _ri_notes
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —
@@ -8555,6 +8633,9 @@ def _node_text(node: Optional[dict]) -> str:
     cfg = _mcp_cfg(n)
     args = cfg.get("args") if isinstance(cfg.get("args"), dict) else {}
     parts.append(str((args or {}).get("command") or ""))
+    # §17.1573 — a `write_file` node's path and content are its text too (the unit it writes names the table it loads)
+    parts.append(str((args or {}).get("path") or ""))
+    parts.append(str((args or {}).get("content") or "")[:2000])
     return " ".join(parts)
 
 
@@ -9297,6 +9378,46 @@ _RAFILTER_UNIT_TEXT = (
 _RA_DROP_RE = re.compile(r"\b(?:drop|block|filter|stop|refuse|discard|suppress)\w*\b[^.;\n]{0,60}\b(?:router\s+advertisements?|\bRAs?\b|nd-router-advert)"
                          r"|\b(?:router\s+advertisements?|nd-router-advert)\b[^.;\n]{0,60}\b(?:drop|block|filter|stop|refuse|discard|suppress)", re.I)
 _RA_WHERE_RE = re.compile(r"\bbridge\b|\bvmbr\d*\b|\bproxmox\s+host\b|\bthe\s+host\b|\bhypervisor\b|\bgateway\b|\bnftables?\b", re.I)
+#: §17.1573 — the filter's own names, the engine's or the planner's: a step that writes/loads/enables/verifies
+#: "block-ra" / "rafilter" / the RA table or unit is a piece of this one install (live, job 9e1c2c68: T2 wrote
+#: the rule file, T3 the unit, T4 enabled it, T5–T7 verified each — fragments of one capability).
+_RA_NAMED_RE = re.compile(r"\bblock[-_ ]?ra\b|\brafilter\b|\bnd-router-advert\b|\brouter[- ]advert", re.I)
+_RA_PIECE_RE = re.compile(r"\b(?:nft|nftables|table|unit|oneshot|service|systemd|rule|counter|enable|start|load)\w*\b", re.I)
+#: … but IN-GUEST IPv6 work ("stop accepting router advertisements in container 102", sysctl, eth0) is §17.1570's, not this
+_IN_GUEST_IPV6_RE = re.compile(r"\bcontainer\s+\d+|\bCT\s*\d+\b|\bpct\s+exec\b|disable[_-]ipv6|\bsysctl\b|\baccept_ra\b|\bautoconf\b|"
+                               r"\bin\s+(?:the\s+|each\s+|every\s+)?(?:guest|container|LXC)s?\b|\beth0\b|\bgai\.conf\b", re.I)
+
+
+def _rafilter_check() -> str:
+    return (f"nft list table {_RAFILTER_TABLE}; systemctl is-active {_RAFILTER_UNIT}; systemctl is-enabled {_RAFILTER_UNIT}; "
+            f"cat {_RAFILTER_FILE}; cat /etc/systemd/system/{_RAFILTER_UNIT}; "
+            f"nft list table {_RAFILTER_TABLE} | grep -q nd-router-advert && systemctl is-active {_RAFILTER_UNIT} | grep -qx active "
+            f"&& echo STATE-OK || echo STATE-WRONG")
+
+
+def rewrite_verify_router_adverts_dropped(node: Optional[dict], commands: list[str], verify: list[str],
+                                          services: Optional[list] = None,
+                                          inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1573 — a verify/check step about the RA filter (its table, rule, counter or unit, by the engine's
+    name or the planner's "block-ra") reads the filter as installed: run == check == `_rafilter_check()`,
+    expecting STATE-OK. The planner's own read named ITS table (`nft list table bridge block_ra`), which
+    does not exist once §17.1571 installed `scaffold_rafilter`; the engine reads what it built."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_JF_OBSERVE_TITLE_RE.search(title) and _RA_NAMED_RE.search(text) and _RA_PIECE_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    own = _own_step_text(node)
+    if _IN_GUEST_IPV6_RE.search(own):
+        return list(commands or []), list(verify or []), []          # a guest's IPv6 state: §17.1570's verify
+    if re.search(r"\bpve-firewall\b|nftables\.conf|\bguests?\s+(?:untouched|unchanged|were\s+not)", own, re.I) \
+            and not _RA_NAMED_RE.search(own):
+        return list(commands or []), list(verify or []), []          # a different thing is being checked
+    check = _rafilter_check()
+    note = [{"expect": {check: "STATE-OK"}, "why": (
+        f"drafted the check from the engine's own shape (§17.1573): it lists the installed table {_RAFILTER_TABLE} — the "
+        f"rule's counter grows with every advertisement dropped — the unit's active/enabled state, and both files, ending "
+        f"STATE-OK. The draft read a table by the plan's working name, which is not the one the engine installed.")}]
+    return [check], [check], note
 
 
 def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: list[str], verify: list[str],
@@ -9313,9 +9434,14 @@ def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: li
     check prints it with one verdict word. Runs on the HOST (no pct exec), as the runner itself does."""
     text = _node_text(node)
     title = str((node or {}).get("title") or "")
-    if not (_RA_DROP_RE.search(text) and _RA_WHERE_RE.search(text)):
-        return list(commands or []), list(verify or []), []
     if _JF_OBSERVE_TITLE_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    if _IN_GUEST_IPV6_RE.search(_own_step_text(node)):
+        return list(commands or []), list(verify or []), []          # in-guest IPv6 work is §17.1570's
+    # the whole ("drop the RAs at the bridge") or a piece of it ("write the block-ra unit", "enable block-ra.service")
+    whole = bool(_RA_DROP_RE.search(text) and _RA_WHERE_RE.search(text))
+    piece = bool(_RA_NAMED_RE.search(text) and _RA_PIECE_RE.search(text))
+    if not (whole or piece):
         return list(commands or []), list(verify or []), []
     run = (f"test -x /usr/sbin/nft || {{ echo 'FAILED: /usr/sbin/nft is not installed on this host'; exit 1; }}; "
            f"mkdir -p /etc/scaffold && printf '{_RAFILTER_NFT}' > {_RAFILTER_FILE} && "
@@ -9324,8 +9450,10 @@ def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: li
            f"nft list table {_RAFILTER_TABLE} && "
            f"echo 'RESULT: IPv6 router advertisements are dropped on the bridge (forward to guests, input to host); "
            f"persisted as {_RAFILTER_UNIT}; existing SLAAC addresses in guests age out by their own lifetimes'")
-    check = (f"nft list table {_RAFILTER_TABLE}; systemctl is-active {_RAFILTER_UNIT}; cat /etc/systemd/system/{_RAFILTER_UNIT}; "
-             f"nft list table {_RAFILTER_TABLE} | grep -q nd-router-advert && echo STATE-OK || echo STATE-WRONG")
+    # The CHECK runs on the read-only channel (`nft list` is a read form there — measured: the runner ran
+    # `nft list ruleset` for T1 of job 9e1c2c68): the table as loaded, with its counter; the oneshot's state
+    # (RemainAfterExit: `active` only when `nft -f` succeeded); both files read back; one verdict word.
+    check = _rafilter_check()
     note = [{"expect": {check: "STATE-OK"}, "why": (
         f"drafted from the engine's own shape (§17.1571): on the Proxmox host it writes {_RAFILTER_FILE} — an nftables "
         f"BRIDGE table that drops nd-router-advert frames forwarded to the guests and delivered to the host — and "
@@ -9334,6 +9462,72 @@ def rewrite_drop_router_adverts_on_the_bridge(node: Optional[dict], commands: li
         f"surface, so the bridge is the nearest point the engine controls. The check lists the table — its counter "
         f"grows with every advertisement dropped — and ends with STATE-OK. Reversible: disable the unit, delete the table.")}]
     return [run], [check], note
+
+
+def _guest_by_name_fragment(text: str, services: Optional[list], inventory: Optional[dict]) -> tuple[str, str, str]:
+    """§17.1572 — the guest whose measured-service or inventory NAME shares a word (4+ letters) with the step:
+    "the panel backend" → control-panel (111). Fallback after `_named_guest`; "" when nothing matches."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", text or "")}
+    for s in services or []:
+        nm = str(getattr(s, "name", "") or "").lower()
+        if nm and getattr(s, "guest", "") and any(t in words for t in re.split(r"[^a-z0-9]+", nm) if len(t) >= 4):
+            return nm, str(getattr(s, "guest")), str(getattr(s, "unit", "") or "")
+    for g, nm in ((inventory or {}).get("names") or {}).items():
+        nm_s = str(nm or "").lower()
+        if nm_s and any(t in words for t in re.split(r"[^a-z0-9]+", nm_s) if len(t) >= 4):
+            unit = next((str(getattr(s, "unit", "") or "") for s in services or []
+                         if str(getattr(s, "guest", "")) == str(g) and getattr(s, "unit", "")), "")
+            return nm_s, str(g), unit
+    return "", "", ""
+
+
+#: §17.1572 — "inventory / list / map the endpoints|routes|API of <service>" is a READ the engine owns:
+#: grep the service's route registrations and its config keys under its /opt/<name>* directories.
+_ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
+                                 r"\b(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
+_ROUTE_SERVICE_RE = re.compile(r"\b(control-?panel|panel|backend|express|node|flask|fastapi)\b", re.I)
+
+
+def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], verify: list[str],
+                                     services: Optional[list] = None,
+                                     inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1572 — an "inventory the panel's endpoints" step reads the measured service's own code,
+    deterministically: every route registration (`app|router.get|post|put|delete|use(`) under the
+    service's /opt/<name>* directories, the config directory's files and the key NAMES they hold
+    (never values), and the served page's fetch targets.
+
+    Live (job c2792d4b, T1): the model drafted 24 exploratory `find / -maxdepth 5 … | xargs grep` commands
+    with no check — refused, `suggested: myself`. The engine already knows the service, its guest and
+    its directories (service_truth / develop.read_workspace); a model cannot read remote files and need
+    not guess where they are. A read, settled by STATE-OK when at least one route was found."""
+    text = _node_text(node)
+    title = str((node or {}).get("title") or "")
+    if not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    own = _own_step_text(node)
+    name, gid, _unit = _named_guest(own, services, inventory)
+    if not gid:
+        name, gid, _unit = _guest_by_name_fragment(own, services, inventory)    # "the panel backend" → control-panel
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    stem = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-").split("-")[0] or "app"
+    routes = "(app|router)\\.(get|post|put|patch|delete|use)\\("
+    inc = "--include='*.js' --include='*.ts' --include='*.py'"
+    # plain reads over the service's /opt/<stem>* glob: no loops, no substitutions, so the read-only channel takes it
+    payload = (
+        f"echo '--- service dirs ---'; ls -d /opt/{stem}*; "
+        f"echo '--- routes ---'; grep -rnE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | head -n 150; "
+        f"echo '--- served page fetch targets ---'; grep -rhoE 'fetch\\([^)]{{0,120}}\\)' /opt/{stem}* --include='*.html' --include='*.js' 2>/dev/null | grep -v node_modules | sort | uniq -c | sort -rn | head -n 40; "
+        f"echo '--- config files and key names (values never printed) ---'; ls /opt/{stem}*/config 2>/dev/null; "
+        f"grep -rhoE '\"[A-Za-z_]*([Kk]ey|[Tt]oken|[Pp]assword|[Uu]rl|[Aa]ddress)\"' /opt/{stem}*/config 2>/dev/null | sort | uniq -c; "
+        f"echo '--- route files ---'; grep -rlE '{routes}' /opt/{stem}* {inc} 2>/dev/null | grep -v node_modules | grep -c . && echo STATE-OK || echo STATE-WRONG")
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    note = [{"expect": {run: "STATE-OK"}, "why": (
+        f"drafted the inventory from the engine's own shape (§17.1572): inside guest {gid} ({name}) it lists the "
+        f"service's /opt/{stem}* directories, every route registration in them, the served page's fetch targets, "
+        f"and the config files with the NAMES of the keys they hold (values are never printed) — a read, settled by "
+        f"STATE-OK when at least one route file was found. The draft was 24 `find / … | xargs grep` guesses with no check.")}]
+    return [run], [run], note
 
 
 def a_validating_endpoint_sent_an_empty_body(
