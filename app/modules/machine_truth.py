@@ -370,6 +370,29 @@ def known_guest(gid: str, inventory: Optional[dict], text: str = "") -> bool:
     return str(gid) in {str(h) for h in have} or any(m.group(1) == str(gid) for m in _CREATES_RE.finditer(text or ""))
 
 
+#: §17.1581 — a PLACE phrase: `LXC 111:` opening a title, or "on/in/inside/into/within/to container 111"
+_PLACE_RE = re.compile(
+    r"(?:^|\n)\s*(?:LXC|CT|VM|container|guest)\s*#?\s*(\d{3,5})\s*:"
+    r"|\b(?:on|in|inside|into|within|to)\s+(?:the\s+)?(?:LXC|CT|VM|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
+
+
+def place_guest(node: Optional[dict]) -> Optional[str]:
+    """§17.1581 — the ONE guest the step's own words place the work ON ("Edit the Radarr handler on
+    container 111 …"), or None when the words name no place or more than one.
+
+    A service the step NAMES is what it talks to, not where it works: live (c2792d4b T4 "Fix Radarr
+    endpoint backend — edit the Radarr handler on container 111 …"), the name match took `radarr` to
+    CT 103 and the draft stopped Radarr and rewrote its config.xml there, while the panel on 111 — the
+    place the step names — was never touched. Read from ALL the step's words: the planner wrote this
+    one into `prompt_template`, which `title + description` readers never saw."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    ids = list(dict.fromkeys((m.group(1) or m.group(2)) for m in _PLACE_RE.finditer(text)))
+    # one place, and no OTHER guest in the words: "Configure VM 100 … (already passed to VM 110)" and "move the
+    # media from container 101 to container 103" name two machines, and a place phrase on one of them decides nothing
+    every = set(_SUBJECT_RE.findall(text))
+    return ids[0] if len(ids) == 1 and every <= {ids[0]} else None
+
+
 def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Optional[str]:
     """The guest a step is about: by id ("VM 106", "LXC 120") or, §17.1316, by NAME
     against the inventory ("Install PalWorld server" → 106 palworld-server). Live,
@@ -388,6 +411,10 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
         return next(iter(acted_on))
     if len(acted_on) > 1:
         return None                     # it spans guests: no single subject to measure
+    # §17.1581 — a place the step's own words name ("on container 111") outranks a service it mentions
+    _place = place_guest(node)
+    if _place and known_guest(_place, inventory, text):
+        return _place
     # §17.1344 — an id no machine has is not a guest. Live, the step that hands the
     # shared media tree to the services says "in-container 999:996 is host
     # 100999:100996" (the services' uid and gid), and `container 999` read as a

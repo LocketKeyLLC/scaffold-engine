@@ -139,6 +139,16 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
         # and seven rounds proposed `/etc/caddy/Caddyfile` for the wrong container until each was refused.
         if pick is None:
             return None
+    if pick is None:
+        # §17.1581 — the step's own words place the work ON a guest ("… the Radarr handler on container 111"):
+        # the developable service there hosts it, and a service the step merely NAMES elsewhere does not.
+        # Live (c2792d4b T4): the title's name match hosted panel work on Radarr's CT 103.
+        from app.modules.machine_truth import place_guest as _place_guest
+        _pg = _place_guest(node)
+        if _pg:
+            pick = next((s for s in cands if str(s.guest) == _pg), None)
+            if pick is None:
+                return None
     # §17.1549 — a job that DECLARES a single deploy target (deploy-verb phrasing, §17.1540
     # `deploy_target_guest`) keeps EVERY build node on it. A panel-aggregator node names the
     # service it QUERIES, not the machine it deploys to: "Add Palworld status endpoint" is a

@@ -488,6 +488,13 @@ def guests_the_host_is_told_to_touch(node: dict, services: Optional[list] = None
     operator: "the engine already knows the information anyways."
     """
     out = {m.group(1) for m in _HOST_INTO_GUEST_RE.finditer(_text(node))}
+    # §17.1581 — a step whose words place the work ON one guest touches that guest; the services it names
+    # are what it talks to (live, T4: "edit the Radarr handler on container 111" is panel work, not Radarr's)
+    from app.modules.machine_truth import place_guest
+    _place = place_guest(node)
+    if _place:
+        out.add(_place)
+        return out
     if services:
         try:
             from app.modules.service_truth import names_in

@@ -214,7 +214,8 @@ def test_the_pause_develops_instead_of_drafting_and_the_chain_stands_aside():
     assert "preconditions=await _pre_for(rb)" in src and "develop.render_delivery(" in src
     for guard in ("if fix and not _developed:", "_rehearsal_only(frame) and not _developed:",
                   'if not frame.get("commands") and not _developed:', 'or _developed) else supervised_runs.verify_not_runnable',
-                  '_ro = "" if _developed else', "_missing = [] if _developed else"):
+                  '_ro = "" if (_developed or frame.get("expects")) else',           # §17.1577 — a capability's frame is final too
+                  '_missing = [] if (_developed or frame.get("expects")) else'):
         assert guard in src, guard
 
 

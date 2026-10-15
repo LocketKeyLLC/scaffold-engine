@@ -182,6 +182,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "type-checked this program before offering it",  # §17.1380
                    "has no check at all",                           # §17.1345
                    "reads every `$UPPER` reference as a secret",     # §17.1578
+                   "writes the secret's NAME where its VALUE belongs",   # §17.1581
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
@@ -290,6 +291,7 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
 _WHOSE_GAP: dict[str, str] = {
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
+    "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
     # ── the machine contradicts the block ────────────────────────────────────
     "is stopped (`": "machine",
     "fails before it starts": "machine",
@@ -5216,6 +5218,39 @@ def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> lis
     return out
 
 
+def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
+                                       verify: Optional[list[str]] = None) -> list[dict]:
+    """§17.1581 — a held secret's NAME typed where its VALUE belongs.
+
+    Live (c2792d4b T4): the draft's in-guest script ran `sed -i 's|<ApiKey>.*</ApiKey>|<ApiKey>RADARR_API_KEY
+    </ApiKey>|' /var/lib/radarr/config.xml` — the WORD `RADARR_API_KEY` as Radarr's new key, after stopping
+    Radarr. §17.1391 catches a VALUE typed in; this catches the name: `>NAME<`, `=NAME`, `"NAME"`, `: NAME`.
+    `$NAME`/`${NAME}` (the runner resolves it) and `<NAME>` (the engine's placeholder) are the right forms and
+    pass; so does `NAME=…` (an assignment to it)."""
+    held = sorted({str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])})
+    if not held:
+        return []
+    pat = re.compile(r"(?<![$<{\w])(?:(?<=[>=:'\"`])|(?<=[>=:'\"`]\s))(" + "|".join(re.escape(h) for h in held) + r")(?=[<'\"`\s;&|)]|$)(?!\s*=[^=])")
+    texts = ([str(c) for c in commands or []] + [str(v) for v in verify or []]
+             + [str((f or {}).get("content") or "") for f in files or []])
+    out: list[dict] = []
+    seen: set[str] = set()
+    for t in texts:
+        for m in pat.finditer(t):
+            name = m.group(1)
+            if name in seen:
+                continue
+            seen.add(name)
+            line = next((ln for ln in t.splitlines() if name in ln), t)
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: `{name}` is the word itself, not the value "
+                f"the engine holds under that name. Written into a config or a header it replaces a working credential "
+                f"with the string `{name}`. Reference it so the runner resolves it — `$"
+                f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
+                f"machine with `$( … )`; never the bare word.")})
+    return out
+
+
 def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], policy: dict) -> list[dict]:
     """§17.1348 — a command that reads a variable nothing provides.
 
@@ -5936,6 +5971,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     refused = refused + locals_the_runner_reads_as_secrets(list(cmds) + list(verify), policy)   # §17.1578
+    refused = refused + a_secret_name_written_as_its_value(cmds, files, policy, verify)         # §17.1581
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
