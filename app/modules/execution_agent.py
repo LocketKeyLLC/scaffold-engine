@@ -2909,6 +2909,11 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     # what `read_services` goes on.
                     _services += await _st.read_services(spec, _g, mentioned=_named,
                                                         reading=_reading, vm=_g in _vms and _g not in _cts)
+            # §17.1591 — the engine's own deploys (Docker inside CT 107/108) are services the step may name
+            _own = supervised_runs.engine_deployed_services(_named, _services)
+            if _own:
+                _services += _own
+                logger.info("services_from_engine_deploys job=%s names=%s", job_id, [s.name for s in _own])
         except Exception as exc:
             logger.warning("service_truth_failed job=%s err=%r", job_id, exc)
         # §17.1334 — a split's own numbering, and any sibling that states how many
@@ -3072,6 +3077,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # §17.1582 — a check the step's text never named, read off the service's own routes
             _port = develop.service_port(host, _services)
             _derived = develop.derived_checks(run_node, host, workspace, _port)
+            if not _derived:        # §17.1591 — say why, so an empty derivation is not a silent stuck
+                logger.warning("develop_no_derived_check job=%s node=%s port=%r files=%d html=%d services=%s", job_id, _nk_dev, _port,
+                               len(workspace), sum(1 for p in workspace if p.endswith((".html", ".htm"))),
+                               [(str(getattr(s, "name", "")), str(getattr(s, "guest", "")), tuple(getattr(s, "ports", ()) or ())) for s in _services or []][:6])
             if _derived:
                 logger.warning("develop_checks_derived job=%s node=%s checks=%s", job_id, _nk_dev, [c[-60:] for c in _derived])
             _no_check = develop.own_check_refusal(run_node, host, _derived)      # §17.1418 — no check, no run

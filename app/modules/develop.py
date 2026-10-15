@@ -389,7 +389,18 @@ def stale_service_addresses(files: dict[str, str], services: Optional[list]) -> 
                 out.append({"command": f"{path}: {others[0]}", "why": (
                     f"this file is {named.name}'s and carries `{others[0]}`, but {named.name} is at {named.address} "
                     f"(measured on guest {getattr(named, 'guest', '?')}). Use the measured address.")})
+            # §17.1591 — and its port: byparr.json said 8192 while Byparr listens on 8191
+            nports = [str(p) for p in (getattr(named, "ports", ()) or ())]
+            pm = _PORT_KEY_RE.search(c)
+            if len(nports) == 1 and pm and pm.group(1) != nports[0] and not any(o["command"].startswith(path + ":") for o in out):
+                out.append({"command": f"{path}: port {pm.group(1)}", "why": (
+                    f"this file is {named.name}'s and says port {pm.group(1)}, but {named.name} listens on {nports[0]} "
+                    f"(measured). Use the measured port.")})
     return out
+
+
+#: §17.1591 — a JSON/YAML-style `"port": 8192` in a service's own config
+_PORT_KEY_RE = re.compile(r"[\"']?port[\"']?\s*[:=]\s*[\"']?(\d{2,5})")
 
 
 def refresh_address_copies(files: dict[str, str], workspace: dict[str, str], services: Optional[list],
@@ -408,10 +419,14 @@ def refresh_address_copies(files: dict[str, str], workspace: dict[str, str], ser
             continue
         c = str(content or "")
         stale = sorted({ip for ip in _IPV4_RE.findall(c) if ip != addr and not ip.startswith("127.")})
-        if not stale:
-            continue
         for ip in stale:
             c = c.replace(ip, addr)
+        nports = [str(p) for p in (getattr(s, "ports", ()) or ())]
+        pm = _PORT_KEY_RE.search(c)
+        if len(nports) == 1 and pm and pm.group(1) != nports[0]:                      # §17.1591 — the port too
+            c = c[:pm.start(1)] + nports[0] + c[pm.end(1):]
+        if c == str(content or ""):
+            continue
         out[path] = c
         added.append(path)
     return out, added

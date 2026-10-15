@@ -8544,6 +8544,24 @@ _FLARESOLVERR_RE = re.compile(r"\b(?:deploy|install|create|set\s*up|provision|st
 #: the official image, detached install across wait phases, idempotent create + recover.
 _BYPARR_VMID = "108"
 _BYPARR_IP = "192.168.1.27"
+
+
+def engine_deployed_services(names: list[str], measured: Optional[list] = None) -> list:
+    """§17.1591 — the services the ENGINE'S OWN DEPLOYS put on this host, as measured services, for a step that names
+    them and whose unit-based measurement cannot see them (they run as Docker containers inside guests the read
+    channel cannot exec into). Live (c2792d4b T7): FlareSolverr and Byparr were named, nothing was measured, the
+    facts carried no address, and the model wrote `192.168.1.107` and kept `192.168.1.25:8192` — the engine had put
+    them on CT 107 (192.168.1.26:8191, §17.1516) and CT 108 (192.168.1.27:8191, §17.1535) itself."""
+    from app.modules.service_truth import ServiceTruth as Service
+    have = {str(getattr(s, "name", "") or "").lower() for s in measured or []}
+    known = {"flaresolverr": (_FS_VMID, _FS_IP), "byparr": (_BYPARR_VMID, _BYPARR_IP)}
+    out = []
+    for n in names or []:
+        key = str(n or "").lower()
+        if key in known and key not in have:
+            gid, ip = known[key]
+            out.append(Service(guest=gid, unit="", name=key, state="running", address=ip, ports=("8191",)))   # both on :8191 (docker run -p 8191:8191)
+    return out
 _BYPARR_CREATE = (
     "sh -c '"
     f"if pct status {_BYPARR_VMID} >/dev/null 2>&1; then echo \"CT {_BYPARR_VMID} already exists: $(pct status {_BYPARR_VMID})\"; "
