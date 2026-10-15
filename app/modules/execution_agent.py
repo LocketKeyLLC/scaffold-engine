@@ -3361,7 +3361,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # `frame["runbook"]` is DISPLAY text (cut at 12 000 chars with a note); the
             # rehearsed drafts are kept whole -- find the one this frame was rendered from
             for _rb0 in _rh_reports:
-                if supervised_runs._runbook_for_display(_rb0, fr.get("commands") or []) == fr.get("runbook"):
+                if str(fr.get("runbook") or "").endswith(supervised_runs._runbook_for_display(_rb0, fr.get("commands") or [])):   # §17.1577 — or follows the engine's block
                     return _rb0
             return str(fr.get("runbook") or "")
 
@@ -3459,7 +3459,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # redrafting for the checks swapped a correct budget refusal for a
             # draft of invalid Python: two unrunnable frames, the second one less
             # informative. The refusal path above owns that case.
-            _nv = "" if (frame.get("refused") or _developed) else supervised_runs.verify_not_runnable(runbook)
+            _nv = "" if (frame.get("refused") or _developed or frame.get("expects")) else supervised_runs.verify_not_runnable(runbook)   # §17.1577
             if _nv:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))
@@ -3484,7 +3484,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # for a step that must change something would be approved, run cleanly
         # and mark the step done having done nothing.
         try:
-            _ro = "" if _developed else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            # §17.1577 — a frame a capability drafted (`expects`, §17.1570g) is the engine's own shape: never redrafted by the model
+            _ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
             if _ro:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
@@ -3511,7 +3512,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = [] if _developed else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])
+            _missing = [] if (_developed or frame.get("expects")) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])

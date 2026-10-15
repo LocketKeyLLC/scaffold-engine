@@ -1482,6 +1482,8 @@ def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
     on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
     if not on:
         return ""                                  # a reading step may legitimately only read
+    if not step_says_it_changes(node):
+        return ""                                  # §17.1577 — hands-on is not "changes": a probe only reads
     for c in cmds:
         for seg in split_segments(c):
             if seg.strip() and not read_only(seg)[0]:
@@ -1502,6 +1504,34 @@ def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
         "one line instead of drafting a block that looks busy and changes nothing.",
     ]
     return "\n".join(lines)
+
+
+#: §17.1577 — the step's own words say it changes nothing
+_NO_CHANGE_RE = re.compile(
+    r"\b(?:do not|don'?t|never|without)\s+(?:modify(?:ing)?|chang(?:e|ing)|alter(?:ing)?|touch(?:ing)?|writ(?:e|ing))\b"
+    r"|\bread[- ]only\b", re.I)
+
+
+def step_says_it_changes(node: dict) -> bool:
+    """§17.1577 — does the step's TEXT say it changes a machine?
+
+    `step_is_hands_on` answers a different question — does this need a machine — and says yes to every
+    Shell/MCP node for its TOOL alone (`tool:shell`). §17.1254 read that yes as "must change something".
+    Live (c2792d4b T2 "Probe each endpoint authenticated … record status code … Do not modify anything",
+    tool Shell): the engine's own read-only probe (§17.1574c) was sent back as "EVERY COMMAND ONLY LOOKS
+    AT THINGS", the model was asked for a write, and the operator was shown a cookie draft in place of
+    the block that would run. Here the tool is put out of the way and the classifier's own TEXT analysis
+    answers (a change verb opening a title that names a service, a command that writes — not a template
+    the engine owns, which fits reads too), or a change verb opening the title; an observation verb opening it, or "do not modify"
+    / "read-only" in its words, says no."""
+    from app.modules.step_classify import step_is_hands_on, _LEADING_CHANGE_RE, _LEADING_OBSERVE_RE
+    n = dict(node) if hasattr(node, "keys") else {}
+    title = str(n.get("title") or "")
+    text = " ".join(str(n.get(k) or "") for k in ("title", "description", "prompt_template"))
+    if _LEADING_OBSERVE_RE.match(title) or _NO_CHANGE_RE.search(text):
+        return False
+    _on, why = step_is_hands_on({**n, "tool": "LLM"})
+    return str(why or "").startswith(("verb:", "writes:")) or bool(_LEADING_CHANGE_RE.match(title))
 
 
 #: §17.1255 — an inline interpreter script whose quoting cannot work.
@@ -5553,6 +5583,20 @@ def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
               f"the two seem to disagree.")
 
 
+def _rewritten_for_display(runbook: str, cmds: list[str], verify: list[str], files: list[dict], repairs: list) -> str:
+    """§17.1577 — a capability replaced the model's draft: the operator approves what they READ, so the
+    frame's prose opens with the block that will run (§17.1569's record head: commands, checks, files,
+    the engine's own drafting notes) and carries the model's draft after it, marked as replaced.
+
+    Live (c2792d4b T2): the frame's `commands` was the engine's probe with the held login, its `runbook`
+    the model's `-b "connect.sid=<PANEL_COOKIE>"` prose asking for a cookie nobody holds — two stories, and
+    the one on top was the one that would not run. The draft is kept whole underneath, so the rehearsal
+    path can still find the text a frame was rendered from (`_full_runbook` matches the tail)."""
+    head = _frame_runbook({"files": [{"path": (f or {}).get("path")} for f in files or []], "engine_fixed": list(repairs or [])},
+                          cmds, verify)
+    return head + "\n\n---\n\n## The model's draft, replaced by the block above\n\n" + _runbook_for_display(runbook, cmds)
+
+
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None, upstream: str = "",
               units: Optional[list[str]] = None, inventory: Optional[dict] = None,
@@ -6069,7 +6113,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         # like one built on a complete one -- to the drafter, to the gates, to the
         # operator and to the post-run judge.
         "not_measured": (reading.gaps() if reading is not None else []),
-        "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
+        # §17.1577 — when a capability REPLACED the draft, the operator reads the block that will run first
+        "runbook": (_rewritten_for_display(runbook, cmds, verify, files, _repairs) if _comp_notes
+                    else _runbook_for_display(runbook, cmds)),
+        "allow": list(policy.get("allow") or []),
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
         "expects": _expects,                      # §17.1570g — what a rewrite's check shows when the goal holds
