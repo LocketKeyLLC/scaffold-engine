@@ -21,6 +21,7 @@ by name through the environment.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -332,6 +333,63 @@ esac
 )
 
 
+#: §17.1618 — "deploy the scaffold engine (its services / stack) in VM N": the engine deploying ITSELF
+_DEPLOY_ENGINE_RE = re.compile(r"\bdeploy(?:s|ing)?\b[^.\n]{0,40}\b(?:scaffold[- ]engine|the engine|engine(?:'s)?\s+(?:services|stack))\b", re.I)
+#: a settings line in the step's own text: KEY=VALUE (the engine's .env keys and the deploy script's own)
+_SETTING_LINE_RE = re.compile(r"^\s*`?([A-Z][A-Z0-9_]{1,60})=([^\s`]+)`?\s*$", re.M)
+_SECRETISH_RE = re.compile(r"KEY|PASSWORD|SECRET|TOKEN|PASS\b")
+SCAFFOLD_REPO_URL = os.environ.get("SCAFFOLD_REPO_URL", "https://github.com/LocketKeyLLC/scaffold-engine.git")
+
+
+def deploy_settings(node: dict) -> list[str]:
+    """§17.1618 — the KEY=VALUE lines the step's own text gives for this guest's engine (models, LAN, Ollama dir).
+    A name that looks like a secret is never carried: the guest generates its own secrets (bootstrap.sh)."""
+    text = " \n".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    out: list[str] = []
+    for m in _SETTING_LINE_RE.finditer(text):
+        k, v = m.group(1), m.group(2)
+        if _SECRETISH_RE.search(k) or any(line.startswith(k + "=") for line in out):
+            continue
+        out.append(f"{k}={v}")
+    return out
+
+
+def deploy_engine_commands(node: dict) -> str:
+    """§17.1618 — the in-guest commands that put THIS engine on a guest: clone/update the repo at
+    SCAFFOLD_DEPLOY_REF, write the step's settings, run scripts/deploy_on_guest.sh (bootstrap, network, LAN gate,
+    local models, build + start, /health)."""
+    ref = os.environ.get("SCAFFOLD_DEPLOY_REF", "main") or "main"
+    settings = "\n".join(deploy_settings(node))
+    return "\n".join([
+        "command -v git >/dev/null 2>&1 || apt-get install -y git",
+        f"[ -d /opt/scaffold-engine/.git ] || git clone --quiet {SCAFFOLD_REPO_URL} /opt/scaffold-engine",
+        "git -C /opt/scaffold-engine fetch --quiet origin",
+        f"git -C /opt/scaffold-engine checkout --quiet --detach origin/{ref} 2>/dev/null || "
+        f"git -C /opt/scaffold-engine checkout --quiet --detach {ref}",
+        "git -C /opt/scaffold-engine log -1 --format='deploying %h %s'",
+        "cat > /root/scaffold-deploy.env <<'SETTINGS'",
+        settings,
+        "SETTINGS",
+        "bash /opt/scaffold-engine/scripts/deploy_on_guest.sh /root/scaffold-deploy.env",
+    ])
+
+
+DEPLOY_SCAFFOLD_ENGINE = Template(
+    name="deploy_scaffold_engine",
+    title="Deploy the scaffold engine itself inside VM {GID}",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_DEPLOY_ENGINE_RE.search(_text(node)))
+                                and not host_side_only(node),
+    params=[p for p in REACH_VM_SSH_AND_RUN.params if p.name != "REMOTE_COMMANDS"]
+           + [Param("REMOTE_COMMANDS", "default", "the engine's own deploy (§17.1618)", "")],
+    files=dict(REACH_VM_SSH_AND_RUN.files),
+    # a first build (the engine image, OWUI, Milvus pulls) outlasts the usual seven waits: thirty, ~75 min
+    run=[REACH_VM_SSH_AND_RUN.run[0]] + [REACH_VM_SSH_AND_RUN.run[1]] * 30 + [REACH_VM_SSH_AND_RUN.run[-1]],
+    verify=["qm status {GID}"],
+    risk="Clones this engine's repository into VM {GID} (/opt/scaffold-engine), generates its secrets there, builds and "
+         "starts its stack; a second run keeps the secrets and re-applies the settings.",
+)
+
+
 #: §17.1303 — a VM whose guest agent answers is reached through the agent: no ssh, no
 #: account, no key, no address. Live, ADD84 (agent up since ADD82) drew an ssh block to
 #: `<PALWORLD_USER>@192.168.1.127` -- another guest's old address, with a placeholder no
@@ -510,7 +568,7 @@ tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, DEPLOY_SCAFFOLD_ENGINE, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]   # §17.1618
 
 
 def _text(node: dict) -> str:
@@ -731,11 +789,11 @@ def select_template(node: dict, truth, services: Optional[list] = None) -> Optio
     login = logs_in_with_a_stored_secret(node)       # §17.1495 — the login runs from the host, on stdin
     for t in TEMPLATES:
         try:
-            if host_admin and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+            if host_admin and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER, DEPLOY_SCAFFOLD_ENGINE):
                 continue
             if t.applies(node, truth):
                 # only the general in-guest templates: an OS install or a console read carries its own secrets
-                if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+                if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER, DEPLOY_SCAFFOLD_ENGINE):
                     return None
                 return t
         except Exception:
@@ -756,7 +814,9 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
         if p.source == "subject":
             vals[p.name] = gid
         elif p.source == "default":
-            vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES" else p.default)   # §17.1489
+            vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES"
+                            else deploy_engine_commands(node) if (template is DEPLOY_SCAFFOLD_ENGINE and p.name == "REMOTE_COMMANDS")
+                            else p.default)   # §17.1489, §17.1618
         elif p.source == "node_key":
             vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
         elif p.source == "derived":

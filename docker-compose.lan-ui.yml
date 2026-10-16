@@ -1,0 +1,9 @@
+# §17.1618 — publish Open WebUI (the chat UI) on the same LAN address as the engine (docker-compose.lan.yml).
+#
+# OFF unless COMPOSE_FILE names it (scripts/deploy_on_guest.sh does when the settings say SCAFFOLD_LAN_UI=1). The
+# LAN gate (scripts/scaffold_lan_gate.sh) admits only SCAFFOLD_LAN_ALLOW on this port too when SCAFFOLD_LAN_UI=1.
+# Open WebUI makes the FIRST account created its admin: create yours first.
+services:
+  open-webui:
+    ports:
+      - "${SCAFFOLD_LAN_ADDRESS:?set SCAFFOLD_LAN_ADDRESS in .env}:3000:8080"
