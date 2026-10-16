@@ -145,6 +145,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "prints a new secret once", "a file named as a secret",   # §17.1603
                    "runs only inside the container",                          # §17.1614
                    "does not parse on its own",                               # §17.1616
+                   "sed rejects this program",                                # §17.1617
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -328,6 +329,7 @@ _WHOSE_GAP: dict[str, str] = {
     "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
     "runs only inside the container": "drafter",                  # §17.1614 — docker exec it, as the job does
     "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
+    "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -4474,6 +4476,58 @@ def a_command_that_does_not_parse(commands: list[str]) -> list[dict]:
     return out
 
 
+def a_sed_program_that_does_not_compile(commands: list[str]) -> list[dict]:
+    """§17.1617 — a `sed` program that sed itself rejects. Each one is compiled against empty input (`sed -n -e PROG
+    </dev/null`: no file, nothing edited) and refused when sed says it is invalid.
+
+    Live (job 0fb4ea7f FW1, 2026-10-16): `sed -i '/^\\[group ai\\]$/,/^$/ { /^IN DROP/ i IN ACCEPT …' file` -- an `i` text
+    runs to the end of the line, so the block's `}` can never come: "sed: -e expression #1, char 0: unmatched `{'".
+    Run, it would have failed and opened nothing."""
+    import shlex
+    import subprocess
+    out: list[dict] = []
+    for c in commands or []:
+        c = str(c or "")
+        if "sed" not in c:
+            continue
+        probe = re.sub(r"<[A-Z][A-Z0-9_]{1,60}>", "x", c)
+        for seg in re.split(r"\|\||&&|;|\|", probe):
+            try:
+                words = shlex.split(seg)
+            except ValueError:
+                continue
+            if not words or words[0] != "sed":
+                continue
+            progs, args, i = [], words[1:], 0
+            while i < len(args):
+                a = args[i]
+                if a in ("-e", "--expression") and i + 1 < len(args):
+                    progs.append(args[i + 1]); i += 2; continue
+                if a.startswith("--expression="):
+                    progs.append(a.split("=", 1)[1]); i += 1; continue
+                if a.startswith("-") and not progs and a not in ("-f",):
+                    i += 1; continue                       # -i, -E, -n, -r, -i.bak …
+                if not progs:
+                    progs.append(a)                        # the first plain word is the program
+                i += 1
+            if not progs:
+                continue
+            flags = ["-E"] if any(a in ("-E", "-r", "--regexp-extended") for a in args) else []
+            try:
+                r = subprocess.run(["sed", "-n", *flags, *sum((["-e", p] for p in progs), [])],
+                                   input="", text=True, capture_output=True, timeout=5)
+            except Exception:
+                continue
+            if r.returncode != 0 and "sed:" in r.stderr:
+                out.append({"command": c[:200], "why": (
+                    f"sed rejects this program (`{r.stderr.strip().splitlines()[-1][:160]}`), so the edit would fail and "
+                    "change nothing. Note `i`/`a`/`c` text runs to the end of the line -- no `}` can follow it on one "
+                    "line; to insert a line before a match on one line, substitute: "
+                    "`sed -i '/start/,/^MATCH$/ s|^MATCH$|NEW LINE\\nMATCH|' file`.")})
+                break
+    return out
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -6162,6 +6216,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
+    refused = refused + a_sed_program_that_does_not_compile(cmds)         # §17.1617
     from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
     refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)

@@ -37,3 +37,23 @@ def test_the_host_firewall_is_host_work():
 
 def test_a_placeholder_is_not_a_redirect():
     assert a_command_that_does_not_parse(["ping -c 1 -W 5 <AI_VM_IP>"]) == []
+
+
+# §17.1617 — a sed program sed rejects
+from app.modules.supervised_runs import a_sed_program_that_does_not_compile  # noqa: E402
+
+LIVE_SED = ("grep -q 'IN ACCEPT -p tcp -dport 3000 -source 192.168.1.0/24' /etc/pve/firewall/cluster.fw || sed -i "
+            "'/^\\[group ai\\]$/,/^$/ { /^IN DROP/ i IN ACCEPT -p tcp -dport 3000 -source 192.168.1.0/24' /etc/pve/firewall/cluster.fw")
+GOOD_SED = ("grep -q 'dport 3000' /etc/pve/firewall/cluster.fw || sed -i '/^\\[group ai\\]$/,/^IN DROP$/ "
+            "s|^IN DROP$|IN ACCEPT -p tcp -dport 3000 -source 192.168.1.0/24\\nIN DROP|' /etc/pve/firewall/cluster.fw")
+
+
+def test_the_live_sed_is_refused_and_the_working_form_passes():
+    out = a_sed_program_that_does_not_compile([LIVE_SED])
+    assert len(out) == 1 and "unmatched" in out[0]["why"]
+    assert a_sed_program_that_does_not_compile([GOOD_SED]) == []
+
+
+def test_other_sed_shapes_pass():
+    assert a_sed_program_that_does_not_compile(["sed -n '1,5p' /etc/hosts", "sed -E -i 's/(a+)/b/' f",
+                                                "echo x | sed -e 's/x/y/' -e 's/y/z/'", "ls /tmp"]) == []
