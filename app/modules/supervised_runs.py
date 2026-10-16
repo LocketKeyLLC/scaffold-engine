@@ -143,6 +143,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "takes loopback down with it",                   # §17.1570d
                    "prints a new secret once", "a file named as a secret",   # §17.1603
+                   "runs only inside the container",                          # §17.1614
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -324,6 +325,7 @@ _WHOSE_GAP: dict[str, str] = {
     "takes loopback down with it": "drafter",                     # §17.1570d — name the interface, not `all`
     "prints a new secret once": "drafter",                        # §17.1603 — send the minted secret only to a file
     "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
+    "runs only inside the container": "drafter",                  # §17.1614 — docker exec it, as the job does
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -6131,6 +6133,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
+    from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
+    refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
@@ -10299,6 +10303,9 @@ async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bo
     return ok
 
 
+_REMOTE_HEREDOC_RE = re.compile(r"<<'REMOTE'\n(.*?)\nREMOTE\n", re.S)
+
+
 def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -> str:
     """§17.1569 — the record's head is WHAT WAS APPROVED AND RAN: the frame's commands, its checks, the
     files it wrote and the engine's own drafting notes — not the pre-rewrite draft.
@@ -10314,6 +10321,18 @@ def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -
     files = [str((f or {}).get("path") or "") for f in (w.get("files") or []) if (f or {}).get("path")]
     if files:
         lines += ["", "## Files written", *[f"- `{p}`" for p in files]]
+    # §17.1614b — the commands that ran INSIDE the guest: the engine's guest templates carry them in a written
+    # script's `REMOTE` heredoc, and the record kept only the wrapper (`bash /tmp/in_vm_110.sh start`). Live (job
+    # 0fb4ea7f), T9's record never said Ollama went into Docker, so every later reader -- the drafter of T11, the
+    # operator -- could not tell how to run it.
+    inside = []
+    for f in (w.get("files") or []):
+        m = _REMOTE_HEREDOC_RE.search(str((f or {}).get("content") or ""))
+        if m:
+            inside += [ln for ln in m.group(1).splitlines()
+                       if ln.strip() and not ln.startswith(("set ", "export DEBIAN_FRONTEND"))]
+    if inside:
+        lines += ["", "## Ran inside the guest", "```bash", *inside, "```"]
     if verify_cmds:
         lines += ["", "## Verify", "```bash", *[str(c) for c in verify_cmds], "```"]
     # the frame stores its notes as plain strings (live) or as {"why": …} dicts (the rewrites' own shape)
