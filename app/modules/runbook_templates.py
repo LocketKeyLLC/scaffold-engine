@@ -41,7 +41,7 @@ _HOST_SIDE_RE = re.compile(
     # pushed it off the agent template; host-side is resizing the DISK (`qm resize`, "resize VM 106's disk").
     r"\b(?:(?:qm|pct) resize|resize (?:the )?(?:vm \d+'?s? )?(?:disk|volume)|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
-    r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"
+    r"(?:re)?(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"   # §17.1620 — restart too
     # §17.1609c — a guest's RAM/CPU raised or lowered is the host's `qm set`: live (job 0fb4ea7f T4) "Expand ai-vm RAM:
     # Increase VM 110's RAM from 16 GB to …" matched nothing and was routed into the guest
     r"|(?:increase|raise|grow|expand|add|give|change|reduce|lower|bump)\s+(?:the\s+)?(?:(?:vm|ct)\s+\d+'?s?\s+|[\w-]+'?s?\s+)?(?:ram|memory|cpus?|cores|vcpus?)\b(?![\s_-]*limit)"

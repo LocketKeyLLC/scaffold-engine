@@ -38,3 +38,9 @@ def test_an_application_memory_limit_is_not(text):
 def test_the_whole_lab_phrase_still_means_the_lab_when_no_guest_is_named():
     assert rt.spans_guests({"title": "Check all services are reachable"})
     assert not rt.spans_guests({"title": "Deploy", "prompt_template": "Inside VM 110: compose up; all containers running"})
+
+
+def test_restarting_a_vm_is_host_work():
+    """§17.1620 — live (job 0fb4ea7f G1 "Restart VM 110 to reset its GPU"): routed into the guest, `qm shutdown` refused there."""
+    node = {"title": "Restart VM 110 to reset its GPU", "prompt_template": "qm shutdown 110, wait until stopped, qm start 110"}
+    assert rt.host_side_only(node)
