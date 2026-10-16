@@ -13,6 +13,8 @@
 # Secrets (API key, Postgres password, WebUI/pipelines keys) are generated HERE by bootstrap.sh and never printed.
 # Idempotent: a second run keeps the .env secrets and re-applies the settings.
 set -euo pipefail
+# §17.1618b — run from a systemd unit (the engine's detached guest steps), there is no HOME; doctor.sh reads ~/.bashrc
+export HOME=${HOME:-/root}
 cd "$(dirname "$0")/.."
 REPO=$PWD
 SETTINGS=${1:?usage: deploy_on_guest.sh SETTINGS_FILE}
@@ -33,6 +35,17 @@ PY
     fi
 }
 
+echo "== 0. the guest's CPU runs the engine's image"
+# §17.1618c — the image's NumPy needs x86-64-v2 (SSE4.2, POPCNT, SSSE3, CX16, LAHF). Proxmox's default CPU type
+# (kvm64) hides them; the orchestrator then dies on import in a restart loop ("NumPy was built with baseline
+# optimizations: (X86_V2) but your machine doesn't support"). Live: VM 110, 2026-10-16. Say so before building.
+missing=""
+for f in sse4_2 popcnt ssse3 cx16 lahf_lm; do grep -qw "$f" /proc/cpuinfo || missing="$missing $f"; done
+if [ -n "$missing" ]; then
+    echo "deploy: this guest's CPU lacks x86-64-v2 features:$missing -- set the VM's CPU type to 'host' (qm set <id> --cpu host) and restart it" >&2
+    exit 3
+fi
+
 echo "== 1. ai-network (172.18.0.0/16) and the guest's Ollama on it"
 OLLAMA_DIR=$(get OLLAMA_COMPOSE_DIR)
 if ! docker network inspect ai-network >/dev/null 2>&1; then
@@ -50,7 +63,9 @@ fi
 
 echo "== 2. bootstrap (fresh secrets, volumes, first build + start)"
 if [ ! -f .env ]; then
-    bash scripts/bootstrap.sh --yes
+    # bootstrap's exit code is its health verdict; this guest's settings (step 3) and the final start (step 6)
+    # come first -- the /health check at the end is this script's verdict (§17.1618b)
+    bash scripts/bootstrap.sh --yes || echo "deploy: bootstrap reported problems; applying this guest's settings and starting again"
 else
     echo ".env present: keeping its secrets"
 fi

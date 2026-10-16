@@ -437,7 +437,7 @@ else:
         # (b) ~/.bashrc — operator-shell surface. We grep verbatim;
         # `source ~/.bashrc` is the operator's responsibility, but the
         # written value must match so a fresh shell picks the right key.
-        BASHRC="${HOME}/.bashrc"
+        BASHRC="${HOME:-/root}/.bashrc"   # §17.1618b — a systemd unit has no HOME
         if [[ ! -f "$BASHRC" ]]; then
             warn "~/.bashrc not found — operator-shell surface unverifiable"
         else

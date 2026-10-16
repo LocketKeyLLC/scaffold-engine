@@ -94,3 +94,11 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     assert "--ctorigdstport 3000" in calls and "--ctorigdstport 8000" in calls
     assert (ollama / "docker-compose.override.yml").read_text().count("ai-network") == 1
     assert str(repo) in (units / "scaffold-lan-gate.service").read_text()
+
+
+def test_the_deploy_script_refuses_a_cpu_without_x86_64_v2():
+    """§17.1618c — live, VM 110 on Proxmox's default kvm64: the orchestrator restarted forever on NumPy's X86_V2 check."""
+    text = (ROOT / "scripts" / "deploy_on_guest.sh").read_text()
+    assert "for f in sse4_2 popcnt ssse3 cx16 lahf_lm" in text and "--cpu host" in text
+    pre = text.index("== 0."), text.index("== 1.")
+    assert pre[0] < pre[1]
