@@ -96,12 +96,17 @@ fi
 echo "== 5. local models into Ollama"
 OC=$(get OLLAMA_CONTAINER); OC=${OC:-ollama}
 if docker inspect "$OC" >/dev/null 2>&1; then
-    for m in $(sed -n 's/^MODEL_[A-Z_]*=//p' .env | sort -u) nomic-embed-text; do
-        case "$m" in *-cloud|*:cloud|''|cross-encoder/*) continue ;; esac
+    # §17.1618d — the ROLE values only: MODEL_*_PROVIDER / MODEL_ROLE_LEARNING_* are settings, not models (live: the
+    # first deploy pulled "false" -- "pull model manifest: file does not exist")
+    roles=$(grep -E '^MODEL_[A-Z_]+=' .env | grep -vE '^MODEL_[A-Z_]*(_PROVIDER|_ENABLED|_CANDIDATES|_URL|_TIMEOUT[A-Z_]*|ROLE_LEARNING[A-Z_]*)=' \
+            | sed 's/^[^=]*=//' | sort -u)
+    for m in $roles nomic-embed-text; do
+        case "$m" in *-cloud|*:cloud|''|cross-encoder/*|true|false) continue ;; esac
         if docker exec "$OC" ollama list | awk 'NR>1 {print $1}' | grep -qxF "$m"; then
             echo "present: $m"
         else
-            docker exec "$OC" ollama pull "$m"
+            echo "pulling: $m"
+            docker exec "$OC" ollama pull "$m" || { echo "deploy: could not pull $m" >&2; exit 1; }
         fi
     done
 fi

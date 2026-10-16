@@ -78,7 +78,8 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     _fake(bindir, "iptables", f'echo "iptables $*" >> {log}\n[ "$1" = -C ] && exit 1\nexit 0\n')
     settings = tmp_path / "settings.env"
     settings.write_text(f"OLLAMA_COMPOSE_DIR={ollama}\nSCAFFOLD_LAN_UI=1\nSCAFFOLD_LAN_ADDRESS=10.9.8.129\n"
-                        "SCAFFOLD_LAN_ALLOW=10.9.8.0/24\nMODEL_CODER=hf.co/x/coder:Q4\nCOMPOSE_PROFILES=owui\n")
+                        "SCAFFOLD_LAN_ALLOW=10.9.8.0/24\nMODEL_CODER=hf.co/x/coder:Q4\nCOMPOSE_PROFILES=owui\n"
+                        "MODEL_CODER_PROVIDER=ollama\nMODEL_ROLE_LEARNING_ENABLED=false\nMODEL_CLOUD_HEAVY=qwen3.5:397b-cloud\n")
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "SCAFFOLD_SYSTEMD_DIR": str(units)}
     for _ in range(2):
         r = subprocess.run(["bash", "scripts/deploy_on_guest.sh", str(settings)], cwd=repo, env=env,
@@ -91,6 +92,7 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     calls = log.read_text()
     assert calls.count("network create") == 1, "ai-network is created once"
     assert "ollama pull hf.co/x/coder:Q4" in calls and "ollama pull qwen3:4b" not in calls
+    assert "ollama pull false" not in calls and "ollama pull ollama" not in calls and "397b-cloud" not in calls
     assert "--ctorigdstport 3000" in calls and "--ctorigdstport 8000" in calls
     assert (ollama / "docker-compose.override.yml").read_text().count("ai-network") == 1
     assert str(repo) in (units / "scaffold-lan-gate.service").read_text()
