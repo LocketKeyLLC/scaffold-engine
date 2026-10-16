@@ -143,6 +143,9 @@ _NOT_ALLOWED = "not on the write-allow list"
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "takes loopback down with it",                   # §17.1570d
                    "prints a new secret once", "a file named as a secret",   # §17.1603
+                   "runs only inside the container",                          # §17.1614
+                   "does not parse on its own",                               # §17.1616
+                   "sed rejects this program",                                # §17.1617
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -324,6 +327,9 @@ _WHOSE_GAP: dict[str, str] = {
     "takes loopback down with it": "drafter",                     # §17.1570d — name the interface, not `all`
     "prints a new secret once": "drafter",                        # §17.1603 — send the minted secret only to a file
     "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
+    "runs only inside the container": "drafter",                  # §17.1614 — docker exec it, as the job does
+    "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
+    "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -1702,6 +1708,11 @@ _AUTH_VERBS = frozenset({"login", "logout", "signin", "signout", "token", "sessi
                          "authenticate", "auth"})
 
 
+#: §17.1619 — POSTs that query a model and change nothing (last two path segments)
+_QUERY_POSTS = frozenset({"chat/completions", "v1/completions", "v1/embeddings", "api/chat", "api/generate",
+                          "api/embed", "api/embeddings"})
+
+
 def api_ports_changed(texts: list[str]) -> dict:
     r"""``{port: line}`` for every HTTP call in these texts that changes state.
 
@@ -1727,6 +1738,13 @@ def api_ports_changed(texts: list[str]) -> dict:
                 # real change; no login shape is lost by this.
                 seg = [s for s in (m.group("path") or "").split("/") if s]
                 if seg and seg[-1].lower() in _AUTH_VERBS:
+                    continue
+                # §17.1619 — an inference/search QUERY changes nothing: a POST to `/v1/chat/completions`,
+                # `/v1/completions`, `/v1/embeddings`, Ollama's `/api/generate|chat|embed|embeddings` asks a model a
+                # question. Live (job 0fb4ea7f T17, the end-to-end test of the server engine) was refused for
+                # "changing" the API it only asked.
+                if "/".join(seg[-2:]).lower() in _QUERY_POSTS or (seg and seg[-1].lower() in ("generate", "embed", "embeddings")
+                                                                 and len(seg) >= 2 and seg[-2].lower() == "api"):
                     continue
                 out.setdefault(m.group("port"), ln.strip()[:200])
             for m in _URL_PORT_RE.finditer(ln):
@@ -4435,6 +4453,93 @@ def prints_a_secret(commands: list[str], verify: Optional[list[str]] = None,
     return out
 
 
+#: §17.1612 — `. FILE` / `source FILE`, and what the standard release files define
+_SOURCED_RE = re.compile(r"(?:^|[\s;&|(`])(?:\.|source)\s+([\"']?/[^\s;&|)`]+)")
+_SOURCED_ANY = "*sourced*"
+_OS_RELEASE = {"NAME", "VERSION", "ID", "ID_LIKE", "PRETTY_NAME", "VERSION_ID", "VERSION_CODENAME", "UBUNTU_CODENAME",
+               "HOME_URL", "SUPPORT_URL", "BUG_REPORT_URL", "PRIVACY_POLICY_URL", "LOGO", "BUILD_ID", "VARIANT", "VARIANT_ID"}
+_SOURCED_KNOWN = {"/etc/os-release": _OS_RELEASE, "/usr/lib/os-release": _OS_RELEASE,
+                  "/etc/lsb-release": {"DISTRIB_ID", "DISTRIB_RELEASE", "DISTRIB_CODENAME", "DISTRIB_DESCRIPTION"}}
+
+
+def a_command_that_does_not_parse(commands: list[str]) -> list[dict]:
+    """§17.1616 — every command of a block runs as its OWN runner call, so each must parse alone (`bash -n`).
+
+    Live (job 0fb4ea7f FW1, 2026-10-16): `… || sed -i '/^\\[group ai\\]/,/^$/ { /IN DROP/i IN ACCEPT …` + newline + `}' file`
+    -- a quoted sed program spanning two lines was split at the line break into two commands, neither of which parses
+    (unterminated quote); nothing refused it. A multi-line program belongs in a written file (or on one line)."""
+    import subprocess
+    out: list[dict] = []
+    for c in commands or []:
+        c = str(c or "")
+        if not c.strip():
+            continue
+        probe = re.sub(r"<[A-Z][A-Z0-9_]{1,60}>", "x", c)    # a <PLACEHOLDER> is filled before anything runs
+        try:
+            r = subprocess.run(["bash", "-n"], input=probe, text=True, capture_output=True, timeout=5)
+        except Exception:
+            continue                         # no bash to ask: judge nothing
+        if r.returncode != 0:
+            out.append({"command": c[:200], "why": (
+                f"this command does not parse on its own (`bash -n`: {r.stderr.strip().splitlines()[-1][:160] if r.stderr.strip() else 'syntax error'}). "
+                "Every line of the block is its own runner call, so a quoted program that spans lines is cut at the "
+                "line break and runs as broken halves. Keep each command on ONE line, or write the multi-line content to "
+                "a file in `## Write these files` and run that file.")})
+    return out
+
+
+def a_sed_program_that_does_not_compile(commands: list[str]) -> list[dict]:
+    """§17.1617 — a `sed` program that sed itself rejects. Each one is compiled against empty input (`sed -n -e PROG
+    </dev/null`: no file, nothing edited) and refused when sed says it is invalid.
+
+    Live (job 0fb4ea7f FW1, 2026-10-16): `sed -i '/^\\[group ai\\]$/,/^$/ { /^IN DROP/ i IN ACCEPT …' file` -- an `i` text
+    runs to the end of the line, so the block's `}` can never come: "sed: -e expression #1, char 0: unmatched `{'".
+    Run, it would have failed and opened nothing."""
+    import shlex
+    import subprocess
+    out: list[dict] = []
+    for c in commands or []:
+        c = str(c or "")
+        if "sed" not in c:
+            continue
+        probe = re.sub(r"<[A-Z][A-Z0-9_]{1,60}>", "x", c)
+        for seg in re.split(r"\|\||&&|;|\|", probe):
+            try:
+                words = shlex.split(seg)
+            except ValueError:
+                continue
+            if not words or words[0] != "sed":
+                continue
+            progs, args, i = [], words[1:], 0
+            while i < len(args):
+                a = args[i]
+                if a in ("-e", "--expression") and i + 1 < len(args):
+                    progs.append(args[i + 1]); i += 2; continue
+                if a.startswith("--expression="):
+                    progs.append(a.split("=", 1)[1]); i += 1; continue
+                if a.startswith("-") and not progs and a not in ("-f",):
+                    i += 1; continue                       # -i, -E, -n, -r, -i.bak …
+                if not progs:
+                    progs.append(a)                        # the first plain word is the program
+                i += 1
+            if not progs:
+                continue
+            flags = ["-E"] if any(a in ("-E", "-r", "--regexp-extended") for a in args) else []
+            try:
+                r = subprocess.run(["sed", "-n", *flags, *sum((["-e", p] for p in progs), [])],
+                                   input="", text=True, capture_output=True, timeout=5)
+            except Exception:
+                continue
+            if r.returncode != 0 and "sed:" in r.stderr:
+                out.append({"command": c[:200], "why": (
+                    f"sed rejects this program (`{r.stderr.strip().splitlines()[-1][:160]}`), so the edit would fail and "
+                    "change nothing. Note `i`/`a`/`c` text runs to the end of the line -- no `}` can follow it on one "
+                    "line; to insert a line before a match on one line, substitute: "
+                    "`sed -i '/start/,/^MATCH$/ s|^MATCH$|NEW LINE\\nMATCH|' file`.")})
+                break
+    return out
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -5352,6 +5457,13 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                    if not _SELF_ASSIGN_RE.match(b[m.start("name"):])}
         out_set |= {g for b in blobs for m in _VAR_BIND_RE.finditer(b)
                     for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        # §17.1612 — a SOURCED file assigns too: `$(. /etc/os-release && echo "$VERSION_CODENAME")` (Docker's own
+        # install line) was refused "nothing sets it" (live, job 0fb4ea7f T7). The two release files' names are known;
+        # any other sourced file may set anything, and then nothing in that command is judged.
+        for b in blobs:
+            for sm in _SOURCED_RE.finditer(b):
+                path = sm.group(1).strip("\"'")
+                out_set |= _SOURCED_KNOWN.get(path, {_SOURCED_ANY})
         return out_set
 
     for cmd in texts:
@@ -5383,6 +5495,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
         assigned = _assigned_in(host_bodies)
         for gid, payload in guest_bits:
             inside = _assigned_in([payload]) | set(_SHELL_VARS)
+            if _SOURCED_ANY in inside:
+                continue                    # §17.1612
             for m in _VAR_REF_RE.finditer(payload):
                 name = m.group("brace") or m.group("bare")
                 if name in inside or name.isdigit():
@@ -5404,6 +5518,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                       "inside the payload from something the guest can read.")})
                 break
         for body in host_bodies:
+            if _SOURCED_ANY in assigned:
+                break                       # §17.1612 — a sourced file may set any name: judge nothing here
             for m in _VAR_REF_RE.finditer(body):
                 name = m.group("brace") or m.group("bare")
                 if name in have or name in assigned or name.isdigit():
@@ -6111,6 +6227,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
+    refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
+    refused = refused + a_sed_program_that_does_not_compile(cmds)         # §17.1617
+    from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
+    refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
@@ -6449,7 +6569,7 @@ async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
 
 
 async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
-                      inputs: dict | None = None) -> dict:
+                      inputs: dict | None = None, note: str = "") -> dict:
     """Carry out the operator's choice on a ``kind="run"`` pause. Returns
     ``{"outcome": …}`` for ``decision_pause.resolve_decision`` to finish (it
     records the decision on the job and moves it back to executing)."""
@@ -6461,10 +6581,13 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'skipped', output_text = COALESCE(output_text, :out), completed_at = NOW(), "
                  "updated_at = NOW() WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
-            {"jid": job_id, "nk": node_key, "out": "Skipped by the operator at the supervised-run pause."})
+            {"jid": job_id, "nk": node_key, "out": "Skipped by the operator at the supervised-run pause."
+                                                   + (f"\n\nOperator's note: {note.strip()}" if (note or "").strip() else "")})
         return {"outcome": "skipped" if upd.rowcount else "node_gone", "node_status": "skipped"}
     if choice == "myself":
-        out = runbook or "(runbook)"
+        # §17.1614c — the operator's note IS the record of what they did: live (job 0fb4ea7f T9), the note "Ollama runs in
+        # Docker … `docker exec ollama ollama pull`" was dropped and the node kept only the unrun draft
+        out = ((f"## Done by the operator\n{note.strip()}\n\n" if (note or "").strip() else "") + (runbook or "(runbook)"))
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), "
                  "started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
@@ -10279,6 +10402,9 @@ async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bo
     return ok
 
 
+_REMOTE_HEREDOC_RE = re.compile(r"<<'REMOTE'\n(.*?)\nREMOTE\n", re.S)
+
+
 def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -> str:
     """§17.1569 — the record's head is WHAT WAS APPROVED AND RAN: the frame's commands, its checks, the
     files it wrote and the engine's own drafting notes — not the pre-rewrite draft.
@@ -10294,6 +10420,18 @@ def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -
     files = [str((f or {}).get("path") or "") for f in (w.get("files") or []) if (f or {}).get("path")]
     if files:
         lines += ["", "## Files written", *[f"- `{p}`" for p in files]]
+    # §17.1614b — the commands that ran INSIDE the guest: the engine's guest templates carry them in a written
+    # script's `REMOTE` heredoc, and the record kept only the wrapper (`bash /tmp/in_vm_110.sh start`). Live (job
+    # 0fb4ea7f), T9's record never said Ollama went into Docker, so every later reader -- the drafter of T11, the
+    # operator -- could not tell how to run it.
+    inside = []
+    for f in (w.get("files") or []):
+        m = _REMOTE_HEREDOC_RE.search(str((f or {}).get("content") or ""))
+        if m:
+            inside += [ln for ln in m.group(1).splitlines()
+                       if ln.strip() and not ln.startswith(("set ", "export DEBIAN_FRONTEND"))]
+    if inside:
+        lines += ["", "## Ran inside the guest", "```bash", *inside, "```"]
     if verify_cmds:
         lines += ["", "## Verify", "```bash", *[str(c) for c in verify_cmds], "```"]
     # the frame stores its notes as plain strings (live) or as {"why": …} dicts (the rewrites' own shape)

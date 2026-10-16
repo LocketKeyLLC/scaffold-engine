@@ -1056,9 +1056,17 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     # start in the script, then push + exec) was refused the same way -- the
     # rule read the listing and never the block. `guests_in` keeps command order.
     started: set[str] = set()
+    # §17.1610 — and the state the block itself leaves each guest in, in command order: a `qm shutdown 110` earlier
+    # in the block makes the `qm start 110` after it the right command. Live (job 0fb4ea7f T4 "Expand ai-vm RAM":
+    # shutdown → qm set --memory → start), the start was refused "VM 110 is ALREADY running".
+    block_state: dict[str, str] = {}
     for tool, verb, gid in guests:
+        prior = block_state.get(gid)
         if verb == "start":
             started.add(gid)
+            block_state[gid] = "running"
+        elif verb in ("stop", "shutdown"):
+            block_state[gid] = "stopped"
         cmd = next((c for c in commands if re.search(rf"\b{tool}\s+{verb}\s+{gid}\b", str(c))), f"{tool} {verb} {gid}")
         is_ct, is_vm = gid in cts, gid in vms
         if verb in _CREATES:
@@ -1089,8 +1097,8 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 continue
             out.append({"command": cmd, "why": f"there is no guest {gid} on this host — `pct list` and `qm list` do not have it."})
         elif verb in _NEEDS_RUNNING:
-            status = cts.get(gid) if is_ct else vms.get(gid)
-            if status and status != "running" and gid not in started:
+            status = prior or (cts.get(gid) if is_ct else vms.get(gid))
+            if status and status != "running" and (prior is not None or gid not in started):
                 fix = _step_that_starts(gid, plan)
                 kind = "container" if is_ct else "VM"
                 if verb == "reboot":
@@ -1101,7 +1109,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                     tail = f" Start it first (`{tool} start {gid}`)."
                 out.append({"command": cmd, "why": f"{kind} {gid} is {status}, so `{tool} {verb}` fails before it starts." + tail})
         elif verb in _ALREADY:
-            status = cts.get(gid) if is_ct else vms.get(gid)
+            status = prior or (cts.get(gid) if is_ct else vms.get(gid))
             if status and status == _ALREADY[verb] and not _guarded(cmd, tool, verb, gid):
                 kind = "container" if is_ct else "VM"
                 out.append({"command": cmd, "why": (

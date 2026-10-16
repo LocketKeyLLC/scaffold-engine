@@ -21,6 +21,7 @@ by name through the environment.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -40,7 +41,10 @@ _HOST_SIDE_RE = re.compile(
     # pushed it off the agent template; host-side is resizing the DISK (`qm resize`, "resize VM 106's disk").
     r"\b(?:(?:qm|pct) resize|resize (?:the )?(?:vm \d+'?s? )?(?:disk|volume)|grow (?:the )?(?:vm \d+'?s? )?disk|boot order|attach|detach|re-attach|passthrough|hostpci|"
     r"snapshot|backup|clone|destroy|delete (?:the )?(?:vm|container)|create (?:a |the )?(?:vm|container|lxc)|"
-    r"(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"
+    r"(?:re)?(?:start|stop|reboot|shutdown) (?:the )?(?:vm|container|ct|lxc)\b|set .*\b(?:cpu|cores|memory|ram)\b"   # §17.1620 — restart too
+    # §17.1609c — a guest's RAM/CPU raised or lowered is the host's `qm set`: live (job 0fb4ea7f T4) "Expand ai-vm RAM:
+    # Increase VM 110's RAM from 16 GB to …" matched nothing and was routed into the guest
+    r"|(?:increase|raise|grow|expand|add|give|change|reduce|lower|bump)\s+(?:the\s+)?(?:(?:vm|ct)\s+\d+'?s?\s+|[\w-]+'?s?\s+)?(?:ram|memory|cpus?|cores|vcpus?)\b(?![\s_-]*limit)"
     # §17.1335 — `qm`, `pct`, `pvesm`, `pvesh` and `pveum` do not exist inside a guest, so a step
     # whose own text names one of them with a subcommand is host-side work. Live, after the host
     # rebooted, "Make the machines that serve the operator's goals start on boot" names
@@ -235,45 +239,154 @@ REACH_VM_SSH_AND_RUN = Template(
                                 and not getattr(truth, "agent", False),
     params=[
         Param("GID", "subject"),
+        Param("STEP", "node_key"),
         Param("GUEST_USER", "operator", "the account inside the guest that has sudo (the operator logs in with it)"),
         Param("REMOTE_COMMANDS", "model", "the commands to run inside the guest, as root, one per line"),
         Param("NEEDS_KEY", "truth", default="yes"),
     ],
-    files={"/tmp/in_vm_{GID}.sh": r'''#!/usr/bin/env bash
-# Reach VM {GID} over ssh and run this step's commands inside it as root.
+    # §17.1613 — DETACHED, like the container and agent templates (§17.1317): the step's commands run inside the
+    # guest as a transient systemd unit, started by one runner call and waited on across several, each inside the
+    # runner's 180 s budget. Live (job 0fb4ea7f T9 "Install Ollama server", 2026-10-15): `docker compose up -d` pulling
+    # the image ran past 180 s in the single ssh call this template made, and the run was cut ("timed out after 180s").
+    files={"/tmp/in_vm_{GID}.sh": r"""#!/usr/bin/env bash
+# Reach VM {GID} over ssh and run this step's commands inside it as root, detached (start | wait | last).
 set -uo pipefail
 GID={GID}
 USER_NAME="${GUEST_USER}"
+UNIT="scaffold-{STEP}"
+IPFILE=/tmp/in_vm_{GID}.ip
 
-''' + WAIT_FOR_ADDRESS + r'''
+""" + WAIT_FOR_ADDRESS + r"""
 
+SSHO="-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new"
 qm status "$GID" | grep -q running || qm start "$GID"
-MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
-IP="$(wait_for_address "$MAC" || true)"
-if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
-echo "VM $GID is at $IP"
-# §17.1299 -- probe key auth FIRST: a cloud-init install already seeded this host's key (--sshkeys) and a cloud
-# image refuses password auth, so a blind ssh-copy-id would fail on a guest that is perfectly reachable.
-if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" true >/dev/null 2>&1; then
-    echo "key auth works for $USER_NAME@$IP"
-elif [ "{NEEDS_KEY}" = "yes" ]; then
-    command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
-    SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
-        || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password, or password auth is off in the guest)"; exit 1; }
-else
-    echo "FAILED: key auth to $USER_NAME@$IP was refused and no password path is allowed here"; exit 1
+IP="$(cat "$IPFILE" 2>/dev/null || true)"
+if [ -z "$IP" ] || ! ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
+    MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
+    IP="$(wait_for_address "$MAC" || true)"
+    if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
+    echo "VM $GID is at $IP"
+    # §17.1299 -- probe key auth FIRST: a cloud-init install already seeded this host's key (--sshkeys) and a cloud
+    # image refuses password auth, so a blind ssh-copy-id would fail on a guest that is perfectly reachable.
+    if ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
+        echo "key auth works for $USER_NAME@$IP"
+    elif [ "{NEEDS_KEY}" = "yes" ]; then
+        command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
+        SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
+            || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password, or password auth is off in the guest)"; exit 1; }
+    else
+        echo "FAILED: key auth to $USER_NAME@$IP was refused and no password path is allowed here"; exit 1
+    fi
+    printf '%s\n' "$IP" > "$IPFILE"
 fi
+# one root command inside the guest; sudo reads the password from the first line of stdin
+gsu() { ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "$1")" <<< "$MASS_PASSWORD" 2>/dev/null; }
 cat > /tmp/in_vm_{GID}_remote.sh <<'REMOTE'
-set -e
+{STRICT}
 export DEBIAN_FRONTEND=noninteractive
 {REMOTE_COMMANDS}
 REMOTE
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" "sudo -S -p '' bash -s" <<< "$MASS_PASSWORD
-$(cat /tmp/in_vm_{GID}_remote.sh)"
-'''},
-    run='MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh',
+case "${1:-start}" in
+  start)
+    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' tee /root/.scaffold_step.sh >/dev/null" <<< "$MASS_PASSWORD
+$(cat /tmp/in_vm_{GID}_remote.sh)" || { echo "FAILED: could not write the step's script into VM $GID"; exit 1; }
+    gsu "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null
+    gsu "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c 'bash /root/.scaffold_step.sh; echo \$? > /root/.scaffold_step.rc'" >/dev/null \
+      || { echo "FAILED: could not start $UNIT inside VM $GID (is systemd running in the guest?)"; exit 1; }
+    echo "started $UNIT inside VM $GID"
+    ;;&
+  start|wait|last)
+    deadline=$(( SECONDS + 150 ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      state="$(gsu "systemctl is-active $UNIT" | tr -d '[:space:]')"
+      case "$state" in
+        active|activating|reloading|deactivating) sleep 5 ;;
+        *) break ;;
+      esac
+    done
+    state="$(gsu "systemctl is-active $UNIT" | tr -d '[:space:]')"
+    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then
+      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; gsu "tail -n 20 /root/.scaffold_step.log"; exit 1; fi
+      echo "STILL RUNNING: $UNIT inside VM $GID (waited 150 s more; the next command keeps waiting)"; gsu "tail -n 3 /root/.scaffold_step.log"; exit 0
+    fi
+    # §17.1490 -- the step's OWN exit code, saved by the unit (`--collect` discards a failed unit's result)
+    code="$(gsu "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d '[:space:]')"
+    # §17.1327 -- the log belongs to the phase that SAW the unit finish
+    if [ -z "$(gsu "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then
+      gsu "echo done > /root/.scaffold_step.reported" >/dev/null
+      gsu "tail -n 60 /root/.scaffold_step.log 2>/dev/null"
+      gsu "tail -n 20 /root/.scaffold_step.err 2>/dev/null" >&2
+    else
+      echo "(the log was printed by the phase that saw $UNIT finish)"
+    fi
+    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi
+    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"
+    ;;
+  *) echo "unknown phase: $1"; exit 2;;
+esac
+"""},
+    run=['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh start']
+        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh wait'] * 7
+        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh last'],
     verify=["qm status {GID}"],
-    risk="Runs this step's commands as root inside VM {GID}; copies this host's key into the guest first.",
+    risk="Runs this step's commands as root inside VM {GID} (detached, waited on); copies this host's key into the guest first.",
+)
+
+
+#: §17.1618 — "deploy the scaffold engine (its services / stack) in VM N": the engine deploying ITSELF
+_DEPLOY_ENGINE_RE = re.compile(r"\b(?:re)?deploy(?:s|ing)?\b[^.\n]{0,40}\b(?:scaffold[- ]engine|the engine|engine(?:'s)?\s+(?:services|stack))\b", re.I)
+#: a settings line in the step's own text: KEY=VALUE (the engine's .env keys and the deploy script's own)
+_SETTING_LINE_RE = re.compile(r"^\s*`?([A-Z][A-Z0-9_]{1,60})=([^\s`]+)`?\s*$", re.M)
+_SECRETISH_RE = re.compile(r"KEY|PASSWORD|SECRET|TOKEN|PASS\b")
+SCAFFOLD_REPO_URL = os.environ.get("SCAFFOLD_REPO_URL", "https://github.com/LocketKeyLLC/scaffold-engine.git")
+
+
+def deploy_settings(node: dict) -> list[str]:
+    """§17.1618 — the KEY=VALUE lines the step's own text gives for this guest's engine (models, LAN, Ollama dir).
+    A name that looks like a secret is never carried: the guest generates its own secrets (bootstrap.sh)."""
+    text = " \n".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    out: list[str] = []
+    for m in _SETTING_LINE_RE.finditer(text):
+        k, v = m.group(1), m.group(2)
+        if _SECRETISH_RE.search(k) or any(line.startswith(k + "=") for line in out):
+            continue
+        out.append(f"{k}={v}")
+    return out
+
+
+def deploy_engine_commands(node: dict) -> str:
+    """§17.1618 — the in-guest commands that put THIS engine on a guest: clone/update the repo at
+    SCAFFOLD_DEPLOY_REF, write the step's settings, run scripts/deploy_on_guest.sh (bootstrap, network, LAN gate,
+    local models, build + start, /health)."""
+    ref = os.environ.get("SCAFFOLD_DEPLOY_REF", "main") or "main"
+    settings = "\n".join(deploy_settings(node))
+    return "\n".join([
+        "command -v git >/dev/null 2>&1 || apt-get install -y git",
+        f"[ -d /opt/scaffold-engine/.git ] || git clone --quiet {SCAFFOLD_REPO_URL} /opt/scaffold-engine",
+        "git -C /opt/scaffold-engine fetch --quiet origin",
+        f"git -C /opt/scaffold-engine checkout --quiet --detach origin/{ref} 2>/dev/null || "
+        f"git -C /opt/scaffold-engine checkout --quiet --detach {ref}",
+        "git -C /opt/scaffold-engine log -1 --format='deploying %h %s'",
+        "cat > /root/scaffold-deploy.env <<'SETTINGS'",
+        settings,
+        "SETTINGS",
+        "bash /opt/scaffold-engine/scripts/deploy_on_guest.sh /root/scaffold-deploy.env",
+    ])
+
+
+DEPLOY_SCAFFOLD_ENGINE = Template(
+    name="deploy_scaffold_engine",
+    title="Deploy the scaffold engine itself inside VM {GID}",
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_DEPLOY_ENGINE_RE.search(_text(node)))
+                                and not host_side_only(node),
+    params=[p for p in REACH_VM_SSH_AND_RUN.params if p.name != "REMOTE_COMMANDS"]
+           + [Param("REMOTE_COMMANDS", "default", "the engine's own deploy (§17.1618)", "")],
+    files=dict(REACH_VM_SSH_AND_RUN.files),
+    # a first build (the engine image, OWUI, Milvus pulls) outlasts the usual seven waits: thirty, ~75 min
+    run=[REACH_VM_SSH_AND_RUN.run[0]] + [REACH_VM_SSH_AND_RUN.run[1]] * 30 + [REACH_VM_SSH_AND_RUN.run[-1]],
+    verify=["qm status {GID}"],
+    risk="Clones this engine's repository into VM {GID} (/opt/scaffold-engine), generates its secrets there, builds and "
+         "starts its stack; a second run keeps the secrets and re-applies the settings.",
 )
 
 
@@ -295,7 +408,7 @@ RUN_IN_VM_VIA_AGENT = Template(
         Param("VERIFY_INSIDE", "model", "ONE read-only command to run inside the guest whose output shows this step's "
                                         "goal is met (for example `df -h /`, `systemctl is-active nginx`, `dpkg -l curl`)"),
     ],
-    files={"/tmp/in_vm_{GID}_agent.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside VM {GID} through its QEMU guest agent: no ssh, no account, no key, no address.\nset -uo pipefail\nGID={GID}\nqm status "$GID" | grep -q running || qm start "$GID"\nfor i in $(seq 1 12); do qm agent "$GID" ping >/dev/null 2>&1 && break; sleep 5; done\nqm agent "$GID" ping >/dev/null 2>&1 || { echo "FAILED: the guest agent in VM $GID did not answer within 60 s"; exit 1; }\ncat > /tmp/in_vm_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\n# §17.1319 -- the agent answers JSON {exitcode, out-data}; every read below wants the TEXT inside it. Live, the\n# first detached run compared `systemctl is-active` against the JSON blob and `exit`ed on one ("numeric argument required").\nginfo() { qm guest exec "$GID" --timeout 60 -- bash -c "$1" 2>/dev/null | python3 -c "import json,sys\nt=sys.stdin.read()\ntry: d=json.loads(t or \'{}\')\nexcept Exception: d={}\nsys.stdout.write(d.get(\'out-data\') or \'\')"; }\ncase "${1:-start}" in\n  start)\n    qm guest exec "$GID" --timeout 60 --pass-stdin 1 -- bash -c "cat > /root/.scaffold_step.sh" < /tmp/in_vm_{GID}_remote.sh >/dev/null \\\n      || { echo "FAILED: could not write the script into VM $GID through the agent"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c \'bash /root/.scaffold_step.sh; echo \\$? > /root/.scaffold_step.rc\'" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    # §17.1490 -- the exit code of the step ITSELF, saved by the unit: `--collect` discards a FAILED unit, and systemctl then\n    # reports the defaults (Result=success, ExecMainStatus=0) -- live, the ADD160 apt 404 was reported "finished (exit 0)".\n    code="$(ginfo "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d \'[:space:]\')"\n    result=""\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi\n    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
+    files={"/tmp/in_vm_{GID}_agent.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside VM {GID} through its QEMU guest agent: no ssh, no account, no key, no address.\nset -uo pipefail\nGID={GID}\nqm status "$GID" | grep -q running || qm start "$GID"\nfor i in $(seq 1 12); do qm agent "$GID" ping >/dev/null 2>&1 && break; sleep 5; done\nqm agent "$GID" ping >/dev/null 2>&1 || { echo "FAILED: the guest agent in VM $GID did not answer within 60 s"; exit 1; }\ncat > /tmp/in_vm_{GID}_remote.sh <<\'REMOTE\'\n{STRICT}\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\n# §17.1319 -- the agent answers JSON {exitcode, out-data}; every read below wants the TEXT inside it. Live, the\n# first detached run compared `systemctl is-active` against the JSON blob and `exit`ed on one ("numeric argument required").\nginfo() { qm guest exec "$GID" --timeout 60 -- bash -c "$1" 2>/dev/null | python3 -c "import json,sys\nt=sys.stdin.read()\ntry: d=json.loads(t or \'{}\')\nexcept Exception: d={}\nsys.stdout.write(d.get(\'out-data\') or \'\')"; }\ncase "${1:-start}" in\n  start)\n    qm guest exec "$GID" --timeout 60 --pass-stdin 1 -- bash -c "cat > /root/.scaffold_step.sh" < /tmp/in_vm_{GID}_remote.sh >/dev/null \\\n      || { echo "FAILED: could not write the script into VM $GID through the agent"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c \'bash /root/.scaffold_step.sh; echo \\$? > /root/.scaffold_step.rc\'" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    # §17.1490 -- the exit code of the step ITSELF, saved by the unit: `--collect` discards a FAILED unit, and systemctl then\n    # reports the defaults (Result=success, ExecMainStatus=0) -- live, the ADD160 apt 404 was reported "finished (exit 0)".\n    code="$(ginfo "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d \'[:space:]\')"\n    result=""\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi\n    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
     run=['bash /tmp/in_vm_{GID}_agent.sh start', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh wait', 'bash /tmp/in_vm_{GID}_agent.sh last'],   # §17.1317 — start, then wait x7, then last
     # §17.1304 — the inside check ALONE: `qm agent ping` prints nothing, and a check that cannot speak to the
     # goal is an `unknown` that keeps §17.1302 from recording an already-met step.
@@ -397,7 +510,7 @@ RUN_IN_CONTAINER = Template(
             # Read off the step's own text (`secret_files_from_text`), never a model draw: every container step
             # would otherwise pay a third draw for a slot almost all of them leave empty.
             Param("SECRET_FILES", "default", "", "")],
-    files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n{SECRET_FILES_WRITE}    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c \'bash /root/.scaffold_step.sh; echo \\$? > /root/.scaffold_step.rc\'" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    # §17.1490 -- the exit code of the step ITSELF, saved by the unit: `--collect` discards a FAILED unit, and systemctl then\n    # reports the defaults (Result=success, ExecMainStatus=0) -- live, the ADD160 apt 404 was reported "finished (exit 0)".\n    code="$(ginfo "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d \'[:space:]\')"\n    result=""\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi\n    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
+    files={"/tmp/in_ct_{GID}.sh": '#!/usr/bin/env bash\n# Run this step\'s commands inside container {GID} as root.\nset -uo pipefail\nGID={GID}\npct status "$GID" | grep -q running || pct start "$GID"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12; do pct status "$GID" | grep -q running && break; sleep 5; done\ncat > /tmp/in_ct_{GID}_remote.sh <<\'REMOTE\'\n{STRICT}\nexport DEBIAN_FRONTEND=noninteractive\n{REMOTE_COMMANDS}\nREMOTE\n\n# §17.1317 — long work runs DETACHED inside the guest as a transient systemd unit and is\n# waited on across several commands, each inside the runner\'s 180 s budget. Live, T23\'s\n# SteamCMD install (several GB) could never fit one command; `qm guest exec --timeout 110`\n# would have cut it the same way ssh did.\nUNIT="scaffold-{STEP}"\nginfo() { pct exec "$GID" -- bash -c "$1" 2>/dev/null; }\ncase "${1:-start}" in\n  start)\n{SECRET_FILES_WRITE}    pct push "$GID" /tmp/in_ct_{GID}_remote.sh /root/.scaffold_step.sh >/dev/null || { echo "FAILED: pct push into $GID"; exit 1; }\n    ginfo "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null\n    ginfo "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c \'bash /root/.scaffold_step.sh; echo \\$? > /root/.scaffold_step.rc\'" >/dev/null \\\n      || { echo "FAILED: could not start $UNIT inside $GID (is systemd running in the guest?)"; exit 1; }\n    echo "started $UNIT inside $GID"\n    ;;&\n  start|wait|last)\n    deadline=$(( SECONDS + 165 ))\n    while [ "$SECONDS" -lt "$deadline" ]; do\n      state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n      case "$state" in\n        active|activating|reloading|deactivating) sleep 5 ;;\n        *) break ;;\n      esac\n    done\n    state="$(ginfo "systemctl is-active $UNIT" | tr -d \'[:space:]\')"\n    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then\n      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; ginfo "tail -n 20 /root/.scaffold_step.log"; exit 1; fi\n      echo "STILL RUNNING: $UNIT inside $GID (waited 165 s more; the next command keeps waiting)"; ginfo "tail -n 3 /root/.scaffold_step.log"; exit 0\n    fi\n    # §17.1490 -- the exit code of the step ITSELF, saved by the unit: `--collect` discards a FAILED unit, and systemctl then\n    # reports the defaults (Result=success, ExecMainStatus=0) -- live, the ADD160 apt 404 was reported "finished (exit 0)".\n    code="$(ginfo "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d \'[:space:]\')"\n    result=""\n    # §17.1327 -- the log belongs to the phase that SAW the unit finish. Live, T23\'s eight\n    # wait phases each re-printed the whole SteamCMD tail; the record carried it eight times.\n    if [ -z "$(ginfo "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then\n      ginfo "echo done > /root/.scaffold_step.reported" >/dev/null\n      ginfo "cat /root/.scaffold_step.log 2>/dev/null | tail -n 60"\n      ginfo "cat /root/.scaffold_step.err 2>/dev/null | tail -n 20" >&2\n    else\n      echo "(the log was printed by the phase that saw $UNIT finish)"\n    fi\n    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi\n    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"\n    ;;\n  *) echo "unknown phase: $1"; exit 2;;\nesac\n'},
     run=['bash /tmp/in_ct_{GID}.sh start{SECRET_REFS}', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh wait', 'bash /tmp/in_ct_{GID}.sh last'],   # §17.1317
     verify=['pct exec {GID} -- bash -c "{VERIFY_INSIDE}"'],   # §17.1307 — inside, alone (see run_in_vm_via_agent); §17.1496 — escaped at render
     risk="Runs this step's commands as root inside container {GID}.",
@@ -455,11 +568,15 @@ tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, DEPLOY_SCAFFOLD_ENGINE, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]   # §17.1618
 
 
 def _text(node: dict) -> str:
-    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    # §17.1609 — and the step's specification: the planner may write it in `prompt_template` with an empty
+    # description. Live (job 0fb4ea7f T3 "Expand ai-vm disk", spec "Grow VM 110's disk from 100 GB to 2 TB …" in
+    # prompt_template only): the router read "Expand ai-vm disk", saw no host-side verb, and drafted
+    # growpart/resize2fs INSIDE the guest -- the next step's work -- instead of the host's `qm resize`.
+    return " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
 
 
 #: §17.1329 — in-guest work: a service/unit/package INSIDE the guest, or a port it binds.
@@ -528,7 +645,16 @@ def spans_guests(node: dict) -> bool:
     template, which drafted work in the wrong machine. Two guests addressed from
     the host is host-side work, whatever words are in view.
     """
-    return len(guests_the_host_is_told_to_touch(node)) >= 2 or bool(_WHOLE_SYSTEM_RE.search(_text(node)))
+    t = _text(node)
+    # §17.1609b — "Inside VM 110: docker compose up … Stops at all containers running" is ONE guest's own stack: the
+    # whole-system phrase ("all containers running") is about the lab only when the step does not say which guest
+    # it works inside. Live (job 0fb4ea7f T14 "Deploy engine services"), it was routed host-side.
+    whole = bool(_WHOLE_SYSTEM_RE.search(t)) and not _INSIDE_ONE_GUEST_RE.search(t)
+    return len(guests_the_host_is_told_to_touch(node)) >= 2 or whole
+
+
+#: §17.1609b — the step names the one guest its work is inside
+_INSIDE_ONE_GUEST_RE = re.compile(r"\b(?:inside|within)\s+(?:the\s+)?(?:vm|ct|lxc|container|guest)\s*\d{3,5}\b", re.I)
 
 
 #: §17.1473 — a step about the whole build, not one machine. Live, T37 "Validate entire build" ("Check all services
@@ -643,7 +769,8 @@ def logs_in_with_a_stored_secret(node: dict) -> bool:
 
 
 #: §17.1603 — Proxmox's own administration tools exist only on the host
-_HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b")
+_HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b"
+                            r"|\bpve-firewall\b|\bpvecm\b|/etc/pve/firewall/")   # §17.1616 — the host's firewall too
 
 
 def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
@@ -662,11 +789,11 @@ def select_template(node: dict, truth, services: Optional[list] = None) -> Optio
     login = logs_in_with_a_stored_secret(node)       # §17.1495 — the login runs from the host, on stdin
     for t in TEMPLATES:
         try:
-            if host_admin and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+            if host_admin and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER, DEPLOY_SCAFFOLD_ENGINE):
                 continue
             if t.applies(node, truth):
                 # only the general in-guest templates: an OS install or a console read carries its own secrets
-                if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER):
+                if login and t in (RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER, DEPLOY_SCAFFOLD_ENGINE):
                     return None
                 return t
         except Exception:
@@ -687,7 +814,9 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
         if p.source == "subject":
             vals[p.name] = gid
         elif p.source == "default":
-            vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES" else p.default)   # §17.1489
+            vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES"
+                            else deploy_engine_commands(node) if (template is DEPLOY_SCAFFOLD_ENGINE and p.name == "REMOTE_COMMANDS")
+                            else p.default)   # §17.1489, §17.1618
         elif p.source == "node_key":
             vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
         elif p.source == "derived":
@@ -782,6 +911,23 @@ def secret_file_parts(spec: str) -> tuple[str, str]:
     return "".join(writes), "".join(f" # ${n}" for n in dict.fromkeys(names))
 
 
+def strict_line(remote_commands: str) -> str:
+    """§17.1608 — `set -e` for in-guest work that CHANGES something; not for a block that only reads.
+
+    Live (job 0fb4ea7f T2 "Verify ai-vm resources", 2026-10-15): seven reads under `set -e`; `df /var/lib/docker` (no
+    Docker yet) exited 1 and the inventory stopped there -- nvidia-smi, lspci and lsblk never ran, and the step was
+    recorded FAILED for a fact it was asked to find. A failed read is the answer. Empty or unknown commands keep
+    `set -e` (a template's own built-in work)."""
+    from app.modules.supervised_runs import _reads_only
+    lines = [ln.strip() for ln in str(remote_commands or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    if lines and all(_reads_only(ln) for ln in lines):
+        # §17.1608b — and the block's exit is not its last read's: live (job 0fb4ea7f T15), a grep that found no OLLAMA_*
+        # key (the compose default is used) exited 1 and the read-only step was recorded FAILED. The checks judge it.
+        return ("set +e; trap 'exit 0' EXIT  # §17.1608: this block only reads -- a failed read is part of the answer, "
+                "not the end of it")
+    return "set -e"
+
+
 def render(template: Template, values: dict) -> str:
     """The runbook, in the exact shape `frame_run` parses: a marker line, the
     inputs, the risk, the files, the run command, the verify checks. Operator
@@ -789,6 +935,7 @@ def render(template: Template, values: dict) -> str:
     script is the ENVIRONMENT variable the run command sets from that placeholder."""
     v = dict(values)
     v["SECRET_FILES_WRITE"], v["SECRET_REFS"] = secret_file_parts(v.get("SECRET_FILES", ""))   # §17.1489
+    v.setdefault("STRICT", strict_line(v.get("REMOTE_COMMANDS", "")))                         # §17.1608
     user_ph = f"<{v.get('GUEST_USER_NAME', 'GUEST_USER')}>"
 
     def fill(s: str) -> str:
@@ -850,12 +997,14 @@ def plan_context(upstream: str = "", environment: Optional[dict] = None) -> str:
     parts: list[str] = []
     up = str(upstream or "").strip()
     if up:
-        parts.append("WHAT EARLIER STEPS ESTABLISHED (reproduce content they specify; do not invent substitutes):\n" + up[:6000])
+        parts.append("WHAT EARLIER STEPS ESTABLISHED (reproduce content they specify; do not invent substitutes):\n" + up[:10000])   # §17.1611c — room for the guest evidence
     env = environment or {}
     facts = [str(f.get("text") if isinstance(f, dict) else f) for f in (env.get("facts") or [])]
     facts = [f.strip() for f in facts if f and f.strip()][:40]
     if facts:
-        parts.append("KNOWN FACTS ABOUT THIS SYSTEM:\n" + "\n".join(f"- {f[:220]}" for f in facts))
+        # §17.1615 — an operator decision is carried whole (the model names, the paths it fixes); other facts are cut
+        parts.append("KNOWN FACTS ABOUT THIS SYSTEM:\n" + "\n".join(
+            f"- {f[:1000] if f.startswith('Operator decision') else f[:220]}" for f in facts))
     subs = env.get("substitutions") or {}
     if isinstance(subs, dict) and subs:
         parts.append("PINNED VALUES (use these, never a placeholder like example.com):\n"

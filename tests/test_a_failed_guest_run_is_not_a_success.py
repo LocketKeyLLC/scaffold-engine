@@ -32,8 +32,10 @@ def _helper(remote: str) -> str:
     return re.search(r"### /tmp/in_ct_105\.sh\n```bash\n([\s\S]*?)\n```", rb).group(1)
 
 
-@pytest.mark.parametrize("remote,ok,code", [("true", True, "0"), ("echo working; false", False, "1"),
-                                            ("exit 100", False, "100")])
+# §17.1608b — a block that only READS exits 0 by design (its checks judge it), so the failing block here CHANGES
+# something (a redirect into a file) before it fails, as ADD160's apt install did.
+@pytest.mark.parametrize("remote,ok,code", [("true", True, "0"), ('echo working > "$ROOT/w"; false', False, "1"),
+                                            ("exit 100", False, "100"), ("echo working; false", True, "0")])
 def test_the_helper_reports_the_scripts_own_exit(tmp_path, remote, ok, code):
     root = tmp_path / "root"
     root.mkdir()

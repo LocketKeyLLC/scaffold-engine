@@ -98,3 +98,22 @@ def test_a_version_that_writes_a_secret_file_is_refused():
     import inspect
     from app.modules import execution_agent
     assert "develop.writes_a_secret_file(files)" in inspect.getsource(execution_agent)
+
+
+# §17.1608 — reads are not ended by a failed read
+def test_a_reads_only_guest_block_is_not_set_e_and_a_writing_one_is():
+    live_t2 = "free -h\ndf -h / /var/lib/docker\nnvidia-smi\nlspci | grep -i nvidia\nlsblk\ncat /proc/meminfo | head -5"
+    assert rt.strict_line(live_t2).startswith("set +e")
+    assert rt.strict_line("apt-get install -y docker.io\nsystemctl enable --now docker") == "set -e"
+    assert rt.strict_line("") == "set -e", "a template's own work stays strict"
+    for t in (rt.RUN_IN_CONTAINER, rt.RUN_IN_VM_VIA_AGENT, rt.REACH_VM_SSH_AND_RUN):
+        body = rt.render(t, {"GID": "110", "STEP": "T2", "REMOTE_COMMANDS": live_t2, "GUEST_USER_NAME": "AI_USER"})
+        assert "{STRICT}" not in body and "set +e" in body, t.name
+
+
+def test_a_reads_only_guest_block_exits_zero_when_its_last_read_finds_nothing(tmp_path):
+    """§17.1608b — live (job 0fb4ea7f T15): `grep … .env` found nothing and the read-only step was recorded FAILED."""
+    import subprocess
+    script = rt.strict_line("grep -n NOPE /etc/hostname") + "\ngrep -n NOPE /etc/hostname\n"
+    assert subprocess.run(["bash", "-c", script], capture_output=True).returncode == 0
+    assert subprocess.run(["bash", "-c", rt.strict_line("apt-get install x") + "\nfalse\n"], capture_output=True).returncode == 1

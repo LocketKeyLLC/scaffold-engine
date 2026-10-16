@@ -10,7 +10,9 @@ ENV_FILE=${1:?usage: scaffold_lan_gate.sh /path/to/scaffold-engine/.env}
 val() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | tr -d '"'"'"' '; }
 ADDR=$(val SCAFFOLD_LAN_ADDRESS)
 ALLOW=$(val SCAFFOLD_LAN_ALLOW)
-PORT=8000
+PORTS=8000
+# §17.1618 — with the chat UI published on the LAN too (docker-compose.lan-ui.yml), gate its port the same way
+[ "$(val SCAFFOLD_LAN_UI)" = "1" ] && PORTS="8000 3000"
 if [ -z "$ADDR" ] || [ -z "$ALLOW" ]; then
     echo "scaffold-lan-gate: SCAFFOLD_LAN_ADDRESS / SCAFFOLD_LAN_ALLOW not set in $ENV_FILE -- nothing to gate"
     exit 0
@@ -18,6 +20,7 @@ fi
 # Docker keeps an existing DOCKER-USER chain; creating it here, before docker.service,
 # means the rule is in place before any container publishes the port.
 iptables -N DOCKER-USER 2>/dev/null || true
+for PORT in $PORTS; do
 # `--ctdir ORIGINAL`: judge only packets travelling TOWARD the engine. The conntrack ORIGINAL tuple
 # is the same for both directions of a connection, so without it the engine's REPLIES (source
 # 172.18.x, "not ALLOW") matched too and every connection died -- the allowed one included.
@@ -34,3 +37,4 @@ else
     iptables -I DOCKER-USER 1 "${RULE[@]}"
     echo "scaffold-lan-gate: installed ($ADDR:$PORT, only $ALLOW)"
 fi
+done

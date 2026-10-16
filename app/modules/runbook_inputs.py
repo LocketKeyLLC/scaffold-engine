@@ -262,11 +262,38 @@ def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "") -> l
         pinned = next((s["value"] for s in sugg if s["confidence"] == "pinned"), "")
         stepped = [s["value"] for s in sugg if s["confidence"] == "step"]
         value = pinned or (stepped[0] if len(stepped) == 1 else "")
+        if not value:
+            acct = homelab_account(str(i.get("name") or ""), env or {})
+            if acct:
+                value, src = acct
+                sugg = [{"value": value, "source": src, "confidence": "homelab"}] + [x for x in sugg if x.get("value") != value]
         out.append({**i, "suggestions": sugg, "value": value})
     return out
 
 
+def homelab_account(name: str, env: dict) -> Optional[tuple[str, str]]:
+    """§17.1606 — a guest's login account the operator never pinned for THAT guest, when every `<GUEST>_USER` pin they
+    did make names the same account: ``(account, source)``, else None.
+
+    Live (job 0fb4ea7f T2, "Verify ai-vm resources", 2026-10-15): the frame asked for `AI_USER`. The engine held
+    `PALWORLD_USER = aedefruscio` and `MASS_PASSWORD` ("the one password used for every container/VM that needs one"),
+    and the operator: "The engine already has ALL of that information." One account across every pinned guest is the
+    homelab's account; two different ones is a real question and nothing is filled."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*_USER", name or ""):
+        return None
+    subs = (env or {}).get("substitutions") or {}
+    pins = {str(k): str(v).strip() for k, v in (subs.items() if isinstance(subs, dict) else [])
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*_USER", str(k)) and str(v or "").strip()}
+    accounts = set(pins.values())
+    if len(accounts) != 1:
+        return None
+    acct = accounts.pop()
+    return acct, f"the one account every pinned guest login names ({', '.join(sorted(pins))} = {acct})"
+
+
 #: §17.1473 — "Operator decision 2026-10-10 (…): only the control panel is reachable from the internet; …"
+#: §17.1615 — a decision node's record: "Decision (operator): X" then "Note: Y" (until "Options considered:")
+_DECISION_RECORD_RE = re.compile(r"Decision \(operator\):\s*(.+?)\s*(?:\nNote:\s*(.+?))?\s*(?:\nOptions considered:|\Z)", re.S)
 _DECISION_RE = re.compile(r"Operator decision (\d{4}-\d{2}-\d{2})(?:\s*\([^)]*\))?:\s*(.+?[.!?])(?=\s|$)", re.S)
 
 
@@ -283,6 +310,18 @@ def operator_decisions(rows: list[dict]) -> list[str]:
         txt = str(r.get("prompt_template") or "") or str(r.get("description") or "")
         for m in _DECISION_RE.finditer(txt):
             found.append((m.group(1), str(r.get("node_key") or ""), " ".join(m.group(2).split())[:400]))
+    # §17.1615 — and a decision made AT a decision pause: its node's record opens "Decision (operator): <choice>" with
+    # the operator's note after it. Live (job 0fb4ea7f), T10 recorded the two models the operator chose; T12, drafted
+    # after it, tested `qwen2.5-coder:14b` -- a model nobody chose, which `ollama run` would have downloaded.
+    for r in rows or []:
+        if str(r.get("status") or "") != "done" or str(r.get("node_type") or "") != "decision":
+            continue
+        m = _DECISION_RECORD_RE.match(str(r.get("output_text") or ""))
+        if not m:
+            continue
+        when = str(r.get("completed_at") or "")[:10] or "0000-00-00"
+        what = " ".join((m.group(1) + (". " + m.group(2) if m.group(2) else "")).split())[:900]
+        found.append((when, str(r.get("node_key") or ""), what))
     seen, out = set(), []
     for when, nk, what in sorted(found, key=lambda x: x[0], reverse=True):
         if what in seen:
@@ -301,7 +340,8 @@ async def job_environment(db, job_id: str) -> dict:
     try:
         from sqlalchemy import text
         rows = (await db.execute(text(
-            "SELECT node_key, status, description, prompt_template FROM dag_nodes WHERE job_id = :jid"),
+            "SELECT node_key, status, node_type, description, prompt_template, output_text, completed_at "
+            "FROM dag_nodes WHERE job_id = :jid"),
             {"jid": job_id})).mappings().all()
         decisions = operator_decisions([dict(r) for r in rows])
     except Exception:
@@ -331,7 +371,26 @@ async def _job_environment_ledger(db, job_id: str) -> dict:
             if env.get("facts") or env.get("substitutions") or env.get("system_state"):
                 return env
         row = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :jid"), {"jid": job_id})).mappings().first()
-        return _environment_from_metadata((row or {}).get("metadata")) if row else {}
+        env = _environment_from_metadata((row or {}).get("metadata")) if row else {}
+        if env.get("facts") or env.get("substitutions") or env.get("system_state"):
+            return env
+        # §17.1607 — a job with no ledger of its own (started from the API, or a job no assist session drove) reads
+        # its OWNER's newest ledger: the operator's machines, pins and facts are theirs, not one session's. Live
+        # (job 0fb4ea7f, 2026-10-15): T2 asked for ai-vm's login while the operator's ledger held PALWORLD_USER and
+        # 40 facts -- "The engine already has ALL of that information"; the panel job c2792d4b ran with no ledger
+        # too, which is why §17.1312's address gate stayed silent there.
+        row = (await db.execute(text("""
+            SELECT s.id, s.metadata FROM assist_sessions s
+              JOIN jobs j ON j.id = s.job_id
+             WHERE j.owner IS NOT DISTINCT FROM (SELECT owner FROM jobs WHERE id = :jid)
+               AND (jsonb_array_length(COALESCE(s.metadata->'environment'->'facts', '[]'::jsonb)) > 0
+                    OR COALESCE(s.metadata->'environment'->'substitutions', '{}'::jsonb) <> '{}'::jsonb)
+             ORDER BY s.updated_at DESC LIMIT 1"""), {"jid": job_id})).mappings().first()
+        if row and row.get("metadata"):
+            inherited = _environment_from_metadata(row["metadata"])
+            if inherited.get("facts") or inherited.get("substitutions") or inherited.get("system_state"):
+                return {**inherited, "inherited_from": str(row["id"])}
+        return env
     except Exception:
         return {}
 

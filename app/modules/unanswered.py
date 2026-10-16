@@ -75,11 +75,45 @@ def is_non_answer(answer: str) -> bool:
     return bool(_NON_ANSWER_RE.match(a))
 
 
+#: §17.1605 — "3. agreed" / "3) agreed": an answer numbered after the brief's own question
+_NUMBERED_ANSWER_RE = re.compile(r"^\s*(\d{1,2})\s*[.):-]\s*(.*)$")
+
+
+def parse_numbered(blob: str, ambiguities: list) -> list[dict]:
+    """§17.1605 — answers numbered after the brief's ambiguities, as an operator types them.
+
+    Live (job 0fb4ea7f, 2026-10-15): the operator answered the brief's eight questions as "1. run both for now …
+    8. …". Only `Q:`/`A:` pairs (what the chat pipeline writes) were understood, so all eight read as unanswered:
+    two came back as "Decide with the operator" steps for questions already answered, and the planner never saw
+    "stick to 2 TB" beside the question it answered. A number maps to the ambiguity in that position; a number with
+    no such ambiguity, or a blob with no numbered lines, yields nothing."""
+    amb = [str(a) for a in ambiguities or []]
+    out: dict[int, list[str]] = {}
+    cur: Optional[int] = None
+    for raw in (blob or "").splitlines():
+        m = _NUMBERED_ANSWER_RE.match(raw)
+        if m and 1 <= int(m.group(1)) <= len(amb):
+            cur = int(m.group(1))
+            out.setdefault(cur, []).append(m.group(2).strip())
+        elif m:
+            cur = None                                   # a number the brief has no question for: not an answer
+        elif cur is not None and raw.strip():
+            out[cur].append(raw.strip())
+    return [{"question": amb[n - 1], "answer": " ".join(parts).strip(),
+             "answered": not is_non_answer(" ".join(parts))} for n, parts in sorted(out.items())]
+
+
+def answers(brief: dict) -> list[dict]:
+    """§17.1605 — every answer the operator gave to the brief, in either shape: `Q:`/`A:` pairs, else numbered."""
+    blob = str((brief or {}).get("user_feedback") or "")
+    return parse_feedback(blob) or parse_numbered(blob, (brief or {}).get("ambiguities") or [])
+
+
 def parse_feedback(blob: str) -> list[dict]:
     """The ``Q: …\\nA: …`` pairs refinement writes into ``user_feedback``.
 
     Returns ``[{question, answer, answered}]`` in order. A blob in any other
-    shape yields nothing rather than a guess.
+    shape yields nothing rather than a guess (§17.1605: `answers` adds the numbered shape).
     """
     out: list[dict] = []
     q: Optional[str] = None
@@ -109,7 +143,7 @@ def unresolved(brief: dict) -> list[str]:
 
     An ambiguity with no Q/A pair at all is open too — it was never put to them.
     """
-    pairs = parse_feedback(str((brief or {}).get("user_feedback") or ""))
+    pairs = answers(brief)                  # §17.1605 — numbered answers count
     by_q = {p["question"].strip().lower(): p for p in pairs}
     out: list[str] = []
     for amb in (brief or {}).get("ambiguities") or []:
