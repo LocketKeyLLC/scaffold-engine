@@ -36,3 +36,20 @@ def test_the_container_form_and_a_block_that_installs_the_tool_pass():
 def test_it_is_registered_for_redraft():
     assert any("runs only inside the container" in m for m in sr._SHAPE_REFUSALS)
     assert sr._WHOSE_GAP["runs only inside the container"] == "drafter"
+
+
+def test_a_step_the_operator_did_keeps_their_note():
+    import asyncio
+    seen = {}
+
+    class Res:
+        rowcount = 1
+
+    class DB:
+        async def execute(self, stmt, params=None):
+            seen.update(params or {})
+            return Res()
+    out = asyncio.run(sr.resolve_run(DB(), "j", "T9", "myself", {"runbook": "## Run this\n..."},
+                                     note="Ollama runs in Docker: `docker exec ollama ollama list`"))
+    assert out["outcome"] == "runbook"
+    assert seen["out"].startswith("## Done by the operator\nOllama runs in Docker") and "## Run this" in seen["out"]

@@ -319,7 +319,7 @@ async def resolve_decision(
         from app.modules import supervised_runs
         try:
             res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")),
-                                                    waiting, inputs=inputs)
+                                                    waiting, inputs=inputs, note=note or "")   # §17.1614c
         except BaseException as exc:
             # §17.1496 — the run claimed the node and then died (runner error, the client
             # dropping this request, a restart): record it on the node before the error

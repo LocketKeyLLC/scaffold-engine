@@ -6473,7 +6473,7 @@ async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
 
 
 async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
-                      inputs: dict | None = None) -> dict:
+                      inputs: dict | None = None, note: str = "") -> dict:
     """Carry out the operator's choice on a ``kind="run"`` pause. Returns
     ``{"outcome": …}`` for ``decision_pause.resolve_decision`` to finish (it
     records the decision on the job and moves it back to executing)."""
@@ -6485,10 +6485,13 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'skipped', output_text = COALESCE(output_text, :out), completed_at = NOW(), "
                  "updated_at = NOW() WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
-            {"jid": job_id, "nk": node_key, "out": "Skipped by the operator at the supervised-run pause."})
+            {"jid": job_id, "nk": node_key, "out": "Skipped by the operator at the supervised-run pause."
+                                                   + (f"\n\nOperator's note: {note.strip()}" if (note or "").strip() else "")})
         return {"outcome": "skipped" if upd.rowcount else "node_gone", "node_status": "skipped"}
     if choice == "myself":
-        out = runbook or "(runbook)"
+        # §17.1614c — the operator's note IS the record of what they did: live (job 0fb4ea7f T9), the note "Ollama runs in
+        # Docker … `docker exec ollama ollama pull`" was dropped and the node kept only the unrun draft
+        out = ((f"## Done by the operator\n{note.strip()}\n\n" if (note or "").strip() else "") + (runbook or "(runbook)"))
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), "
                  "started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
