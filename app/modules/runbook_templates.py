@@ -921,7 +921,10 @@ def strict_line(remote_commands: str) -> str:
     from app.modules.supervised_runs import _reads_only
     lines = [ln.strip() for ln in str(remote_commands or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
     if lines and all(_reads_only(ln) for ln in lines):
-        return "set +e  # §17.1608: this block only reads -- a failed read is part of the answer, not the end of it"
+        # §17.1608b — and the block's exit is not its last read's: live (job 0fb4ea7f T15), a grep that found no OLLAMA_*
+        # key (the compose default is used) exited 1 and the read-only step was recorded FAILED. The checks judge it.
+        return ("set +e; trap 'exit 0' EXIT  # §17.1608: this block only reads -- a failed read is part of the answer, "
+                "not the end of it")
     return "set -e"
 
 
