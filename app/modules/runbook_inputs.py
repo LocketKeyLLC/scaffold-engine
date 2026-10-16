@@ -292,6 +292,8 @@ def homelab_account(name: str, env: dict) -> Optional[tuple[str, str]]:
 
 
 #: §17.1473 — "Operator decision 2026-10-10 (…): only the control panel is reachable from the internet; …"
+#: §17.1615 — a decision node's record: "Decision (operator): X" then "Note: Y" (until "Options considered:")
+_DECISION_RECORD_RE = re.compile(r"Decision \(operator\):\s*(.+?)\s*(?:\nNote:\s*(.+?))?\s*(?:\nOptions considered:|\Z)", re.S)
 _DECISION_RE = re.compile(r"Operator decision (\d{4}-\d{2}-\d{2})(?:\s*\([^)]*\))?:\s*(.+?[.!?])(?=\s|$)", re.S)
 
 
@@ -308,6 +310,18 @@ def operator_decisions(rows: list[dict]) -> list[str]:
         txt = str(r.get("prompt_template") or "") or str(r.get("description") or "")
         for m in _DECISION_RE.finditer(txt):
             found.append((m.group(1), str(r.get("node_key") or ""), " ".join(m.group(2).split())[:400]))
+    # §17.1615 — and a decision made AT a decision pause: its node's record opens "Decision (operator): <choice>" with
+    # the operator's note after it. Live (job 0fb4ea7f), T10 recorded the two models the operator chose; T12, drafted
+    # after it, tested `qwen2.5-coder:14b` -- a model nobody chose, which `ollama run` would have downloaded.
+    for r in rows or []:
+        if str(r.get("status") or "") != "done" or str(r.get("node_type") or "") != "decision":
+            continue
+        m = _DECISION_RECORD_RE.match(str(r.get("output_text") or ""))
+        if not m:
+            continue
+        when = str(r.get("completed_at") or "")[:10] or "0000-00-00"
+        what = " ".join((m.group(1) + (". " + m.group(2) if m.group(2) else "")).split())[:900]
+        found.append((when, str(r.get("node_key") or ""), what))
     seen, out = set(), []
     for when, nk, what in sorted(found, key=lambda x: x[0], reverse=True):
         if what in seen:
@@ -326,7 +340,8 @@ async def job_environment(db, job_id: str) -> dict:
     try:
         from sqlalchemy import text
         rows = (await db.execute(text(
-            "SELECT node_key, status, description, prompt_template FROM dag_nodes WHERE job_id = :jid"),
+            "SELECT node_key, status, node_type, description, prompt_template, output_text, completed_at "
+            "FROM dag_nodes WHERE job_id = :jid"),
             {"jid": job_id})).mappings().all()
         decisions = operator_decisions([dict(r) for r in rows])
     except Exception:

@@ -938,7 +938,9 @@ def plan_context(upstream: str = "", environment: Optional[dict] = None) -> str:
     facts = [str(f.get("text") if isinstance(f, dict) else f) for f in (env.get("facts") or [])]
     facts = [f.strip() for f in facts if f and f.strip()][:40]
     if facts:
-        parts.append("KNOWN FACTS ABOUT THIS SYSTEM:\n" + "\n".join(f"- {f[:220]}" for f in facts))
+        # §17.1615 — an operator decision is carried whole (the model names, the paths it fixes); other facts are cut
+        parts.append("KNOWN FACTS ABOUT THIS SYSTEM:\n" + "\n".join(
+            f"- {f[:1000] if f.startswith('Operator decision') else f[:220]}" for f in facts))
     subs = env.get("substitutions") or {}
     if isinstance(subs, dict) and subs:
         parts.append("PINNED VALUES (use these, never a placeholder like example.com):\n"
