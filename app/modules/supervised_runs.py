@@ -144,6 +144,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "takes loopback down with it",                   # §17.1570d
                    "prints a new secret once", "a file named as a secret",   # §17.1603
                    "runs only inside the container",                          # §17.1614
+                   "does not parse on its own",                               # §17.1616
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
@@ -326,6 +327,7 @@ _WHOSE_GAP: dict[str, str] = {
     "prints a new secret once": "drafter",                        # §17.1603 — send the minted secret only to a file
     "a file named as a secret": "drafter",                        # §17.1603 — use the secret, do not print it
     "runs only inside the container": "drafter",                  # §17.1614 — docker exec it, as the job does
+    "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -4446,6 +4448,32 @@ _SOURCED_KNOWN = {"/etc/os-release": _OS_RELEASE, "/usr/lib/os-release": _OS_REL
                   "/etc/lsb-release": {"DISTRIB_ID", "DISTRIB_RELEASE", "DISTRIB_CODENAME", "DISTRIB_DESCRIPTION"}}
 
 
+def a_command_that_does_not_parse(commands: list[str]) -> list[dict]:
+    """§17.1616 — every command of a block runs as its OWN runner call, so each must parse alone (`bash -n`).
+
+    Live (job 0fb4ea7f FW1, 2026-10-16): `… || sed -i '/^\\[group ai\\]/,/^$/ { /IN DROP/i IN ACCEPT …` + newline + `}' file`
+    -- a quoted sed program spanning two lines was split at the line break into two commands, neither of which parses
+    (unterminated quote); nothing refused it. A multi-line program belongs in a written file (or on one line)."""
+    import subprocess
+    out: list[dict] = []
+    for c in commands or []:
+        c = str(c or "")
+        if not c.strip():
+            continue
+        probe = re.sub(r"<[A-Z][A-Z0-9_]{1,60}>", "x", c)    # a <PLACEHOLDER> is filled before anything runs
+        try:
+            r = subprocess.run(["bash", "-n"], input=probe, text=True, capture_output=True, timeout=5)
+        except Exception:
+            continue                         # no bash to ask: judge nothing
+        if r.returncode != 0:
+            out.append({"command": c[:200], "why": (
+                f"this command does not parse on its own (`bash -n`: {r.stderr.strip().splitlines()[-1][:160] if r.stderr.strip() else 'syntax error'}). "
+                "Every line of the block is its own runner call, so a quoted program that spans lines is cut at the "
+                "line break and runs as broken halves. Keep each command on ONE line, or write the multi-line content to "
+                "a file in `## Write these files` and run that file.")})
+    return out
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -6133,6 +6161,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
+    refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
     from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
     refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)

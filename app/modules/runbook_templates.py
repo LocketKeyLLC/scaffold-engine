@@ -711,7 +711,8 @@ def logs_in_with_a_stored_secret(node: dict) -> bool:
 
 
 #: §17.1603 — Proxmox's own administration tools exist only on the host
-_HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b")
+_HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b"
+                            r"|\bpve-firewall\b|\bpvecm\b|/etc/pve/firewall/")   # §17.1616 — the host's firewall too
 
 
 def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
