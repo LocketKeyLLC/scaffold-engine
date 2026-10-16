@@ -116,6 +116,19 @@ def _smart_fallback(model: str, default_fallback: str) -> str:
     return default_fallback
 
 
+async def _registered_cloud_tag(model: str, resp: "ModelResponse") -> bool:
+    """§17.1623 — True when ``model`` is a cloud tag the daemon reported as not
+    found and the engine has just pulled it (worth one more call). Fail-soft."""
+    from app.modules.cloud_role_tags import ensure_cloud_role_tags, is_cloud_tag
+    if not is_cloud_tag(model) or "not found" not in (resp.error or ""):
+        return False
+    try:
+        return model in (await ensure_cloud_role_tags(tags={model}))["pulled"]
+    except Exception as exc:
+        logger.warning("cloud_role_tag_ensure_failed: tag=%s err=%s", model, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core dispatch
 # ---------------------------------------------------------------------------
@@ -379,6 +392,15 @@ async def _dispatch_with_retry(
             attempt + 1, retries, model, classification, last_resp.error,
         )
         if classification == "fail_fast":
+            # §17.1623 — an unregistered cloud tag (a cloud role, the
+            # escalation rung) is pulled by the engine and tried once more.
+            if await _registered_cloud_tag(model, last_resp):
+                last_resp = await _call_ollama(
+                    endpoint, payload, model, _timeout_for(model),
+                )
+                if last_resp.success:
+                    last_resp.retries = attempt
+                    return last_resp
             break
         # §17.1082 — the operator's screen went quiet for 105 s while two
         # 500s from the cloud were retried in silence; say so where they look.
@@ -398,6 +420,10 @@ async def _dispatch_with_retry(
         fb_resp = await _call_ollama(
             endpoint, payload, fallback, _timeout_for(fallback),
         )
+        if not fb_resp.success and await _registered_cloud_tag(fallback, fb_resp):
+            fb_resp = await _call_ollama(
+                endpoint, payload, fallback, _timeout_for(fallback),
+            )
         fb_resp.retries = attempts_used
         fb_resp.fallback_used = True
         if fb_resp.success:

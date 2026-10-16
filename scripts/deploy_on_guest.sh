@@ -101,9 +101,17 @@ if docker inspect "$OC" >/dev/null 2>&1; then
     roles=$(grep -E '^MODEL_[A-Z_]+=' .env | grep -vE '^MODEL_[A-Z_]*(_PROVIDER|_ENABLED|_CANDIDATES|_URL|_TIMEOUT[A-Z_]*|ROLE_LEARNING[A-Z_]*)=' \
             | sed 's/^[^=]*=//' | sort -u)
     for m in $roles nomic-embed-text; do
-        case "$m" in *-cloud|*:cloud|''|cross-encoder/*|true|false) continue ;; esac
+        case "$m" in ''|cross-encoder/*|true|false) continue ;; esac
         if docker exec "$OC" ollama list | awk 'NR>1 {print $1}' | grep -qxF "$m"; then
             echo "present: $m"
+        elif case "$m" in *-cloud|*:cloud) true ;; *) false ;; esac; then
+            # §17.1623 — a cloud tag is a few-KB manifest and serves nothing until pulled (live: the fallback roles
+            # named qwen3.5:397b-cloud on a daemon that never had it). The cloud is the FALLBACK, so a refusal (this
+            # daemon's key not yet added at ollama.com) warns with the key instead of failing the deploy.
+            echo "pulling cloud tag: $m"
+            docker exec "$OC" ollama pull "$m" || {
+                echo "deploy: WARNING cloud tag $m not registered -- add this daemon's key at https://ollama.com/settings/keys:" >&2
+                docker exec "$OC" cat /root/.ollama/id_ed25519.pub >&2 || true; }
         else
             echo "pulling: $m"
             docker exec "$OC" ollama pull "$m" || { echo "deploy: could not pull $m" >&2; exit 1; }

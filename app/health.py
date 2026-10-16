@@ -107,12 +107,19 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
     )
     if not missing:
         return []
-    return [
+    out = [
         "model roles reference tags not pulled on the Ollama daemon: "
         + ", ".join(missing)
         + " — pull them (ollama pull <tag>) or open the connect-models "
         "wizard at /ui/#/setup"
     ]
+    # §17.1623 — the engine pulls cloud tags itself; when the daemon refused,
+    # say what it said (read-only: the last attempt's record, no pull here).
+    from app.modules.cloud_role_tags import last_failures
+    for tag, err in sorted(last_failures().items()):
+        if any(m.endswith(f"={tag}") for m in missing):
+            out.append(f"the engine's pull of cloud tag {tag} was refused by Ollama: {err}")
+    return out
 
 
 

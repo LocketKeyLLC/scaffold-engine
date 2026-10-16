@@ -410,6 +410,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("runtime_profile_hook_failed: err=%s", exc)
 
+    # §17.1623 — register the cloud role tags on the daemon (a cloud tag serves
+    # nothing until pulled). AFTER the overrides + profile replay so it sees the
+    # effective roles. Fail-soft; a refusal is kept for /health.
+    try:
+        from app.modules.cloud_role_tags import ensure_cloud_role_tags
+        _crt = await ensure_cloud_role_tags(force=True)
+        if _crt["pulled"] or _crt["failed"]:
+            logger.info("cloud_role_tags_at_startup: pulled=%s failed=%s",
+                        _crt["pulled"], sorted(_crt["failed"]))
+    except Exception as exc:
+        logger.warning("cloud_role_tags_hook_failed: err=%s", exc)
+
     # §17.812 (audit C6) — the shared HTTP clients must be initialized BEFORE
     # crash-resume: resume_orphaned_executions() spawns detached
     # _drain_execution tasks that reach the first LLM/embedder call, and
