@@ -76,7 +76,8 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
                             '  "compose config") echo \'{"volumes": {"open-webui": {"external": true, "name": "open-webui"}, '
                             '"cache": {}}}\';;\n'
                             '  "volume inspect") exit 1;;\nesac\nexit 0\n')
-    for n in ("curl", "systemctl"):
+    (repo / "pipelines").mkdir()
+    for n in ("curl", "systemctl", "chown"):
         _fake(bindir, n, f'echo "{n} $*" >> {log}\nexit 0\n')
     _fake(bindir, "iptables", f'echo "iptables $*" >> {log}\n[ "$1" = -C ] && exit 1\nexit 0\n')
     settings = tmp_path / "settings.env"
@@ -100,6 +101,8 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     assert (ollama / "docker-compose.override.yml").read_text().count("ai-network") == 1
     assert str(repo) in (units / "scaffold-lan-gate.service").read_text()
     assert "volume create open-webui" in calls and "volume create cache" not in calls, "§17.1618e — external volumes only"
+    assert "chown -R 1000:1000 pipelines" in calls, "§17.1621 — the pipelines container (uid 1000) writes its valves there"
+    assert calls.index("chown -R") < calls.index("compose up -d --build"), "before the stack starts"
 
 
 def test_the_deploy_script_refuses_a_cpu_without_x86_64_v2():

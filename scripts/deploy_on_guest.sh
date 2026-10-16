@@ -123,6 +123,14 @@ for k, v in (c.get("volumes") or {}).items():
     docker volume inspect "$v" >/dev/null 2>&1 || { docker volume create "$v" >/dev/null && echo "created volume $v"; }
 done
 
+echo "== 6b. the pipelines container can write its valves"
+# §17.1621 — the pipelines service runs as PIPELINES_UID:GID (default 1000) and writes valves.json into the
+# bind-mounted ./pipelines. A guest checkout made by root leaves it root-owned, and the container restarts forever
+# ("PermissionError: ... ./pipelines/dag_viewer/valves.json"). Live: VM 110, 2026-10-16, 25 restarts.
+puid=$(sed -n 's/^PIPELINES_UID=//p' .env | tail -n 1); pgid=$(sed -n 's/^PIPELINES_GID=//p' .env | tail -n 1)
+chown -R "${puid:-1000}:${pgid:-1000}" pipelines
+echo "pipelines/ owned by ${puid:-1000}:${pgid:-1000}"
+
 echo "== 7. build + start with this guest's settings"
 docker compose up -d --build
 for i in $(seq 1 60); do
