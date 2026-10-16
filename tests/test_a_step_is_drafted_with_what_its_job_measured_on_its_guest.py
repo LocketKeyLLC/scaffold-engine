@@ -47,3 +47,10 @@ def test_a_step_about_no_guest_gets_nothing():
 
 def test_the_draft_path_carries_it():
     assert "_ge.earlier_reads(_db_ge, job_id, run_node, _inv)" in inspect.getsource(execution_agent)
+
+
+def test_a_long_record_keeps_what_ran_and_what_it_saw():
+    long = {"node_key": "T9", "title": "Install Ollama on ai-vm",
+            "output_text": "## Run this\ncat > /opt/ollama/docker-compose.yml\ndocker exec ollama ollama list\n" + "x" * 6000 + "\nNAME ID SIZE"}
+    b = ge.block([long], "110", set())
+    assert "docker exec ollama ollama list" in b and "NAME ID SIZE" in b and "left out" in b

@@ -36,7 +36,14 @@ def block(rows: list[dict], gid: str, skip: set[str]) -> str:
              "Read off the machine by finished steps (not this step's upstream). Use these values; do not guess them."]
     for r in picked:
         out = str(r["output_text"])
-        tail = out[-PER_STEP_CHARS:]
+        # §17.1611b — what the step RAN is at the head of its record, what it SAW at the tail; both are evidence.
+        # Live (T11 "Pull selected models"): T9's tail said "Testing ollama list…" while its head held
+        # `docker exec ollama …` -- the drafter, given only the tail, ran `ollama pull` on the VM, where no ollama is.
+        if len(out) <= PER_STEP_CHARS:
+            tail = out
+        else:
+            head_n = PER_STEP_CHARS * 2 // 5
+            tail = out[:head_n] + "\n[… middle of the record left out …]\n" + out[-(PER_STEP_CHARS - head_n):]
         # the records hold their own ``` fences (runbooks, outputs): a tilde fence cannot be closed by them
         parts.append(f"### {r['node_key']} — {r.get('title') or ''}\n~~~~\n{tail.replace('~~~~', '~ ~ ~ ~')}\n~~~~")
     return "\n\n".join(parts)
