@@ -1708,6 +1708,11 @@ _AUTH_VERBS = frozenset({"login", "logout", "signin", "signout", "token", "sessi
                          "authenticate", "auth"})
 
 
+#: §17.1619 — POSTs that query a model and change nothing (last two path segments)
+_QUERY_POSTS = frozenset({"chat/completions", "v1/completions", "v1/embeddings", "api/chat", "api/generate",
+                          "api/embed", "api/embeddings"})
+
+
 def api_ports_changed(texts: list[str]) -> dict:
     r"""``{port: line}`` for every HTTP call in these texts that changes state.
 
@@ -1733,6 +1738,13 @@ def api_ports_changed(texts: list[str]) -> dict:
                 # real change; no login shape is lost by this.
                 seg = [s for s in (m.group("path") or "").split("/") if s]
                 if seg and seg[-1].lower() in _AUTH_VERBS:
+                    continue
+                # §17.1619 — an inference/search QUERY changes nothing: a POST to `/v1/chat/completions`,
+                # `/v1/completions`, `/v1/embeddings`, Ollama's `/api/generate|chat|embed|embeddings` asks a model a
+                # question. Live (job 0fb4ea7f T17, the end-to-end test of the server engine) was refused for
+                # "changing" the API it only asked.
+                if "/".join(seg[-2:]).lower() in _QUERY_POSTS or (seg and seg[-1].lower() in ("generate", "embed", "embeddings")
+                                                                 and len(seg) >= 2 and seg[-2].lower() == "api"):
                     continue
                 out.setdefault(m.group("port"), ln.strip()[:200])
             for m in _URL_PORT_RE.finditer(ln):
