@@ -30,6 +30,13 @@ async def _require_valid_models(overrides: dict | None = None):
     the set of missing role→model names.
     """
     missing = await validate_models(overrides)
+    # §17.1623 — a missing CLOUD tag is a few-KB manifest the engine can pull
+    # itself; try (throttled) before refusing. Local tags still 422.
+    if missing:
+        from app.modules.cloud_role_tags import ensure_cloud_role_tags, is_cloud_tag
+        cloud = {m.split("=", 1)[1] for m in missing if is_cloud_tag(m.split("=", 1)[1])}
+        if cloud and (await ensure_cloud_role_tags(tags=cloud))["pulled"]:
+            missing = await validate_models(overrides)
     if missing is None:
         raise HTTPException(
             status_code=503,

@@ -72,7 +72,9 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     _fake(bindir, "docker", f'echo "docker $*" >> {log}\ncase "$1 $2" in\n'
                             f'  "network inspect") [ -f {tmp_path}/net ] || exit 1;;\n'
                             f'  "network create") touch {tmp_path}/net;;\n'
-                            '  "exec ollama") [ "$4" = list ] && printf "NAME ID\\nqwen3:4b x\\n";;\n'
+                            '  "exec ollama") case "$4" in list) printf "NAME ID\\nqwen3:4b x\\n";;\n'
+                            f'    pull) [ -f {tmp_path}/refuse ] && [[ "$5" == *cloud ]] && exit 1;;\n'
+                            '    *) [ "$3" = cat ] && echo "ssh-ed25519 AAAAfakekey";; esac;;\n'
                             '  "compose config") echo \'{"volumes": {"open-webui": {"external": true, "name": "open-webui"}, '
                             '"cache": {}}}\';;\n'
                             '  "volume inspect") exit 1;;\nesac\nexit 0\n')
@@ -96,13 +98,21 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     calls = log.read_text()
     assert calls.count("network create") == 1, "ai-network is created once"
     assert "ollama pull hf.co/x/coder:Q4" in calls and "ollama pull qwen3:4b" not in calls
-    assert "ollama pull false" not in calls and "ollama pull ollama" not in calls and "397b-cloud" not in calls
+    assert "ollama pull false" not in calls and "ollama pull ollama" not in calls
+    assert "ollama pull qwen3.5:397b-cloud" in calls, "§17.1623 — the cloud fallback tag is registered by the deploy"
     assert "--ctorigdstport 3000" in calls and "--ctorigdstport 8000" in calls
     assert (ollama / "docker-compose.override.yml").read_text().count("ai-network") == 1
     assert str(repo) in (units / "scaffold-lan-gate.service").read_text()
     assert "volume create open-webui" in calls and "volume create cache" not in calls, "§17.1618e — external volumes only"
     assert "chown -R 1000:1000 pipelines" in calls, "§17.1621 — the pipelines container (uid 1000) writes its valves there"
     assert calls.index("chown -R") < calls.index("compose up -d --build"), "before the stack starts"
+    # §17.1623 — the cloud is the FALLBACK: a refused cloud pull (daemon key not yet added) warns with the key and
+    # the deploy still completes; a refused LOCAL pull still fails it.
+    (tmp_path / "refuse").touch()
+    r = subprocess.run(["bash", "scripts/deploy_on_guest.sh", str(settings)], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "cloud tag qwen3.5:397b-cloud not registered" in r.stderr and "ssh-ed25519 AAAAfakekey" in r.stderr
 
 
 def test_the_deploy_script_refuses_a_cpu_without_x86_64_v2():

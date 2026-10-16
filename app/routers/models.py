@@ -314,6 +314,18 @@ async def put_model_role(
         )
     if provider == "ollama":
         tags = await _pulled_tags()
+        # §17.1623 — a cloud tag is registered by the engine, not the operator.
+        if tags is not None and model not in tags and _is_cloud_tag(model):
+            from app.modules.cloud_role_tags import ensure_cloud_role_tags
+            res = await ensure_cloud_role_tags(force=True, tags={model})
+            if res["pulled"]:
+                tags = tags | {model}
+            elif res["failed"].get(model):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"model {model!r}: the engine's Ollama refused the "
+                            f"pull: {res['failed'][model]}"),
+                )
         if tags is not None and model not in tags:
             raise HTTPException(
                 status_code=422,
