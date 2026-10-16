@@ -334,7 +334,7 @@ esac
 
 
 #: §17.1618 — "deploy the scaffold engine (its services / stack) in VM N": the engine deploying ITSELF
-_DEPLOY_ENGINE_RE = re.compile(r"\bdeploy(?:s|ing)?\b[^.\n]{0,40}\b(?:scaffold[- ]engine|the engine|engine(?:'s)?\s+(?:services|stack))\b", re.I)
+_DEPLOY_ENGINE_RE = re.compile(r"\b(?:re)?deploy(?:s|ing)?\b[^.\n]{0,40}\b(?:scaffold[- ]engine|the engine|engine(?:'s)?\s+(?:services|stack))\b", re.I)
 #: a settings line in the step's own text: KEY=VALUE (the engine's .env keys and the deploy script's own)
 _SETTING_LINE_RE = re.compile(r"^\s*`?([A-Z][A-Z0-9_]{1,60})=([^\s`]+)`?\s*$", re.M)
 _SECRETISH_RE = re.compile(r"KEY|PASSWORD|SECRET|TOKEN|PASS\b")
