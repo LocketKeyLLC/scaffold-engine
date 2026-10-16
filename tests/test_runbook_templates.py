@@ -79,7 +79,8 @@ def test_the_reach_template_copies_the_key_only_when_none_is_known():
     yes = rt.render(rt.REACH_VM_SSH_AND_RUN, rt.values_for(rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm"), ENV, {"REMOTE_COMMANDS": REMOTE}))
     no = rt.render(rt.REACH_VM_SSH_AND_RUN, rt.values_for(rt.REACH_VM_SSH_AND_RUN, ADD82, _truth("vm", key="ADD26"), ENV, {"REMOTE_COMMANDS": REMOTE}))
     assert 'if [ "yes" = "yes" ]' in yes and 'if [ "no" = "yes" ]' in no
-    assert "sshpass -e ssh-copy-id" in yes and "sudo -S -p '' bash -s" in yes and REMOTE in yes
+    # §17.1613 — the step's script is written into the guest (sudo tee) and run detached as a unit
+    assert "sshpass -e ssh-copy-id" in yes and "sudo -S -p '' tee /root/.scaffold_step.sh" in yes and REMOTE in yes
 
 
 def test_selection_follows_the_step_and_the_measured_guest():

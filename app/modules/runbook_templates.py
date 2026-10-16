@@ -238,45 +238,97 @@ REACH_VM_SSH_AND_RUN = Template(
                                 and not getattr(truth, "agent", False),
     params=[
         Param("GID", "subject"),
+        Param("STEP", "node_key"),
         Param("GUEST_USER", "operator", "the account inside the guest that has sudo (the operator logs in with it)"),
         Param("REMOTE_COMMANDS", "model", "the commands to run inside the guest, as root, one per line"),
         Param("NEEDS_KEY", "truth", default="yes"),
     ],
-    files={"/tmp/in_vm_{GID}.sh": r'''#!/usr/bin/env bash
-# Reach VM {GID} over ssh and run this step's commands inside it as root.
+    # §17.1613 — DETACHED, like the container and agent templates (§17.1317): the step's commands run inside the
+    # guest as a transient systemd unit, started by one runner call and waited on across several, each inside the
+    # runner's 180 s budget. Live (job 0fb4ea7f T9 "Install Ollama server", 2026-10-15): `docker compose up -d` pulling
+    # the image ran past 180 s in the single ssh call this template made, and the run was cut ("timed out after 180s").
+    files={"/tmp/in_vm_{GID}.sh": r"""#!/usr/bin/env bash
+# Reach VM {GID} over ssh and run this step's commands inside it as root, detached (start | wait | last).
 set -uo pipefail
 GID={GID}
 USER_NAME="${GUEST_USER}"
+UNIT="scaffold-{STEP}"
+IPFILE=/tmp/in_vm_{GID}.ip
 
-''' + WAIT_FOR_ADDRESS + r'''
+""" + WAIT_FOR_ADDRESS + r"""
 
+SSHO="-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new"
 qm status "$GID" | grep -q running || qm start "$GID"
-MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
-IP="$(wait_for_address "$MAC" || true)"
-if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
-echo "VM $GID is at $IP"
-# §17.1299 -- probe key auth FIRST: a cloud-init install already seeded this host's key (--sshkeys) and a cloud
-# image refuses password auth, so a blind ssh-copy-id would fail on a guest that is perfectly reachable.
-if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" true >/dev/null 2>&1; then
-    echo "key auth works for $USER_NAME@$IP"
-elif [ "{NEEDS_KEY}" = "yes" ]; then
-    command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
-    SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
-        || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password, or password auth is off in the guest)"; exit 1; }
-else
-    echo "FAILED: key auth to $USER_NAME@$IP was refused and no password path is allowed here"; exit 1
+IP="$(cat "$IPFILE" 2>/dev/null || true)"
+if [ -z "$IP" ] || ! ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
+    MAC="$(qm config "$GID" | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]*\).*/\1/p' | head -n 1 || true)"
+    IP="$(wait_for_address "$MAC" || true)"
+    if [ -z "$IP" ]; then echo "FAILED: VM $GID (MAC $MAC) did not appear on the network"; exit 1; fi
+    echo "VM $GID is at $IP"
+    # §17.1299 -- probe key auth FIRST: a cloud-init install already seeded this host's key (--sshkeys) and a cloud
+    # image refuses password auth, so a blind ssh-copy-id would fail on a guest that is perfectly reachable.
+    if ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
+        echo "key auth works for $USER_NAME@$IP"
+    elif [ "{NEEDS_KEY}" = "yes" ]; then
+        command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
+        SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" >/dev/null \
+            || { echo "FAILED: ssh-copy-id to $USER_NAME@$IP was refused (wrong account or password, or password auth is off in the guest)"; exit 1; }
+    else
+        echo "FAILED: key auth to $USER_NAME@$IP was refused and no password path is allowed here"; exit 1
+    fi
+    printf '%s\n' "$IP" > "$IPFILE"
 fi
+# one root command inside the guest; sudo reads the password from the first line of stdin
+gsu() { ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "$1")" <<< "$MASS_PASSWORD" 2>/dev/null; }
 cat > /tmp/in_vm_{GID}_remote.sh <<'REMOTE'
 {STRICT}
 export DEBIAN_FRONTEND=noninteractive
 {REMOTE_COMMANDS}
 REMOTE
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$IP" "sudo -S -p '' bash -s" <<< "$MASS_PASSWORD
-$(cat /tmp/in_vm_{GID}_remote.sh)"
-'''},
-    run='MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh',
+case "${1:-start}" in
+  start)
+    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' tee /root/.scaffold_step.sh >/dev/null" <<< "$MASS_PASSWORD
+$(cat /tmp/in_vm_{GID}_remote.sh)" || { echo "FAILED: could not write the step's script into VM $GID"; exit 1; }
+    gsu "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null
+    gsu "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c 'bash /root/.scaffold_step.sh; echo \$? > /root/.scaffold_step.rc'" >/dev/null \
+      || { echo "FAILED: could not start $UNIT inside VM $GID (is systemd running in the guest?)"; exit 1; }
+    echo "started $UNIT inside VM $GID"
+    ;;&
+  start|wait|last)
+    deadline=$(( SECONDS + 150 ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      state="$(gsu "systemctl is-active $UNIT" | tr -d '[:space:]')"
+      case "$state" in
+        active|activating|reloading|deactivating) sleep 5 ;;
+        *) break ;;
+      esac
+    done
+    state="$(gsu "systemctl is-active $UNIT" | tr -d '[:space:]')"
+    if [ "$state" = "active" ] || [ "$state" = "activating" ]; then
+      if [ "${1:-start}" = "last" ]; then echo "FAILED: $UNIT is still running after the whole wait budget; the step did not finish"; gsu "tail -n 20 /root/.scaffold_step.log"; exit 1; fi
+      echo "STILL RUNNING: $UNIT inside VM $GID (waited 150 s more; the next command keeps waiting)"; gsu "tail -n 3 /root/.scaffold_step.log"; exit 0
+    fi
+    # §17.1490 -- the step's OWN exit code, saved by the unit (`--collect` discards a failed unit's result)
+    code="$(gsu "cat /root/.scaffold_step.rc 2>/dev/null" | tr -d '[:space:]')"
+    # §17.1327 -- the log belongs to the phase that SAW the unit finish
+    if [ -z "$(gsu "cat /root/.scaffold_step.reported 2>/dev/null")" ]; then
+      gsu "echo done > /root/.scaffold_step.reported" >/dev/null
+      gsu "tail -n 60 /root/.scaffold_step.log 2>/dev/null"
+      gsu "tail -n 20 /root/.scaffold_step.err 2>/dev/null" >&2
+    else
+      echo "(the log was printed by the phase that saw $UNIT finish)"
+    fi
+    if [ "$code" = "0" ]; then echo "$UNIT finished (exit 0)"; exit 0; fi
+    echo "FAILED: $UNIT ended with exit=${code:-none recorded (the step did not finish)}"; exit "${code:-1}"
+    ;;
+  *) echo "unknown phase: $1"; exit 2;;
+esac
+"""},
+    run=['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh start']
+        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh wait'] * 7
+        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh last'],
     verify=["qm status {GID}"],
-    risk="Runs this step's commands as root inside VM {GID}; copies this host's key into the guest first.",
+    risk="Runs this step's commands as root inside VM {GID} (detached, waited on); copies this host's key into the guest first.",
 )
 
 
