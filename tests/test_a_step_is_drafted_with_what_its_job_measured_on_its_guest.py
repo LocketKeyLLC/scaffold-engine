@@ -54,3 +54,10 @@ def test_a_long_record_keeps_what_ran_and_what_it_saw():
             "output_text": "## Run this\ncat > /opt/ollama/docker-compose.yml\ndocker exec ollama ollama list\n" + "x" * 6000 + "\nNAME ID SIZE"}
     b = ge.block([long], "110", set())
     assert "docker exec ollama ollama list" in b and "NAME ID SIZE" in b and "left out" in b
+
+
+def test_the_newest_record_comes_first():
+    rows = [{"node_key": "T6", "title": "driver on ai-vm", "output_text": "old"},
+            {"node_key": "T9", "title": "ollama on ai-vm", "output_text": "newest"}]
+    b = ge.block(rows, "110", set())
+    assert b.index("### T9") < b.index("### T6")

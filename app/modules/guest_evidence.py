@@ -34,7 +34,9 @@ def block(rows: list[dict], gid: str, skip: set[str]) -> str:
         return ""
     parts = [f"## What earlier steps of this job measured on guest {gid}",
              "Read off the machine by finished steps (not this step's upstream). Use these values; do not guess them."]
-    for r in picked:
+    # §17.1611c — newest first: the drafter's context is capped (`plan_context`), and the most recent step on the guest
+    # is the most likely to say how things now stand there (live, T9's record -- Ollama in Docker -- was the one cut)
+    for r in reversed(picked):
         out = str(r["output_text"])
         # §17.1611b — what the step RAN is at the head of its record, what it SAW at the tail; both are evidence.
         # Live (T11 "Pull selected models"): T9's tail said "Testing ollama list…" while its head held

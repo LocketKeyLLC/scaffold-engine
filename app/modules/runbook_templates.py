@@ -933,7 +933,7 @@ def plan_context(upstream: str = "", environment: Optional[dict] = None) -> str:
     parts: list[str] = []
     up = str(upstream or "").strip()
     if up:
-        parts.append("WHAT EARLIER STEPS ESTABLISHED (reproduce content they specify; do not invent substitutes):\n" + up[:6000])
+        parts.append("WHAT EARLIER STEPS ESTABLISHED (reproduce content they specify; do not invent substitutes):\n" + up[:10000])   # §17.1611c — room for the guest evidence
     env = environment or {}
     facts = [str(f.get("text") if isinstance(f, dict) else f) for f in (env.get("facts") or [])]
     facts = [f.strip() for f in facts if f and f.strip()][:40]
