@@ -4435,6 +4435,15 @@ def prints_a_secret(commands: list[str], verify: Optional[list[str]] = None,
     return out
 
 
+#: §17.1612 — `. FILE` / `source FILE`, and what the standard release files define
+_SOURCED_RE = re.compile(r"(?:^|[\s;&|(`])(?:\.|source)\s+([\"']?/[^\s;&|)`]+)")
+_SOURCED_ANY = "*sourced*"
+_OS_RELEASE = {"NAME", "VERSION", "ID", "ID_LIKE", "PRETTY_NAME", "VERSION_ID", "VERSION_CODENAME", "UBUNTU_CODENAME",
+               "HOME_URL", "SUPPORT_URL", "BUG_REPORT_URL", "PRIVACY_POLICY_URL", "LOGO", "BUILD_ID", "VARIANT", "VARIANT_ID"}
+_SOURCED_KNOWN = {"/etc/os-release": _OS_RELEASE, "/usr/lib/os-release": _OS_RELEASE,
+                  "/etc/lsb-release": {"DISTRIB_ID", "DISTRIB_RELEASE", "DISTRIB_CODENAME", "DISTRIB_DESCRIPTION"}}
+
+
 def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288b — a secret referenced inside an ssh REMOTE COMMAND cannot work
     and must not be made to. Live, ADD82's script ran
@@ -5352,6 +5361,13 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                    if not _SELF_ASSIGN_RE.match(b[m.start("name"):])}
         out_set |= {g for b in blobs for m in _VAR_BIND_RE.finditer(b)
                     for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        # §17.1612 — a SOURCED file assigns too: `$(. /etc/os-release && echo "$VERSION_CODENAME")` (Docker's own
+        # install line) was refused "nothing sets it" (live, job 0fb4ea7f T7). The two release files' names are known;
+        # any other sourced file may set anything, and then nothing in that command is judged.
+        for b in blobs:
+            for sm in _SOURCED_RE.finditer(b):
+                path = sm.group(1).strip("\"'")
+                out_set |= _SOURCED_KNOWN.get(path, {_SOURCED_ANY})
         return out_set
 
     for cmd in texts:
@@ -5383,6 +5399,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
         assigned = _assigned_in(host_bodies)
         for gid, payload in guest_bits:
             inside = _assigned_in([payload]) | set(_SHELL_VARS)
+            if _SOURCED_ANY in inside:
+                continue                    # §17.1612
             for m in _VAR_REF_RE.finditer(payload):
                 name = m.group("brace") or m.group("bare")
                 if name in inside or name.isdigit():
@@ -5404,6 +5422,8 @@ def variables_nothing_sets(commands: list[str], files: Optional[list[dict]], pol
                       "inside the payload from something the guest can read.")})
                 break
         for body in host_bodies:
+            if _SOURCED_ANY in assigned:
+                break                       # §17.1612 — a sourced file may set any name: judge nothing here
             for m in _VAR_REF_RE.finditer(body):
                 name = m.group("brace") or m.group("bare")
                 if name in have or name in assigned or name.isdigit():
