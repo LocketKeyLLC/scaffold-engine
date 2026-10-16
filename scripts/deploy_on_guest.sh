@@ -111,7 +111,19 @@ if docker inspect "$OC" >/dev/null 2>&1; then
     done
 fi
 
-echo "== 6. build + start with this guest's settings"
+echo "== 6. external volumes the configured stack declares"
+# §17.1618e — bootstrap creates the volumes of the profiles it saw; a profile this guest turns on later (owui) needs its
+# own (live: "external volume \"open-webui\" not found" on the third deploy)
+for v in $(docker compose config --format json | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+for k, v in (c.get("volumes") or {}).items():
+    if isinstance(v, dict) and v.get("external"):
+        print(v.get("name") or k)'); do
+    docker volume inspect "$v" >/dev/null 2>&1 || { docker volume create "$v" >/dev/null && echo "created volume $v"; }
+done
+
+echo "== 7. build + start with this guest's settings"
 docker compose up -d --build
 for i in $(seq 1 60); do
     if curl -sf http://localhost:8000/health >/dev/null 2>&1; then echo "engine healthy"; break; fi

@@ -72,7 +72,10 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     _fake(bindir, "docker", f'echo "docker $*" >> {log}\ncase "$1 $2" in\n'
                             f'  "network inspect") [ -f {tmp_path}/net ] || exit 1;;\n'
                             f'  "network create") touch {tmp_path}/net;;\n'
-                            '  "exec ollama") [ "$4" = list ] && printf "NAME ID\\nqwen3:4b x\\n";;\nesac\nexit 0\n')
+                            '  "exec ollama") [ "$4" = list ] && printf "NAME ID\\nqwen3:4b x\\n";;\n'
+                            '  "compose config") echo \'{"volumes": {"open-webui": {"external": true, "name": "open-webui"}, '
+                            '"cache": {}}}\';;\n'
+                            '  "volume inspect") exit 1;;\nesac\nexit 0\n')
     for n in ("curl", "systemctl"):
         _fake(bindir, n, f'echo "{n} $*" >> {log}\nexit 0\n')
     _fake(bindir, "iptables", f'echo "iptables $*" >> {log}\n[ "$1" = -C ] && exit 1\nexit 0\n')
@@ -96,6 +99,7 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
     assert "--ctorigdstport 3000" in calls and "--ctorigdstport 8000" in calls
     assert (ollama / "docker-compose.override.yml").read_text().count("ai-network") == 1
     assert str(repo) in (units / "scaffold-lan-gate.service").read_text()
+    assert "volume create open-webui" in calls and "volume create cache" not in calls, "§17.1618e — external volumes only"
 
 
 def test_the_deploy_script_refuses_a_cpu_without_x86_64_v2():
