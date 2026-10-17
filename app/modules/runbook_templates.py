@@ -593,6 +593,18 @@ _IN_GUEST_SIGNAL_RE = re.compile(
     r"\b(?:inside|within)\s+(?:the\s+)?(?:vm|container|ct|lxc|guest)\b|\binside\b"
     r"|\b(?:systemctl|systemd|service|unit|daemon|apt|apt-get|dpkg|pip|npm|steamcmd|app_update)\b"
     r"|\b(?:enabled|active|listening)\b|\b(?:UDP|TCP)\s*\d{2,5}\b|\bport\s*\d{2,5}\b", re.I)
+#: §17.1627 — "not inside the VM" says the work is NOT in the guest. Live (job 0fb4ea7f RM1, 2026-10-17): "On the Proxmox
+#: host (not inside the VM): … `qm disk unlink 110 …`, `qm set 110 --ide2 none …`" matched `\binside\b`, which vetoed both
+#: host-side rules, and the host's own commands were drafted into the in-guest ssh template (refused: /etc/pve is not
+#: in a guest). A negated inside is removed before any in-guest test reads the text.
+_NEGATED_INSIDE_RE = re.compile(
+    r"\b(?:not|never|nothing|no\s+work)\s+(?:\w+\s+){0,2}?(?:inside|within|in)\s+(?:the\s+|a\s+|any\s+)?"
+    r"(?:vm|guest|container|ct|lxc)s?\b(?:\s+\d+)?", re.I)
+
+
+def _affirmed(text: str) -> str:
+    """The text with every negated "inside the guest" removed (§17.1627)."""
+    return _NEGATED_INSIDE_RE.sub(" ", text or "")
 
 
 #: §17.1339b — `pct exec 111`, `qm guest exec 106`, `pct push 103`: the HOST's way of
@@ -692,7 +704,7 @@ def host_side_only(node: dict) -> bool:
         return True
     if _names_only_host_commands(text):         # §17.1469
         return True
-    return bool(_HOST_SIDE_RE.search(text)) and not _IN_GUEST_SIGNAL_RE.search(text)
+    return bool(_HOST_SIDE_RE.search(text)) and not _IN_GUEST_SIGNAL_RE.search(_affirmed(text))   # §17.1627
 
 
 _HOST_TOOL_RE = re.compile(r"^\s*(?:qm|pct|pvesm|pvesh|pveum|pvenode|pve-firewall)\s+[a-z]")
@@ -709,7 +721,7 @@ def _names_only_host_commands(text: str) -> bool:
     work = re.split(r"\bDone when\b", text or "", maxsplit=1, flags=re.I)[0]
     cmds = re.findall(r"`([^`\n]+)`", work)
     cmds = [c for c in cmds if re.match(r"\s*[a-z][\w.-]*\s", c)]
-    if re.search(r"\binside\b|\bwithin\s+(?:the\s+)?(?:vm|guest|container)\b", re.sub(r"`[^`\n]*`", "", work), re.I):
+    if re.search(r"\binside\b|\bwithin\s+(?:the\s+)?(?:vm|guest|container)\b", _affirmed(re.sub(r"`[^`\n]*`", "", work)), re.I):
         return False                 # §17.1329's ADD66: "then confirm inside the guest that palworld.service is active"
     return bool(cmds) and all(_HOST_TOOL_RE.match(c) and not _HOST_INTO_GUEST_CMD_RE.match(c) for c in cmds)
 
@@ -742,7 +754,7 @@ def intent_of(node: dict) -> Optional[str]:
         return READ_GUEST_CONSOLE.name
     if host_side_only(node):
         return None
-    if _INSIDE_RE.search(text):
+    if _INSIDE_RE.search(_affirmed(text)):                                # §17.1627
         return "guest_work"            # reach_vm_ssh_and_run or run_in_container, once the guest's kind is measured
     return None
 
