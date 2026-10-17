@@ -6207,7 +6207,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1488 — and the step's OWN checks count here, as they do at the run (§17.1470): ADD160 named three
     # (`wg show`, the public-address read, the IPv6 read) and its frame was refused "this block has no check at all"
     if cmds and not verify:
-        verify = with_own_checks(node, verify)
+        verify = with_own_checks(node, verify, cmds)
     if cmds and not verify:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
@@ -6599,8 +6599,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         return {"outcome": "not_runnable", "refused": waiting.get("refused") or [],
                 "secrets_missing": waiting.get("secrets_missing") or []}
     commands = [str(c) for c in waiting.get("commands") or []]
-    verify_cmds = with_own_checks({"title": waiting.get("title"), "description": waiting.get("description")},
-                                  waiting.get("verify") or [])                   # §17.1470
+    # §17.1625 — the step's whole text: the frame's `description` is `description or prompt_template`, so a short
+    # description hid the prompt's "Done when"; the frame now carries the prompt too (a frame parked before it: as before)
+    verify_cmds = with_own_checks({"title": waiting.get("title"), "description": waiting.get("description"),
+                                   "prompt_template": waiting.get("prompt_template")},
+                                  waiting.get("verify") or [], commands)         # §17.1470, §17.1625
     asked = list(waiting.get("inputs") or [])
     need = [i for i in asked if not i.get("secret")]
     secrets_asked = [i for i in asked if i.get("secret")]
@@ -10272,7 +10275,34 @@ def _reads_only(cmd: str) -> bool:
     return read_only_command(c)
 
 
-def with_own_checks(node: Optional[dict], verify: list) -> list[str]:
+#: §17.1625 — the engine's in-guest templates: their block runs INSIDE guest N through the host's script
+#: (`bash /tmp/in_vm_N.sh start` over ssh, `…/in_vm_N_agent.sh` through the guest agent, `…/in_ct_N.sh` in an LXC).
+_IN_GUEST_RUN_RE = re.compile(
+    r"^(?P<prefix>.*?)bash\s+/tmp/in_(?P<kind>vm|ct)_(?P<gid>\d+)(?P<agent>_agent)?\.sh\s+(?:start|wait|last)\b")
+#: a check that names the hypervisor itself is a host check whatever the step's subject
+_HOST_CHECK_RE = re.compile(r"^\s*(?:qm|pct|pvesh|pvesm|pvecm|pveversion|ha-manager|lxc-\w+)\b")
+
+
+def _inside_the_guest(commands: Optional[list]):
+    """§17.1625 — when the block runs inside a guest through an engine template, the wrapper that runs ONE check in
+    that same guest (as root); else None. Live (job 0fb4ea7f T18, 2026-10-16): the ssh template's checks are all
+    host-side (`qm status 110`), so the step's own `head -n 40 /opt/scaffold-engine/PLACEMENT.md` was added bare
+    and read the HOST, where the file does not exist; on the agent and LXC templates the same check was dropped."""
+    for c in commands or []:
+        m = _IN_GUEST_RUN_RE.match(str(c).strip())
+        if not m:
+            continue
+        gid, q = m["gid"], shlex.quote
+        if m["kind"] == "ct":
+            return lambda chk: f"pct exec {gid} -- bash -c {q(chk)}"
+        if m["agent"]:
+            return lambda chk: f"qm guest exec {gid} -- bash -c {q(chk)}"
+        prefix = m["prefix"]          # the run line's own MASS_PASSWORD / GUEST_USER assignments
+        return lambda chk: f"{prefix}bash /tmp/in_vm_{gid}.sh check {q(chk)}"
+    return None
+
+
+def with_own_checks(node: Optional[dict], verify: list, commands: Optional[list] = None) -> list[str]:
     """§17.1470 — the checks a step names after "Done when" always run, whatever the drafted block chose.
 
     Live (2026-10-11): ADR1 ("Point what earlier steps set up at the new address of VM 106") named three greps that
@@ -10285,8 +10315,13 @@ def with_own_checks(node: Optional[dict], verify: list) -> list[str]:
     # A bare check written for inside a guest (ADD84's `df -h /`) would read the HOST if run as written: only a
     # check that says where it runs is added, or any check when the block has checks and all run on the host.
     host_level = bool(out) and not any(into.match(c) for c in out)
+    inside = _inside_the_guest(commands)                                     # §17.1625
     for c in checks(node):
-        if c not in out and (into.match(c) or host_level):
+        if inside and not into.match(c) and not _HOST_CHECK_RE.match(c):
+            c = inside(c)              # the step's work is in the guest: so is its bare check
+        elif not (into.match(c) or host_level):
+            continue
+        if c not in out:
             out.append(c)
     return out
 
@@ -10322,7 +10357,8 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     against the step's title AND its "done when" text). `unknown` or
     `contradicted` anywhere → None, and the block is parked as before.
     """
-    verify_cmds = with_own_checks(node, (frame or {}).get("verify") or [])        # §17.1470
+    verify_cmds = with_own_checks(node, (frame or {}).get("verify") or [],
+                                  (frame or {}).get("commands") or [])          # §17.1470, §17.1625
     if not verify_cmds or not (frame or {}).get("commands"):
         return None
     # §17.1365 — a pre-pass means nothing when the checks could not have failed.

@@ -93,8 +93,14 @@ def _looks_like_command(c: str) -> bool:
 
 
 def checks(node: Optional[dict]) -> list[str]:
-    """The step's own read-only checks: backticked commands after 'Done when'."""
-    parts = _DONE_WHEN_RE.split(_text(node), 1)
+    """The step's own read-only checks: backticked commands after 'Done when'.
+
+    §17.1625 — read from the description AND the prompt: `_text` takes the description when there is one, and a
+    short one ("From D9.", job 0fb4ea7f RD1) hid the prompt's whole "Done when" -- the checks never ran."""
+    n = node or {}
+    body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
+                                     if str(n.get(k) or "").strip()))
+    parts = _DONE_WHEN_RE.split(body, 1)
     if len(parts) < 2:
         return []
     from app.modules.assist_state_check import read_only_command

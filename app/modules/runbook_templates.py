@@ -259,6 +259,15 @@ IPFILE=/tmp/in_vm_{GID}.ip
 """ + WAIT_FOR_ADDRESS + r"""
 
 SSHO="-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new"
+# §17.1625 -- `check '<cmd>'`: ONE read-only check INSIDE the guest, as root, for the step's own "Done when" checks
+# (live, job 0fb4ea7f T18: `head -n 40 /opt/scaffold-engine/PLACEMENT.md` ran on the HOST and failed). No setup: it
+# never starts the VM, looks for an address or copies a key -- a check may run before the block is approved.
+if [ "${1:-}" = check ]; then
+    IP="$(cat "$IPFILE" 2>/dev/null || true)"
+    [ -n "$IP" ] || { echo "FAILED: no address recorded for VM $GID yet (no step has reached it over ssh)"; exit 1; }
+    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "${2:-true}")" <<< "$MASS_PASSWORD"
+    exit $?
+fi
 qm status "$GID" | grep -q running || qm start "$GID"
 IP="$(cat "$IPFILE" 2>/dev/null || true)"
 if [ -z "$IP" ] || ! ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
