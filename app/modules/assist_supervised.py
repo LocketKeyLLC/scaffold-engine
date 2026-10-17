@@ -201,6 +201,19 @@ def split_segments(cmd: str) -> list[str]:
     return [o for o in out if o.strip()]
 
 
+def guarded_write(cmd: str) -> str:
+    """§17.1629 — the read-only guard of a `<read> && <write>` line (one top-level `&&`, no other
+    operator after it), or ''. Its non-zero exit means "not needed", not "failed"."""
+    masked = mask_quoted(cmd or "")
+    at = masked.find("&&")
+    if at < 0 or "&&" in masked[at + 2:] or re.search(r"\|\||;", masked[at + 2:]) or len(masked) != len(cmd):
+        return ""
+    guard, write = cmd[:at].strip(), cmd[at + 2:].strip()
+    if not guard or not write or not read_only(guard)[0] or read_only(write)[0]:
+        return ""
+    return guard
+
+
 def mask_quoted(cmd: str) -> str:
     """The command with the INSIDE of quoted strings blanked — so a `>` in a
     quoted regex (`grep -o "<Name>[^<]*</Name>"`, live: refused as 'redirect')
@@ -554,6 +567,26 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
         # writes are the sequence; a read in the middle is information.
         informational = (not refused and not unreachable and code not in (0, None)
                          and read_only(cmd)[0])
+        # §17.1629 — `qm status 110 | grep -q running && qm stop 110` exits 1 when the VM is already
+        # stopped: the guard said "nothing to do", and that aborted GPU0 before its `qm set`. Asked
+        # alone, a guard that still says no and prints what the line printed means the write never ran.
+        guard_said_no = False
+        if not refused and not unreachable and code not in (0, None) and not informational:
+            guard = guarded_write(cmd)
+            if guard:
+                gap = mint_approval(guard, token)
+                try:
+                    gres = await mcp_client.call_tool(spec, WRITE_TOOL, {"command": guard, "approval": gap,
+                                                                         "timeout_s": RUN_COMMAND_TIMEOUT_S})
+                    graw = gres.text or ""
+                    gst = getattr(gres, "structured", None)
+                    if isinstance(gst, dict) and isinstance(gst.get("result"), str):
+                        graw = gst["result"]
+                    gcode, gout = _exit_of(graw)
+                    guard_said_no = gcode not in (0, None) and gout.strip() == out.strip()
+                except Exception as exc:
+                    logger.warning("guard_recheck_failed cmd=%r err=%r", guard[:120], exc)
+                informational = guard_said_no
         ok = (code == 0) and not refused
         done.append({"command": cmd, "output": out.rstrip(), "exit": code, "ok": ok, "approval_id": ap["id"],
                      "refused": refused, "unreachable": unreachable, "informational": informational})
