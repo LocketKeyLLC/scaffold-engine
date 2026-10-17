@@ -2602,7 +2602,10 @@ _GUEST_SUBJECT_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*(\d{3,5}
 #: guest exec) or is the host's own work ON it (start, set, config, …) — both
 #: are the step addressing its subject.
 _REACH_TOOL_INSTALL_RE = re.compile(r"\bapt(?:-get)?\s+install\b[^\n|;&]*\b(?:sshpass|nmap|openssh-client|arp-scan|fping)\b")
-_GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+)\s+(\d{3,5})\b")
+#: §17.1628 — and a two-word subcommand (`qm disk unlink 110`, `qm disk move|import|resize`, `qm cloudinit update 106`,
+#: `qm guest cmd 106`): live (job 0fb4ea7f RM1, 2026-10-17) `qm disk unlink 110 --idlist unused0 --force` was refused as
+#: work that "would change the HOST instead of guest 110" while the `qm set 110 …` lines beside it passed.
+_GUEST_ADDRESS_RE = re.compile(r"\b(?:pct|qm)\s+(?:guest\s+exec|[a-z-]+(?:\s+[a-z][a-z-]*)?)\s+(\d{3,5})\b")
 
 
 def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],

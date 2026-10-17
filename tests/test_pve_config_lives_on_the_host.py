@@ -34,3 +34,20 @@ def test_a_host_side_write_reaches_the_guest_it_configures():
 def test_registered_for_redraft():
     m = "lives on the Proxmox HOST, not inside a guest"
     assert m in sr._SHAPE_REFUSALS and sr._WHOSE_GAP[m] == "drafter"
+
+
+def test_a_two_word_qm_subcommand_is_the_host_s_work_on_its_guest():
+    """§17.1628 — job 0fb4ea7f RM1: `qm disk unlink 110 …` was refused as work that "would change the HOST instead of
+    guest 110" while `qm set 110 …` beside it passed: the reach pattern knew `qm <verb> N` only."""
+    from app.modules.supervised_runs import commands_never_reach_the_guest
+    node = {"title": "On the Proxmox host: remove VM 110's unused disk and eject the ISO",
+            "prompt_template": "On the Proxmox host (not inside the VM): remove VM 110's unused disk."}
+    rm1 = ["cp /etc/pve/qemu-server/110.conf /root/110.conf.bak.$(date +%Y%m%d-%H%M%S)",
+           "qm disk unlink 110 --idlist unused0 --force", "qm set 110 --ide2 none,media=cdrom",
+           "qm set 110 --boot order=scsi0"]
+    assert commands_never_reach_the_guest(rm1, node) == []
+    for two_word in ["qm disk move 110 scsi0 oasis", "qm disk resize 110 scsi0 +10G", "qm cloudinit update 106"]:
+        assert commands_never_reach_the_guest([two_word], {"title": "VM 110 disk"}) == [], two_word
+    # the rule still bites: ADD82's host-side install for a guest reaches no guest
+    assert commands_never_reach_the_guest(["apt-get install -y qemu-guest-agent"],
+                                          {"title": "Install the guest agent in VM 106"})
