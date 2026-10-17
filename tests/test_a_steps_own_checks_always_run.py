@@ -47,5 +47,9 @@ def test_already_met_reads_the_steps_own_checks(monkeypatch):
 
 def test_the_run_verifies_with_them_too():
     src = pathlib.Path("app/modules/supervised_runs.py").read_text()
-    assert "verify_cmds = with_own_checks({\"title\": waiting.get(\"title\"), \"description\": waiting.get(\"description\")}," in src
-    assert "verify_cmds = with_own_checks(node, (frame or {}).get(\"verify\") or [])" in src
+    # §17.1625 — with the frame's commands (an in-guest block's checks run in the guest) and the step's whole text
+    assert ("verify_cmds = with_own_checks({\"title\": waiting.get(\"title\"), \"description\": waiting.get(\"description\"),\n"
+            "                                   \"prompt_template\": waiting.get(\"prompt_template\")},\n"
+            "                                  waiting.get(\"verify\") or [], commands)") in src
+    assert ("verify_cmds = with_own_checks(node, (frame or {}).get(\"verify\") or [],\n"
+            "                                  (frame or {}).get(\"commands\") or [])") in src
