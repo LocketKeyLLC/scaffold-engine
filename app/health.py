@@ -105,20 +105,24 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
         for role in SWITCHABLE_ROLE_FIELDS
         if not _pulled(getattr(settings, role))
     )
-    if not missing:
-        return []
     out = [
         "model roles reference tags not pulled on the Ollama daemon: "
         + ", ".join(missing)
         + " — pull them (ollama pull <tag>) or open the connect-models "
         "wizard at /ui/#/setup"
-    ]
+    ] if missing else []
     # §17.1623 — the engine pulls cloud tags itself; when the daemon refused,
     # say what it said (read-only: the last attempt's record, no pull here).
-    from app.modules.cloud_role_tags import last_failures
+    from app.modules.cloud_role_tags import dead_tags, last_failures, roles_naming
     for tag, err in sorted(last_failures().items()):
         if any(m.endswith(f"={tag}") for m in missing):
             out.append(f"the engine's pull of cloud tag {tag} was refused by Ollama: {err}")
+    # §17.1624 — a LISTED cloud tag Ollama refuses (retired models stay listed);
+    # the record is the reaper's last probe, never a call from this view.
+    for tag, err in sorted(dead_tags().items()):
+        if _pulled(tag):
+            out.append(f"cloud tag {tag} is listed but Ollama refuses it ({err}) — "
+                       f"re-point {', '.join(roles_naming(tag))}")
     return out
 
 

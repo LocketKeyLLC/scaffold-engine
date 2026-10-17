@@ -394,9 +394,9 @@ services:
       #   MODEL_CODER=kimi-k2.7-code:cloud
       #   MODEL_VERIFIER=glm-5.3-flash:cloud
       #   MODEL_ROUTER=gemma4:cloud
-      #   MODEL_RESEARCH_EXTRACT=deepseek-v4-flash:cloud
-      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud
-      #   MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      #   MODEL_RESEARCH_EXTRACT=deepseek-v4-pro:cloud
+      #   MODEL_CLOUD_HEAVY=deepseek-v4-pro:cloud
+      #   MODEL_CLOUD_ALT=deepseek-v4-pro:cloud
       #   MODEL_TRIAGE=gemma4:cloud
       #   MODEL_FALLBACK=qwen3.5:latest
       MODEL_ROUTER: ${MODEL_ROUTER:-qwen3:4b}

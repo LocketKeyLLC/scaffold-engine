@@ -396,6 +396,13 @@ async def _run_once() -> None:
         # persistently-broken Milvus TTL sweep failed silently. WARNING +
         # exc_info surfaces it without aborting the reaper cycle.
         logger.warning("staleness_sweep_failed", exc_info=True)
+    # §17.1624 — re-probe the cloud role tags (self-throttled to hourly; the
+    # eager first sweep is the startup check). A retired model stays LISTED.
+    try:
+        from app.modules.cloud_role_tags import check_cloud_role_tags
+        await check_cloud_role_tags()
+    except Exception:
+        logger.warning("cloud_role_tags_check_failed", exc_info=True)
 
 
 async def _cleanup_loop() -> None:

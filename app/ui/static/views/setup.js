@@ -22,9 +22,9 @@ const CLOUD_PICKS = {
   model_coder: "kimi-k2.7-code:cloud",
   model_verifier: "glm-5.3-flash:cloud",
   model_router: "gemma4:cloud",
-  model_research_extract: "deepseek-v4-flash:cloud",
-  model_cloud_heavy: "qwen3.5:397b-cloud",
-  model_cloud_alt: "qwen3.5:397b-cloud",
+  model_research_extract: "deepseek-v4-pro:cloud",
+  model_cloud_heavy: "deepseek-v4-pro:cloud",
+  model_cloud_alt: "deepseek-v4-pro:cloud",
   model_triage: "gemma4:cloud",
   model_fallback: "qwen3.5:latest",
 };

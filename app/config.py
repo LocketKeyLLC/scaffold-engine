@@ -493,9 +493,9 @@ class Settings(BaseSettings):
     # deepseek-v4-flash 24/24 @3.75s and glm-5.1 24/24 @10.27s were the only
     # perfect scorers; gemma4 scored 9/12 and failed confidence-grading 3/3,
     # glm-5.3-flash took the §17.854 attribution bait 2/3.
-    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-flash:cloud, §17.993)
+    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.1624)
     model_cloud_heavy: str = "qwen3.5:latest"  # §17.819 local-safe: escalation target = biggest local tag
-    model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
+    model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.1624)
     model_fallback: str = "qwen3.5:latest"
 
     # §17.547 — models that do NOT reliably emit native `tool_calls`. qwen3.5
