@@ -336,3 +336,28 @@ def test_frame_run_runs_the_jellyfin_rewrites_before_the_key_reader():
     for fn in ("rewrite_refresh_jellyfin_metadata", "rewrite_jellyfin_metadata_report"):
         assert f"{fn}(node, cmds, verify, services, inventory)" in src
         assert src.index(f"{fn}(node, cmds") < src.index("read_on_the_machine(cmds")
+
+
+def test_a_dash_d_is_curl_s_body_only_when_curl_owns_it():
+    """§17.1626 — `-d` is also `tr -d`, `cut -d`, `[ -d dir ]`, `docker run -d`: live, the ssh template's own
+    `tr -d '[:space:]'` made every block through it "blind", CHK1's pure `head` read included."""
+    from app.modules import runbook_templates as rt
+    from app.modules.supervised_runs import checks_can_witness_the_change, sends_a_change
+    for not_a_body in ["state=\"$(gsu \"systemctl is-active $UNIT\" | tr -d '[:space:]')\"",
+                       "cut -d: -f1 /etc/passwd", "[ -d /opt/scaffold-engine/.git ] || git clone x y",
+                       "docker run -d --name x img", "date -d yesterday", "curl -s http://x/health | tr -d '\\r'"]:
+        assert sends_a_change([not_a_body]) == "", not_a_body
+    for body in ["curl -s -d '{}' http://x/api", "curl -sS --data-raw '{}' http://x", "curl --json '{}' http://x",
+                 "curl -s http://x/api \\\n    -H 'Content-Type: application/json' \\\n    -d '{\"a\":1}'",
+                 "wget -qO- --post-data='a=1' http://x"]:
+        assert sends_a_change([body]) == "`-d` a request body", body
+    # the CHK1 shape end to end: the engine's ssh template around a pure read is not blind
+    rendered = rt.render(rt.REACH_VM_SSH_AND_RUN, {"GID": "110", "STEP": "CHK1", "GUEST_USER_NAME": "AI_USER",
+                                                   "NEEDS_KEY": "yes",
+                                                   "REMOTE_COMMANDS": "head -n 5 /opt/scaffold-engine/PLACEMENT.md"})
+    script = rendered.split("### /tmp/in_vm_110.sh\n```bash\n", 1)[1].split("\n```", 1)[0]
+    files = [{"path": "/tmp/in_vm_110.sh", "content": script}]
+    cmds = ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<AI_USER>" bash /tmp/in_vm_110.sh start']
+    verify = ["qm status 110", "MASS_PASSWORD=\"$MASS_PASSWORD\" GUEST_USER=\"<AI_USER>\" bash /tmp/in_vm_110.sh check "
+                               "'head -n 5 /opt/scaffold-engine/PLACEMENT.md'"]
+    assert checks_can_witness_the_change(cmds, verify, files) == ""

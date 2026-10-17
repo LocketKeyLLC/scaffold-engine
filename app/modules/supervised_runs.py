@@ -10205,9 +10205,14 @@ def checks_can_witness_the_change(commands: list[str], verify: list[str],
 
 #: §17.1559 — a mutating HTTP call: curl's method/body flags, a python `method='POST'`, a wrapper
 #: called with a method literal (`api('/Items/x/Refresh','POST')`), or `requests.post(…)`.
+#: §17.1626 — a body flag is curl's only when curl is the command it belongs to: `-d` alone is also `tr -d`, `cut -d`,
+#: `[ -d dir ]`, `docker run -d`, `date -d`. Live (RD2, CHK1, 2026-10-16/17): the ssh template's own `tr -d '[:space:]'`
+#: made EVERY block through it "blind" ("sends a change (`-d` a request body)"), so no ssh-guest step could ever be
+#: recorded already met -- CHK1 was a pure `head` read.
 _SENDS_A_CHANGE_RE = re.compile(
     r"(?:-X|--request)\s*[\"']?(?P<m1>POST|PUT|PATCH|DELETE)\b"
-    r"|(?:^|\s)(?:-d|--data(?:-raw|-binary)?|--json)(?:\s|=)"
+    r"|\bcurl\b[^|;&\n]*?\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json)(?:\s|=)"
+    r"|\bwget\b[^|;&\n]*?\s--post-(?:data|file)(?:\s|=)"
     r"|\bmethod\s*=\s*[\"'](?P<m2>POST|PUT|PATCH|DELETE)[\"']"
     r"|\b\w+\((?:[^()\n]|\([^()\n]*\))*?[\"'](?P<m3>POST|PUT|PATCH|DELETE)[\"']"
     r"|\brequests\.(?P<m4>post|put|patch|delete)\(", re.I)
@@ -10220,7 +10225,8 @@ def sends_a_change(commands: list[str], files: Optional[list[dict]] = None) -> s
     texts = [str(c) for c in commands or []] + \
             [str((f or {}).get("content") or "") for f in files or []]
     for t in texts:
-        for ln in t.splitlines():
+        # §17.1626 — one logical line: a `curl … \` continued onto `  -d '{…}'` keeps its body flag with its curl
+        for ln in re.sub(r"\\\r?\n[ \t]*", " ", t).splitlines():
             line = _strip_comment_shell(ln)
             m = _SENDS_A_CHANGE_RE.search(line)
             if m:
