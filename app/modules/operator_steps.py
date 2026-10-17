@@ -108,6 +108,38 @@ def checks(node: Optional[dict]) -> list[str]:
             if _looks_like_command(c) and read_only_command(c.strip())]
 
 
+# §17.1630 — "Done when it prints `A` and `B`": the backticked texts a verb of output names.
+_PRINTS_RE = re.compile(r"\b(?:prints?|shows?|outputs?|says|returns?|answers?)\s+((?:`[^`\n]+`(?:\s*,\s*|\s+(?:and|plus)\s+)?)+)", re.I)
+
+
+def expected_prints(node: Optional[dict]) -> list[str]:
+    """§17.1630 — the texts the step's "Done when" says the run prints, other than its own check commands.
+
+    Live (job 0fb4ea7f FB1): "Done when it prints `fallback_setting deepseek-v4-pro:cloud` and `model
+    deepseek-v4-pro:cloud success True fallback_used True`". The run printed `success False`, nothing compared it,
+    and the step was recorded done."""
+    n = node or {}
+    body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
+                                     if str(n.get(k) or "").strip()))
+    parts = _DONE_WHEN_RE.split(body, 1)
+    if len(parts) < 2:
+        return []
+    own = set(checks(n))
+    out: list[str] = []
+    for m in _PRINTS_RE.finditer(parts[1]):
+        for t in _BACKTICK_RE.findall(m.group(1)):
+            t = t.strip()
+            if t and t not in own and t not in out:
+                out.append(t)
+    return out
+
+
+def missing_prints(expected: list[str], printed: str) -> list[str]:
+    """The expected texts the run's output does not contain, whitespace-insensitively."""
+    flat = " ".join((printed or "").split())
+    return [t for t in expected or [] if " ".join(t.split()) not in flat]
+
+
 # §17.1464 — where the operator's part happens: the app or console they have to open.
 _SURFACE_RE = re.compile(r"\b(my spectrum app|tailscale(?: admin console| app)?|admin console|router app|[a-z][\w-]+ app)\b", re.I)
 
