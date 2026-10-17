@@ -22,10 +22,12 @@ CLOUD = "qwen3.5:397b-cloud"
 class FakeDaemon:
     """/api/tags + /api/pull. ``refuse`` maps tag -> the daemon's JSON reply."""
 
-    def __init__(self, tags, refuse=None):
+    def __init__(self, tags, refuse=None, gone=None):
         self.tags = set(tags)
         self.refuse = dict(refuse or {})
+        self.gone = dict(gone or {})  # tag -> (status, error) the generate answers
         self.pulls: list[str] = []
+        self.probes: list[str] = []
 
     async def get(self, url, timeout=None):
         assert url.endswith("/api/tags")
@@ -33,6 +35,13 @@ class FakeDaemon:
                               request=httpx.Request("GET", url))
 
     async def post(self, url, json=None, timeout=None):
+        if url.endswith("/api/generate"):
+            assert json["options"]["num_predict"] == 1, "a probe is one token"
+            self.probes.append(json["model"])
+            if json["model"] in self.gone:
+                code, err = self.gone[json["model"]]
+                return httpx.Response(code, json={"error": err})
+            return httpx.Response(200, json={"response": "OK"})
         assert url.endswith("/api/pull") and json["stream"] is False
         self.pulls.append(json["model"])
         if json["model"] in self.refuse:
@@ -50,7 +59,7 @@ def roles(monkeypatch):
     monkeypatch.setattr(settings, "model_coder", "hf.co/x/coder:Q4")
     for role in ("model_fallback", "model_cloud_heavy", "model_cloud_alt"):
         monkeypatch.setattr(settings, role, CLOUD)
-    monkeypatch.setattr(crt, "_state", {"at": 0.0, "failed": {}})
+    monkeypatch.setattr(crt, "_state", {"at": 0.0, "failed": {}, "checked_at": None, "dead": {}})
 
 
 def _daemon(monkeypatch, d: FakeDaemon) -> FakeDaemon:
@@ -136,3 +145,61 @@ async def test_the_research_gate_still_refuses_a_missing_local_tag(roles, monkey
     with pytest.raises(HTTPException) as e:
         await _require_valid_models()
     assert e.value.status_code == 422 and d.pulls == []
+
+
+# §17.1624 — Ollama Cloud retired qwen3.5:397b on 2026-09-25; the generate says so,
+# the pull says only "file does not exist", and the tag list keeps a pre-retirement pull.
+RETIRED = (410, "qwen3.5:397b was retired on September 25, 2026. Try glm-5.3-flash:cloud.")
+
+
+async def test_a_refused_pull_is_explained_by_the_generate(roles, monkeypatch):
+    from app.health import _model_role_warnings
+    d = _daemon(monkeypatch, FakeDaemon({"qwen3:4b", "hf.co/x/coder:Q4"},
+                                        refuse={CLOUD: {"error": "pull model manifest: file does not exist"}},
+                                        gone={CLOUD: RETIRED}))
+    res = await crt.ensure_cloud_role_tags(force=True)
+    assert "HTTP 410" in res["failed"][CLOUD] and "retired on September 25" in res["failed"][CLOUD]
+    assert "Try glm-5.3-flash:cloud" in _model_role_warnings(d.tags)[1]
+
+
+async def test_a_listed_but_retired_cloud_tag_is_reported_with_its_roles(roles, monkeypatch):
+    from app.health import _model_role_warnings
+    d = _daemon(monkeypatch, FakeDaemon({"qwen3:4b", "hf.co/x/coder:Q4", CLOUD}, gone={CLOUD: RETIRED}))
+    assert _model_role_warnings(d.tags) == [], "listed: the tag-list check alone is blind (the laptop's state)"
+    res = await crt.check_cloud_role_tags(force=True)
+    assert res["checked"] == [CLOUD] and d.probes == [CLOUD] and d.pulls == []
+    [w] = _model_role_warnings(d.tags)
+    assert "retired on September 25" in w
+    assert "model_cloud_alt, model_cloud_heavy, model_fallback" in w
+    # throttled: the reaper's next 15-min pass does not re-probe inside the hour
+    assert await crt.check_cloud_role_tags() is None and d.probes == [CLOUD]
+    # re-pointing the roles clears the warning without another probe
+    for role in ("model_fallback", "model_cloud_heavy", "model_cloud_alt"):
+        monkeypatch.setattr(settings, role, "deepseek-v4-pro:cloud")
+    assert _model_role_warnings(d.tags | {"deepseek-v4-pro:cloud"}) == []
+
+
+async def test_a_transient_refusal_is_not_a_dead_tag(roles, monkeypatch):
+    from app.health import _model_role_warnings
+    d = _daemon(monkeypatch, FakeDaemon({"qwen3:4b", "hf.co/x/coder:Q4", CLOUD},
+                                        gone={CLOUD: (502, "upstream timeout")}))
+    assert (await crt.check_cloud_role_tags(force=True))["dead"] == {}
+    assert _model_role_warnings(d.tags) == []
+
+
+async def test_the_reaper_sweep_runs_the_check(roles, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from app.modules import cleanup
+
+    @asynccontextmanager
+    async def no_db():
+        yield None
+
+    d = _daemon(monkeypatch, FakeDaemon({"qwen3:4b", "hf.co/x/coder:Q4", CLOUD}, gone={CLOUD: RETIRED}))
+    monkeypatch.setattr(cleanup, "async_session", no_db)
+    monkeypatch.setattr(cleanup, "reap_stale_jobs", AsyncMock())
+    monkeypatch.setattr(cleanup, "sweep_llm_traces", AsyncMock())
+    monkeypatch.setattr(cleanup, "sweep_expired", AsyncMock(return_value={}))
+    await cleanup._run_once()
+    assert d.probes == [CLOUD] and CLOUD in crt.dead_tags()
