@@ -932,6 +932,20 @@ def secret_file_parts(spec: str) -> tuple[str, str]:
     return "".join(writes), "".join(f" # ${n}" for n in dict.fromkeys(names))
 
 
+#: §17.1634 — a line that only sets shell options (`set -euo pipefail`, `set +x`)
+_SHELL_OPTIONS_RE = re.compile(r"^set(?:\s+(?:[-+][a-zA-Z]*o\s+[a-z]+|[-+][a-zA-Z]+))+\s*(?:#.*)?$")   # `-euo pipefail`: o takes a word
+
+
+def read_only_remote(remote_commands: str) -> str:
+    """§17.1634 — a block that only reads, without its own shell-option lines: the model's `set -euo pipefail` (job
+    0fb4ea7f VS2) both made the block read as a write and, under §17.1608's `set +e`, would turn errexit back on, so
+    one failed read ended the inventory. Unchanged when the block writes."""
+    text = str(remote_commands or "")
+    if not strict_line(text).startswith("set +e"):
+        return text
+    return "\n".join(ln for ln in text.split("\n") if not _SHELL_OPTIONS_RE.match(ln.strip()))
+
+
 def strict_line(remote_commands: str) -> str:
     """§17.1608 — `set -e` for in-guest work that CHANGES something; not for a block that only reads.
 
@@ -941,6 +955,7 @@ def strict_line(remote_commands: str) -> str:
     `set -e` (a template's own built-in work)."""
     from app.modules.supervised_runs import _reads_only
     lines = [ln.strip() for ln in str(remote_commands or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    lines = [ln for ln in lines if not _SHELL_OPTIONS_RE.match(ln)]       # §17.1634 — a shell option changes no machine
     if lines and all(_reads_only(ln) for ln in lines):
         # §17.1608b — and the block's exit is not its last read's: live (job 0fb4ea7f T15), a grep that found no OLLAMA_*
         # key (the compose default is used) exited 1 and the read-only step was recorded FAILED. The checks judge it.
@@ -957,6 +972,8 @@ def render(template: Template, values: dict) -> str:
     v = dict(values)
     v["SECRET_FILES_WRITE"], v["SECRET_REFS"] = secret_file_parts(v.get("SECRET_FILES", ""))   # §17.1489
     v.setdefault("STRICT", strict_line(v.get("REMOTE_COMMANDS", "")))                         # §17.1608
+    if "REMOTE_COMMANDS" in v:
+        v["REMOTE_COMMANDS"] = read_only_remote(v["REMOTE_COMMANDS"])                          # §17.1634
     user_ph = f"<{v.get('GUEST_USER_NAME', 'GUEST_USER')}>"
 
     def fill(s: str) -> str:
