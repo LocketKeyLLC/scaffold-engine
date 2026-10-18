@@ -3006,6 +3006,30 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2
             up_block = (up_block + "\n\n" + _st2.table(_services, _reading)).strip()
+        # §17.1644 — a fix step that runs "only if" named checks found failures, when every one of them passed, has
+        # nothing to fix: recorded skipped from the plan's own record, before anything is drafted.
+        if _depth < 6:
+            from app.modules.conditional_steps import unmet_condition
+            _unmet = unmet_condition(run_node, _plan_rows)
+            if _unmet:
+                from datetime import datetime as _dt, timezone as _tz
+                _nk = run_node.get("node_key")
+                async with async_session() as db:
+                    _upd = await db.execute(
+                        text("UPDATE dag_nodes SET status = 'skipped', output_text = :out, completed_at = NOW(), "
+                             "updated_at = NOW(), last_verification_reason = :why "
+                             "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+                        {"jid": job_id, "nk": _nk, "out": "## Skipped — nothing to fix\n\n" + _unmet, "why": _unmet})
+                    if _upd.rowcount:
+                        await db.execute(
+                            text("UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{decisions}', "
+                                 "COALESCE(metadata->'decisions', '{}'::jsonb) || CAST(:patch AS jsonb)) WHERE id = :jid"),
+                            {"jid": job_id, "patch": json.dumps({_nk: {"by": "engine", "at": _dt.now(_tz.utc).isoformat(),
+                                                                       "result": "condition_unmet"}})})
+                    await db.commit()
+                if _upd.rowcount:
+                    logger.warning("conditional_step_skipped job=%s node=%s why=%s", job_id, _nk, _unmet[:200])
+                    return await _pause_for_decision(job_id, _depth + 1)
         # §17.1412 — a step that writes SOFTWARE in a measured service's directory is
         # DEVELOPED against the real files, not drafted as one blind shell block.
         from app.modules import develop

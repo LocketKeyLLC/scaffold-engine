@@ -9589,6 +9589,8 @@ _JELLYFIN_CENSUS_PY = (
     "if wrong: sys.exit(2)\n"
 )
 _JF_WAIT_TITLE_RE = re.compile(r"\b(?:wait|poll|until|monitor)\b", re.I)
+#: §17.1643 — the other apps of the media stack; a check titled with one of them is a comparison, not a census
+_JF_OTHER_APP_RE = re.compile(r"\b(?:radarr|sonarr|lidarr|readarr|prowlarr|qbittorrent|transmission|deluge|sabnzbd|nzbget)\b", re.I)
 _JF_CENSUS_TEXT_RE = re.compile(r"\bmetadata\b|\boverviews?\b|\bprimary\s*image\b|\bposters?\b|\bimages?\b|\bnames?\b|\bitems?\b"
                                 r"|\bepisodes?\b|\bseasons?\b|\bseries\b|\brefresh(?:ed|ing|library)?\b|\bscheduledtasks\b|\blibrar(?:y|ies)\b", re.I)
 
@@ -9611,6 +9613,11 @@ def rewrite_jellyfin_metadata_report(node: Optional[dict], commands: list[str], 
     text = _node_text(node)
     title = str((node or {}).get("title") or "")
     if not (_JF_OBSERVE_TITLE_RE.search(title) and _JF_SERVICE_RE.search(text) and _JF_CENSUS_TEXT_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1643 — a check whose title names ANOTHER app compares Jellyfin with it, which a Jellyfin-only census cannot
+    # answer. Live (job 5db1b088 T2 "Verify Movies points to the folder Radarr imports into"): the census claimed it off
+    # the splitter's "(split from T2: Verify Jellyfin library paths)" and would have recorded it done without reading Radarr.
+    if _JF_OTHER_APP_RE.search(title):
         return list(commands or []), list(verify or []), []
     gid = _arr_guest("jellyfin", services, inventory)
     if not gid:
