@@ -6451,6 +6451,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1355 — the block mistook the engine's own scaffolding for the work:
     # a written file that runs itself, and a check that reads only that file.
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
+    from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
+    refused = refused + _prints_a_credential(cmds, verify)              # §17.1652 — a key is used, never printed
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
     # §17.1288 — a check must use what the run used; a secret rides no ssh
     # command line; the neighbour table is read warm. Three readings of one frame.

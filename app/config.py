@@ -1708,6 +1708,9 @@ class Settings(BaseSettings):
     # deterministic summary ships regardless; this only ADDS a prose line.
     progress_summary_llm_enabled: bool = Field(default=False)
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
+    # §17.1653 — a REPORT step summarises every step of the job: at 8,000 chars over 45 sections each kept ~40 chars and
+    # the report named steps from fragments (job 5db1b088 T31). Its own, larger budget.
+    max_report_upstream_chars: int = Field(default=40000, ge=1000, le=200000)
     # §17.477 (Phase 3) — when over max_upstream_chars, allocate each upstream
     # node's surviving char budget by (verifier confidence × length) instead of
     # length alone, so higher-confidence upstream context is preserved. NULL
