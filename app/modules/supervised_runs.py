@@ -2712,6 +2712,42 @@ def declares_read_only(node: Optional[dict]) -> bool:
     return bool(_READ_ONLY_STEP_RE.search(work))
 
 
+#: §17.1637b — the options that send a tool to a REMOTE copy of what it reads locally: ipmitool's interface, host,
+#: login and password (`-I lanplus -H <BMC_IP> -U <BMC_USER> -P …`). On the machine whose BMC it is, the same read
+#: needs none of them.
+_REMOTE_REACH_OPTIONS = {"ipmitool": ({"-I", "-H", "-U", "-P", "-p", "-L", "-y", "-k", "-f", "-C"}, {"-E"})}
+
+
+def local_form_of_a_read(cmd: str) -> str:
+    """§17.1637b — `ipmitool -I lanplus -H x -U y -P "$P" sel list` → `ipmitool sel list`, when that form is a read.
+
+    Live (MC1's redraft, 2026-10-18): told to write "a read the machine answers locally … in its plain local form",
+    the model kept every BMC read over lanplus twice and the step parked. The engine knows the form; it says it.
+    Returns "" when the command is not one of these tools, carries no remote option, or its local form is no read."""
+    import shlex
+    from app.modules.assist_state_check import read_only_command
+    try:
+        words = shlex.split(_PLACEHOLDER_RE.sub("x", str(cmd or "")))
+    except ValueError:
+        return ""
+    if not words or words[0] not in _REMOTE_REACH_OPTIONS:
+        return ""
+    valued, flags = _REMOTE_REACH_OPTIONS[words[0]]
+    out, i, dropped = [words[0]], 1, False
+    while i < len(words):
+        w = words[i]
+        if w in valued:
+            i, dropped = i + 2, True
+            continue
+        if w in flags:
+            i, dropped = i + 1, True
+            continue
+        out.append(w)
+        i += 1
+    local = " ".join(shlex.quote(w) for w in out)
+    return local if dropped and read_only_command(local) else ""
+
+
 def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
@@ -2732,13 +2768,16 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     for c in commands:
         segs = writing_segments(str(c))
         if segs:
+            local = local_form_of_a_read(segs[0])
+            here = (f" Here that is `{local}`: on this machine the tool reaches its own device, so the address, login "
+                    f"and password are not needed -- and the same holds for every other line written this way.") if local else ""
             return [{"command": str(c), "why": (
                 f"this step says it is READ ONLY (it changes nothing), and `{segs[0].strip()[:80]}` is not a read "
                 f"the engine recognises -- it would change the machine, or reach it in a form no read takes. Use "
                 f"only reads, with what the machine already has: a tool that may be missing is a finding to "
                 f"report (`command -v <tool> || echo '<tool>: not installed'`), never something to install; and a "
                 f"read the machine answers locally is written in its plain local form, with no address, login or "
-                f"password of its own.")}]
+                f"password of its own." + here)}]
     return []
 
 
