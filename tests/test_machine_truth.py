@@ -289,7 +289,8 @@ def test_every_redraft_in_the_pause_carries_the_truth_and_a_reopen_restarts_it()
     # §17.1548b — six: and a verify the engine could draft into nothing, failed clean
     # (settled), which recurses to the NEXT decision rather than returning None (a
     # None reads as "start the next node" and the clean exit flips the job failed).
-    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 6
+    # §17.1644 — seven: and a conditional fix whose named checks all passed, recorded skipped before any draft.
+    assert body.count("_pause_for_decision(job_id, _depth + 1)") == 7
     assert "decision_pause_upstream_moved" in body
     assert "step_split_restart" in body
     assert body.index("machine_truth.reconcile_from_truth(") < body.index("decision_pause_restart_after_reopen") < body.index('logger.warning("supervised_run_redraft job=')

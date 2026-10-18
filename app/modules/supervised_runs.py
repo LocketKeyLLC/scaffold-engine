@@ -6256,6 +6256,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pe_notes:
         cmds, verify = _pe_cmds, _pe_verify
         _comp_notes = list(_comp_notes) + _pe_notes
+    # §17.1645 — "rotate <arr app>'s API key and update every holder": generated in its guest, moved only through
+    # root-only files, the app answering with it before any holder changes, each holder updated where it is a VALUE.
+    from app.modules import arr_key_rotation as _akr
+    _rk = _akr.block(node, lambda app: _arr_guest(app, services, inventory))
+    if _rk:
+        cmds, verify = _rk[0], _rk[1]
+        _comp_notes = list(_comp_notes) + [{"why": _rk[2]}]
     # §17.1570e — a deterministic rewrite REPLACES the draft: the files the drafted runbook asked to write
     # belong to the discarded draft (the `run_in_container` template's /tmp/in_ct_N.sh carrying the model's
     # in-guest script). Live (job eff80f98, T6): the rewrite's commands were right, but the draft's file —

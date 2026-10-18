@@ -172,3 +172,18 @@ def test_the_engines_check_is_final_and_is_never_already_met():
                   '_missing = [] if (_developed or frame.get("expects") or _engine_check) else',
                   "_state_only = _state_only or _engine_check"):
         assert guard in src, guard
+
+
+# ── §17.1646: `'\''` reopens a single-quoted payload ─────────────────────────
+
+def test_an_escaped_quote_keeps_the_payload_in_its_guest():
+    text = ("pct exec 103 -- python3 -c 'import urllib.request\n"
+            "u = urllib.request.urlopen('\\''http://127.0.0.1:7878/api/v3/system/status'\\'')\n"
+            "print(u.status)' radarr\n"
+            "curl -s http://127.0.0.1:7878/api")
+    where = where_each_line_runs(text)
+    assert where.get(2) == "103" and where.get(3) == "103", where
+    assert where.get(4) in (None, ""), where                       # after the payload closes: the host again
+    radarr = ServiceTruth(guest="103", unit="radarr.service", name="radarr", ports=("7878",))
+    hits = loopback_on_the_host([text], [], [radarr])
+    assert len(hits) == 1 and hits[0]["command"].startswith("curl -s http://127.0.0.1:7878"), hits

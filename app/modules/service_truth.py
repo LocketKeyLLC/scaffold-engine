@@ -977,19 +977,27 @@ def _quote_char(line: str) -> str:
 
 
 def _closes_the_quote(line: str, q: str) -> bool:
-    """§17.1377c — does this line close a quote `q` that was already open."""
+    """§17.1377c — does this line close a quote `q` that was already open.
+
+    §17.1646 — closed AT THE END of the line, not at its first quote character: `'\\''` inside a single-quoted
+    payload closes the quote, adds a literal `'` and REOPENS it, so the payload goes on. Live (job 5db1b088 RK1): the
+    engine's own `pct exec 103 -- python3 -c '…'` program has `'\\''` on most lines, and every line after the first
+    one read as the HOST's -- §17.1368 refused its in-guest `127.0.0.1:7878` and `:9696`."""
     if not q:
         return True
-    k = 0
+    state, k = q, 0
     while k < len(line):
         c = line[k]
-        if c == "\\" and q != "'":
+        if c == "\\" and state != "'":
             k += 2
             continue
-        if c == q:
-            return True
+        if state:
+            if c == state:
+                state = ""
+        elif c in "\"'":
+            state = c
         k += 1
-    return False
+    return state == ""
 
 
 def _dispatch_calls(text: str) -> list:
