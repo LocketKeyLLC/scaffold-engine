@@ -135,8 +135,8 @@ def too_large(frame: Optional[dict], node: Optional[dict] = None) -> str:
     # §17.1622 — the engine's own deploy template carries the whole stack (its API and its chat UI) as ONE block: a
     # step it drafts is not "two deliverables". Live (0fb4ea7f RD1, a redeploy), the split drafted a hand-written
     # compose stack under /opt/engine that was not the engine at all.
-    from app.modules.runbook_templates import _DEPLOY_ENGINE_RE
-    if _DEPLOY_ENGINE_RE.search(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))):
+    from app.modules.runbook_templates import asks_to_deploy_the_engine      # §17.1635 — one judgement, both places
+    if asks_to_deploy_the_engine(node or {}):
         return ""
     parts = deliverables_in(node)
     if len(parts) >= 2:
