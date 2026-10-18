@@ -103,3 +103,22 @@ def test_a_template_frame_is_the_engines_own_shape():
                                               "GUEST_USER_NAME": "AI_USER", "NEEDS_KEY": "yes"})
     node = {"node_key": "PLR1", "title": "VM 110: read the placement record", "description": "Read only."}
     assert sr.writes_in_a_read_only_step(["bash /tmp/in_vm_110.sh start"], node, body) == []
+
+
+#: §17.1637b — the redraft after §17.1637, verbatim in shape: the install was gone, every BMC read still went over lanplus
+REDRAFT = ["command -v ipmitool || echo 'ipmitool: not installed'",
+           'ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P "$MASS_PASSWORD" sel list',
+           "dmidecode -t memory"]
+
+
+def test_the_refusal_names_the_local_read():
+    found = sr.writes_in_a_read_only_step(REDRAFT, MC1)
+    assert len(found) == 1 and "Here that is `ipmitool sel list`" in found[0]["why"], found
+
+
+def test_only_a_read_gets_a_local_form():
+    assert sr.local_form_of_a_read('ipmitool -I lanplus -H <BMC_IP> -U u -P "$P" sel elist') == "ipmitool sel elist"
+    assert sr.local_form_of_a_read("ipmitool -I lanplus -H x -U y -E sdr elist") == "ipmitool sdr elist"
+    for c in ("ipmitool -I lanplus -H x -U y -P p sel clear", "ipmitool -I lanplus -H x -U y -P p mc reset cold",
+              "ipmitool sel elist", "apt-get install -y ipmitool", "ipmitool -I lanplus -H 'x"):
+        assert sr.local_form_of_a_read(c) == "", c
