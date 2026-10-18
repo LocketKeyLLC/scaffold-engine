@@ -83,3 +83,23 @@ def test_the_frame_shows_the_checks_the_run_will_make():
     assert frame["verify"] == ["pct status 103", "pct exec 103 -- systemctl is-active radarr"]
     run = sr.with_own_checks(node, frame["verify"], frame["commands"])
     assert run == frame["verify"], "the run adds nothing the operator did not see"
+
+
+# §17.1636 — the clause ends at its paragraph: live (PLF1), the operator's appended redraft note said "show `diff`"
+PLF1_TEXT = ("Inside VM 110: correct the stale lines.\nDone when `grep '^MODEL_FALLBACK=' /opt/x/PLACEMENT.md` prints "
+             "`MODEL_FALLBACK=deepseek-v4-pro:cloud` and `cat -n /opt/x/PLACEMENT.md` prints it.\n\n"
+             "Operator review 2026-10-18 of the drafted block: build the new file in a temp copy, show `diff` against "
+             "the original, then move it into place; `cat /etc/hostname` is not a check here.")
+
+
+def test_an_appended_note_is_not_part_of_the_done_when():
+    node = {"prompt_template": PLF1_TEXT}
+    assert expected_prints(node) == ["MODEL_FALLBACK=deepseek-v4-pro:cloud"]
+    from app.modules.operator_steps import checks
+    assert checks(node) == ["grep '^MODEL_FALLBACK=' /opt/x/PLACEMENT.md", "cat -n /opt/x/PLACEMENT.md"]
+
+
+def test_a_list_under_the_done_when_is_still_read():
+    from app.modules.operator_steps import checks
+    node = {"prompt_template": "Do it.\nDone when:\n\n- `systemctl is-active nginx` prints `active`\n- `curl -s http://h/` answers"}
+    assert checks(node) == ["systemctl is-active nginx", "curl -s http://h/"] and expected_prints(node) == ["active"]
