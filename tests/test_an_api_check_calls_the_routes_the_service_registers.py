@@ -155,3 +155,20 @@ def test_all_routes_answering_passes(tmp_path):
     cmd = arc.check_command(PANEL, ["/api/a", "/api/b"], None)
     r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={"PATH": f"{bindir}:/usr/bin:/bin"})
     assert r.returncode == 0 and r.stdout.count("PASS") == 2, r.stdout
+
+
+# ── the run IS the check: never "already met", never redrafted by the model ──
+
+def test_the_engines_check_is_final_and_is_never_already_met():
+    """Live (T26, the first frame this module built): §17.1302 read `systemctl is-active control-panel.service`,
+    judged the goal met and recorded T26 done -- none of the 17 routes was called."""
+    import inspect
+    from app.modules import execution_agent
+    assert arc.run_is_the_check(arc.runbook(PANEL, ["/api/a"], None))
+    assert not arc.run_is_the_check("## Run this\n\n```bash\ncurl -s http://127.0.0.1:3001/api/a\n```\n")
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "_engine_check = _run_is_the_check(runbook)" in src
+    for guard in ('_ro = "" if (_developed or frame.get("expects") or _engine_check) else',
+                  '_missing = [] if (_developed or frame.get("expects") or _engine_check) else',
+                  "_state_only = _state_only or _engine_check"):
+        assert guard in src, guard

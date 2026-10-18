@@ -3046,6 +3046,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     logger.warning("api_route_check_skipped job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
             if not _developed and not runbook:
                 runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
+        # §17.1641 — a frame the engine composed as a check is final: no model redraft replaces it, and its run is the check
+        from app.modules.api_route_check import run_is_the_check as _run_is_the_check
+        _engine_check = _run_is_the_check(runbook)
 
         # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
         # runs against copies of the real files in the rehearsal sandbox before it is
@@ -3597,7 +3600,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # and mark the step done having done nothing.
         try:
             # §17.1577 — a frame a capability drafted (`expects`, §17.1570g) is the engine's own shape: never redrafted by the model
-            _ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            _ro = "" if (_developed or frame.get("expects") or _engine_check) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
             if _ro:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
@@ -3624,7 +3627,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = [] if (_developed or frame.get("expects")) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
+            _missing = [] if (_developed or frame.get("expects") or _engine_check) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
@@ -3666,6 +3669,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # met from those two reads alone while the panel answered 200 with no credential.
         _state_only = _developed and all(
             re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in (frame.get("verify") or [""]))
+        _state_only = _state_only or _engine_check      # §17.1641 — the run IS the check; the unit active is not the goal
         if _depth < 6 and not _state_only:
             try:
                 _met = await supervised_runs.already_met(spec, run_node, frame, _env)

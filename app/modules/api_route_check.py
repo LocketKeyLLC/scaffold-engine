@@ -24,6 +24,17 @@ _API_WORDS_RE = re.compile(r"\b(?:api|apis|routes?|endpoints?)\b", re.I)
 _ROUTE_RE = re.compile(r"\b(?:app|router)\.get\(\s*['\"](/api/[^'\"\s:*]*)['\"]")
 #: the per-route budget: a route that has not answered in this long is reported as hanging
 ROUTE_TIMEOUT_S = 20
+#: the first line of the runbook this module renders
+MARK = "<!-- engine-capability: api_route_check -->"
+
+
+def run_is_the_check(runbook_text: str) -> bool:
+    """The step's RUN is its check, so it is never "already met" off its verify line.
+
+    Live (job 5db1b088 T26, 2026-10-18, the first frame this module built): §17.1302 read the verify line
+    (`systemctl is-active control-panel.service` → active), judged the goal met and recorded T26 done -- the
+    seventeen routes were never called. The unit being up says nothing about whether its routes answer."""
+    return str(runbook_text or "").lstrip().startswith(MARK)
 
 
 def _norm(s: str) -> str:
@@ -85,7 +96,7 @@ def check_command(service, routes: list[str], login: Optional[tuple] = None) -> 
 
 def runbook(service, routes: list[str], login: Optional[tuple] = None) -> str:
     """The step's runbook: the one check, and a heading that says where its routes came from."""
-    return (f"<!-- engine-capability: api_route_check -->\n\n"
+    return (f"{MARK}\n\n"
             f"## Check every API route {getattr(service, 'name', 'the service')} registers\n\n"
             f"The {len(routes)} GET routes below are the ones the service's own code registers under "
             f"{getattr(service, 'workdir', '')}; each is called inside guest {service.guest} on port "
