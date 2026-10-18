@@ -161,6 +161,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "this step says it is READ ONLY",                # §17.1637
+                   "inside single quotes is left alone by the shell",   # §17.1638
                    "and nothing sets it",                           # §17.1348
                    "but set in a DIFFERENT command",               # §17.1398
                    "is expanded by GUEST",                          # §17.1364
@@ -334,6 +335,7 @@ _WHOSE_GAP: dict[str, str] = {
     "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
     "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "this step says it is READ ONLY": "drafter",                  # §17.1637 — reads only, with what the machine has
+    "inside single quotes is left alone by the shell": "drafter",   # §17.1638 — no `$` before an uppercase letter
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -5493,6 +5495,89 @@ def a_shell_runs_it(cmd: str, path: str, body: str) -> bool:
 _RUNNER_LEAVES_BOUND_NAMES = 23
 
 
+def _single_quoted_spans(text: str) -> list[tuple[int, int]]:
+    """§17.1638 — the (start, end) of each single-quoted span, as bash reads them (a `'` inside "…" or after a
+    backslash outside quotes is a plain character). The end is the closing quote; an unclosed span runs to the end."""
+    spans: list[tuple[int, int]] = []
+    i, n, dq = 0, len(text), False
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and not dq:
+            i += 2
+            continue
+        if ch == "\\" and dq:
+            i += 2
+            continue
+        if ch == '"':
+            dq = not dq
+        elif ch == "'" and not dq:
+            j = text.find("'", i + 1)
+            j = n if j < 0 else j
+            spans.append((i + 1, j))
+            i = j + 1
+            continue
+        i += 1
+    return spans
+
+
+#: §17.1638 — awk's own `$`-variables: inside a single-quoted program `$NF` is the last field, and `$(NF)` is the same
+_AWK_FIELD_REF_RE = re.compile(r"\$(NF|NR|FNR)\b")
+
+
+def awk_fields_the_runner_reads_as_secrets(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1638 — `awk '{print $NF}'` written `awk '{print $(NF)}'`, said on the frame.
+
+    Live (job 0fb4ea7f MC1, 2026-10-18, helper 23): the approved read-only block stopped at its fifth line,
+    `ipmitool sel list | grep -E "Correctable ECC|…" | … | awk '{print $NF}' | sort | uniq -c`: "this command needs
+    $NF, which neither the engine sent nor this runner's secrets file holds". The runner's `secret_refs` reads every
+    `$UPPER` as a stored secret, inside single quotes too, where the shell never expands it. To awk the two spellings
+    are one expression, and the runner's pattern does not match `$(`."""
+    notes: list[str] = []
+
+    def _fix(line: str) -> str:
+        text = str(line)
+        for a, b in reversed(_single_quoted_spans(text)):
+            span = text[a:b]
+            new = _AWK_FIELD_REF_RE.sub(lambda m: f"$({m.group(1)})", span)
+            if new != span:
+                notes.extend(f"${m.group(1)}" for m in _AWK_FIELD_REF_RE.finditer(span))
+                text = text[:a] + new + text[b:]
+        return text
+
+    cmds = [_fix(c) for c in commands or []]
+    ver = [_fix(v) for v in verify or []]
+    if not notes:
+        return commands, verify, []
+    names = ", ".join(f"`{x}`" for x in dict.fromkeys(notes))
+    return cmds, ver, [{"why": (
+        f"awk's {names} inside a single-quoted program is written `$(…)`: the runner reads every `$UPPER` as a stored "
+        f"secret, quotes or not, and would refuse the line; to awk the two are the same field")}]
+
+
+def single_quoted_names_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> list[dict]:
+    """§17.1638 — any OTHER `$UPPER` inside single quotes that no store holds: the shell leaves it alone, the runner
+    demands it as a secret and refuses the approved block. Said before Run, so it redrafts instead."""
+    held = ({str(x) for x in ((policy or {}).get("secrets") or [])}
+            | {str(x) for x in ((policy or {}).get("held") or [])})
+    out: list[dict] = []
+    for cmd in commands or []:
+        text = str(cmd or "")
+        # a name the block binds itself is §17.1578's (an old runner) or nobody's (helper 23 leaves it alone)
+        bound = {m.group("name") for m in _VAR_SET_RE.finditer(text)
+                 if not _SELF_ASSIGN_RE.match(text[m.start("name"):])}
+        bound |= {g for m in _VAR_BIND_RE.finditer(text)
+                  for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        hits = sorted({m.group(1) for a, b in _single_quoted_spans(text)
+                       for m in _SECRET_REF_RE.finditer(text[a:b])} - held - bound)
+        if hits:
+            out.append({"command": text[:200], "why": (
+                f"{', '.join(f'`${h}`' for h in hits)} inside single quotes is left alone by the shell, but the runner "
+                f"reads every `$UPPER` reference as a secret it must hold and refuses the block (\"this command needs "
+                f"${hits[0]}, which neither the engine sent nor this runner's secrets file holds\"). Spell it so no "
+                f"`$` is followed by an uppercase letter: lowercase the name, or in awk write `$(NF)`.")})
+    return out
+
+
 def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> list[dict]:
     """§17.1578 — an UPPERCASE name the block sets and then reads, on a runner that demands a value for
     EVERY `$UPPER` reference.
@@ -6052,6 +6137,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
     cmds, verify, _local_notes = local_reads_in_a_read_only_step(node, cmds, verify, runbook)   # §17.1637c
+    cmds, verify, _awk_notes = awk_fields_the_runner_reads_as_secrets(cmds, verify)   # §17.1638
+    _local_notes = list(_local_notes) + _awk_notes
     # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
     # the gaps deterministically, instead of the model's lookup/add/true draft. Runs
     # BEFORE the key reader so `<APP_API_KEY>` is filled in the guest it now runs in.
@@ -6313,6 +6400,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     refused = refused + locals_the_runner_reads_as_secrets(list(cmds) + list(verify), policy)   # §17.1578
+    refused = refused + single_quoted_names_the_runner_reads_as_secrets(list(cmds), policy)   # §17.1638 — the supervised path only
     refused = refused + a_secret_name_written_as_its_value(cmds, files, policy, verify)         # §17.1581
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
