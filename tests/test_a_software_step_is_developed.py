@@ -209,7 +209,8 @@ def test_scoring_puts_a_clean_frame_first_and_non_rehearsal_refusals_last():
 
 def test_the_pause_develops_instead_of_drafting_and_the_chain_stands_aside():
     src = inspect.getsource(execution_agent._pause_for_decision)
-    assert 'runbook = "" if _developed else await supervised_runs.draft_runbook(' in src
+    # §17.1641 — the draft is now reached only when the step is neither developed nor an engine API check
+    assert 'if not _developed and not runbook:\n                runbook = await supervised_runs.draft_runbook(' in src
     assert "frame = await _develop_the_step(_dev_host, frame)" in src
     assert "preconditions=await _pre_for(rb)" in src and "develop.render_delivery(" in src
     for guard in ("if fix and not _developed:", "_rehearsal_only(frame) and not _developed:",
