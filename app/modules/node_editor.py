@@ -353,6 +353,31 @@ async def _reopen_job(db: AsyncSession, job_id: str) -> None:
         logger.warning("node_edit_reopened_terminal_job job=%s -> executing", job_id)
 
 
+async def _drop_parked_frame(db: AsyncSession, job_id: str, node_keys: list[str], why: str) -> bool:
+    """§17.1639 — a node edit that removes or settles the step the run is PARKED on drops that step's frame.
+
+    `jobs.metadata.awaiting_decision` is the question on screen. Only answering it (`decide`) or `reask` cleared it, so
+    deleting, resetting or marking satisfied the very step it asks about left the job `awaiting_decision` on a frame
+    for a step that no longer exists or is no longer that draft. Live (job 0fb4ea7f, 2026-10-18): LT2, a stop step held
+    ready during a load test, was deleted while parked; the job kept the frame, and after the next run reached
+    `completed` it still carried it. The job goes to `blocked` -- nothing is running, and Run picks the plan up again
+    (§17.1211: not `executing`, which would claim a run in flight). Returns True when a frame was dropped."""
+    row = (await db.execute(
+        text("SELECT status, metadata -> 'awaiting_decision' ->> 'node_key' AS parked "
+             "FROM jobs WHERE id = :j FOR UPDATE"), {"j": job_id})).mappings().first()
+    if not row or not row["parked"] or row["parked"] not in set(node_keys):
+        return False
+    await db.execute(
+        text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) - 'awaiting_decision', updated_at = now() "
+             "WHERE id = :j"), {"j": job_id})
+    if str(row["status"]) == "awaiting_decision":
+        from app.modules.job_state import transition
+        await transition(db, job_id, to="blocked", expected_from=("awaiting_decision",),
+                         reason=f"parked_step_{why}:{row['parked']}")
+    logger.warning("node_edit_dropped_parked_frame job=%s node=%s why=%s", job_id, row["parked"], why)
+    return True
+
+
 def _version_conflict(node: dict, expected_version: int | None) -> dict | None:
     """Optimistic-lock check. expected_version=None → lenient (last-write-wins,
     logged). Mismatch → 409 dict."""
@@ -589,6 +614,7 @@ async def delete_node(
         text("DELETE FROM dag_nodes WHERE job_id = :j AND node_key = :nk"),
         {"j": job_id, "nk": node_key},
     )
+    await _drop_parked_frame(db, job_id, [node_key], "deleted")   # §17.1639
     # Renumber remaining nodes and cascade-reset rewired dependents (+ their
     # downstream) since their input set changed.
     remaining = [n["node_key"] for n in nodes if n["node_key"] != node_key]
@@ -680,6 +706,7 @@ async def mark_satisfied(
              "WHERE job_id = :j AND node_key = :nk AND status <> 'running'"),
         {"j": job_id, "nk": node_key, "block": block, "sep": "\n\n",
          "why": "recorded as already done, with evidence (§17.1226)"})
+    await _drop_parked_frame(db, job_id, [node_key], "satisfied")   # §17.1639
     await _audit(db, job_id, node_key, "satisfied",
                  {"status": node["status"], "output_text": prior[:8000]},
                  {"status": "done", "evidence": evidence[:4000], "cascade": []},
@@ -716,6 +743,7 @@ async def reset_node(
     reset_keys = sorted({node_key} | downstream)
     await _reset_keys(db, job_id, reset_keys)
     await _drop_engine_half_marks(db, job_id, reset_keys)
+    await _drop_parked_frame(db, job_id, reset_keys, "reset")   # §17.1639 — its draft is gone with it
     await _reopen_job(db, job_id)
     await _audit(
         db, job_id, node_key, "reset",
