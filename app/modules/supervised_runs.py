@@ -160,6 +160,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "a secret cannot be written into a file",       # §17.1280
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
+                   "this step says it is READ ONLY",                # §17.1637
                    "and nothing sets it",                           # §17.1348
                    "but set in a DIFFERENT command",               # §17.1398
                    "is expanded by GUEST",                          # §17.1364
@@ -332,6 +333,7 @@ _WHOSE_GAP: dict[str, str] = {
     "runs only inside the container": "drafter",                  # §17.1614 — docker exec it, as the job does
     "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
     "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
+    "this step says it is READ ONLY": "drafter",                  # §17.1637 — reads only, with what the machine has
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
     "lines it holds now would be lost": "drafter",                 # §17.1457 — edit in place / carry every line
@@ -2641,6 +2643,11 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         ids = [g for g in ids if known_guest(g, inventory, text + "\n" + "\n".join(str(c) for c in commands or []))]
     if not ids or not commands:
         return []
+    # §17.1637 — a step that says it changes nothing has no write to carry into a guest: §17.1637's own gate refuses
+    # the write, and this one's remedy (ssh it INTO the VM) would contradict it. Live, MC1 ran on the HOST and named
+    # VM 110 only in its "Why".
+    if declares_read_only(node):
+        return []
     # §17.1603b — a step whose own text names Proxmox's admin tools (`pveum`, `pvesh create`, `pct push`, …) is the
     # HOST's work for the guest: those tools exist only there. Live (c2792d4b T14, "create the panel's API token …
     # push it into container 111"), the right host-side draft was refused as "would change the HOST instead of guest 111".
@@ -2687,6 +2694,52 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
         f"as ONE bash script under ## Write these files run with `MASS_PASSWORD=\"$MASS_PASSWORD\" bash /tmp/<name>.sh`. "
         f"A host-side operation ON the guest is `qm …/pct … {gid}`. The step is the operator's only when ssh itself "
         f"is refused -- say which command refused and why.")}]
+
+
+#: §17.1637 — the step's OWN declaration that it changes nothing: "Read only:" / "Read only, inside VM 110" opening a
+#: clause, or "change nothing" (not "change nothing else", which is a write step's boundary). Measured on all 532 steps
+#: of 2026-10-18: 24 hits, every one a read-only step; "read-only mount|token|checks|network view", "(read-only)" and
+#: "changes nothing in Pi-hole" (a capability step that writes code) are not declarations and do not match.
+_READ_ONLY_STEP_RE = re.compile(
+    r"(?:^|\|\||[.;:])\s*read[- ]only(?=\s*(?:[.:;,(]|$))"
+    r"|\bchange nothing\b(?![ \t]+(?:else|in|on|but|except|other|outside)\b)", re.I)
+
+
+def declares_read_only(node: Optional[dict]) -> bool:
+    """§17.1637 — does the step say, before its "Done when", that it changes nothing?"""
+    text = " || ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    work = re.split(r"\bDone when\b", text, maxsplit=1, flags=re.I)[0]
+    return bool(_READ_ONLY_STEP_RE.search(work))
+
+
+def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
+    """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
+
+    Live (job 0fb4ea7f MC1, 2026-10-18): "On the Proxmox host: check CPU1 memory channel C … change nothing, read
+    only" was drafted with `apt-get install -y ipmitool` -- on a host whose `ipmitool sel elist` VS1 had read the
+    day before -- and every BMC read as `ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P "$MASS_PASSWORD" …`,
+    asking the operator for the BMC's address and login. Nothing refused the install for being a write; §17.1285
+    refused it for missing guest 110 (named in the step's "Why"), whose remedy is to ssh the write INTO the VM.
+
+    Only the drafter's own lines are judged: a template's frame is the engine's (its host-side `write /tmp/…sh`
+    and ssh lines are how it reaches the guest) and §17.1634 already strips a read-only block's own options.
+    """
+    if not commands or not declares_read_only(node):
+        return []
+    from app.modules.runbook_templates import template_of
+    if template_of(runbook or ""):
+        return []
+    for c in commands:
+        segs = writing_segments(str(c))
+        if segs:
+            return [{"command": str(c), "why": (
+                f"this step says it is READ ONLY (it changes nothing), and `{segs[0].strip()[:80]}` is not a read "
+                f"the engine recognises -- it would change the machine, or reach it in a form no read takes. Use "
+                f"only reads, with what the machine already has: a tool that may be missing is a finding to "
+                f"report (`command -v <tool> || echo '<tool>: not installed'`), never something to install; and a "
+                f"read the machine answers locally is written in its plain local form, with no address, login or "
+                f"password of its own.")}]
+    return []
 
 
 def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
@@ -6181,6 +6234,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
+    refused = refused + writes_in_a_read_only_step(cmds, node, runbook)   # §17.1637
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
