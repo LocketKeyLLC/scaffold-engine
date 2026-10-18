@@ -2748,6 +2748,49 @@ def local_form_of_a_read(cmd: str) -> str:
     return local if dropped and read_only_command(local) else ""
 
 
+def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], verify: list[str],
+                                    runbook: str = "") -> tuple[list[str], list[str], list[dict]]:
+    """§17.1637c — in a step that says it changes nothing, a read sent to a remote copy of the machine's own device
+    at an address nobody knows (`ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P "$MASS_PASSWORD" sel list`) is
+    written in its local form (`ipmitool sel list`) by the engine, said on the frame.
+
+    Live (MC1, 2026-10-18): after §17.1637b's refusal named the local form, two more redrafts still sent every BMC
+    read over lanplus, and the step parked asking the operator for the BMC's address and a login -- for a read the
+    host answers itself (VS1 ran `ipmitool sel elist` there). Only a PLACEHOLDER address is rewritten: a literal
+    one is a machine the drafter chose, and stays the drafter's (§17.1637b refuses it with the local form named)."""
+    if not declares_read_only(node):
+        return commands, verify, []
+    from app.modules.runbook_templates import template_of
+    if template_of(runbook or ""):
+        return commands, verify, []
+    from app.modules.assist_supervised import split_segments
+    rewrote: list[str] = []
+
+    def _fix(line: str) -> str:
+        out = str(line)
+        for seg in split_segments(out):
+            seg = seg.strip()
+            m = re.search(r"(?:^|\s)-H\s+(\S+)", seg)
+            if not m or not _PLACEHOLDER_RE.fullmatch(m.group(1)) or seg not in out:
+                continue
+            local = local_form_of_a_read(seg)
+            if local:
+                out = out.replace(seg, local, 1)
+                rewrote.append(local)
+        return out
+
+    cmds = [_fix(c) for c in commands or []]
+    ver = [_fix(v) for v in verify or []]
+    if not rewrote:
+        return commands, verify, []
+    forms = ", ".join(f"`{f}`" for f in dict.fromkeys(rewrote))
+    return cmds, ver, [{"why": (
+        f"this step says it changes nothing, and {len(rewrote)} read{'s' if len(rewrote) != 1 else ''} went to the "
+        f"machine's device over the network at an address nobody gave (`-H <…>`, with a login): the engine wrote "
+        f"{'them' if len(rewrote) != 1 else 'it'} in the local form the machine answers itself -- {forms} -- so "
+        f"no address, login or password is asked")}]
+
+
 def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
@@ -6008,6 +6051,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # the key substitution and the host-tool gate see it (else it is refused as a
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
+    cmds, verify, _local_notes = local_reads_in_a_read_only_step(node, cmds, verify, runbook)   # §17.1637c
     # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
     # the gaps deterministically, instead of the model's lookup/add/true draft. Runs
     # BEFORE the key reader so `<APP_API_KEY>` is filled in the guest it now runs in.
@@ -6277,7 +6321,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
-    _repairs = list(_repairs) + _vdrops + _lookup_repairs + _mv_notes  # §17.1288d/o, §17.1332 — a dropped check, a repaired lookup: corrections too
+    _repairs = list(_repairs) + _vdrops + _lookup_repairs + _mv_notes + _local_notes  # §17.1288d/o, §17.1332 — a dropped check, a repaired lookup: corrections too
     from app.modules.runbook_templates import template_of
     _tpl = template_of(runbook)
     if _tpl:                                               # §17.1290 — said on the frame: the shape is the engine's

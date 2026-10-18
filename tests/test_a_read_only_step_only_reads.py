@@ -122,3 +122,30 @@ def test_only_a_read_gets_a_local_form():
     for c in ("ipmitool -I lanplus -H x -U y -P p sel clear", "ipmitool -I lanplus -H x -U y -P p mc reset cold",
               "ipmitool sel elist", "apt-get install -y ipmitool", "ipmitool -I lanplus -H 'x"):
         assert sr.local_form_of_a_read(c) == "", c
+
+
+#: §17.1637c — the third live draft, after §17.1637b named the local form: still lanplus, now behind pipes too
+THIRD = ["command -v ipmitool || echo 'ipmitool: not installed'",
+         'ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P "$MASS_PASSWORD" sel list',
+         "ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P \"$MASS_PASSWORD\" sel list | grep -c 'DIMMC1(CPU1)'",
+         'ipmitool -I lanplus -H <BMC_IP> -U <BMC_USER> -P "$MASS_PASSWORD" sensor list',
+         "dmidecode -t memory"]
+THIRD_RUNBOOK = "## Run this\n\n" + "\n\n".join(f"```bash\n{c}\n```" for c in THIRD) + "\n"
+
+
+def test_the_engine_writes_the_local_read_itself_and_asks_nothing():
+    frame = _frame(MC1, THIRD_RUNBOOK)
+    assert frame["commands"][1:4] == ["ipmitool sel list", "ipmitool sel list | grep -c 'DIMMC1(CPU1)'",
+                                      "ipmitool sensor list"], frame["commands"]
+    assert frame["inputs"] == [] and not frame["refused"], (frame["inputs"], frame["refused"])
+    assert any("the engine wrote them in the local form" in str(f) for f in frame["engine_fixed"]), frame["engine_fixed"]
+
+
+def test_a_literal_address_or_a_write_step_is_left_alone():
+    lit = ['ipmitool -I lanplus -H 10.0.0.9 -U u -P "$P" sel list']
+    assert sr.local_reads_in_a_read_only_step(MC1, lit, [])[0] == lit           # a machine the drafter chose
+    write_step = {"node_key": "W", "title": "Clear the BMC log", "description": "Change nothing else."}
+    assert sr.local_reads_in_a_read_only_step(write_step, THIRD, [])[0] == THIRD
+    clear = ['ipmitool -I lanplus -H <BMC_IP> -U u -P "$P" sel clear']          # no local READ form: stays refused
+    assert sr.local_reads_in_a_read_only_step(MC1, clear, [])[0] == clear
+    assert sr.writes_in_a_read_only_step(clear, MC1)
