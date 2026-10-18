@@ -92,6 +92,19 @@ def _looks_like_command(c: str) -> bool:
     return bool(re.match(r"\s*[a-z][\w.-]*(?:\s|$)", c)) and " " in c.strip()
 
 
+def done_when_clause(body: str) -> str:
+    """§17.1636 — the text of the step's "Done when", up to the end of its paragraph (or '').
+
+    Live (job 0fb4ea7f PLF1): the operator's redraft note is appended to the step text AFTER the "Done when"; its
+    "show `diff` against the original" was read as a Done-when print, and the run that did the work was recorded
+    failed. A blank line ends the clause; blank lines right after "Done when" (a list below it) do not."""
+    parts = _DONE_WHEN_RE.split(body or "", 1)
+    if len(parts) < 2:
+        return ""
+    rest = re.sub(r"^[\s:]+", "", parts[1])
+    return re.split(r"\n\s*\n", rest, maxsplit=1)[0]
+
+
 def checks(node: Optional[dict]) -> list[str]:
     """The step's own read-only checks: backticked commands after 'Done when'.
 
@@ -100,11 +113,11 @@ def checks(node: Optional[dict]) -> list[str]:
     n = node or {}
     body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
                                      if str(n.get(k) or "").strip()))
-    parts = _DONE_WHEN_RE.split(body, 1)
-    if len(parts) < 2:
+    clause = done_when_clause(body)
+    if not clause:
         return []
     from app.modules.assist_state_check import read_only_command
-    return [c.strip() for c in dict.fromkeys(_BACKTICK_RE.findall(parts[1]))
+    return [c.strip() for c in dict.fromkeys(_BACKTICK_RE.findall(clause))
             if _looks_like_command(c) and read_only_command(c.strip())]
 
 
@@ -121,12 +134,12 @@ def expected_prints(node: Optional[dict]) -> list[str]:
     n = node or {}
     body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
                                      if str(n.get(k) or "").strip()))
-    parts = _DONE_WHEN_RE.split(body, 1)
-    if len(parts) < 2:
+    clause = done_when_clause(body)
+    if not clause:
         return []
     own = set(checks(n))
     out: list[str] = []
-    for m in _PRINTS_RE.finditer(parts[1]):
+    for m in _PRINTS_RE.finditer(clause):
         for t in _BACKTICK_RE.findall(m.group(1)):
             t = t.strip()
             if t and t not in own and t not in out:
