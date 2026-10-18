@@ -343,7 +343,15 @@ esac
 
 
 #: §17.1618 — "deploy the scaffold engine (its services / stack) in VM N": the engine deploying ITSELF
-_DEPLOY_ENGINE_RE = re.compile(r"\b(?:re)?deploy(?:s|ing)?\b[^.\n]{0,40}\b(?:scaffold[- ]engine|the engine|engine(?:'s)?\s+(?:services|stack))\b", re.I)
+_DEPLOY_ENGINE_RE = re.compile(r"\b(?:re)?deploy(?:s|ing)?\b[^.\n]{0,40}(?:(?<![/\w-])scaffold[- ]engine|\bthe engine|\bengine(?:'s)?\s+(?:services|stack))\b", re.I)
+#: §17.1635 — a backticked span is a command or a path the step QUOTES, not what it asks for
+
+
+def asks_to_deploy_the_engine(node: dict) -> bool:
+    """§17.1635 — the step asks to deploy the engine itself. Judged on its prose: live (job 0fb4ea7f PLF1, "correct the
+    stale lines of PLACEMENT.md"), "(the redeploy command) becomes `cd /opt/scaffold-engine && …`" picked the deploy
+    template with EMPTY settings -- approving it would have redeployed the server and corrected nothing."""
+    return bool(_DEPLOY_ENGINE_RE.search(re.sub(r"`[^`\n]*`", " ", _text(node))))
 #: a settings line in the step's own text: KEY=VALUE (the engine's .env keys and the deploy script's own)
 _SETTING_LINE_RE = re.compile(r"^\s*`?([A-Z][A-Z0-9_]{1,60})=([^\s`]+)`?\s*$", re.M)
 _SECRETISH_RE = re.compile(r"KEY|PASSWORD|SECRET|TOKEN|PASS\b")
@@ -386,7 +394,7 @@ def deploy_engine_commands(node: dict) -> str:
 DEPLOY_SCAFFOLD_ENGINE = Template(
     name="deploy_scaffold_engine",
     title="Deploy the scaffold engine itself inside VM {GID}",
-    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and bool(_DEPLOY_ENGINE_RE.search(_text(node)))
+    applies=lambda node, truth: _subject_kind(node, truth) == "vm" and asks_to_deploy_the_engine(node)
                                 and not host_side_only(node),
     params=[p for p in REACH_VM_SSH_AND_RUN.params if p.name != "REMOTE_COMMANDS"]
            + [Param("REMOTE_COMMANDS", "default", "the engine's own deploy (§17.1618)", "")],
