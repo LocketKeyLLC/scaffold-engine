@@ -58,7 +58,16 @@ if [ -n "$OLLAMA_DIR" ] && [ -f "$OLLAMA_DIR/docker-compose.yml" ]; then
     if [ ! -f "$OLLAMA_DIR/docker-compose.override.yml" ]; then
         printf 'networks:\n  default:\n    name: ai-network\n    external: true\n' > "$OLLAMA_DIR/docker-compose.override.yml"
     fi
-    (cd "$OLLAMA_DIR" && docker compose up -d)
+    # §17.1631 -- bring it up with the files it RUNS with: compose records them on the container. Live, VM 110
+    # 2026-10-17: Ollama ran from an extra docker-compose.nogpu.yml (the P40 detached); a plain `up -d` would recreate
+    # it with the GPU reservation, and it cannot start without the card.
+    OC=$(get OLLAMA_CONTAINER); OC=${OC:-ollama}
+    files=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$OC" 2>/dev/null || true)
+    fargs=()
+    IFS=',' read -ra _fs <<< "$files"
+    for f in "${_fs[@]}"; do [ -f "$f" ] && fargs+=(-f "$f"); done
+    [ "${#fargs[@]}" -gt 0 ] && echo "Ollama keeps the compose files it runs with: $files"
+    (cd "$OLLAMA_DIR" && docker compose "${fargs[@]}" up -d)
 fi
 
 echo "== 2. bootstrap (fresh secrets, volumes, first build + start)"
