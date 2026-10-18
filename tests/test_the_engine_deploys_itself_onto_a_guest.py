@@ -77,7 +77,8 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
                             '    *) [ "$3" = cat ] && echo "ssh-ed25519 AAAAfakekey";; esac;;\n'
                             '  "compose config") echo \'{"volumes": {"open-webui": {"external": true, "name": "open-webui"}, '
                             '"cache": {}}}\';;\n'
-                            '  "volume inspect") exit 1;;\nesac\nexit 0\n')
+                            '  "volume inspect") exit 1;;\n'
+                            f'  "inspect -f") [ -f {tmp_path}/labels ] && cat {tmp_path}/labels;;\nesac\nexit 0\n')
     (repo / "pipelines").mkdir()
     for n in ("curl", "systemctl", "chown"):
         _fake(bindir, n, f'echo "{n} $*" >> {log}\nexit 0\n')
@@ -113,6 +114,18 @@ def test_bash_level_the_deploy_script_runs_twice_and_keeps_its_secrets(tmp_path)
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "cloud tag qwen3.5:397b-cloud not registered" in r.stderr and "ssh-ed25519 AAAAfakekey" in r.stderr
+    # §17.1631 -- Ollama is brought up with the compose files it RUNS with (live: VM 110's extra nogpu file, the P40
+    # detached); a plain `up -d` would recreate it with the GPU reservation. A recorded file that is gone is dropped.
+    (ollama / "docker-compose.nogpu.yml").write_text("services: {}\n")
+    (tmp_path / "labels").write_text(f"{ollama}/docker-compose.yml,{ollama}/docker-compose.override.yml,"
+                                     f"{ollama}/docker-compose.nogpu.yml,{ollama}/gone.yml\n")
+    log.write_text("")
+    r = subprocess.run(["bash", "scripts/deploy_on_guest.sh", str(settings)], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ups = [ln for ln in log.read_text().splitlines() if ln.startswith("docker compose") and ln.endswith("up -d")]
+    assert ups == [f"docker compose -f {ollama}/docker-compose.yml -f {ollama}/docker-compose.override.yml "
+                   f"-f {ollama}/docker-compose.nogpu.yml up -d"], ups
 
 
 def test_the_deploy_script_refuses_a_cpu_without_x86_64_v2():
