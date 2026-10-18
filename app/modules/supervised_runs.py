@@ -6341,6 +6341,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1278 — and it must tell a dead tracker from a bad request the way the
     # service does: by whether a field is NAMED, not whether the key is present.
     refused = refused + classifies_by_key_presence(cmds, shape_files)
+    # §17.1630 — the frame shows every check the run will make: the step's own "Done when" checks were added only at
+    # the run (§17.1470/§17.1625), so OL2's frame listed `qm status 110` while two in-guest checks ran after it.
+    if cmds:
+        verify = with_own_checks(node, verify, cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -6789,6 +6793,18 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                                    str(_against[0].get("reason"))[:140])
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
+    # §17.1630 — a "Done when it prints `X`" is a check too, and the cheapest one: X is in what ran, or it is not.
+    if ok:
+        from app.modules.operator_steps import expected_prints, missing_prints
+        _expected = expected_prints({"description": waiting.get("description"),
+                                     "prompt_template": waiting.get("prompt_template")})
+        _missing = missing_prints(_expected, "\n".join([str(e.get("output") or "") for e in executed] + [verify_out]))
+        if _missing:
+            ok = False
+            refuted = list(refuted) + [{"verdict": "contradicted", "reason": f"nothing printed `{t}`, which its Done when names"}
+                                       for t in _missing]
+            logger.warning("supervised_run_expected_print_missing job=%s node=%s missing=%r",
+                           job_id, node_key, [t[:60] for t in _missing])
     # §17.1281 — nothing a run printed reaches the record, the response or the
     # log with an engine-held value or a secret-shaped token in it.
     for e in executed:

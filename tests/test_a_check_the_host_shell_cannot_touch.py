@@ -69,7 +69,9 @@ def test_a_quoted_check_reaches_the_guest_whole(tpl, node, truth, prefix):
     assert verify == [prefix + '"grep -q \\"ListenPort = 51820\\" /etc/wireguard/wg0.conf"'], verify
     assert _what_the_guest_gets(verify[0]) == CHECK
     frame = _frame(rb, node)
-    assert frame["verify"] == verify, [r["why"][:100] for r in frame["refused"]]
+    # §17.1630 — and after them the step's own "Done when" checks, which the run makes too (ADD84's `df -h`)
+    assert frame["verify"] == sr.with_own_checks(node, verify, frame["commands"]), [r["why"][:100] for r in frame["refused"]]
+    assert frame["verify"][:1] == verify
 
 
 @pytest.mark.asyncio
@@ -86,7 +88,8 @@ async def test_the_draw_is_escaped_once_at_render(monkeypatch):
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, ADD84, _truth("vm", agent=True), ENV, vals))
     verify = sr.verify_commands(rb)
     assert _what_the_guest_gets(verify[0]) == "df -h / | awk '{print $5}'"
-    assert _frame(rb, ADD84)["verify"] == verify
+    frame = _frame(rb, ADD84)
+    assert frame["verify"] == verify + ["qm guest exec 106 -- bash -c 'df -h'"], "§17.1630: and ADD84's own check"
 
 
 def test_a_public_key_or_a_shell_variable_never_becomes_a_secret_file():

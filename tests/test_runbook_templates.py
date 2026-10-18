@@ -320,8 +320,9 @@ def test_the_agent_template_reaches_the_guest_without_ssh_account_key_or_address
     assert "deadline=$(( SECONDS + 165 ))" in body and "STILL RUNNING" in body and 'exit "${code:-1}"' in body, "each wait fits the budget; the unit's exit code is the step's"
     frame = _frame(rb, ADD84)
     assert frame["commands"] == ["bash /tmp/in_vm_106_agent.sh start"] + ["bash /tmp/in_vm_106_agent.sh wait"] * 7 + ["bash /tmp/in_vm_106_agent.sh last"], frame["commands"]
-    assert frame["verify"] == ['qm guest exec 106 -- bash -c "df -h /"'], "the verify runs INSIDE the guest, alone, so §17.1302 can read it (§17.1304)"
-    assert sr.verify_commands(rb) == frame["verify"], "both checks are read-only through the wrapper"
+    assert frame["verify"] == ['qm guest exec 106 -- bash -c "df -h /"',      # §17.1630: then the step's own `df -h`
+                               "qm guest exec 106 -- bash -c 'df -h'"], "the verify runs INSIDE the guest, alone, so §17.1302 can read it (§17.1304)"
+    assert sr.verify_commands(rb) == frame["verify"][:1], "the runbook's check is read-only through the wrapper"
 
 
 @pytest.mark.asyncio
