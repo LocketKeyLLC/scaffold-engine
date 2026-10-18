@@ -770,7 +770,8 @@ async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
     """
     res = await db.execute(
         text(
-            "UPDATE jobs SET status = 'completed' "
+            # §17.1639 — a completed job asks nothing: any parked frame left behind goes with it
+            "UPDATE jobs SET status = 'completed', metadata = COALESCE(metadata, '{}'::jsonb) - 'awaiting_decision' "
             "WHERE id = :jid AND status NOT IN ('completed','cancelled','failed') "
             "RETURNING id"
         ),
