@@ -1414,11 +1414,15 @@ def a_file_read_on_another_machine(commands: list[str],
     channel.discard("")
     out: list[dict] = []
     seen: set = set()
+    # §17.1648 — what is written is the BLOCK's, in order: each command is its own runner call, so a writer and its
+    # reader are usually two commands. Live (T10's redraft): `pct exec 103 -- sh -c '…' | tee /tmp/radarr_dc.json`
+    # (the host's shell runs that `tee`) and then `pct exec 103 -- sh -c 'curl … -d @/tmp/radarr_dc.json …'` -- judged
+    # one command at a time, the writer and the reader were never compared.
+    wrote: dict = {}
     for t in texts:
         if _PROMPT_RE.search(t):
             continue                           # a transcript, not a draft
         runs_on = where_each_line_runs(t)
-        wrote: dict = {}
         for i, ln in enumerate(t.split("\n"), 1):
             if ln.strip().startswith("#"):
                 continue
@@ -1427,8 +1431,8 @@ def a_file_read_on_another_machine(commands: list[str],
                 if not path:
                     continue
                 at = runs_on.get(i, THE_HOST)
-                if m.group("p") and _redirection_is_the_outer_shells(ln, m.start()):
-                    at = THE_HOST              # §17.1377e — `pct exec … > /tmp/x`
+                if (m.group("p") or m.group("p2")) and _redirection_is_the_outer_shells(ln, m.start()):
+                    at = THE_HOST              # §17.1377e — `pct exec … > /tmp/x`; §17.1648 — and `pct exec … | tee /tmp/x`
                 wrote.setdefault(path, at)
             # §17.1377b — a transfer is a write on the DESTINATION machine, and it
             # overrides an earlier host-side write of the same path.

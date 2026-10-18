@@ -6036,6 +6036,15 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     # and `blocked` is read off that. (Computing them the other way round left
     # `unquotable` empty and every name looked askable.)
     cmds_out, verify_out = _ref(commands), _ref(verify)
+    # §17.1649 — a name the operator would be ASKED for gets the same test: its answer is stored and referenced, so a
+    # placeholder the reference cannot reach (inside a single-quoted guest payload) could never carry it. Live (job
+    # 5db1b088 PK1): `pct exec 111 -- sh -c 'echo "… <KEY_FROM_STEP_1>" >> known_hosts'` was asked for, answered, and ran
+    # with the literal `<KEY_FROM_STEP_1>` written into CT 111's known_hosts.
+    for n in [m for m in missing if m not in resolved]:
+        for c in list(commands or []) + list(verify or []):
+            _c, problem = secret_ref_rewrite(c, n)
+            if problem and problem not in unquotable:
+                unquotable.append(problem)
     # §17.1193 — a secret nothing holds yet is ASKED FOR, once, and the answer
     # is stored encrypted rather than spliced into the command. An unquotable
     # name is the exception: asking would not help, because the runbook put the
@@ -6137,6 +6146,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # `pct` run inside a guest, and the read would run on the host unprivileged).
     cmds, verify, _fold_notes = _mv.fold_redundant_nested_guest_exec(cmds, verify)
     cmds, verify, _local_notes = local_reads_in_a_read_only_step(node, cmds, verify, runbook)   # §17.1637c
+    # §17.1647 — an *arr test call that sent only an id GETs the object and posts it back whole
+    from app.modules.arr_test_calls import send_the_whole_object as _whole_object
+    cmds, verify, _tc_notes = _whole_object(cmds, verify)
+    _local_notes = list(_local_notes) + _tc_notes
     cmds, verify, _awk_notes = awk_fields_the_runner_reads_as_secrets(cmds, verify)   # §17.1638
     _local_notes = list(_local_notes) + _awk_notes
     # §17.1504 — a "check <show> completeness" step reads the *arr library and reports
@@ -6158,6 +6171,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _cs_notes:
         cmds, verify = _cs_cmds, _cs_verify
         _comp_notes = list(_comp_notes) + _cs_notes
+    # §17.1650 — "dismiss the import-blocked queue items": out of the queue only, then the app's missing search.
+    _db_cmds, _db_verify, _db_notes = rewrite_dismiss_import_blocked(node, cmds, verify, services, inventory)
+    if _db_notes:
+        cmds, verify = _db_cmds, _db_verify
+        _comp_notes = list(_comp_notes) + _db_notes
     # §17.1523 — "inventory the Prowlarr indexers": read /api/v1/indexer + /indexerstatus in-guest
     # (no service stop, no jq) and print the table, deterministically.
     _pi_cmds, _pi_verify, _pi_notes = rewrite_inventory_prowlarr_indexers(node, cmds, verify, services, inventory)
@@ -6877,11 +6895,25 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             from app.modules import runner_secrets as _rs
             await _rs.set_secret(db, name, _all[name],
                                  runner=str(waiting.get("runner") or "") or None, hint=str(i.get("hint") or ""))
-            commands = [secret_ref_rewrite(c, name)[0] for c in commands]
-            verify_cmds = [secret_ref_rewrite(c, name)[0] for c in verify_cmds]
+            _rw = [secret_ref_rewrite(c, name) for c in commands]
+            _rwv = [secret_ref_rewrite(c, name) for c in verify_cmds]
+            _stuck = [p for _c, p in _rw + _rwv if p]
+            if _stuck:
+                # §17.1649 — never run a command the stored answer cannot reach: it would run with the bare placeholder
+                return {"outcome": "not_runnable", "refused": [{"command": "", "why": (
+                    f"`<{name}>` sits where a stored value cannot reach -- {_stuck[0]} -- so the command would run with "
+                    f"the literal text `<{name}>` (live, PK1 wrote it into CT 111's known_hosts). Redraft it so the value "
+                    f"is read in the same command that uses it.")}]}
+            commands, verify_cmds = [c for c, _p in _rw], [c for c, _p in _rwv]
         if need:
             commands = substitute(commands, values)
             verify_cmds = substitute(verify_cmds, values)
+        # §17.1649 — backstop: no asked placeholder may survive into what runs
+        _left_ph = sorted({i["name"] for i in asked if any(f"<{i['name']}>" in c for c in commands + verify_cmds)})
+        if _left_ph:
+            return {"outcome": "not_runnable", "refused": [{"command": "", "why": (
+                f"`<{_left_ph[0]}>` is still in the command after the answers were applied, so it would run with the "
+                f"placeholder itself (§17.1649).")}]}
     ch = await channel(db)
     if ch is None:
         return {"outcome": "no_channel"}
@@ -8449,6 +8481,8 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
     title = str((node or {}).get("title") or "")
     if not (_QUEUE_RE.search(title) and _MISSING_RE.search(text) and _SEASONS_RE.search(text)):
         return list(commands or []), list(verify or []), []
+    if _QUEUE_REMOVAL_RE.search(title):
+        return list(commands or []), list(verify or []), []     # §17.1650 — taking items OUT of the queue is not a search
     app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", title, re.I) else "sonarr"
     gid = _arr_guest(app, services, inventory)
     if not gid:
@@ -8538,6 +8572,66 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
         f"Sonarr queue, bulk-removes every stalled/errored item with blocklist=true (so the dead release is not "
         f"grabbed again) and removeFromClient=true (drops the partials from qBittorrent), then triggers "
         f"MissingEpisodeSearch to pull better-seeded releases — two API calls, no per-item loop.")}]
+    return [run], [check], note
+
+
+#: §17.1650 — a title that takes items OUT of an *arr queue (dismiss / remove / clear … queue)
+_QUEUE_REMOVAL_RE = re.compile(r"\b(?:dismiss|remove|clear|purge|drop|delete)\b[^.;\n]{0,60}\bqueue\b", re.I)
+_IMPORT_BLOCKED_RE = re.compile(r"\bimport[- ]?blocked\b|\bblocked\b[^.;\n]{0,20}\bimports?\b", re.I)
+#: in the app's guest: the importBlocked items only, out of the QUEUE only (the client keeps seeding, no blocklist, no
+#: file touched), then the app's own search for what is still missing
+_DISMISS_BLOCKED_PY = (
+    "import sys,json,urllib.request\n"
+    "PORT,CMD=sys.argv[1],sys.argv[2]; KEY=sys.argv[3]; BASE='http://127.0.0.1:'+PORT\n"
+    "def api(p,method='GET',body=None):\n"
+    "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
+    "data=json.dumps(body).encode() if body is not None else None)\n"
+    "    u=urllib.request.urlopen(r,timeout=60); d=u.read()\n"
+    "    return json.loads(d) if d else None\n"
+    "def blocked():\n"
+    "    q=api('/api/v3/queue?pageSize=2000') or {}; recs=q.get('records') or []\n"
+    "    return recs,[r['id'] for r in recs if str(r.get('trackedDownloadState') or '').lower()=='importblocked' and r.get('id') is not None]\n"
+    "recs,ids=blocked()\n"
+    "print('IMPORT-BLOCKED: %d of %d queue items' % (len(ids),len(recs)))\n"
+    "if ids:\n"
+    "    api('/api/v3/queue/bulk?removeFromClient=false&blocklist=false&skipRedownload=true','DELETE',{'ids':ids})\n"
+    "    print('DISMISSED %d from the queue (left in the download client, not blocklisted, no file touched)' % len(ids))\n"
+    "api('/api/v3/command','POST',{'name':CMD}); print('RE-SEARCH: %s queued' % CMD)\n"
+    "left=blocked()[1]\n"
+    "print('STILL IMPORT-BLOCKED: %d' % len(left)); print('STATE-OK' if not left else 'STATE-WRONG'); sys.exit(1 if left else 0)\n")
+
+
+def rewrite_dismiss_import_blocked(node: Optional[dict], commands: list[str], verify: list[str],
+                                   services: Optional[list] = None,
+                                   inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
+    r"""§17.1650 — "dismiss the import-blocked queue items" done deterministically.
+
+    Live (job 5db1b088 IB1, 2026-10-18): 82 of Sonarr's 107 queue items were finished season packs held importBlocked
+    ("One or more episodes expected in this release were not imported or missing from the release"; every file in them
+    already imported). The operator chose to dismiss them from Sonarr's queue only. §17.1508's per-series search claimed
+    the step (its title says "queue", its text "missing episodes") and would have searched instead of dismissing;
+    §17.1515's clear-stalled deliberately spares importBlocked and drops from the client with a blocklist. Inside the
+    app's guest: one bulk DELETE of the importBlocked ids with removeFromClient=false and blocklist=false, the app's
+    missing search, a re-read settled by STATE-OK."""
+    title = str((node or {}).get("title") or "")
+    text = _node_text(node)
+    if not (_QUEUE_REMOVAL_RE.search(title) and _IMPORT_BLOCKED_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", title, re.I) else "sonarr"
+    gid = _arr_guest(app, services, inventory)
+    if not gid:
+        return list(commands or []), list(verify or []), []
+    port, search = ("7878", "MissingMoviesSearch") if app == "radarr" else ("8989", "MissingEpisodeSearch")
+    key = app.upper() + "_API_KEY"
+    payload = f'python3 -c "{_DISMISS_BLOCKED_PY}" "{port}" "{search}" "<{key}>"'
+    run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
+    # the check is a READ: how many queue items are still importBlocked (the run itself fails when any is left)
+    check = (f'pct exec {gid} -- sh -c {_sq_payload("curl -s -H " + chr(34) + "X-Api-Key: <" + key + ">" + chr(34) + " " + chr(34) + f"http://127.0.0.1:{port}/api/v3/queue?pageSize=2000" + chr(34) + " | grep -o importBlocked | wc -l")}')
+    note = [{"why": (
+        f"drafted the dismissal from the engine's own shape (§17.1650): inside guest {gid} it takes {app}'s importBlocked "
+        f"items out of the QUEUE only -- removeFromClient=false and blocklist=false, so the download client keeps them, "
+        f"nothing is blocklisted and no file is touched -- queues {search}, and re-reads the queue (STATE-OK when none "
+        f"is left; the run fails when any is).")}]
     return [run], [check], note
 
 
