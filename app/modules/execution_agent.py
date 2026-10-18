@@ -3025,7 +3025,27 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("develop_host_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
                 _dev_host = None
             _developed = _dev_host is not None
-            runbook = "" if _developed else await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
+            runbook = ""
+            if not _developed:
+                # §17.1641 — a check of a measured service's API calls the routes its own code registers, with the
+                # login the engine holds; the model guessed both (T26: five made-up routes, no login, on a panel with 17)
+                try:
+                    from app.modules import api_route_check as _arc
+                    _api_svc = _arc.checked_service(run_node, _services)
+                    if _api_svc is not None:
+                        _ws = await develop.read_workspace(spec, develop.Host(
+                            guest=str(_api_svc.guest), vm=False, workdir=str(_api_svc.workdir).rstrip("/"),
+                            unit=str(_api_svc.unit), name=str(_api_svc.name)))
+                        _routes = _arc.registered_routes(_ws)
+                        if _routes:
+                            runbook = _arc.runbook(_api_svc, _routes,
+                                                   _arc.login_for(_api_svc, (policy or {}).get("held_logins")))
+                            logger.warning("api_route_check job=%s node=%s service=%s routes=%d", job_id,
+                                           run_node.get("node_key"), _api_svc.name, len(_routes))
+                except Exception as exc:
+                    logger.warning("api_route_check_skipped job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
+            if not _developed and not runbook:
+                runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
 
         # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
         # runs against copies of the real files in the rehearsal sandbox before it is

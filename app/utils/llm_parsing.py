@@ -24,10 +24,21 @@ _THINK_OPEN_RE = re.compile(r"<(?:think|thinking)>.*", re.DOTALL)
 _FENCE_RE = re.compile(r"^[ \t]*```[A-Za-z0-9_+-]*[ \t]*\r?\n?|\r?\n?[ \t]*```[ \t]*$|```", re.MULTILINE)
 
 
+#: §17.1642 — a CLOSING tag with no opener: the model's chat template opened the block, so the output starts
+#: inside it and the reasoning runs up to the first `</think>`.
+_THINK_ORPHAN_CLOSE_RE = re.compile(r"^.*?</(?:think|thinking)>", re.DOTALL)
+
+
 def strip_think_tags(text: str) -> str:
-    """Remove <think>/<thinking> reasoning blocks (closed or open) from LLM output."""
+    """Remove <think>/<thinking> reasoning blocks (closed, open, or opened by the template) from LLM output.
+
+    §17.1642 — live (research d4b7ce68, 2026-10-18): the summary began "Let me analyze the task…" and ran 80
+    lines of reasoning to a lone `</think>` before the answer; the opening tag was in the model's template, not
+    in its output, so neither pattern above matched and the reasoning was stored as the summary."""
     cleaned = _THINK_CLOSED_RE.sub("", text)
     cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    if re.search(r"</(?:think|thinking)>", cleaned):
+        cleaned = _THINK_ORPHAN_CLOSE_RE.sub("", cleaned, count=1)
     return cleaned.strip()
 
 

@@ -38,7 +38,7 @@ from app.providers.base import ModelResponse, Tool
 
 # via _ra().get_generic_http_client(); also the patch target for url-mode tests.
 from app.utils.http_clients import get_generic_http_client
-from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.llm_parsing import parse_json_array, parse_json_object, strip_think_tags
 from app.utils.tool_call_args import read_tool_args
 
 # Re-exports for test patches and existing call sites — keeps
@@ -1709,7 +1709,8 @@ async def _generate_summary(
                 "summary_llm_failed",
                 f"the summary model call failed ({resp.error or 'no error detail'})",
             )
-        summary_text = (resp.text or "").strip()
+        # §17.1642 — the reasoning of a thinking model whose template opened the block is not the summary
+        summary_text = strip_think_tags(resp.text or "")
         if summary_text:
             break
         logger.warning(

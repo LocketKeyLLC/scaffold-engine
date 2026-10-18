@@ -889,7 +889,56 @@ def where_each_line_runs(text: str) -> dict:
     for i, gid in _lines_feeding_dispatch(text, _dispatchers_in_python(text)):
         if where.get(i) in (None, SOME_GUEST):
             where[i] = gid
+    for (lo, hi), gid in _heredocs_into_a_guest(lines):
+        for i in range(lo, hi + 1):
+            where[i] = gid
     return where
+
+
+#: §17.1640 — a heredoc opener: `cat > /tmp/x.sh <<'REMOTE'`, `pct exec 111 -- bash <<EOF`
+_HEREDOC_RE = re.compile(r"<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_]\w*)(?P=q)")
+_HEREDOC_TO_FILE_RE = re.compile(r"(?<![\w-])(?:cat\s*>>?|tee\s+(?:-a\s+)?)\s*[\"']?(?P<path>/[^\s\"';|)<]+)")
+_PCT_PUSH_INTO_RE = re.compile(r"(?<![\w-])pct\s+push\s+[\"']?(?P<gid>\$\{?\w+\}?|\d{3,5})[\"']?\s+[\"']?(?P<src>/[^\s\"']+)")
+
+
+def _heredocs_into_a_guest(lines: list) -> list:
+    r"""§17.1640 — the lines of a heredoc body that run in a guest, as ((first, last), gid).
+
+    A heredoc's body is not the host's: it is the INPUT of the command that opened it. Fed to
+    `pct exec N -- bash`, it runs in N; written to a file by `cat > P` that a later line sends in
+    with `pct push N P …`, it runs in N too. That second shape is the engine's own
+    `run_in_container` template, so without this every gate asking "which machine runs this line"
+    read the step's in-guest commands as the host's. Live (job 5db1b088 T26, 2026-10-18): the
+    panel check `BASE = "http://127.0.0.1:3001"`, inside CT 111 where 3001 IS the panel, was
+    refused by §17.1368 as a host line reaching a guest's port on loopback.
+    """
+    text = "\n".join(lines)
+    assigned = dict(re.findall(r"(?m)^\s*(\w+)=[\"']?(\d{3,5})[\"']?\s*$", text))
+    pushed: dict = {}
+    for m in _PCT_PUSH_INTO_RE.finditer(text):
+        gid = m.group("gid")
+        if not gid.isdigit():
+            gid = assigned.get(gid.strip("${}"), "")
+        if gid:
+            pushed.setdefault(m.group("src"), gid)
+    out: list = []
+    i = 0
+    while i < len(lines):
+        m = _HEREDOC_RE.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        tag, opener = m.group("tag"), lines[i]
+        end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == tag), None)
+        if end is None:
+            break                                  # unterminated: leave the rest to the line rules
+        g = _IN_GUEST_RE.search(opener[:m.start()])
+        f = _HEREDOC_TO_FILE_RE.search(opener[:m.start()])
+        gid = g.group("gid") if g else (pushed.get(f.group("path"), "") if f else "")
+        if gid and end > i + 1:
+            out.append(((i + 2, end), gid))        # 1-based body lines; the outer span covers nested ones
+        i = end + 1
+    return out
 
 
 def _continued_from(lines: list, i: int) -> int:
