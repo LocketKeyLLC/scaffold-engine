@@ -499,6 +499,35 @@ def head_reads(argv: list) -> bool:
     return sub in subs
 
 
+# §17.1633 — ENGINE-SIDE reads, kept out of `head_reads` and its tables, which the runner holds byte-identical
+# (test_the_allowlist_tables_are_byte_identical_at_both_ends): the runner stays the stricter end, and these shapes are
+# drafted for in-guest scripts (job 0fb4ea7f VS2), which the host runner's read channel never judges.
+#: a tool's global options that take a VALUE before its subcommand (`git -C /opt/x log`: `/opt/x` is not the subcommand)
+_SUBCOMMAND_VALUE_FLAGS = {"git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"},
+                           "docker": {"-H", "--host", "--context", "-c", "--config", "-l", "--log-level"}}
+#: subcommands that only read, of tools the shared tables do not know
+_ENGINE_READ_SUBCOMMANDS = {"ollama": {"list", "ls", "ps", "show", "--version", "-v"}}
+
+
+def without_global_values(argv: list) -> list:
+    """argv with a tool's leading global value options dropped, so its subcommand is where `head_reads` looks."""
+    flags = _SUBCOMMAND_VALUE_FLAGS.get(argv[0].rsplit("/", 1)[-1] if argv else "", ())
+    out, i = list(argv[:1]), 1
+    while i < len(argv) and argv[i].startswith("-"):
+        if argv[i] in flags:
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out + list(argv[i:])
+
+
+def engine_side_read(argv: list) -> bool:
+    name = argv[0].rsplit("/", 1)[-1] if argv else ""
+    subs = _ENGINE_READ_SUBCOMMANDS.get(name)
+    return bool(subs) and next((a for a in argv[1:] if not a.startswith("-") or a in subs), "") in subs
+
+
 def _requote(parts: list) -> str:
     """§17.1173 — rebuild a command STRING from an already-split argv without
     losing what the quotes were doing.
@@ -519,6 +548,7 @@ _SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W
 
 
 _CONTAINER_EXEC = {"pct": ("exec",), "lxc-attach": (), "qm": ("guest", "exec")}
+_DOCKER_EXEC_VALUE_FLAGS = {"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"}
 
 
 def container_exec_remainder(argv: list) -> Optional[str]:
@@ -527,6 +557,14 @@ def container_exec_remainder(argv: list) -> Optional[str]:
     or None when argv is not such a shape. §17.1152 — live: `pct exec 111 --
     sh -c 'rm -rf /x'` passed this gate (the wrapper head is a read)."""
     head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head == "docker" and argv[1:2] == ["exec"]:
+        # §17.1633 — `docker exec [opts] <container> <cmd…>`: judged on what runs in the container. Live (job 0fb4ea7f
+        # VS2): `docker exec ollama ollama list` read as a write, and the read-only block got `set -e`.
+        i, rest = 0, list(argv[2:])
+        while i < len(rest) and rest[i].startswith("-"):
+            flag = rest[i].split("=", 1)[0]
+            i += 2 if flag in _DOCKER_EXEC_VALUE_FLAGS and "=" not in rest[i] else 1
+        return _requote(rest[i + 1:]) or None
     if head not in _CONTAINER_EXEC:
         return None
     subs = _CONTAINER_EXEC[head]
@@ -664,6 +702,9 @@ def read_only_command(cmd: str) -> bool:
             continue
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
             continue
+        if engine_side_read(argv):  # §17.1633 — `ollama list` (engine side only; see _ENGINE_READ_SUBCOMMANDS)
+            continue
+        argv = without_global_values(argv)   # §17.1633 — `git -C /opt/x log` is judged as `git log`
         # argv[0] alone decides for most commands; the joined unquoted head
         # (`systemctl start`, `pct destroy`, `ip link add`, `sed -i`) only
         # for the families whose verb is a subcommand or a flag.

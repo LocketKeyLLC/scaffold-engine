@@ -22,6 +22,7 @@ channel is open: hands-on steps are executable — one approval each.
 """
 from __future__ import annotations
 
+import functools
 import json
 import ast
 import asyncio
@@ -30,6 +31,7 @@ import os
 import shlex
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -4869,6 +4871,8 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
                                           # that does not exist.
             if names_as_unit(held, base):
                 continue
+            if base in engine_shipped_units():
+                continue                  # §17.1632 — a unit the engine installs itself (scaffold-lan-gate, VS2)
             import difflib
             candidates = sorted(({mm.group(1) for mm in re.finditer(r"\b([A-Za-z0-9@._-]{2,40})\.service\b", held)}
                                  | {u for u in (line_units or []) if "@" not in u}) - _STOCK_UNITS)
@@ -4885,6 +4889,16 @@ def unsourced_service_name(commands: list[str], files: Optional[list[dict]], env
                 ", and this block writes no unit file for it — so `systemctl` acts on a unit that does "
                 "not exist and reports a failure that is not about the work." + hint)})
     return out
+
+
+@functools.lru_cache(maxsize=1)
+def engine_shipped_units() -> frozenset:
+    """§17.1632 — the systemd units the engine ships in its own scripts/ and installs on a guest it deploys.
+
+    Live (job 0fb4ea7f VS2, 2026-10-18): `systemctl is-active scaffold-lan-gate` was refused as "not a unit anything
+    the engine holds names" on the server the engine deployed, where deploy_on_guest.sh installed that unit."""
+    root = Path(__file__).resolve().parents[2] / "scripts"
+    return frozenset(f.name.rsplit(".", 1)[0] for f in root.glob("*") if f.suffix in (".service", ".timer", ".socket"))
 
 
 #: §17.1488 — units a package ships under another name than its own
