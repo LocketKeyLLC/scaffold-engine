@@ -50,9 +50,10 @@ def test_a_shell_step_whose_words_change_is_still_caught_when_its_block_only_rea
 def test_the_executor_never_redrafts_a_frame_a_capability_drafted():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
-    assert '_ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)' in src
+    # §17.1641b — and a frame the engine composed as a check (api_route_check)
+    assert '_ro = "" if (_developed or frame.get("expects") or _engine_check) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)' in src
     assert '_nv = "" if (frame.get("expects") or frame.get("refused") or _developed)' in src
-    assert '_missing = [] if (_developed or frame.get("expects")) else uncovered(' in src
+    assert '_missing = [] if (_developed or frame.get("expects") or _engine_check) else uncovered(' in src
 
 
 COOKIE_DRAFT = ("## Inputs needed\n\n- `<PANEL_COOKIE>` — the panel user's session cookie value\n\n## Run this\n\n```bash\n"

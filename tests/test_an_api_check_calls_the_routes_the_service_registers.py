@@ -82,10 +82,9 @@ def test_t26_checks_the_panel():
 
 def test_other_steps_are_not_claimed():
     fix = {**T26, "title": "Fix control panel API", "prompt_template": "fix failing /api routes"}
-    sections = {**T26, "title": "Verify control panel sections", "prompt_template": "each section shows real data"}
     unnamed = {**T26, "title": "Verify the API", "prompt_template": "Test every /api route. Report pass/fail per route."}
     both = {**T26, "prompt_template": "Test every /api route of control panel and radarr."}
-    for node in (fix, sections, unnamed, both):
+    for node in (fix, unnamed, both):
         assert arc.checked_service(node, [PANEL, RADARR]) is None, node
     by_id = {**T26, "title": "CT 103: verify the API", "prompt_template": "every route answers"}
     assert arc.checked_service(by_id, [PANEL, RADARR]) is RADARR
@@ -155,3 +154,86 @@ def test_all_routes_answering_passes(tmp_path):
     cmd = arc.check_command(PANEL, ["/api/a", "/api/b"], None)
     r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={"PATH": f"{bindir}:/usr/bin:/bin"})
     assert r.returncode == 0 and r.stdout.count("PASS") == 2, r.stdout
+
+
+# ── the run IS the check: never "already met", never redrafted by the model ──
+
+def test_the_engines_check_is_final_and_is_never_already_met():
+    """Live (T26, the first frame this module built): §17.1302 read `systemctl is-active control-panel.service`,
+    judged the goal met and recorded T26 done -- none of the 17 routes was called."""
+    import inspect
+    from app.modules import execution_agent
+    assert arc.run_is_the_check(arc.runbook(PANEL, ["/api/a"], None))
+    assert not arc.run_is_the_check("## Run this\n\n```bash\ncurl -s http://127.0.0.1:3001/api/a\n```\n")
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    assert "_engine_check = _run_is_the_check(runbook)" in src
+    for guard in ('_ro = "" if (_developed or frame.get("expects") or _engine_check) else',
+                  '_missing = [] if (_developed or frame.get("expects") or _engine_check) else',
+                  "_state_only = _state_only or _engine_check"):
+        assert guard in src, guard
+
+
+# ── §17.1646: `'\''` reopens a single-quoted payload ─────────────────────────
+
+def test_an_escaped_quote_keeps_the_payload_in_its_guest():
+    text = ("pct exec 103 -- python3 -c 'import urllib.request\n"
+            "u = urllib.request.urlopen('\\''http://127.0.0.1:7878/api/v3/system/status'\\'')\n"
+            "print(u.status)' radarr\n"
+            "curl -s http://127.0.0.1:7878/api")
+    where = where_each_line_runs(text)
+    assert where.get(2) == "103" and where.get(3) == "103", where
+    assert where.get(4) in (None, ""), where                       # after the payload closes: the host again
+    radarr = ServiceTruth(guest="103", unit="radarr.service", name="radarr", ports=("7878",))
+    hits = loopback_on_the_host([text], [], [radarr])
+    assert len(hits) == 1 and hits[0]["command"].startswith("curl -s http://127.0.0.1:7878"), hits
+
+
+# ── §17.1651: the page's SECTIONS -- each route answers AND carries the fields the page reads ─────────────
+
+T27 = {"node_key": "T27", "title": "Verify control panel sections", "tool": "Shell", "description": "",
+       "prompt_template": "Check each section of control panel page shows real data rather than errors or 'Loading'. "
+                          "Report pass/fail per section."}
+PAGE = {"/opt/control-panel-ui/index.html": (
+    "<script>async function loadPal(){ const res = await fetch(`${API_BASE}/api/palworld/status`);\n"
+    "const data = await res.json(); el.textContent = data.status + ' ' + data.host; }\n"
+    "async function loadMedia(){ const r = await fetch(`${API_BASE}/api/media-library`);\n"
+    "const lib = await r.json(); show(lib.movies, lib.series); }</script>")}
+
+
+def test_t27_is_a_sections_check_and_reads_what_each_section_reads():
+    assert arc.checked_service(T27, [PANEL, RADARR]) is PANEL and arc.asks_about_sections(T27)
+    assert not arc.asks_about_sections(T26)
+    assert arc.section_reads(PAGE) == {"/api/palworld/status": ["status", "host"], "/api/media-library": ["movies", "series"]}
+
+
+def test_the_sections_frame_runs_with_the_login_and_nothing_to_ask():
+    frame = _frame(arc.sections_runbook(PANEL, arc.section_reads(PAGE), ("PANEL_PASSWORD", "panel")))
+    assert not frame["refused"] and frame["inputs"] == [], (frame["refused"], frame["inputs"])
+    assert frame["commands"][0].endswith('<<< "$PANEL_PASSWORD"')
+
+
+def test_a_section_missing_a_field_or_failing_fails_the_step(tmp_path):
+    bindir = tmp_path / "bin"; bindir.mkdir()
+    (bindir / "curl").write_text(
+        '#!/bin/bash\nfor a; do u="$a"; done\n'
+        'o=""; prev=""; for a; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done\ncase "$u" in\n'
+        '*/api/palworld/status) printf \'{"status":"running","host":"192.168.1.44"}\' > "$o"; printf 200;;\n'
+        '*/api/media-library) printf \'{"movies":[]}\' > "$o"; printf 200;;\n'
+        '*) printf \'{"error":"Authentication required"}\' > "$o"; printf 401;;\nesac\n')
+    (bindir / "curl").chmod(0o755)
+    (bindir / "pct").write_text('#!/bin/bash\nshift 3\nexec "$@"\n'); (bindir / "pct").chmod(0o755)
+    reads = {**arc.section_reads(PAGE), "/api/overview": ["services"]}
+    cmd = arc.sections_command(PANEL, reads, ("PANEL_PASSWORD", "panel")).replace('<<< "<PANEL_PASSWORD>"', "<<< 'pw'")
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={"PATH": f"{bindir}:/usr/bin:/bin"})
+    out = r.stdout.splitlines()
+    assert "PASS /api/palworld/status (2 fields)" in out, r.stdout + r.stderr
+    assert "FAIL /api/media-library HTTP 200, the page reads fields its answer lacks: series" in out, out
+    assert "FAIL /api/overview HTTP 401" in out and out[-1] == "3 sections checked" and r.returncode == 1, out
+
+
+def test_the_pause_reads_the_served_page_for_a_sections_check():
+    import inspect
+    from app.modules import execution_agent
+    src = inspect.getsource(execution_agent._pause_for_decision)
+    i = src.index("if _arc.asks_about_sections(run_node):")
+    assert "develop.served_entries(_ws)" in src[i:i + 900] and "_arc.section_reads(_ws)" in src[i:i + 900]

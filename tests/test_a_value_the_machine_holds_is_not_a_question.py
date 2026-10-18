@@ -147,5 +147,8 @@ def test_without_an_inventory_the_frame_behaves_exactly_as_before():
     """The host unreadable: the value is asked for, nothing is refused on its
     account. A measurement that did not happen changes nothing."""
     frame = _frame(LIVE_RUNBOOK, inventory=None)
-    assert any(i["name"] == "RADARR_API_KEY" for i in frame["inputs"]) or frame["verify"] == []
+    # §17.1649 — the placeholder sits inside a single-quoted `pct exec … sh -c '…'` payload, where a stored answer can
+    # never be delivered, so it is stated undeliverable (secrets_missing) instead of asked for and dropped at the run
+    assert (any(i["name"] == "RADARR_API_KEY" for i in frame["inputs"]) or frame["verify"] == []
+            or "RADARR_API_KEY" in (frame.get("secrets_missing") or []))
     assert not any("not a question for the operator" in str(r.get("why", "")) for r in frame["refused"])

@@ -977,19 +977,27 @@ def _quote_char(line: str) -> str:
 
 
 def _closes_the_quote(line: str, q: str) -> bool:
-    """§17.1377c — does this line close a quote `q` that was already open."""
+    """§17.1377c — does this line close a quote `q` that was already open.
+
+    §17.1646 — closed AT THE END of the line, not at its first quote character: `'\\''` inside a single-quoted
+    payload closes the quote, adds a literal `'` and REOPENS it, so the payload goes on. Live (job 5db1b088 RK1): the
+    engine's own `pct exec 103 -- python3 -c '…'` program has `'\\''` on most lines, and every line after the first
+    one read as the HOST's -- §17.1368 refused its in-guest `127.0.0.1:7878` and `:9696`."""
     if not q:
         return True
-    k = 0
+    state, k = q, 0
     while k < len(line):
         c = line[k]
-        if c == "\\" and q != "'":
+        if c == "\\" and state != "'":
             k += 2
             continue
-        if c == q:
-            return True
+        if state:
+            if c == state:
+                state = ""
+        elif c in "\"'":
+            state = c
         k += 1
-    return False
+    return state == ""
 
 
 def _dispatch_calls(text: str) -> list:
@@ -1406,11 +1414,15 @@ def a_file_read_on_another_machine(commands: list[str],
     channel.discard("")
     out: list[dict] = []
     seen: set = set()
+    # §17.1648 — what is written is the BLOCK's, in order: each command is its own runner call, so a writer and its
+    # reader are usually two commands. Live (T10's redraft): `pct exec 103 -- sh -c '…' | tee /tmp/radarr_dc.json`
+    # (the host's shell runs that `tee`) and then `pct exec 103 -- sh -c 'curl … -d @/tmp/radarr_dc.json …'` -- judged
+    # one command at a time, the writer and the reader were never compared.
+    wrote: dict = {}
     for t in texts:
         if _PROMPT_RE.search(t):
             continue                           # a transcript, not a draft
         runs_on = where_each_line_runs(t)
-        wrote: dict = {}
         for i, ln in enumerate(t.split("\n"), 1):
             if ln.strip().startswith("#"):
                 continue
@@ -1419,8 +1431,8 @@ def a_file_read_on_another_machine(commands: list[str],
                 if not path:
                     continue
                 at = runs_on.get(i, THE_HOST)
-                if m.group("p") and _redirection_is_the_outer_shells(ln, m.start()):
-                    at = THE_HOST              # §17.1377e — `pct exec … > /tmp/x`
+                if (m.group("p") or m.group("p2")) and _redirection_is_the_outer_shells(ln, m.start()):
+                    at = THE_HOST              # §17.1377e — `pct exec … > /tmp/x`; §17.1648 — and `pct exec … | tee /tmp/x`
                 wrote.setdefault(path, at)
             # §17.1377b — a transfer is a write on the DESTINATION machine, and it
             # overrides an earlier host-side write of the same path.

@@ -20,10 +20,23 @@ from typing import Optional
 
 #: what a step must ask about for this check to be its answer
 _API_WORDS_RE = re.compile(r"\b(?:api|apis|routes?|endpoints?)\b", re.I)
+#: §17.1651 — or about what the PAGE shows: its sections, real data, "Loading"
+_SECTION_WORDS_RE = re.compile(r"\bsections?\b|\breal data\b|\bloading\b|\bpage\b[^.;\n]{0,30}\bshows?\b", re.I)
 #: a GET route the service registers: `app.get('/api/x', …)` / `router.get("/api/x", …)`; a `:param` route is not called
 _ROUTE_RE = re.compile(r"\b(?:app|router)\.get\(\s*['\"](/api/[^'\"\s:*]*)['\"]")
 #: the per-route budget: a route that has not answered in this long is reported as hanging
 ROUTE_TIMEOUT_S = 20
+#: the first line of the runbook this module renders
+MARK = "<!-- engine-capability: api_route_check -->"
+
+
+def run_is_the_check(runbook_text: str) -> bool:
+    """The step's RUN is its check, so it is never "already met" off its verify line.
+
+    Live (job 5db1b088 T26, 2026-10-18, the first frame this module built): §17.1302 read the verify line
+    (`systemctl is-active control-panel.service` → active), judged the goal met and recorded T26 done -- the
+    seventeen routes were never called. The unit being up says nothing about whether its routes answer."""
+    return str(runbook_text or "").lstrip().startswith(MARK)
 
 
 def _norm(s: str) -> str:
@@ -39,7 +52,7 @@ def checked_service(node: Optional[dict], services: Optional[list]):
     from app.modules.step_classify import _LEADING_OBSERVE_RE
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
-    if not _LEADING_OBSERVE_RE.match(title) or not _API_WORDS_RE.search(text):
+    if not _LEADING_OBSERVE_RE.match(title) or not (_API_WORDS_RE.search(text) or _SECTION_WORDS_RE.search(text)):
         return None
     cands = [s for s in services or [] if getattr(s, "workdir", "") and getattr(s, "ports", ())
              and getattr(s, "guest", "") and not getattr(s, "vm", False)]
@@ -60,6 +73,49 @@ def registered_routes(workspace: Optional[dict]) -> list[str]:
             continue
         out += _ROUTE_RE.findall(str(body or ""))
     return list(dict.fromkeys(out))
+
+
+def asks_about_sections(node: Optional[dict]) -> bool:
+    """§17.1651 — the step checks what the page's SECTIONS show, not only that routes answer."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    return bool(_SECTION_WORDS_RE.search(text))
+
+
+def section_reads(workspace: Optional[dict]) -> dict:
+    """§17.1651 — route -> the fields the served page reads off its answer (`develop.page_reads`), for each section
+    that fetches one route. Empty when the page names none."""
+    from app.modules.develop import page_reads
+    return {route: fields for route, (_page, fields) in (page_reads(workspace or {}) or {}).items()
+            if re.fullmatch(r"/api/[A-Za-z0-9_/-]+", route)}
+
+
+def sections_command(service, reads: dict, login: Optional[tuple] = None) -> str:
+    """One command in the service's guest: each section's route answers 2xx AND carries every field the page reads."""
+    port = str(next(iter(getattr(service, "ports", ()) or ()), ""))
+    auth = f'-u "{login[1]}:$cpw" ' if login else ""
+    parts = [("cpw=$(cat); " if login else "") + "fail=0; "]
+    for route, fields in sorted(reads.items()):
+        fl = " ".join(f for f in fields if re.fullmatch(r"[A-Za-z_$][\w$]*", f))
+        parts.append(
+            f"code=$(curl -sS {auth}--max-time {ROUTE_TIMEOUT_S} -o /tmp/.scaffold-section -w \"%{{http_code}}\" "
+            f"http://127.0.0.1:{port}{route} 2>/dev/null); miss=\"\"; "
+            f"for f in {fl}; do grep -q \"\\\"$f\\\"\" /tmp/.scaffold-section || miss=\"$miss $f\"; done; "
+            f"case \"$code\" in 2??) if [ -z \"$miss\" ]; then echo \"PASS {route} ({len(fl.split())} fields)\"; "
+            f"else echo \"FAIL {route} HTTP $code, the page reads fields its answer lacks:$miss\"; fail=1; fi;; "
+            f"*) echo \"FAIL {route} HTTP $code\"; fail=1;; esac; ")
+    parts.append("rm -f /tmp/.scaffold-section; ")
+    parts.append(f'echo "{len(reads)} sections checked"; exit $fail')
+    cmd = f"pct exec {service.guest} -- sh -c {_sq(''.join(parts))}"
+    return cmd + (f' <<< "<{login[0]}>"' if login else "")
+
+
+def sections_runbook(service, reads: dict, login: Optional[tuple] = None) -> str:
+    return (f"{MARK}\n\n## Check what each section of {getattr(service, 'name', 'the service')}'s page shows\n\n"
+            f"Each of the {len(reads)} routes the served page fetches is called inside guest {service.guest}"
+            + (" with the login the engine holds" if login else "") + "; it must answer 2xx and carry every field "
+            "that section reads, or the section renders an error, blanks or \"Loading\".\n\n"
+            "## Run this\n\n```bash\n" + sections_command(service, reads, login) + "\n```\n\n"
+            "## Verify\n\n```bash\n" + f"pct exec {service.guest} -- systemctl is-active {service.unit}" + "\n```\n")
 
 
 def _sq(s: str) -> str:
@@ -85,7 +141,7 @@ def check_command(service, routes: list[str], login: Optional[tuple] = None) -> 
 
 def runbook(service, routes: list[str], login: Optional[tuple] = None) -> str:
     """The step's runbook: the one check, and a heading that says where its routes came from."""
-    return (f"<!-- engine-capability: api_route_check -->\n\n"
+    return (f"{MARK}\n\n"
             f"## Check every API route {getattr(service, 'name', 'the service')} registers\n\n"
             f"The {len(routes)} GET routes below are the ones the service's own code registers under "
             f"{getattr(service, 'workdir', '')}; each is called inside guest {service.guest} on port "

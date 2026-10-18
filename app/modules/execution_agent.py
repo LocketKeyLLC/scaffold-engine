@@ -825,7 +825,8 @@ async def _fetch_upstream_outputs(
     rows = await db.execute(
         text(
             "SELECT node_key, output_text, confidence FROM dag_nodes "
-            "WHERE job_id = :jid AND node_key = ANY(:keys) AND status = 'done'"
+            # §17.1653 — a SKIPPED step carries its evidence too (the skip note: "measured instead", "nothing to fix")
+            "WHERE job_id = :jid AND node_key = ANY(:keys) AND status IN ('done', 'skipped')"
         ),
         {"jid": job_id, "keys": depends_on},
     )
@@ -833,6 +834,39 @@ async def _fetch_upstream_outputs(
         r.node_key: (r.output_text or "", r.confidence)
         for r in rows.fetchall()
     }
+
+
+async def _fetch_upstream_labels(db, job_id: str, keys: list[str]) -> dict[str, str]:
+    """§17.1653 — `{node_key: "<title> — <status>"}`, so a section says WHICH step it is.
+
+    Live (job 5db1b088 T31, 2026-10-18): the report was handed `### T11 (finished …)` and `403` and called T11 an
+    "API key check" that failed (it was qBittorrent reachability, where 403 means it answered); `### T26` became a
+    "route/kill-switch check" (it was the panel's 17 routes). The model named each step from its output."""
+    if not keys:
+        return {}
+    try:
+        rows = await db.execute(
+            text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys)"),
+            {"jid": job_id, "keys": list(keys)})
+        return {r.node_key: f"{r.title} — {r.status}" for r in rows.fetchall()}
+    except Exception as exc:                 # a label must never sink the step it labels
+        logger.warning("upstream_labels_failed job=%s err=%r", job_id, exc)
+        return {}
+
+
+async def _settled_keys(db, job_id: str, node_key: str) -> list[str]:
+    """§17.1653 — every step of the job already settled, in plan order: what a REPORT step reports on. Its planned
+    `depends_on` misses the steps inserted while the job ran (live: RK1/PK1/IB1, the three fixes) and the report
+    never saw them."""
+    try:
+        rows = await db.execute(
+            text("SELECT node_key FROM dag_nodes WHERE job_id = :jid AND node_key <> :nk "
+                 "AND status IN ('done', 'skipped', 'failed') ORDER BY execution_order"),
+            {"jid": job_id, "nk": node_key})
+        return [r.node_key for r in rows.fetchall()]
+    except Exception as exc:
+        logger.warning("settled_keys_failed job=%s err=%r", job_id, exc)
+        return []
 
 
 async def _fetch_upstream_finished(db, job_id: str, depends_on: list[str]) -> dict[str, object]:
@@ -848,7 +882,7 @@ async def _fetch_upstream_finished(db, job_id: str, depends_on: list[str]) -> di
     try:
         rows = await db.execute(
             text("SELECT node_key, completed_at FROM dag_nodes WHERE job_id = :jid AND node_key = ANY(:keys) "
-                 "AND status = 'done'"),
+                 "AND status IN ('done', 'skipped')"),
             {"jid": job_id, "keys": depends_on})
         return {r.node_key: r.completed_at for r in rows.fetchall() if r.completed_at is not None}
     except Exception as exc:                 # an annotation must never sink the step it annotates
@@ -898,7 +932,8 @@ def _result_of(output_text: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None) -> str:
+def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None,
+                           labels: dict | None = None, budget: int | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
 
@@ -931,7 +966,8 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
 
     total_chars = sum(len(v) for v in texts.values())
     truncated_keys: list[str] = []
-    if total_chars > settings.max_upstream_chars:
+    _budget = int(budget or settings.max_upstream_chars)          # §17.1653 — a report step passes its own
+    if total_chars > _budget:
         if settings.upstream_confidence_ranking_enabled:
             weights = {
                 nk: _conf_or_default(confs[nk]) * len(texts[nk])
@@ -945,7 +981,7 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
             orig_len = len(texts[nk])
             share = max(
                 settings.compile_output_min_chunk,
-                int(settings.max_upstream_chars * weights[nk] / denom),
+                int(_budget * weights[nk] / denom),
             )
             if orig_len > share:
                 texts[nk] = _truncate_output(texts[nk], share)
@@ -975,7 +1011,8 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
                 suffix += f" (finished {when.strftime('%Y-%m-%d %H:%M')} UTC)"
             except Exception:
                 suffix += f" (finished {when})"
-        parts.append(f"### {nk}{suffix}\n{texts[nk]}")
+        _lab = (labels or {}).get(nk)
+        parts.append(f"### {nk}{' — ' + _lab if _lab else ''}{suffix}\n{texts[nk]}")     # §17.1653 — which step it is
     ordered_note = (" They are listed in the order they FINISHED, oldest first; where two disagree, the later one "
                     "is the current state and the earlier one is history." if fin else "")
     return (
@@ -1731,6 +1768,12 @@ async def execute_next_node(
 
         brief = job.get("refined_brief") or {}
         depends_on = node.get("depends_on") or []
+        # §17.1653 — a REPORT step reads every settled step (inserted fixes included), each labelled with its title
+        _reports = bool(formats_what_came_before(dict(node) if hasattr(node, "keys") else {}))
+        _context_keys = list(depends_on)
+        if _reports:
+            _context_keys = list(dict.fromkeys(list(depends_on) + await _settled_keys(db, job_id, node_key)))
+        _upstream_labels = await _fetch_upstream_labels(db, job_id, _context_keys) if _context_keys else {}
         # Sprint X.4 — upstream-fetch try/except wrap. Same rationale as W.4:
         # without this, a DB-layer failure inside _fetch_upstream_outputs
         # (connection drop, asyncpg interface error, etc.) bubbles up to
@@ -1741,11 +1784,11 @@ async def execute_next_node(
         # session may be poisoned by the failure.
         try:
             upstream_outputs = (
-                await _fetch_upstream_outputs(db, job_id, depends_on)
-                if depends_on else {}
+                await _fetch_upstream_outputs(db, job_id, _context_keys)
+                if _context_keys else {}
             )
             # §17.1566 — when each finished, so the block can say which result is current
-            _upstream_finished = (await _fetch_upstream_finished(db, job_id, depends_on) if depends_on else {})
+            _upstream_finished = (await _fetch_upstream_finished(db, job_id, _context_keys) if _context_keys else {})
             # §17.1039 — values the upstream reports left unsupported; they are
             # not credited by the upstream text they sit in (§17.1028).
             _upstream_flagged = await fetch_upstream_flagged(db, job_id, depends_on)
@@ -1920,7 +1963,9 @@ async def execute_next_node(
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
-        _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished)
+        _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished,
+                                                 labels=_upstream_labels,
+                                                 budget=settings.max_report_upstream_chars if _reports else None)
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 
@@ -3006,6 +3051,30 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if _services or _reading:          # §17.1346 — facts, in place of prose
             from app.modules import service_truth as _st2
             up_block = (up_block + "\n\n" + _st2.table(_services, _reading)).strip()
+        # §17.1644 — a fix step that runs "only if" named checks found failures, when every one of them passed, has
+        # nothing to fix: recorded skipped from the plan's own record, before anything is drafted.
+        if _depth < 6:
+            from app.modules.conditional_steps import unmet_condition
+            _unmet = unmet_condition(run_node, _plan_rows)
+            if _unmet:
+                from datetime import datetime as _dt, timezone as _tz
+                _nk = run_node.get("node_key")
+                async with async_session() as db:
+                    _upd = await db.execute(
+                        text("UPDATE dag_nodes SET status = 'skipped', output_text = :out, completed_at = NOW(), "
+                             "updated_at = NOW(), last_verification_reason = :why "
+                             "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+                        {"jid": job_id, "nk": _nk, "out": "## Skipped — nothing to fix\n\n" + _unmet, "why": _unmet})
+                    if _upd.rowcount:
+                        await db.execute(
+                            text("UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{decisions}', "
+                                 "COALESCE(metadata->'decisions', '{}'::jsonb) || CAST(:patch AS jsonb)) WHERE id = :jid"),
+                            {"jid": job_id, "patch": json.dumps({_nk: {"by": "engine", "at": _dt.now(_tz.utc).isoformat(),
+                                                                       "result": "condition_unmet"}})})
+                    await db.commit()
+                if _upd.rowcount:
+                    logger.warning("conditional_step_skipped job=%s node=%s why=%s", job_id, _nk, _unmet[:200])
+                    return await _pause_for_decision(job_id, _depth + 1)
         # §17.1412 — a step that writes SOFTWARE in a measured service's directory is
         # DEVELOPED against the real files, not drafted as one blind shell block.
         from app.modules import develop
@@ -3037,7 +3106,23 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                             guest=str(_api_svc.guest), vm=False, workdir=str(_api_svc.workdir).rstrip("/"),
                             unit=str(_api_svc.unit), name=str(_api_svc.name)))
                         _routes = _arc.registered_routes(_ws)
-                        if _routes:
+                        _reads: dict = {}
+                        if _arc.asks_about_sections(run_node):
+                            # §17.1651 — the page the service SERVES (its static dir is often a sibling of the unit's
+                            # WorkingDirectory: /opt/control-panel-ui beside -backend), read so its sections are known
+                            from app.modules import rehearsal as _rh
+                            for _pg in develop.served_entries(_ws)[:3]:
+                                if _pg not in _ws:
+                                    _body = await _rh._cat(spec, str(_api_svc.guest), False, _pg)
+                                    if _body:
+                                        _ws[_pg] = _body
+                            _reads = _arc.section_reads(_ws)
+                        if _reads:          # §17.1651 — the page's sections: each route AND the fields it reads
+                            runbook = _arc.sections_runbook(_api_svc, _reads,
+                                                            _arc.login_for(_api_svc, (policy or {}).get("held_logins")))
+                            logger.warning("api_section_check job=%s node=%s service=%s sections=%d", job_id,
+                                           run_node.get("node_key"), _api_svc.name, len(_reads))
+                        elif _routes:
                             runbook = _arc.runbook(_api_svc, _routes,
                                                    _arc.login_for(_api_svc, (policy or {}).get("held_logins")))
                             logger.warning("api_route_check job=%s node=%s service=%s routes=%d", job_id,
@@ -3046,6 +3131,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     logger.warning("api_route_check_skipped job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
             if not _developed and not runbook:
                 runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env, truth=_truth, services=_services)
+        # §17.1641 — a frame the engine composed as a check is final: no model redraft replaces it, and its run is the check
+        from app.modules.api_route_check import run_is_the_check as _run_is_the_check
+        _engine_check = _run_is_the_check(runbook)
 
         # §17.1409 — a step that promises a settings round trip is REHEARSED: its draft
         # runs against copies of the real files in the rehearsal sandbox before it is
@@ -3597,7 +3685,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # and mark the step done having done nothing.
         try:
             # §17.1577 — a frame a capability drafted (`expects`, §17.1570g) is the engine's own shape: never redrafted by the model
-            _ro = "" if (_developed or frame.get("expects")) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            _ro = "" if (_developed or frame.get("expects") or _engine_check) else supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
             if _ro:
                 logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
                                job_id, run_node.get("node_key"), len(frame.get("commands") or []))
@@ -3624,7 +3712,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = [] if (_developed or frame.get("expects")) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
+            _missing = [] if (_developed or frame.get("expects") or _engine_check) else uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])   # §17.1577
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
@@ -3666,6 +3754,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # met from those two reads alone while the panel answered 200 with no credential.
         _state_only = _developed and all(
             re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in (frame.get("verify") or [""]))
+        _state_only = _state_only or _engine_check      # §17.1641 — the run IS the check; the unit active is not the goal
         if _depth < 6 and not _state_only:
             try:
                 _met = await supervised_runs.already_met(spec, run_node, frame, _env)
