@@ -57,17 +57,43 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
                  f"if [ \"${{h:-0}}\" -gt 0 ] 2>/dev/null; then echo \"HANDSHAKE: {wg} is talking to its peer\"; exit 0; fi; "
                  f"sleep 1; done; echo \"FAILED: {wg} is up but never completed a handshake with its peer in 30 s\"; "
                  f"systemctl --no-pager status wg-quick@{wg} | tail -n 15; exit 1")
+    # §17.1669b — Debian's resolvconf turns /etc/resolv.conf into a symlink to /run/resolvconf/resolv.conf, which in a
+    # Proxmox container nothing feeds: live, CT 109 lost DNS the moment it was installed and `wg setconf` retried the
+    # Endpoint's hostname forever (the restart hung past the runner's 180 s). Proxmox writes a plain resolv.conf at
+    # container start (CT 105 has one, resolvconf installed and inert); the engine writes the same file now, from the
+    # container's own `pct config` nameservers (the host's, when it has none).
+    restore = (f"if pct exec {gid} -- test -L /etc/resolv.conf; then "
+               f"ns=$(pct config {gid} | grep '^nameserver:' | cut -d' ' -f2-); sd=$(pct config {gid} | grep '^searchdomain:' | cut -d' ' -f2-); "
+               f"{{ echo '# --- BEGIN PVE ---'; if [ -n \"$sd\" ]; then echo \"search $sd\"; fi; "
+               f"if [ -n \"$ns\" ]; then for x in $ns; do echo \"nameserver $x\"; done; else grep '^nameserver' /etc/resolv.conf; fi; "
+               f"echo '# --- END PVE ---'; }} > /tmp/scaffold-resolv.{gid} && pct exec {gid} -- rm -f /etc/resolv.conf && "
+               f"pct push {gid} /tmp/scaffold-resolv.{gid} /etc/resolv.conf --perms 644 && rm -f /tmp/scaffold-resolv.{gid} && "
+               f"echo \"RESTORED: container {gid}'s resolv.conf from its Proxmox nameservers\"; "
+               f"else echo \"resolv.conf in {gid} is a plain file\"; fi")
+    # the Endpoint must resolve BEFORE the start: `wg setconf` retries an unresolvable name without end
+    resolve = (f"ep=$(sed -n \"s/^Endpoint *= *//p\" {s} | head -n 1); h=${{ep%:*}}; "
+               f"[ -n \"$h\" ] || {{ echo \"FAILED: no Endpoint in {src}\"; exit 1; }}; "
+               f"case \"$h\" in \\[*|*[!0-9.]*) case \"$h\" in \\[*) ;; *) getent hosts \"$h\" >/dev/null || "
+               f"{{ echo \"FAILED: container {gid} cannot resolve $h -- wg-quick would wait on it forever\"; exit 1; }};; esac;; esac; "
+               f"echo \"ENDPOINT RESOLVES: $h\"")
+    install = ("DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
+               "apt-get install -y -qq --no-install-recommends wireguard-tools resolvconf")   # recommends pull a kernel
     cmds = [
         f"pct exec {gid} -- sh -c {shlex.quote(present)}",
-        f"pct exec {gid} -- sh -c {shlex.quote('DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools resolvconf')}",
+        f"pct exec {gid} -- sh -c {shlex.quote(install)}",
+        restore,
         f"pct exec {gid} -- sh -c {shlex.quote(place)}",
+        f"pct exec {gid} -- sh -c {shlex.quote(resolve)}",
         f"pct exec {gid} -- systemctl enable wg-quick@{wg}",
-        f"pct exec {gid} -- systemctl restart wg-quick@{wg}",
+        f"pct exec {gid} -- timeout 120 systemctl restart wg-quick@{wg}",
         f"pct exec {gid} -- sh -c {shlex.quote(handshake)}",
     ]
-    verify = [f"pct exec {gid} -- wg show {wg}", f"pct exec {gid} -- ip -4 addr show {wg}"]   # the runner refuses systemctl as a check
+    # the runner's read channel takes neither `systemctl` nor `wg`: the handshake is proved by the block's last command
+    verify = [f"pct exec {gid} -- ip -4 addr show {wg}", f"pct exec {gid} -- ip -4 rule show"]
     note = (f"set up {wg} in container {gid} from {src} as the engine's own block (§17.1669): the source must be there; "
-            f"wireguard-tools and resolvconf (a provider's `DNS =` line needs it) are installed; any {dst} is kept as a "
-            f"dated .bak and {src} is installed there mode 600; wg-quick@{wg} is enabled and restarted, and the step "
-            "waits for a real handshake with the peer -- an interface that never spoke to the server is not a tunnel.")
+            f"wireguard-tools and resolvconf (a provider's `DNS =` line needs it) are installed without recommends; if "
+            f"that turned /etc/resolv.conf into resolvconf's (empty) symlink, the container's Proxmox nameservers are "
+            f"written back as a plain file; any {dst} is kept as a dated .bak and {src} is installed there mode 600; the "
+            f"Endpoint must resolve first; wg-quick@{wg} is enabled and restarted (120 s limit), and the step waits for "
+            "a real handshake with the peer -- an interface that never spoke to the server is not a tunnel.")
     return cmds, verify, note

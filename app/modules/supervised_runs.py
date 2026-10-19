@@ -7597,6 +7597,27 @@ _GUEST_RUN_RE = re.compile(r"\b(?P<tool>pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>
 _HOST_TOOL_RE = re.compile(r"(?:^|[;&|(\s'\"])(?P<tool>qm|pct|pvesm|pvesh|pveam|vzdump)\s+[a-z]")
 
 
+def _guest_part(rest: str) -> str:
+    """§17.1669c — the part of `pct exec N -- …` that runs IN the guest: up to the first `;`, `&`, `|` outside quotes.
+    Live (job 3cc24343 T7): `if pct exec 109 -- test -L /etc/resolv.conf; then ns=$(pct config 109 …)` was refused
+    because the host's own `pct config`, after the `;`, was read as running inside guest 109."""
+    q, k = "", 0
+    while k < len(rest):
+        c = rest[k]
+        if c == "\\" and q != "'":
+            k += 2
+            continue
+        if q:
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        elif c in ";&|":
+            return rest[:k]
+        k += 1
+    return rest
+
+
 def a_host_file_run_inside_a_guest(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1403 — the engine writes a block's files on the HOST; inside a guest they are not there.
 
@@ -7614,7 +7635,7 @@ def a_host_file_run_inside_a_guest(commands: list[str], files: Optional[list[dic
     out: list[dict] = []
     for i, ln in enumerate(lines):
         for m in _GUEST_RUN_RE.finditer(ln):
-            gid, rest, tool = m.group("gid"), m.group("rest"), m.group("tool")
+            gid, rest, tool = m.group("gid"), _guest_part(m.group("rest")), m.group("tool")
             for p in paths:
                 if not re.search(rf"(?<![\w./-]){re.escape(p)}(?![\w./-])", rest):
                     continue
