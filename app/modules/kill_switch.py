@@ -132,3 +132,45 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
             "current rules are saved first, the boot copy is written and parse-tested, and the switch is proven at "
             "once: a connection forced out eth0 must fail, one through the tunnel must work.")
     return cmds, verify, note
+
+
+#: §17.1670c — "verify the kill-switch blocks traffic (bring wgN down …)"
+_PROOF_TITLE_RE = re.compile(r"^\s*(?:verify|test|check|confirm|prove)\b[^\n]*\bkill[\s-]?switch\b", re.I)
+
+
+def proof_block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optional[tuple[list[str], list[str], str]]:
+    """Live (job 3cc24343 T11): the draft was `wg-quick down wg0` / `curl http://1.1.1.1` / `wg-quick up wg0` -- the curl
+    is MEANT to fail, a failing command stops the block, so the tunnel would have been left down and the step recorded
+    failed while the switch worked. One command: stop the unit, try to get out by IP (no DNS in the way), ALWAYS start it
+    again and wait for a handshake, then say what happened -- pass only when the attempt was blocked and the tunnel is back."""
+    title = str((node or {}).get("title") or "")
+    if not _PROOF_TITLE_RE.match(title):
+        return None
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    named = [m.group("gid") for m in _CT_RE.finditer(text) if not m.group("pre")]
+    drafted = Counter(m.group(1) for c in commands or [] for m in _PCT_RE.finditer(str(c)))
+    gid = named[0] if len(set(named)) == 1 else (drafted.most_common(1)[0][0] if drafted else "")
+    if not gid:
+        return None
+    wg = (_IFACE_RE.search(text) or _IFACE_RE.search(" ".join(commands or [])))
+    wg = wg.group(1) if wg else "wg0"
+    script = (f'systemctl stop wg-quick@{wg}; '
+              f'if ip link show {wg} >/dev/null 2>&1; then r="NOT DOWN"; '
+              'elif curl -s -m 8 -o /dev/null https://1.1.1.1/ || curl -s -m 8 -o /dev/null http://9.9.9.9/; then r=LEAK; '
+              'else r=BLOCKED; fi; '
+              f'systemctl start wg-quick@{wg}; up=""; '
+              f'for i in $(seq 1 30); do h=$(wg show {wg} latest-handshakes 2>/dev/null | cut -f2 | head -n 1); '
+              'if [ "${h:-0}" -gt 0 ] 2>/dev/null; then up=yes; break; fi; sleep 1; done; '
+              f'case "$r" in BLOCKED) echo "BLOCKED: with {wg} down nothing reached the internet";; '
+              f'LEAK) echo "FAILED: with {wg} down traffic got out -- the kill-switch does not hold";; '
+              f'*) echo "FAILED: {wg} did not go down, so nothing was tested";; esac; '
+              f'if [ -n "$up" ]; then echo "BACK UP: {wg} handshook with its peer again"; '
+              f'else echo "FAILED: {wg} did not come back (no handshake in 30 s)"; fi; '
+              '[ "$r" = BLOCKED ] && [ -n "$up" ]')
+    cmds = [f"pct exec {gid} -- sh -c {shlex.quote(script)}"]
+    verify = [f"pct exec {gid} -- ip -4 addr show {wg}", f"pct exec {gid} -- iptables -S OUTPUT"]
+    note = (f"proved the kill-switch in container {gid} as one engine command (§17.1670c): wg-quick@{wg} is stopped, the "
+            "container tries to reach two public addresses by IP, the tunnel is ALWAYS started again and must handshake, "
+            "and only then is the result read -- the drafted `curl` was meant to fail, which would have stopped the block "
+            "and left the tunnel down.")
+    return cmds, verify, note

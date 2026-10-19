@@ -111,3 +111,56 @@ def test_a_second_run_adds_nothing_and_nothing_is_flushed(tmp_path):
     assert subprocess.run(["sh", "-c", v4], capture_output=True, text=True, env=env).returncode == 0
     calls = log.read_text().splitlines()
     assert not [c for c in calls if " -A " in c or " -I " in c]
+
+
+T11 = {"node_key": "T11", "title": "Verify kill-switch blocks traffic", "tool": "Shell",
+       "prompt_template": ("Bring wg0 down, attempt outbound connection, confirm blocked. Bring wg0 back up. Must pass "
+                           "BEFORE bitmagnet starts.")}
+T11_DRAFT = ["pct exec 109 -- wg-quick down wg0",
+             "pct exec 109 -- timeout 10 curl -s -o /dev/null -w '%{http_code}' http://1.1.1.1",
+             "pct exec 109 -- wg-quick up wg0"]
+
+
+def test_the_proof_is_one_command_that_always_brings_the_tunnel_back():
+    assert ks.block(T11, T11_DRAFT) is None
+    cmds, verify, note = ks.proof_block(T11, T11_DRAFT)
+    assert len(cmds) == 1 and cmds[0].startswith("pct exec 109 -- sh -c ")
+    s = _inner(cmds[0])
+    assert s.index("systemctl stop wg-quick@wg0") < s.index("curl") < s.index("systemctl start wg-quick@wg0")
+    assert "§17.1670c" in note and ks.proof_block(T8, DRAFT) is None
+
+
+def _proof_env(tmp_path, curl_ok: bool, comes_back: bool, goes_down: bool = True):
+    b = tmp_path / "bin"; b.mkdir(exist_ok=True)
+    st = tmp_path / "state"
+    (b / "systemctl").write_text(f"#!/bin/sh\necho \"$1\" > {st}\n"); (b / "systemctl").chmod(0o755)
+    (b / "ip").write_text(f"#!/bin/sh\n[ \"$(cat {st})\" = start ] || {'true' if not goes_down else 'false'}\n")
+    (b / "ip").chmod(0o755)
+    (b / "curl").write_text(f"#!/bin/sh\nexit {0 if curl_ok else 28}\n"); (b / "curl").chmod(0o755)
+    hs = "1792400000" if comes_back else "0"
+    (b / "wg").write_text(f"#!/bin/sh\nprintf 'peer\\t{hs}\\n'\n"); (b / "wg").chmod(0o755)
+    (b / "sleep").write_text("#!/bin/sh\n"); (b / "sleep").chmod(0o755)
+    return {**os.environ, "PATH": f"{b}:{os.environ['PATH']}"}, st
+
+
+def test_the_proof_passes_only_when_blocked_and_back(tmp_path):
+    s = _inner(ks.proof_block(T11, T11_DRAFT)[0][0])
+    for curl_ok, back, rc, says in ((False, True, 0, "BLOCKED"), (True, True, 1, "traffic got out"),
+                                    (False, False, 1, "did not come back")):
+        env, st = _proof_env(tmp_path, curl_ok, back)
+        r = subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=env)
+        assert r.returncode == rc and says in r.stdout, (curl_ok, back, r.stdout)
+        assert st.read_text().strip() == "start"                  # the tunnel is always started again
+    env, st = _proof_env(tmp_path, False, True, goes_down=False)
+    r = subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "did not go down" in r.stdout
+
+
+def test_the_frame_takes_the_proof():
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": []}
+    draft = "## Run this\n\n```bash\n" + "\n".join(T11_DRAFT) + "\n```\n"
+    frame = sr.frame_run(T11, draft, spec, policy, services=[],
+                         inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
+    assert not frame["refused"] and frame["inputs"] == [], (frame["refused"], frame["inputs"])
+    assert len(frame["commands"]) == 1 and "systemctl start wg-quick@wg0" in frame["commands"][0]
