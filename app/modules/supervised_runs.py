@@ -10402,8 +10402,10 @@ def _guest_by_name_fragment(text: str, services: Optional[list], inventory: Opti
 #: §17.1572 — "inventory / list / map the endpoints|routes|API of <service>" is a READ the engine owns:
 #: grep the service's route registrations and its config keys under its /opt/<name>* directories.
 #: §17.1602 — `read` the verb, never the adjective: "Create a read-only Proxmox API token" matched "read … API"
+#: §17.1682 — `api` as a URL path (`/api/v3/wanted/missing`) is a call TO an API, not the service's code: live (job c2518102
+#: T2 "Fetch Sonarr wanted missing", text "read Sonarr's /api/v3/wanted/missing …"), the read became a route inventory
 _ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read(?![-‐ ]only|[-‐ ]write)|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
-                                 r"\b(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
+                                 r"(?<![/\w])(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
 _ROUTE_SERVICE_RE = re.compile(r"\b(control-?panel|panel|backend|express|node|flask|fastapi)\b", re.I)
 
 

@@ -82,3 +82,13 @@ async def test_a_read_that_failed_is_not_a_done_step():
 async def test_a_read_that_answered_is_done():
     out, _ = await _resolve("Show A\t1\t3\tPilot\t2026-01-01\ttrue\nscaffold-T2 finished (exit 0)")
     assert out["node_status"] == "done", out.get("reason")
+
+
+def test_a_call_to_an_api_path_is_not_a_route_inventory():
+    """§17.1682 — live, "read Sonarr's /api/v3/wanted/missing" became an inventory of Sonarr's code"""
+    t = ("Inside CT 104, read Sonarr's /api/v3/wanted/missing (includeSeries=true). Print one line per series and "
+         "season. Read only, change nothing, one endpoint only.")
+    assert not sr._ROUTE_INVENTORY_RE.search(t)
+    for still in ("Inventory the control panel's endpoints", "Read the backend's routes and handlers",
+                  "List every API the panel serves", "enumerate the routes of the panel"):
+        assert sr._ROUTE_INVENTORY_RE.search(still), still
