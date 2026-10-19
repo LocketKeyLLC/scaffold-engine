@@ -7178,6 +7178,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                                        for t in _missing]
             logger.warning("supervised_run_expected_print_missing job=%s node=%s missing=%r",
                            job_id, node_key, [t[:60] for t in _missing])
+    # §17.1680b — a read-only block with no separate check (§17.1680) is judged by its OWN output: the same judge, the
+    # step's goal, the block's reads as the one piece of evidence. Live (job c2518102 T2): with no jq in CT 104 the read
+    # printed only "Sonarr API request failed", §17.1608's `trap 'exit 0'` made it exit 0, and it was recorded done.
+    if ok and not verify_cmds:
+        _against = await judge_a_read_only_block(waiting, node_key, executed)
+        if _against:
+            ok = False
+            refuted = list(refuted) + _against
+            logger.warning("supervised_run_read_block_contradicted job=%s node=%s first=%r",
+                           job_id, node_key, str(_against[0].get("reason"))[:140])
     # §17.1281 — nothing a run printed reaches the record, the response or the
     # log with an engine-held value or a secret-shaped token in it.
     for e in executed:
@@ -7344,6 +7354,20 @@ def goal_claim(title: str, description: str = "") -> str:
 
 #: how much of a step's description the judge reads (§17.1396)
 _CLAIM_CAP = 1200
+
+
+async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[dict]) -> list[dict]:
+    """§17.1680b — the contradicted verdicts for a read-only template block's OWN output ([] when it is not one).
+
+    A block §17.1608 marked read-only needs no separate check (§17.1680); what it printed is the evidence, judged by
+    the same judge against the step's goal. Live (job c2518102 T2): with no jq in CT 104 the read printed only "Sonarr
+    API request failed", exited 0 under `trap 'exit 0'`, and was recorded done."""
+    if not any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or [])):
+        return []
+    own = "\n".join(str(e.get("output") or "") for e in executed or [])[-6000:]
+    return contradicted(await _verify_verdicts(
+        goal_claim(str(waiting.get("title") or node_key), str((waiting.get("description") or ""))),
+        ["(this block's own reads)"], "== V1 ==\n" + (own.strip() or "(it printed nothing)")))
 
 
 async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
