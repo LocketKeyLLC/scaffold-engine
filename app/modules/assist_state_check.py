@@ -522,8 +522,28 @@ def without_global_values(argv: list) -> list:
     return out + list(argv[i:])
 
 
+#: §17.1665 — `docker compose <sub>` is judged by ITS subcommand. Live (job 3cc24343 T5, 2026-10-19): the template's
+#: check `docker compose version` was dropped as a write (docker's subcommand is `compose`), every redraft came back
+#: "this block has no check at all", and the Docker install parked three times. A `logs` that follows never ends.
+_COMPOSE_READS = {"ps", "ls", "version", "config", "images", "logs", "top", "port"}
+_COMPOSE_VALUE_FLAGS = {"-f", "--file", "-p", "--project-name", "--project-directory", "--env-file", "--profile",
+                        "--ansi", "--progress"}
+
+
+def _compose_read(argv: list) -> bool:
+    rest = list(argv[2:])
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 2 if rest[i].split("=", 1)[0] in _COMPOSE_VALUE_FLAGS and "=" not in rest[i] else 1
+    if i >= len(rest) or rest[i] not in _COMPOSE_READS:
+        return False
+    return not (rest[i] == "logs" and any(a in ("-f", "--follow") for a in rest[i + 1:]))
+
+
 def engine_side_read(argv: list) -> bool:
     name = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if name == "docker" and argv[1:2] == ["compose"]:
+        return _compose_read(argv)                                     # §17.1665
     subs = _ENGINE_READ_SUBCOMMANDS.get(name)
     return bool(subs) and next((a for a in argv[1:] if not a.startswith("-") or a in subs), "") in subs
 
@@ -656,7 +676,7 @@ def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
     return (True, "") if ok else (False, "ssh remote command writes")
 
 
-def read_only_command(cmd: str) -> bool:
+def read_only_command(cmd: str, runner_side: bool = False) -> bool:
     """True when the command can only read. Conservative: any mutation verb at
     the HEAD of any command (nested scripts and substitutions included), any
     redirect that is not to /dev/null, any pipe into an interpreter → False.
@@ -667,7 +687,12 @@ def read_only_command(cmd: str) -> bool:
     `grep 'rm -rf' /var/log/syslog`; live, 6 of 48 probes) and could not see
     `$(…)` or `bash -c "…"`. The mutation regex still decides which HEADS are
     mutations (first four tokens of each command) — one verb table, applied
-    to structure. A parse error fails closed."""
+    to structure. A parse error fails closed.
+
+    §17.1666 — `runner_side=True` judges as the RUNNER does: the engine-side reads (`ollama list`, `docker compose ps`)
+    are left out, because the runner's own tables are the stricter end. A check the frame offers runs through the
+    runner; live (job 3cc24343 T5), `docker compose version` passed here, was refused by pve-runner, and the step was
+    recorded failed with the install done."""
     c = (cmd or "").strip()
     if not c or c.startswith("#"):
         return False
@@ -681,28 +706,28 @@ def read_only_command(cmd: str) -> bool:
         return False
     for argv, head in zip(facts.commands, facts.heads, strict=True):
         if argv[0].rsplit("/", 1)[-1] == "ssh":   # §17.1151 — the remote command is judged like a local one
-            ok, _why = ssh_remote_read_only(argv, read_only_command)
+            ok, _why = ssh_remote_read_only(argv, lambda x: read_only_command(x, runner_side))
             if not ok:
                 return False
             continue
         wrapped = privilege_wrapper_remainder(argv)  # §17.1166 — sudo/env/nohup/timeout: judge what it RUNS
         if wrapped is not None:
-            if not wrapped or not read_only_command(wrapped):
+            if not wrapped or not read_only_command(wrapped, runner_side):
                 return False
             continue
         inner = container_exec_remainder(argv)   # §17.1152 — pct exec / qm guest exec / lxc-attach: judge what runs INSIDE
         if inner is not None:
-            if not read_only_command(inner):
+            if not read_only_command(inner, runner_side):
                 return False
             continue
         script = interpreter_script(argv)   # §17.1171 — an interpreter is judged on what it RUNS
         if script is not None:
-            if not script or not read_only_command(script):
+            if not script or not read_only_command(script, runner_side):
                 return False
             continue
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
             continue
-        if engine_side_read(argv):  # §17.1633 — `ollama list` (engine side only; see _ENGINE_READ_SUBCOMMANDS)
+        if not runner_side and engine_side_read(argv):  # §17.1633 — `ollama list` (engine side only; see _ENGINE_READ_SUBCOMMANDS)
             continue
         argv = without_global_values(argv)   # §17.1633 — `git -C /opt/x log` is judged as `git log`
         # argv[0] alone decides for most commands; the joined unquoted head
