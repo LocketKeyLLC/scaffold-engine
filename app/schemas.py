@@ -443,6 +443,9 @@ class DecideInput(BaseModel):
     # §17.1661 — when the operator SKIPS a check it settled another way (a read of its own), what that read showed: a
     # fix step conditional on the check (§17.1644) then knows whether there is anything to fix
     verdict: Literal["passed", "failed"] | None = None
+    # §17.1681 — the `frame_id` of the frame the operator read (metadata.awaiting_decision.frame_id): when the parked
+    # frame has changed since, nothing runs and the call answers 409 with the new id
+    frame_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _choice_or_delegate(self):

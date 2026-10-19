@@ -202,6 +202,13 @@ async def decide_endpoint(
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
     await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
+    # §17.1681 — an approval binds to the frame the operator read, not to whatever is parked when it arrives
+    if body.frame_id:
+        _current = await decision_pause.parked_frame_id(db, str(parsed_id))
+        if decision_pause.frame_is_stale(body.frame_id, _current):
+            raise HTTPException(status_code=409, detail={
+                "error": "the step's frame changed since it was read -- read it again before approving",
+                "node_key": body.node_key, "frame_id": _current, "you_approved": body.frame_id})
     outcome = await decision_pause.resolve_decision(
         db, str(parsed_id), body.node_key, choice=body.choice, note=body.note or "", delegate=body.delegate,
         inputs=body.inputs, verdict=body.verdict,

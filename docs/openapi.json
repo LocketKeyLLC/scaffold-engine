@@ -1270,6 +1270,18 @@
             "title": "Delegate",
             "type": "boolean"
           },
+          "frame_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame Id"
+          },
           "inputs": {
             "anyOf": [
               {

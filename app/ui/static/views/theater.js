@@ -964,8 +964,9 @@ export function renderTheater(container, jobId, ctx = {}) {
       const values = {};
       for (const [n, f] of fields) if (f.value.trim()) values[n] = f.value.trim();
       try {
+        // §17.1681 — the approval names the frame on screen; a frame re-drawn since answers 409
         const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, choice, note: note.value.trim() || null,
-          inputs: choice === "run" && inputs.length ? values : null });
+          inputs: choice === "run" && inputs.length ? values : null, frame_id: d.frame_id || null });
         summaryEl.classList.add("hidden");
         const st = res.node_status || (choice === "skip" ? "skipped" : "done");
         ensureNode(nodeKey, { status: st });
