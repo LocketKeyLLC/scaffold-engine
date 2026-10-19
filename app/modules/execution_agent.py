@@ -932,6 +932,30 @@ def _result_of(output_text: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def fair_shares(sizes: dict, budget: int, weights: dict | None = None) -> dict:
+    """§17.1684b — max-min fair: every upstream output that fits its fair share is kept WHOLE, and what it does not use
+    goes to the larger ones; only the largest are cut. Live (job c2518102 T9): shares proportional to confidence × LENGTH
+    gave T8's 40k of raw profile JSON (confidence 1.0) almost the whole 40000-char budget, and T4's 150-char answer
+    ("Total missing movies: 0") was cut to "Total mis". `weights` (confidence) tilt the fair share; length never earns more."""
+    out = {k: 0 for k in sizes}
+    left = dict(sizes)
+    remaining = max(0, int(budget))
+    w = {k: float((weights or {}).get(k) or 1.0) for k in sizes}
+    while left and remaining > 0:
+        total_w = sum(w[k] for k in left) or 1.0
+        fair = {k: remaining * w[k] / total_w for k in left}
+        fits = [k for k in left if left[k] <= fair[k]]
+        if not fits:
+            for k in left:
+                out[k] += int(fair[k])
+            break
+        for k in fits:
+            out[k] += left[k]
+            remaining -= left[k]
+            del left[k]
+    return out
+
+
 def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None,
                            labels: dict | None = None, budget: int | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
@@ -968,22 +992,12 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
     truncated_keys: list[str] = []
     _budget = int(budget or settings.max_upstream_chars)          # §17.1653 — a report step passes its own
     if total_chars > _budget:
-        if settings.upstream_confidence_ranking_enabled:
-            weights = {
-                nk: _conf_or_default(confs[nk]) * len(texts[nk])
-                for nk in texts
-            }
-            denom = sum(weights.values()) or 1.0
-        else:
-            weights = {nk: float(len(texts[nk])) for nk in texts}
-            denom = float(total_chars) or 1.0
+        shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget,
+                             {nk: _conf_or_default(confs[nk]) for nk in texts}
+                             if settings.upstream_confidence_ranking_enabled else None)
         for nk in texts:
-            orig_len = len(texts[nk])
-            share = max(
-                settings.compile_output_min_chunk,
-                int(_budget * weights[nk] / denom),
-            )
-            if orig_len > share:
+            share = max(settings.compile_output_min_chunk, shares[nk])
+            if len(texts[nk]) > share:
                 texts[nk] = _truncate_output(texts[nk], share)
                 truncated_keys.append(nk)
         logger.info(
