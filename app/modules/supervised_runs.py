@@ -6511,6 +6511,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
     from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
     refused = refused + _prints_a_credential(cmds, verify)              # §17.1652 — a key is used, never printed
+    from app.modules.prints_a_secret import prints_arr_settings as _prints_arr_settings
+    refused = refused + _prints_arr_settings(cmds, verify)              # §17.1673 — an *arr settings list holds credentials
     from app.modules.check_writes import a_check_that_writes as _a_check_that_writes
     refused = refused + _a_check_that_writes(cmds, node)                 # §17.1659 — a check does not change what it checks
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
