@@ -6286,6 +6286,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pe_notes:
         cmds, verify = _pe_cmds, _pe_verify
         _comp_notes = list(_comp_notes) + _pe_notes
+    # §17.1667 — "copy <host file> into container N": the engine's own pct push from the host, never an in-guest draft.
+    from app.modules import host_file_push as _hfp
+    _hp = _hfp.block(node)
+    if _hp:
+        cmds, verify = _hp[0], _hp[1]
+        _comp_notes = list(_comp_notes) + [{"why": _hp[2]}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
