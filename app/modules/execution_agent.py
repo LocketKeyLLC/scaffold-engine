@@ -3906,7 +3906,15 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
     try:
         _ch = await _sr.channel(db)
         if _ch is None:
-            return None
+            # §17.1685 — "no runner" and "a runner that does not answer" are different facts. Live (job c2518102,
+            # 2026-10-19 23:00): the Proxmox host went down mid-run, channel() answered None, and three Shell
+            # measurement steps (M1–M3) took the ordinary path -- their RUNBOOK written as output and marked done --
+            # so the research steps after them "researched" with no data. A registered runner that cannot be
+            # reached HOLDS the step (pending, needs_approval): the work waits for the machine, nothing is faked.
+            _state, _why = await _sr.channel_state(db)
+            if _state != "unreachable":
+                return None
+            logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
         # §17.1200 — a decision is consumed by the attempt it authorised. It is
         # recorded to stop ONE pending node being asked twice in a single pass;
         # it must not silence the ask for a node that has since run and been
