@@ -2793,6 +2793,10 @@ def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], v
         f"no address, login or password is asked")}]
 
 
+#: §17.1680 — the line §17.1608 puts at the head of an in-guest block that only reads
+READS_ONLY_MARKER = "§17.1608: this block only reads"
+
+
 def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
@@ -6555,7 +6559,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # (`wg show`, the public-address read, the IPv6 read) and its frame was refused "this block has no check at all"
     if cmds and not verify:
         verify = with_own_checks(node, verify, cmds)
-    if cmds and not verify:
+    # §17.1680 — and a template block the engine itself marked read-only (§17.1608's `set +e` line) is the same case:
+    # its commands are the template's wrapper (`bash /tmp/in_ct_N.sh start`), its reads are inside the script, and the
+    # check the drafter repeated (`curl … | jq …`) is one the read channel drops. Live (job c2518102 T2 "Fetch Sonarr
+    # wanted missing"): one read of Sonarr's missing list, refused "this block has no check at all".
+    _reads_only_block = any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in shape_files or [])
+    if cmds and not verify and not _reads_only_block:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
