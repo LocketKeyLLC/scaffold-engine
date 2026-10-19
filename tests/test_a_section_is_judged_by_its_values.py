@@ -44,3 +44,13 @@ def test_no_temp_file_and_it_parses():
     cmd = arc.sections_command(SVC, {"/api/overview": ["dependencies"]}, ("PANEL_PASSWORD", "panel"))
     assert "/tmp/" not in cmd
     assert subprocess.run(["bash", "-n", "-c", cmd], capture_output=True).returncode == 0
+
+
+def test_a_stopped_server_with_a_nested_answer_fails_too(tmp_path):
+    """the panel's not-active shape: the error entry carries a nested `response` object"""
+    body = ('{"status":"ok","dependencies":{"palworld":{"name":"palworld","status":"error","host":"192.168.1.44",'
+            '"port":null,"response":{"status":"failed"}},"radarr":{"name":"radarr","status":"ok","response":{"v":1}}}}')
+    r = _run(tmp_path, body)
+    assert r.returncode == 1 and '"palworld"' in r.stdout and '"radarr"' not in r.stdout, r
+    ok = '{"status":"ok","dependencies":{"palworld":{"name":"palworld","status":"ok","response":{"status":"active"}}}}'
+    assert _run(tmp_path, ok).returncode == 0

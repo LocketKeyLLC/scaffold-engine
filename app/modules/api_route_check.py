@@ -102,7 +102,9 @@ def sections_command(service, reads: dict, login: Optional[tuple] = None) -> str
     auth = f'-u "{login[1]}:$cpw" ' if login else ""
     parts = [("cpw=$(cat); " if login else "") + "fail=0; "]
     # double quotes only inside the script: a `'\''` splice made the variable-scope gate lose `cpw=$(cat)` (live, §17.1674)
-    bad = r'\\\"[A-Za-z0-9_.-]+\\\" *: *[{][^{}]*\\\"status\\\" *: *\\\"(error|fail|failed|down|unhealthy)\\\"[^{}]*[}]'
+    # one level of nesting is read through: a not-active Palworld is {"status":"error",…,"response":{"status":"failed"}}
+    bad = (r'\\\"[A-Za-z0-9_.-]+\\\" *: *[{]([^{}]|[{][^{}]*[}])*\\\"status\\\" *: *'
+           r'\\\"(error|fail|failed|down|unhealthy)\\\"([^{}]|[{][^{}]*[}])*[}]')
     for route, fields in sorted(reads.items()):
         fl = " ".join(f for f in fields if re.fullmatch(r"[A-Za-z_$][\w$]*", f))
         parts.append(
