@@ -65,7 +65,8 @@ T13 = {"node_key": "T13", "title": "Start bitmagnet stack", "tool": "Shell",
 
 
 def test_the_start_is_judged_and_the_container_egress_is_read():
-    cmds, verify, note = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])
+    cmds, verify, note, extra = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])
+    assert extra["always_run"]
     assert [c.split(" -- ")[0] for c in cmds] == ["pct exec 109"] * 10
     assert "systemd-run --unit scaffold-bitmagnet-pull" in cmds[0] and "docker compose pull" in cmds[0]
     assert all("is-active" in c for c in cmds[1:7]) and "still running after every wait" in cmds[6]
@@ -128,3 +129,23 @@ def test_the_wait_is_bounded_by_the_clock():
     """live: 75 × (2 s + a 3 s curl) outran the runner's 180 s call"""
     w = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0][8]
     assert "end=$(( $(date +%s) + 150 ))" in w and "seq 1 75" not in w
+
+
+def test_the_wait_takes_the_ui_redirect(tmp_path):
+    """live: bitmagnet's web UI answers 301 to / -- an answer, not a failure"""
+    b = tmp_path / "bin"; b.mkdir()
+    (b / "docker").write_text('#!/bin/sh\ncase "$3" in *Health*) echo healthy;; *) echo true;; esac\n'); (b / "docker").chmod(0o755)
+    (b / "curl").write_text("#!/bin/sh\nprintf 301\n"); (b / "curl").chmod(0o755)
+    w = subprocess.run(["bash", "-c", "eval \"set -- ${0#*sh -c }\"; printf '%s' \"$1\"",
+                        bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0][8]], capture_output=True, text=True).stdout
+    r = subprocess.run(["sh", "-c", w], capture_output=True, text=True, env={**os.environ, "PATH": f"{b}:{os.environ['PATH']}"})
+    assert r.returncode == 0 and "web UI answers 301" in r.stdout, r
+
+
+def test_the_start_frame_is_never_already_met():
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": [], "can_write_files": True}
+    draft = "## Run this\n\n```bash\n" + "\n".join(DRAFT) + "\n```\n"
+    frame = sr.frame_run(T13, draft, spec, policy, services=[],
+                         inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
+    assert "traffic leaves" in frame["always_run"]

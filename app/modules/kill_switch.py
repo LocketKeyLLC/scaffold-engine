@@ -45,7 +45,7 @@ def guarded(node: Optional[dict], commands: Optional[list[str]] = None) -> tuple
     return gid, (wg.group(1) if wg else "wg0"), (lan.group("lan") if lan else "")
 
 
-def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optional[tuple[list[str], list[str], str]]:
+def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optional[tuple[list[str], list[str], str, dict]]:
     gid, wg, lan = guarded(node, commands)
     if not gid:
         return None
@@ -146,14 +146,14 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
               verify[1]: "-A SCAFFOLD-KS-FWD ... -o eth0 -j RETURN for the LAN, then -A SCAFFOLD-KS-FWD -o eth0 -j DROP",
               verify[2]: f"-P OUTPUT DROP, and ACCEPT rules for -o lo, RELATED,ESTABLISHED, -o {wg}, fe80::/10, -o docker0 "
                          "and -o br-+"}
-    return cmds, verify, note, expect
+    return cmds, verify, note, {"expect": expect}
 
 
 #: §17.1670c — "verify the kill-switch blocks traffic (bring wgN down …)"
 _PROOF_TITLE_RE = re.compile(r"^\s*(?:verify|test|check|confirm|prove)\b[^\n]*\bkill[\s-]?switch\b", re.I)
 
 
-def proof_block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optional[tuple[list[str], list[str], str]]:
+def proof_block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optional[tuple[list[str], list[str], str, dict]]:
     """Live (job 3cc24343 T11): the draft was `wg-quick down wg0` / `curl http://1.1.1.1` / `wg-quick up wg0` -- the curl
     is MEANT to fail, a failing command stops the block, so the tunnel would have been left down and the step recorded
     failed while the switch worked. One command: stop the unit, try to get out by IP (no DNS in the way), ALWAYS start it
@@ -188,4 +188,5 @@ def proof_block(node: Optional[dict], commands: Optional[list[str]] = None) -> O
             "container tries to reach two public addresses by IP, the tunnel is ALWAYS started again and must handshake, "
             "and only then is the result read -- the drafted `curl` was meant to fail, which would have stopped the block "
             "and left the tunnel down.")
-    return cmds, verify, note
+    return cmds, verify, note, {"always_run": ("the proof takes the tunnel down and tries to get out; the switch's rules "
+                                               "on disk say nothing about whether they hold")}

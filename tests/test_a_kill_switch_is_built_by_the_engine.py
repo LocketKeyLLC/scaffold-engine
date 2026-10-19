@@ -127,7 +127,8 @@ T11_DRAFT = ["pct exec 109 -- wg-quick down wg0",
 
 def test_the_proof_is_one_command_that_always_brings_the_tunnel_back():
     assert ks.block(T11, T11_DRAFT) is None
-    cmds, verify, note = ks.proof_block(T11, T11_DRAFT)
+    cmds, verify, note, extra = ks.proof_block(T11, T11_DRAFT)
+    assert extra["always_run"]
     assert len(cmds) == 1 and cmds[0].startswith("pct exec 109 -- sh -c ")
     s = _inner(cmds[0])
     assert s.index("systemctl stop wg-quick@wg0") < s.index("curl") < s.index("systemctl start wg-quick@wg0")
@@ -177,3 +178,16 @@ def test_the_frame_states_what_a_whole_switch_shows():
     frame = sr.frame_run(T8, "## Run this\n\n```bash\n" + "\n".join(DRAFT) + "\n```\n", spec, policy, services=[],
                          inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
     assert "-o br-+" in frame["expects"]["pct exec 109 -- iptables -S OUTPUT"]
+
+
+def test_a_proof_is_never_already_met():
+    """§17.1671d — the pre-read cannot show what the proof proves; already_met must stand aside without reading"""
+    import asyncio
+    from unittest.mock import patch
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": []}
+    frame = sr.frame_run(T11, "## Run this\n\n```bash\n" + "\n".join(T11_DRAFT) + "\n```\n", spec, policy, services=[],
+                         inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
+    assert frame["always_run"]
+    with patch.object(sr, "run_verify", side_effect=AssertionError("read the checks")):
+        assert asyncio.run(sr.already_met(spec, T11, frame, {})) is None

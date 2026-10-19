@@ -124,7 +124,7 @@ _START_RE = re.compile(r"^\s*(?:start|bring\s+up|launch|run|deploy)\b[^\n]{0,30}
 
 
 def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
-                files: Optional[list[dict]] = None) -> Optional[tuple[list[str], list[str], str]]:
+                files: Optional[list[dict]] = None) -> Optional[tuple[list[str], list[str], str, dict]]:
     """Live (job 3cc24343 T13 "Start bitmagnet stack"): every check the draft had (`docker compose ps`, `ss | grep 3333`)
     sat inside its in-guest script, so the frame had none and was refused. The engine starts it and judges it: pull
     (bounded), `up -d`, then wait for Postgres healthy, bitmagnet running and the web UI answering 200 on 3333 -- and,
@@ -157,8 +157,9 @@ def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
             'pg=$(docker inspect -f "{{.State.Health.Status}}" bitmagnet-postgres 2>/dev/null); '
             'bm=$(docker inspect -f "{{.State.Running}}" bitmagnet 2>/dev/null); '
             'code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:3333/); '
-            'if [ "$pg" = healthy ] && [ "$bm" = true ] && [ "$code" = 200 ]; then '
-            'echo "UP: postgres healthy, bitmagnet running, web UI answers 200 on 3333"; exit 0; fi; sleep 2; done; '
+            'case "$code" in 2*|3*) web=yes;; *) web="";; esac; '       # live: the UI answers 301 to its own page
+            'if [ "$pg" = healthy ] && [ "$bm" = true ] && [ -n "$web" ]; then '
+            'echo "UP: postgres healthy, bitmagnet running, web UI answers $code on 3333"; exit 0; fi; sleep 2; done; '
             'echo "FAILED: postgres=$pg bitmagnet_running=$bm web_ui_http=$code after 150 s"; '
             'docker logs --tail 30 bitmagnet 2>&1; exit 1')
     egress = ('ct=$(curl -s -m 15 https://ipinfo.io/ip); '
@@ -176,4 +177,5 @@ def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
             f"`docker compose up -d` in {d}, then it waits up to 150 s for Postgres healthy, bitmagnet running and the web "
             "UI answering 200 on 3333, and reads the bitmagnet container's public address -- it must be the tunnel's, "
             "since a container's traffic is forwarded and never passes the host's OUTPUT rules.")
-    return cmds, verify, note
+    return cmds, verify, note, {"always_run": ("the block proves where the bitmagnet container's traffic leaves; a port "
+                                               "that answers says nothing about that")}

@@ -6308,13 +6308,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _kb = _ks.block(node, cmds) or _ks.proof_block(node, cmds)
     if _kb:
         cmds, verify = _kb[0], _kb[1]
-        _comp_notes = list(_comp_notes) + [{"why": _kb[2], **({"expect": _kb[3]} if len(_kb) > 3 else {})}]
+        _comp_notes = list(_comp_notes) + [{"why": _kb[2], **(_kb[3] if len(_kb) > 3 else {})}]
     # §17.1671 — "write the official bitmagnet compose": bitmagnet's published file, never one from memory.
     from app.modules import bitmagnet_compose as _bmc
     _bc = _bmc.block(node, cmds, files) or _bmc.start_block(node, cmds, files)
     if _bc:
         cmds, verify = _bc[0], _bc[1]
-        _comp_notes = list(_comp_notes) + [{"why": _bc[2]}]
+        _comp_notes = list(_comp_notes) + [{"why": _bc[2], **(_bc[3] if len(_bc) > 3 else {})}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
@@ -6351,6 +6351,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     for _n in _comp_notes or []:
         if isinstance(_n, dict) and isinstance(_n.get("expect"), dict):
             _expects.update({str(k): str(v) for k, v in _n["expect"].items()})
+    # §17.1671d — a capability whose block PROVES something no check can show beforehand is never "already met"
+    _always_run = next((str(_n["always_run"]) for _n in _comp_notes or []
+                        if isinstance(_n, dict) and _n.get("always_run")), "")
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -6720,6 +6723,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
         "expects": _expects,                      # §17.1570g — what a rewrite's check shows when the goal holds
+        "always_run": _always_run,                # §17.1671d — the block proves what no pre-read can
     }
 
 
@@ -10849,7 +10853,7 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         [str(c) for c in (frame or {}).get("commands") or []], verify_cmds,
         (frame or {}).get("files") or [])
     # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
-    _blind = _blind or a_backup_is_taken_now(node)
+    _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)
