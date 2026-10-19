@@ -55,3 +55,14 @@ def test_the_filter_the_refusal_offers_is_accepted_and_a_key_filter_is_not():
     assert prints_arr_settings([base + " | grep -o '\"name\": *\"[^\"]*\"'"], []) == []
     assert prints_arr_settings([base + " | grep -o '\"apiKey[^}]*'"], [])
     assert "grep -o" in prints_arr_settings([base], [])[0]["why"]
+
+
+def test_a_read_only_refusal_of_a_program_names_the_read_to_use():
+    """§17.1673b — the redraft must be told what IS a read, or it drafts the same program again"""
+    node = {"title": "Diagnose nekoBT indexer failure in Prowlarr", "prompt_template": "Read only, change nothing."}
+    c = ('pct exec 102 -- sh -c \'curl -s http://127.0.0.1:9696/api/v1/indexer | python3 -c "import json,sys; '
+         'print(1)"\'')
+    hits = sr.writes_in_a_read_only_step([c], node)
+    assert hits and "/api/v1/indexerstatus" in hits[0]["why"] and "A program is not a read" in hits[0]["why"]
+    ok = 'pct exec 102 -- curl -s -H "X-Api-Key: k" http://127.0.0.1:9696/api/v1/indexerstatus'
+    assert sr.writes_in_a_read_only_step([ok], node) == []
