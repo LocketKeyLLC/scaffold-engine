@@ -59,3 +59,16 @@ def test_a_step_that_sets_a_guests_proxmox_settings_gets_no_guest_template():
     for t in ("pct set 109 --nameserver 1.1.1.1", "qm cloudinit dump 106 network"):
         assert rt._HOST_ADMIN_RE.search(t), t
     assert not rt._HOST_ADMIN_RE.search("netplan set ethernets.eth0.dhcp4=false")
+
+
+def test_a_netplan_write_that_matches_cloud_init_is_allowed():
+    """§17.1677 — the same static address Proxmox now renders is not "undone at the next boot\""""
+    from app.modules.rewrite_guard import _agrees_with_cloud_init
+    static = "ipconfig0: ip=192.168.1.44/24,gw=192.168.1.1"
+    plan = ("network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n      - 192.168.1.44/24\n"
+            "      routes:\n      - to: default\n        via: 192.168.1.1\n")
+    assert _agrees_with_cloud_init(static, plan)
+    assert not _agrees_with_cloud_init(static, plan.replace("192.168.1.44/24", "192.168.1.50/24"))
+    assert not _agrees_with_cloud_init(static, "eth0:\n  dhcp4: true\n")
+    assert _agrees_with_cloud_init("ipconfig0: ip=dhcp", "eth0:\n  dhcp4: true\n")
+    assert not _agrees_with_cloud_init("ipconfig0: ip=dhcp", plan)
