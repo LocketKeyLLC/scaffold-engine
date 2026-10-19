@@ -54,3 +54,14 @@ def test_a_stopped_server_with_a_nested_answer_fails_too(tmp_path):
     assert r.returncode == 1 and '"palworld"' in r.stdout and '"radarr"' not in r.stdout, r
     ok = '{"status":"ok","dependencies":{"palworld":{"name":"palworld","status":"ok","response":{"status":"active"}}}}'
     assert _run(tmp_path, ok).returncode == 0
+
+
+def test_a_read_only_step_takes_the_engines_own_section_check():
+    """§17.1678 — live, PW1 (declared read only) refused the engine's own section check as "not a read\""""
+    from app.modules import supervised_runs as sr
+    node = {"node_key": "PW1", "title": "Verify control panel Palworld boxes as the page sees them",
+            "prompt_template": "Read only, change nothing."}
+    rb = arc.sections_runbook(SVC, {"/api/overview": ["dependencies"]}, ("PANEL_PASSWORD", "panel"))
+    cmd = arc.sections_command(SVC, {"/api/overview": ["dependencies"]}, ("PANEL_PASSWORD", "panel"))
+    assert sr.writes_in_a_read_only_step([cmd], node, rb) == []
+    assert sr.writes_in_a_read_only_step(["apt-get install -y ipmitool"], node, "## Run this\n")   # a real write still is

@@ -2810,6 +2810,12 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     from app.modules.runbook_templates import template_of
     if template_of(runbook or ""):
         return []
+    # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
+    # the engine's frame like a template's. Live (job 5db1b088 PW1, 2026-10-19): "Verify control panel Palworld boxes",
+    # declared read only, was refused because the whole `pct exec 111 -- sh -c '…'` check is one segment no read table holds.
+    from app.modules.api_route_check import run_is_the_check
+    if run_is_the_check(runbook or ""):
+        return []
     for c in commands:
         segs = writing_segments(str(c))
         if segs:
@@ -6144,6 +6150,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
     from app.modules.arr_api_key import present_the_arr_key as _present_arr_key
     cmds, verify, files, _ak_notes = _present_arr_key(cmds, verify, files, services)
+    from app.modules import lan_checks as _lan                     # §17.1679 — "from the LAN" runs on the host
+    cmds, verify, _lan_notes = _lan.from_the_host(node, cmds, verify)
+    _ak_notes = list(_ak_notes) + _lan_notes
     from app.modules import json_grep as _jg                     # §17.1658 — JSON greps tolerate the spacing
     cmds, verify, files, _jg_notes = _jg.repair(cmds, verify, files)
     _ak_notes = list(_ak_notes) + _jg_notes
