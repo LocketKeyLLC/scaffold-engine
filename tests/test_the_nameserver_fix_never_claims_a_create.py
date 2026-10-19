@@ -23,3 +23,27 @@ def test_a_repair_of_a_guest_that_does_not_exist_is_left_alone():
 
 def test_the_repair_still_claims_an_existing_guest():
     assert _claimed({"title": "Give container 107 a working nameserver"})
+
+
+def test_a_step_whose_text_only_mentions_a_nameserver_is_not_claimed():
+    """§17.1675 — live, SIP2 ("VM 106: make 192.168.1.44 its static address") became `pct reboot 111`"""
+    sip2 = {"node_key": "SIP2", "title": "VM 106: make 192.168.1.44 its static address",
+            "prompt_template": ("Make VM 106's address static ... nameserver 192.168.1.1 ... Done when ... from CT 111 "
+                                "`ssh -o BatchMode=yes aedefruscio@192.168.1.44 sudo -n systemctl is-active palworld.service`")}
+    inv = {"cts": {"111": "running"}, "vms": {"106": "running"}}
+    c, v, notes = rewrite_set_container_nameserver(sip2, ["qm set 106 --ipconfig0 ip=192.168.1.44/24"], [], None, inv)
+    assert notes == [] and c == ["qm set 106 --ipconfig0 ip=192.168.1.44/24"]
+    vm = {"title": "Give VM 106 a working nameserver"}
+    assert rewrite_set_container_nameserver(vm, ["x"], [], None, inv)[2] == []
+    ct = {"title": "Give container 111 a working nameserver"}
+    assert rewrite_set_container_nameserver(ct, ["x"], [], None, inv)[2]
+
+
+SIP2_TEXT = "Make VM 106's address static at the address it has now, 192.168.1.44/24, gateway 192.168.1.1, nameserver 192.168.1.1 (search domain tail3692cc.ts.net, as before). On the Proxmox host: `qm set 106 --ipconfig0 ip=192.168.1.44/24,gw=192.168.1.1` (the nameserver is already set) so every boot renders it. Inside VM 106 now, without a reboot: keep a dated copy of /etc/netplan/50-cloud-init.yaml, write it with the same static address, routes and nameservers (matching MAC bc:24:11:e8:9f:7a, set-name eth0), mode 600, and `netplan apply` -- the address does not change, so the game and the panel stay connected. Do NOT reboot VM 106 (friends may be playing). Done when: inside VM 106 `ip -4 addr show eth0` shows 192.168.1.44/24 without `dynamic`, `ip -4 route` shows the default via 192.168.1.1 without `proto dhcp`; on the host `qm cloudinit dump 106 network` shows the static address; `cat /etc/ssh/ssh_host_ed25519_key.pub` inside VM 106 equals what SIP1 printed; and from CT 111 `ssh -o BatchMode=yes aedefruscio@192.168.1.44 sudo -n systemctl is-active palworld.service` prints active."
+
+
+def test_the_live_text_alone_never_claims_it():
+    """§17.1675 — each guard on its own: SIP2's real text under a title that names no VM is still not claimed"""
+    inv = {"cts": {"111": "running"}, "vms": {"106": "running"}}
+    node = {"title": "Make the Palworld address static", "prompt_template": SIP2_TEXT}
+    assert rewrite_set_container_nameserver(node, ["x"], [], None, inv)[2] == []

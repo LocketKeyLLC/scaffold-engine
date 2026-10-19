@@ -9318,9 +9318,14 @@ def rewrite_set_container_nameserver(node: Optional[dict], commands: list[str], 
     in the command (the host-tool gate, §17.1517); the verify resolves a public name inside the guest."""
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    # §17.1675 — the TITLE asks for the repair (the engine's own is "Give container N a working nameserver"); the body
+    # text no longer does. Live (job 5db1b088 SIP2 "VM 106: make 192.168.1.44 its static address", 2026-10-19): its text
+    # said "nameserver 192.168.1.1" and "from CT 111 `ssh …`", and this rewrite replaced the whole step with
+    # `pct set 111 --nameserver …; pct reboot 111` -- the control panel's container, rebooted, the static address dropped.
     if not (_NAMESERVER_RE.search(title) and _NS_VERB_RE.search(title)):
-        if not (_NAMESERVER_RE.search(text) and _NS_VERB_RE.search(text)):
-            return list(commands or []), list(verify or []), []
+        return list(commands or []), list(verify or []), []
+    if re.search(r"\bVM\s*#?\s*\d{2,4}\b", title):
+        return list(commands or []), list(verify or []), []            # a VM's resolver is not `pct set`
     m = _NS_CT_RE.search(title) or _NS_CT_RE.search(text)
     gid = m.group(1) if m else None
     if not gid and inventory:
