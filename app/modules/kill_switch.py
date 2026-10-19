@@ -139,7 +139,14 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
             "forwarded traffic -- which never passes OUTPUT -- may leave eth0 only for the LAN (DOCKER-USER). The "
             "current rules are saved first, the boot copy is written and parse-tested, and the switch is proven at "
             "once: a connection forced out eth0 must fail, one through the tunnel must work.")
-    return cmds, verify, note
+    # §17.1570g — what the checks SHOW when the switch is whole, so "already met" is judged against the full rule set
+    # (live: a switch from before §17.1670d was judged met, and the Docker-bridge rule never went in)
+    expect = {verify[0]: (f"-P OUTPUT DROP, and ACCEPT rules for -o lo, RELATED,ESTABLISHED, -o {wg}, -o eth0 to the "
+                          "LAN, -o eth0 udp to the endpoint port, -o docker0 and -o br-+"),
+              verify[1]: "-A SCAFFOLD-KS-FWD ... -o eth0 -j RETURN for the LAN, then -A SCAFFOLD-KS-FWD -o eth0 -j DROP",
+              verify[2]: f"-P OUTPUT DROP, and ACCEPT rules for -o lo, RELATED,ESTABLISHED, -o {wg}, fe80::/10, -o docker0 "
+                         "and -o br-+"}
+    return cmds, verify, note, expect
 
 
 #: §17.1670c — "verify the kill-switch blocks traffic (bring wgN down …)"

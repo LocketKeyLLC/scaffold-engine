@@ -27,7 +27,7 @@ def test_left_alone():
 
 
 def test_nothing_else_rides_along():
-    cmds, verify, _ = ks.block(T8, DRAFT)
+    cmds, verify, _, _ = ks.block(T8, DRAFT)
     assert all(c.startswith("pct exec 109 -- ") for c in cmds)              # no CT 102, no pushed file
     assert "9696" not in " ".join(cmds) and verify == ["pct exec 109 -- iptables -S OUTPUT",
                                                     "pct exec 109 -- iptables -S SCAFFOLD-KS-FWD",
@@ -68,7 +68,7 @@ def test_the_rules_go_in_allow_first_then_drop_and_the_boot_files_match(tmp_path
     env, log = _env(tmp_path)
     conf = tmp_path / "wg0.conf"
     conf.write_text("[Interface]\nAddress = 10.0.0.2/32\n\n[Peer]\nEndpoint = ch3.vpn.airdns.org:1637\n")
-    cmds, _, _ = ks.block(T8, DRAFT)
+    cmds = ks.block(T8, DRAFT)[0]
     v4 = _inner(cmds[2]).replace("/etc/wireguard/wg0.conf", str(conf))
     r = subprocess.run(["sh", "-c", v4], capture_output=True, text=True, env=env)
     assert r.returncode == 0 and "udp/1637" in r.stdout, r
@@ -168,3 +168,12 @@ def test_the_frame_takes_the_proof():
                          inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
     assert not frame["refused"] and frame["inputs"] == [], (frame["refused"], frame["inputs"])
     assert len(frame["commands"]) == 1 and "systemctl start wg-quick@wg0" in frame["commands"][0]
+
+
+def test_the_frame_states_what_a_whole_switch_shows():
+    """§17.1670d — "already met" is judged against the full rule set, the Docker bridges included"""
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": []}
+    frame = sr.frame_run(T8, "## Run this\n\n```bash\n" + "\n".join(DRAFT) + "\n```\n", spec, policy, services=[],
+                         inventory={"vms": {}, "cts": {"109": "running"}, "names": {"109": "bitmagnet"}})
+    assert "-o br-+" in frame["expects"]["pct exec 109 -- iptables -S OUTPUT"]

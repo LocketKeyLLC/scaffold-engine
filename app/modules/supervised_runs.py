@@ -6308,7 +6308,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _kb = _ks.block(node, cmds) or _ks.proof_block(node, cmds)
     if _kb:
         cmds, verify = _kb[0], _kb[1]
-        _comp_notes = list(_comp_notes) + [{"why": _kb[2]}]
+        _comp_notes = list(_comp_notes) + [{"why": _kb[2], **({"expect": _kb[3]} if len(_kb) > 3 else {})}]
     # §17.1671 — "write the official bitmagnet compose": bitmagnet's published file, never one from memory.
     from app.modules import bitmagnet_compose as _bmc
     _bc = _bmc.block(node, cmds, files) or _bmc.start_block(node, cmds, files)
