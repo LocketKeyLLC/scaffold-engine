@@ -6303,6 +6303,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _wu:
         cmds, verify = _wu[0], _wu[1]
         _comp_notes = list(_comp_notes) + [{"why": _wu[2]}]
+    # §17.1670 — "configure the VPN kill-switch" for a container's tunnel: CT 105's measured shape, plus Docker's FORWARD.
+    from app.modules import kill_switch as _ks
+    _kb = _ks.block(node, cmds)
+    if _kb:
+        cmds, verify = _kb[0], _kb[1]
+        _comp_notes = list(_comp_notes) + [{"why": _kb[2]}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
