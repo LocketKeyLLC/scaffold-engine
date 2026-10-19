@@ -136,3 +136,13 @@ def test_a_read_only_program_is_recognised_and_a_writing_one_is_not():
         assert not sr.a_read_only_program(RO, _block(READ_PROG + "\n" + w)), w
     assert not sr.a_read_only_program(RO, _block(READ_PROG, extra="systemctl restart sonarr\n"))   # shell work beside it
     assert not sr.a_read_only_program({"title": "Fetch Sonarr wanted missing"}, _block(READ_PROG))  # step never said so
+
+
+def test_reading_a_packaged_apps_api_is_not_a_route_inventory():
+    """§17.1682b — live, T6 "read qBittorrent's torrent list from its local Web API" became an inventory of /opt/qbittorrent*"""
+    inv = {"cts": {"105": "running", "111": "running"}, "vms": {}, "names": {"105": "download-client", "111": "control-panel"}}
+    t6 = {"title": "Fetch qBittorrent torrent status",
+          "prompt_template": "Inside CT 105, read qBittorrent's torrent list from its local Web API (/api/v2/torrents/info)."}
+    assert sr.rewrite_inventory_service_routes(t6, ["x"], [], [], inv)[2] == []
+    panel = {"title": "Read the control panel backend's routes", "prompt_template": "Read the panel's routes in CT 111."}
+    assert sr._ROUTE_INVENTORY_RE.search(panel["title"]) and sr._ROUTE_SERVICE_RE.search(panel["prompt_template"])

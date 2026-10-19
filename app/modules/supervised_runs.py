@@ -10475,6 +10475,12 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     title = str((node or {}).get("title") or "")
     if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
         return list(commands or []), list(verify or []), []
+    # §17.1682b — "read" alone (not inventory/enumerate/list/map/catalog/survey) claims only a service built from code the
+    # engine can read (_ROUTE_SERVICE_RE): live (job c2518102 T6), "read qBittorrent's torrent list from its local Web API"
+    # became an inventory of /opt/qbittorrent* -- a packaged app, no routes to read
+    _m = _ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)
+    if _m and re.match(r"read\b", _m.group(0), re.I) and not _ROUTE_SERVICE_RE.search(text):
+        return list(commands or []), list(verify or []), []
     own = _own_step_text(node)
     name, gid, _unit = _named_guest(own, services, inventory)
     if not gid:
