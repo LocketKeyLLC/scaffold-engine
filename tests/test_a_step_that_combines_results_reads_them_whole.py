@@ -31,3 +31,9 @@ def test_a_short_result_is_never_cut_because_another_is_long():
     assert sum(sh.values()) <= 40000
     even = fair_shares({"a": 30000, "b": 30000}, 40000)
     assert even == {"a": 20000, "b": 20000}
+
+
+def test_a_research_step_reads_a_measurement_of_this_size():
+    """§17.1687 — T9's dataset (~6.9k) and M1's five shows (~9k) fit the default upstream budget"""
+    from app.config import Settings
+    assert Settings.model_fields["max_upstream_chars"].default >= 6900 + 9000

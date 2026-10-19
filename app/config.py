@@ -1707,7 +1707,10 @@ class Settings(BaseSettings):
     # this host is CPU-only and it adds a model_general call per emit. The
     # deterministic summary ships regardless; this only ADDS a prose line.
     progress_summary_llm_enabled: bool = Field(default=False)
-    max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
+    # §17.1687 — 24000 (was 8000): a research step reads the measurements it is about. Live (job c2518102 T13 "Research
+    # scene naming aliases"), T9's dataset and M1's five shows did not fit 8000 chars and the step wrote "M1 output is
+    # truncated in this context" -- ~6k tokens is small for every model this engine routes to.
+    max_upstream_chars: int = Field(default=24000, ge=100, le=200000)
     # §17.1653 — a REPORT step summarises every step of the job: at 8,000 chars over 45 sections each kept ~40 chars and
     # the report named steps from fragments (job 5db1b088 T31). Its own, larger budget.
     max_report_upstream_chars: int = Field(default=40000, ge=1000, le=200000)
