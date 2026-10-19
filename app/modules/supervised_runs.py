@@ -4463,7 +4463,8 @@ def verify_commands(text_out: str) -> list[str]:
         # §17.1187 — a <PLACEHOLDER> reads as a redirect to the shell gate; judge
         # the shape with a dummy value, keep the raw command for the operator.
         shape = _PLACEHOLDER_RE.sub("x", c)
-        if c not in out and not c.startswith("/") and read_only_command(shape):
+        # §17.1666 — a check runs through the RUNNER's read channel: judged as the runner judges it
+        if c not in out and not c.startswith("/") and read_only_command(shape, runner_side=True):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
 
@@ -9229,6 +9230,10 @@ _NS_VERB_RE = re.compile(r"\b(?:give|set|fix|configure|repair|add|working|point|
 _NS_CT_RE = re.compile(r"\b(?:container|ct|lxc|guest)\s*#?\s*(\d{2,4})\b", re.I)
 
 
+#: §17.1664 — a title that CREATES a guest (its nameserver is a `pct create` option, not a repair)
+_CREATES_A_GUEST_RE = re.compile(r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*)?(?:create|provision|make|build|deploy|set\s+up)\b[^.;\n]{0,40}\b(?:CT|LXC|container|guest|VM)\b", re.I)
+
+
 def rewrite_set_container_nameserver(node: Optional[dict], commands: list[str], verify: list[str],
                                      services: Optional[list] = None,
                                      inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
@@ -9254,6 +9259,14 @@ def rewrite_set_container_nameserver(node: Optional[dict], commands: list[str], 
         gid = str(subj) if subj else None
     if not gid:
         return list(commands or []), list(verify or []), []
+    # §17.1664 — a repair of an EXISTING container never claims the step that creates it. Live (job 3cc24343 T2
+    # "Create CT 109 container", 2026-10-19): the step's text said to pass `--nameserver` to `pct create`, this rewrite
+    # matched the text and replaced the whole create with `pct set 109 --nameserver …` -- on a container not yet there.
+    if _CREATES_A_GUEST_RE.search(title):
+        return list(commands or []), list(verify or []), []
+    _known = {str(k) for k in ((inventory or {}).get("cts") or {})} | {str(k) for k in ((inventory or {}).get("vms") or {})}
+    if inventory and _known and str(gid) not in _known:
+        return list(commands or []), list(verify or []), []     # measured: no such guest to repair
     run = [
         f"sh -c 'pct set {gid} --nameserver \"192.168.1.1 1.1.1.1\"; "
         f"pct status {gid} | grep -q running && pct reboot {gid}; "
