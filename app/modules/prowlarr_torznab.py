@@ -84,3 +84,56 @@ def block(node: Optional[dict], prowlarr_guest: Callable[[], str]) -> Optional[t
             "forceSave, so Prowlarr tests it before it saves; an indexer already at that URL or with that name is "
             "reported, not duplicated, and nothing else is touched. The draft only stopped prowlarr.service.")
     return cmds, verify, note
+
+
+#: §17.1672b — "verify/test the Prowlarr indexer (test)"
+_TEST_TITLE_RE = re.compile(r"^\s*(?:verify|test|check|confirm|run)\b[^\n]{0,40}\bprowlarr\b[^\n]{0,30}\bindexer\b|"
+                            r"^\s*(?:verify|test|check|confirm|run)\b[^\n]{0,30}\bindexer\b[^\n]{0,30}\bprowlarr\b", re.I)
+_DRAFT_ID_RE = re.compile(r"/api/v1/indexer/(\d{1,5})\b")
+
+#: `python3 -c "<this>" <key> <indexer id>` -- the test Prowlarr's own Test button runs, then one search through it
+TEST_PY = (
+    "import sys,json,urllib.request,urllib.error,urllib.parse\n"
+    "key,iid=sys.argv[1],sys.argv[2]\n"
+    "base='http://127.0.0.1:" + _PORT + "'\n"
+    "def api(path,method='GET',body=None,t=90):\n"
+    "    data=json.dumps(body).encode() if body is not None else None\n"
+    "    req=urllib.request.Request(base+path,method=method,data=data,headers={'X-Api-Key':key,'Content-Type':'application/json'})\n"
+    "    try:\n"
+    "        with urllib.request.urlopen(req,timeout=t) as r: return json.loads(r.read() or b'null'),None\n"
+    "    except urllib.error.HTTPError as e: return None,'HTTP %d %s' % (e.code,e.read().decode(errors='replace')[:400])\n"
+    "    except Exception as e: return None,repr(e)\n"
+    "ix,err=api('/api/v1/indexer/'+iid)\n"
+    "if err: print('FAILED: no indexer '+iid+': '+err); sys.exit(1)\n"
+    "_,err=api('/api/v1/indexer/test','POST',ix)\n"
+    "if err: print('FAILED: Prowlarr test of %s (indexer %s): %s' % (ix.get('name'),iid,err)); sys.exit(1)\n"
+    "print('TEST PASSED: Prowlarr tested %s (indexer %s, enabled=%s)' % (ix.get('name'),iid,ix.get('enable')))\n"
+    "res,err=api('/api/v1/search?'+urllib.parse.urlencode({'query':'1080p','indexerIds':iid,'type':'search','limit':100}),t=120)\n"
+    "print('SEARCH through %s alone: %s' % (ix.get('name'),('%d results for 1080p' % len(res)) if res is not None else err))\n"
+)
+
+
+def test_block(node: Optional[dict], prowlarr_guest: Callable[[], str], commands: Optional[list[str]] = None,
+               files: Optional[list[dict]] = None) -> Optional[tuple[list[str], list[str], str, dict]]:
+    """Live (job 3cc24343 T16 "Verify Prowlarr indexer test"): the draft only read the indexer's `enable` flag -- no test
+    ran -- and was refused for having no check. The engine runs Prowlarr's own test on the indexer the draft names (the
+    full object POSTed to /indexer/test, §17.1647's lesson) and one search through that indexer alone."""
+    title = str((node or {}).get("title") or "")
+    if not _TEST_TITLE_RE.match(title):
+        return None
+    drafted = " ".join([str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+                       + [str((node or {}).get(k) or "") for k in ("description", "prompt_template")])
+    ids = set(_DRAFT_ID_RE.findall(drafted))
+    gid = prowlarr_guest() if len(ids) == 1 else ""
+    if not gid:
+        return None
+    iid = next(iter(ids))
+    from app.modules.supervised_runs import _sq_payload
+    payload = f'python3 -c "{TEST_PY}" "<PROWLARR_API_KEY>" "{iid}"'
+    cmds = [f"pct exec {gid} -- sh -c {_sq_payload(payload)}"]
+    verify = [f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null -w "prowlarr indexer {iid} HTTP %{{http_code}}" '
+              f'-H "X-Api-Key: $PROWLARR_API_KEY" "http://127.0.0.1:{_PORT}/api/v1/indexer/{iid}"']
+    note = (f"ran Prowlarr's own test on indexer {iid} as the engine's block (§17.1672b): inside guest {gid}, key read "
+            "there, the indexer's full object is POSTed to /api/v1/indexer/test (what the Test button does) and one search "
+            "runs through that indexer alone; the draft only read its `enable` flag.")
+    return cmds, verify, note, {"always_run": "a test proves the indexer answers now; its saved settings cannot show that"}

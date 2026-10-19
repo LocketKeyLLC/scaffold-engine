@@ -6317,10 +6317,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         _comp_notes = list(_comp_notes) + [{"why": _bc[2], **(_bc[3] if len(_bc) > 3 else {})}]
     # §17.1672 — "add <name> to Prowlarr as Generic Torznab at <url>": Prowlarr's own template, tested before it saves.
     from app.modules import prowlarr_torznab as _ptz
-    _pt = _ptz.block(node, lambda: _arr_guest("prowlarr", services, inventory))
+    _pt = (_ptz.block(node, lambda: _arr_guest("prowlarr", services, inventory))
+           or _ptz.test_block(node, lambda: _arr_guest("prowlarr", services, inventory), cmds, files))
     if _pt:
         cmds, verify = _pt[0], _pt[1]
-        _comp_notes = list(_comp_notes) + [{"why": _pt[2]}]
+        _comp_notes = list(_comp_notes) + [{"why": _pt[2], **(_pt[3] if len(_pt) > 3 else {})}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
