@@ -66,9 +66,10 @@ T13 = {"node_key": "T13", "title": "Start bitmagnet stack", "tool": "Shell",
 
 def test_the_start_is_judged_and_the_container_egress_is_read():
     cmds, verify, note = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])
-    assert [c.split(" -- ")[0] for c in cmds] == ["pct exec 109"] * 4
-    assert "docker compose pull" in cmds[0] and "docker compose up -d" in cmds[1]
-    assert "healthy" in cmds[2] and "3333" in cmds[2] and "docker exec bitmagnet" in cmds[3]
+    assert [c.split(" -- ")[0] for c in cmds] == ["pct exec 109"] * 10
+    assert "systemd-run --unit scaffold-bitmagnet-pull" in cmds[0] and "docker compose pull" in cmds[0]
+    assert all("is-active" in c for c in cmds[1:7]) and "still running after every wait" in cmds[6]
+    assert "docker compose up -d" in cmds[7] and "healthy" in cmds[8] and "docker exec bitmagnet" in cmds[9]
     assert verify[0].startswith("pct exec 109 -- curl") and bc.block(T13, ["bash /tmp/in_ct_109.sh start"]) is None
     for c in cmds:
         assert subprocess.run(["bash", "-n", "-c", c], capture_output=True).returncode == 0, c
@@ -94,10 +95,30 @@ def _egress_env(tmp_path, ct_ip, in_ip):
 
 def test_the_egress_check_both_ways(tmp_path):
     s = subprocess.run(["bash", "-c", "eval \"set -- ${0#*sh -c }\"; printf '%s' \"$1\"",
-                        bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0][3]], capture_output=True, text=True).stdout
+                        bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0][9]], capture_output=True, text=True).stdout
     same = subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=_egress_env(tmp_path, "146.70.226.122", "146.70.226.122"))
     assert same.returncode == 0 and "THROUGH THE TUNNEL" in same.stdout
     leak = subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=_egress_env(tmp_path, "146.70.226.122", "67.240.32.243"))
     assert leak.returncode == 1 and "FAILED" in leak.stdout
     none = subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=_egress_env(tmp_path, "146.70.226.122", ""))
     assert none.returncode == 0 and "NOT TESTED" in none.stdout
+
+
+def _pull_env(tmp_path, have: bool, active: bool):
+    b = tmp_path / "bin"; b.mkdir(exist_ok=True)
+    (b / "docker").write_text(f"#!/bin/sh\nexit {0 if have else 1}\n"); (b / "docker").chmod(0o755)
+    (b / "systemctl").write_text(f"#!/bin/sh\nexit {0 if active else 3}\n"); (b / "systemctl").chmod(0o755)
+    (b / "sleep").write_text("#!/bin/sh\n"); (b / "sleep").chmod(0o755)
+    return {**os.environ, "PATH": f"{b}:{os.environ['PATH']}"}
+
+
+def test_the_waits_pass_hold_and_fail_as_they_should(tmp_path):
+    cmds = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0]
+    inner = lambda c: subprocess.run(["bash", "-c", "eval \"set -- ${0#*sh -c }\"; printf '%s' \"$1\"", c],
+                                     capture_output=True, text=True).stdout
+    mid, last = inner(cmds[1]), inner(cmds[6])
+    run = lambda s, **k: subprocess.run(["sh", "-c", s], capture_output=True, text=True, env=_pull_env(tmp_path, **k))
+    assert "PULLED" in run(mid, have=True, active=False).stdout
+    r = run(mid, have=False, active=True); assert r.returncode == 0 and "STILL PULLING" in r.stdout
+    r = run(last, have=False, active=True); assert r.returncode == 1 and "still running after every wait" in r.stdout
+    r = run(mid, have=False, active=False); assert r.returncode == 1 and "ended without the images" in r.stdout

@@ -137,7 +137,20 @@ def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
     if not gid:
         return None
     dq = shlex.quote(d)
-    pull = f"cd {dq} && timeout 170 docker compose pull -q && echo \"PULLED the images in {d}\""
+    # §17.1671c — the pull runs DETACHED and is waited on across calls (§17.1317's shape): live, ghcr's bitmagnet image
+    # did not arrive inside one 170 s call through the tunnel (exit 124, Postgres had)
+    images = " ".join(re.findall(r"^\s*image:\s*(\S+)", OFFICIAL_COMPOSE, re.M))
+    have = f"for im in {images}; do docker image inspect \"$im\" >/dev/null 2>&1 || exit 1; done"
+    pull = (f"if ( {have} ); then echo \"PULLED: the images are already here\"; exit 0; fi; "
+            "systemctl is-active --quiet scaffold-bitmagnet-pull || systemd-run --unit scaffold-bitmagnet-pull --collect "
+            f"-p WorkingDirectory={d} docker compose pull -q >/dev/null && echo \"PULLING in the background\"")
+    def waiting(last: bool) -> str:
+        return (f"for i in $(seq 1 33); do systemctl is-active --quiet scaffold-bitmagnet-pull || break; sleep 5; done; "
+                f"if ( {have} ); then echo \"PULLED: {images}\"; exit 0; fi; "
+                "if systemctl is-active --quiet scaffold-bitmagnet-pull; then "
+                + ('echo "FAILED: the image pull is still running after every wait"; exit 1; fi; ' if last else
+                   'echo "STILL PULLING (the next command keeps waiting)"; exit 0; fi; ')
+                + 'echo "FAILED: the pull ended without the images"; exit 1')
     up = f"cd {dq} && docker compose up -d && echo \"STARTED the stack in {d}\""
     wait = ('for i in $(seq 1 75); do pg=$(docker inspect -f "{{.State.Health.Status}}" bitmagnet-postgres 2>/dev/null); '
             'bm=$(docker inspect -f "{{.State.Running}}" bitmagnet 2>/dev/null); '
@@ -152,10 +165,12 @@ def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
               'if [ "$in" = "$ct" ]; then echo "THROUGH THE TUNNEL: the bitmagnet container leaves as $in, the same as wg0"; '
               'else echo "FAILED: the bitmagnet container leaves as $in, the container host as $ct"; exit 1; fi')
     q = shlex.quote
-    cmds = [f"pct exec {gid} -- sh -c {q(pull)}", f"pct exec {gid} -- sh -c {q(up)}",
+    cmds = [f"pct exec {gid} -- sh -c {q(pull)}"] + [f"pct exec {gid} -- sh -c {q(waiting(i == 5))}" for i in range(6)] + [
+            f"pct exec {gid} -- sh -c {q(up)}",
             f"pct exec {gid} -- sh -c {q(wait)}", f"pct exec {gid} -- sh -c {q(egress)}"]
     verify = [f'pct exec {gid} -- curl -s -o /dev/null -w "%{{http_code}}" http://127.0.0.1:3333/', f"pct exec {gid} -- ss -tln"]
-    note = (f"started bitmagnet in container {gid} as the engine's own block (§17.1671b): images pulled (170 s bound), "
+    note = (f"started bitmagnet in container {gid} as the engine's own block (§17.1671b): images pulled in the background and "
+            "waited on across calls (up to ~16 min), "
             f"`docker compose up -d` in {d}, then it waits up to 150 s for Postgres healthy, bitmagnet running and the web "
             "UI answering 200 on 3333, and reads the bitmagnet container's public address -- it must be the tunnel's, "
             "since a container's traffic is forwarded and never passes the host's OUTPUT rules.")
