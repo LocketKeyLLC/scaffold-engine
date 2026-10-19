@@ -21,7 +21,8 @@ def test_reads_that_carry_no_credential_pass():
           'curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: k" "http://127.0.0.1:9696/api/v1/indexer"',
           'curl -s -H "X-Api-Key: k" http://127.0.0.1:9696/api/v1/indexer | grep -c nekoBT',
           'curl -s -H "X-Api-Key: k" http://127.0.0.1:8989/api/v3/health',
-          'python3 -c "import json" "$(curl -s http://127.0.0.1:9696/api/v1/indexer)"']
+          'python3 -c "import json" "$(curl -s http://127.0.0.1:9696/api/v1/indexer)"',
+          'curl -s -H "X-Api-Key: k" http://127.0.0.1:9696/api/v1/indexer | python3 -c "import json,sys; print(1)"']
     for c in ok:
         assert prints_arr_settings([c], []) == [], c
 

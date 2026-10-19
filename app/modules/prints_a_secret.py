@@ -99,8 +99,8 @@ def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
             if re.search(r"\s(?:-X|--request)\s*[\"']?(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary)?|--json)(?:\s|=)",
                          s[max(s.rfind("curl", 0, m.end()), 0):m.end() + len(call)]):
                 continue
-            if re.search(r"\bpython3?\s+-c\b", s[:m.start()]):
-                continue
+            if re.search(r"\bpython3?\s+-c\b", s[:m.start()]) or re.search(r"\|\s*python3?\s+-c\b", call):
+                continue                      # a program reads the list and prints only what it chooses
             res = m.group("res")
             out.append({"command": str(c)[:200], "why": (
                 f"this read PRINTS the {res} settings of an *arr app, and each entry's `fields` carry its credentials "
