@@ -1151,8 +1151,12 @@ def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> s
 
 
 #: §17.1565 — a step whose work is to shape what earlier steps produced: a report, a summary, a list.
+#: §17.1684 — and the steps that COMBINE what came before: live (job c2518102 T9 "Aggregate missing media dataset", T20
+#: "Synthesize root cause findings … Merge all research"), with the default 8000-char budget split by length, T8's 40k of
+#: raw profile JSON took it and T9 wrote "payload truncated" for the measurements it had been handed
 _FORMATS_UPSTREAM_RE = re.compile(
-    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate)\b", re.I)
+    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate"
+    r"|aggregate|combine|synthesi[sz]e|merge|roll\s*up)\b", re.I)
 
 
 def formats_what_came_before(node: dict) -> str:
