@@ -204,7 +204,7 @@ async def decide_endpoint(
     await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
     outcome = await decision_pause.resolve_decision(
         db, str(parsed_id), body.node_key, choice=body.choice, note=body.note or "", delegate=body.delegate,
-        inputs=body.inputs,
+        inputs=body.inputs, verdict=body.verdict,
     )
     if outcome["outcome"] == "not_found":
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

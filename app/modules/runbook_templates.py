@@ -1228,7 +1228,17 @@ def keep_a_copy_before_overwrites(remote_commands: str) -> str:
             path = next(v for v in (m.group("tee"), m.group("cat"), m.group("cpmv"), m.group("inst"),
                                     m.group("inplace"), m.group("append")) if v)
             path = path.strip("\"'")                # §17.1341 — `"$CONF"` is a path too
-            out.append(f'[ -e "{path}" ] && cp -a "{path}" "{path}.bak.$(date +%Y%m%d%H%M%S)"')
+            # §17.1654 — a cp/mv INTO a directory overwrites the file of the same name inside it, not the directory.
+            # Live (job d89078ed T8): `cp /var/lib/prowlarr/prowlarr.db /var/backups/prowlarr/` got
+            # `[ -e "/var/backups/prowlarr/" ] && cp -a "/var/backups/prowlarr/" ".../.bak.<stamp>"` -- a directory
+            # copied into itself, which fails, and under `set -e` the step ends with prowlarr.service already stopped.
+            if m.group("cpmv") and path.endswith("/"):
+                src = ln.split()[-2] if len(ln.split()) >= 3 else ""
+                path = path + src.strip("\"'").rstrip("/").rsplit("/", 1)[-1] if src else ""
+            if path:
+                # only a regular FILE is kept (`-f`): a directory, or a path that is not there yet, is not a pre-image,
+                # and an `if` never trips `set -e` the way a false `[ … ] &&` at the end of a list can
+                out.append(f'if [ -f "{path}" ]; then cp -a "{path}" "{path}.bak.$(date +%Y%m%d%H%M%S)"; fi')
         out.append(ln)
         hd = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", ln)
         if hd and not ln.lstrip().startswith("#"):

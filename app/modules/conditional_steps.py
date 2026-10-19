@@ -33,6 +33,19 @@ def named_checks(node: Optional[dict]) -> list[str]:
     return list(dict.fromkeys(re.findall(_KEY, m.group("keys")))) if m else []
 
 
+def _settled_as(row: dict) -> str:
+    """The check's outcome for this rule. §17.1661 -- a check the operator SKIPPED with a stated verdict (they settled it
+    with a read of their own: live, job 5db1b088 T24's shared-storage measurement) is that verdict: `passed` counts as
+    a check that ran and passed, `failed` as a failure. A skip with no verdict stays `skipped` (nothing checked)."""
+    st = str(row.get("status") or "")
+    why = str(row.get("last_verification_reason") or "")
+    if st == "skipped":
+        m = re.search(r"verdict (passed|failed)", why)
+        if m:
+            return "done" if m.group(1) == "passed" else "failed"
+    return st
+
+
 def unmet_condition(node: Optional[dict], plan_rows: Optional[list[dict]]) -> Optional[str]:
     """Why the step has nothing to do -- every check it is conditional on passed -- or None to draft it as usual."""
     keys = named_checks(node)
@@ -43,7 +56,7 @@ def unmet_condition(node: Optional[dict], plan_rows: Optional[list[dict]]) -> Op
         return None                          # a key the plan does not hold: not the engine's to settle
     # a named check that was split carries its children: "T2" is also T2v2
     family = [k2 for k in keys for k2 in by if k2 == k or re.fullmatch(rf"{re.escape(k)}v\d+", k2)]
-    status = {k: str(by[k].get("status") or "") for k in dict.fromkeys(family)}
+    status = {k: _settled_as(by[k]) for k in dict.fromkeys(family)}
     if any(s not in ("done", "skipped") for s in status.values()):
         return None                          # one failed, or one is not settled yet
     if not any(s == "done" for s in status.values()):

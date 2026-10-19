@@ -38,3 +38,11 @@ def test_a_comparison_with_radarr_or_sonarr_is_left_to_its_own_draft():
 
 def test_a_jellyfin_only_check_is_still_the_census():
     assert _claimed(T1) and _claimed(T3)
+
+
+def test_a_storage_check_whose_text_mentions_jellyfin_is_not_a_census():
+    """§17.1660 — live (job 5db1b088 T24)."""
+    t24 = {"node_key": "T24", "title": "Verify shared storage paths",
+           "prompt_template": ("Verify the download folder, the *arr root folders and the Jellyfin library folders are "
+                               "the same shared storage seen at matching paths.")}
+    assert not _claimed(t24)

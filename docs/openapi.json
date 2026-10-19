@@ -1301,6 +1301,21 @@
               }
             ],
             "title": "Note"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "enum": [
+                  "passed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verdict"
           }
         },
         "required": [

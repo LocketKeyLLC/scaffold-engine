@@ -264,7 +264,7 @@ def decision_record(choice: str, note: str, frame: dict | None) -> str:
 
 async def resolve_decision(
     db: AsyncSession, job_id: str, node_key: str, *, choice: str | None, note: str = "", delegate: bool = False,
-    inputs: dict | None = None,
+    inputs: dict | None = None, verdict: str | None = None,
 ) -> dict:
     """Record the operator's answer (or their delegation) and put the job back
     to ``executing`` so the run can be restarted. Returns ``{"outcome": …}``:
@@ -321,7 +321,8 @@ async def resolve_decision(
         from app.modules import supervised_runs
         try:
             res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")),
-                                                    waiting, inputs=inputs, note=note or "")   # §17.1614c
+                                                    waiting, inputs=inputs, note=note or "",   # §17.1614c
+                                                    verdict=verdict)                           # §17.1661
         except BaseException as exc:
             # §17.1496 — the run claimed the node and then died (runner error, the client
             # dropping this request, a restart): record it on the node before the error
