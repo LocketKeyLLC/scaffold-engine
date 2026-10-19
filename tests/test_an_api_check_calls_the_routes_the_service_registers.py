@@ -215,18 +215,18 @@ def test_the_sections_frame_runs_with_the_login_and_nothing_to_ask():
 def test_a_section_missing_a_field_or_failing_fails_the_step(tmp_path):
     bindir = tmp_path / "bin"; bindir.mkdir()
     (bindir / "curl").write_text(
-        '#!/bin/bash\nfor a; do u="$a"; done\n'
-        'o=""; prev=""; for a; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done\ncase "$u" in\n'
-        '*/api/palworld/status) printf \'{"status":"running","host":"192.168.1.44"}\' > "$o"; printf 200;;\n'
-        '*/api/media-library) printf \'{"movies":[]}\' > "$o"; printf 200;;\n'
-        '*) printf \'{"error":"Authentication required"}\' > "$o"; printf 401;;\nesac\n')
+        # §17.1674 — the check reads the body from stdout with `-w " HTTPCODE%{http_code}"` (no temp file)
+        '#!/bin/bash\nfor a; do u="$a"; done\ncase "$u" in\n'
+        '*/api/palworld/status) printf \'{"status":"running","host":"192.168.1.44"} HTTPCODE200\';;\n'
+        '*/api/media-library) printf \'{"movies":[]} HTTPCODE200\';;\n'
+        '*) printf \'{"error":"Authentication required"} HTTPCODE401\';;\nesac\n')
     (bindir / "curl").chmod(0o755)
     (bindir / "pct").write_text('#!/bin/bash\nshift 3\nexec "$@"\n'); (bindir / "pct").chmod(0o755)
     reads = {**arc.section_reads(PAGE), "/api/overview": ["services"]}
     cmd = arc.sections_command(PANEL, reads, ("PANEL_PASSWORD", "panel")).replace('<<< "<PANEL_PASSWORD>"', "<<< 'pw'")
     r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={"PATH": f"{bindir}:/usr/bin:/bin"})
     out = r.stdout.splitlines()
-    assert "PASS /api/palworld/status (2 fields)" in out, r.stdout + r.stderr
+    assert "PASS /api/palworld/status (2 fields, nothing reported failing)" in out, r.stdout + r.stderr
     assert "FAIL /api/media-library HTTP 200, the page reads fields its answer lacks: series" in out, out
     assert "FAIL /api/overview HTTP 401" in out and out[-1] == "3 sections checked" and r.returncode == 1, out
 
