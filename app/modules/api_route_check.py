@@ -90,20 +90,33 @@ def section_reads(workspace: Optional[dict]) -> dict:
 
 
 def sections_command(service, reads: dict, login: Optional[tuple] = None) -> str:
-    """One command in the service's guest: each section's route answers 2xx AND carries every field the page reads."""
+    """One command in the service's guest: each section's route answers 2xx, carries every field the page reads, AND
+    reports nothing in it as failing.
+
+    §17.1674 — live (job 5db1b088 T27, 2026-10-19): every section PASSED while the page showed Palworld as "error" --
+    the check only asked whether `dependencies` was THERE, and the panel's /api/overview and /api/health carry
+    `"palworld": {"status": "error", "error": "…"}` inside a 200. An entry whose `status` is error/fail/failed/down/
+    unhealthy now fails its section, printed with its name and error text. The answer is held in a shell variable, not
+    a /tmp file, so the check is a read the read-only gate accepts."""
     port = str(next(iter(getattr(service, "ports", ()) or ()), ""))
     auth = f'-u "{login[1]}:$cpw" ' if login else ""
     parts = [("cpw=$(cat); " if login else "") + "fail=0; "]
+    # double quotes only inside the script: a `'\''` splice made the variable-scope gate lose `cpw=$(cat)` (live, §17.1674)
+    # one level of nesting is read through: a not-active Palworld is {"status":"error",…,"response":{"status":"failed"}}
+    bad = (r'\\\"[A-Za-z0-9_.-]+\\\" *: *[{]([^{}]|[{][^{}]*[}])*\\\"status\\\" *: *'
+           r'\\\"(error|fail|failed|down|unhealthy)\\\"([^{}]|[{][^{}]*[}])*[}]')
     for route, fields in sorted(reads.items()):
         fl = " ".join(f for f in fields if re.fullmatch(r"[A-Za-z_$][\w$]*", f))
         parts.append(
-            f"code=$(curl -sS {auth}--max-time {ROUTE_TIMEOUT_S} -o /tmp/.scaffold-section -w \"%{{http_code}}\" "
-            f"http://127.0.0.1:{port}{route} 2>/dev/null); miss=\"\"; "
-            f"for f in {fl}; do grep -q \"\\\"$f\\\"\" /tmp/.scaffold-section || miss=\"$miss $f\"; done; "
-            f"case \"$code\" in 2??) if [ -z \"$miss\" ]; then echo \"PASS {route} ({len(fl.split())} fields)\"; "
-            f"else echo \"FAIL {route} HTTP $code, the page reads fields its answer lacks:$miss\"; fail=1; fi;; "
+            f"body=$(curl -sS {auth}--max-time {ROUTE_TIMEOUT_S} -w \" HTTPCODE%{{http_code}}\" "
+            f"http://127.0.0.1:{port}{route} 2>/dev/null); code=${{body##* HTTPCODE}}; body=${{body% HTTPCODE*}}; "
+            f"miss=\"\"; for f in {fl}; do printf \"%s\" \"$body\" | grep -q \"\\\"$f\\\"\" || miss=\"$miss $f\"; done; "
+            f"down=$(printf \"%s\" \"$body\" | grep -oE \"{bad}\" | cut -c1-240); "
+            f"case \"$code\" in 2??) if [ -n \"$miss\" ]; then echo \"FAIL {route} HTTP $code, the page reads fields its "
+            f"answer lacks:$miss\"; fail=1; elif [ -n \"$down\" ]; then echo \"FAIL {route} HTTP $code, the page shows "
+            f"these as failing:\"; printf \"%s\\n\" \"$down\" | sed \"s/^/    /\"; fail=1; "
+            f"else echo \"PASS {route} ({len(fl.split())} fields, nothing reported failing)\"; fi;; "
             f"*) echo \"FAIL {route} HTTP $code\"; fail=1;; esac; ")
-    parts.append("rm -f /tmp/.scaffold-section; ")
     parts.append(f'echo "{len(reads)} sections checked"; exit $fail')
     cmd = f"pct exec {service.guest} -- sh -c {_sq(''.join(parts))}"
     return cmd + (f' <<< "<{login[0]}>"' if login else "")

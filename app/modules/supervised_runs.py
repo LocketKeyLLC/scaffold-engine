@@ -2810,6 +2810,12 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     from app.modules.runbook_templates import template_of
     if template_of(runbook or ""):
         return []
+    # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
+    # the engine's frame like a template's. Live (job 5db1b088 PW1, 2026-10-19): "Verify control panel Palworld boxes",
+    # declared read only, was refused because the whole `pct exec 111 -- sh -c '…'` check is one segment no read table holds.
+    from app.modules.api_route_check import run_is_the_check
+    if run_is_the_check(runbook or ""):
+        return []
     for c in commands:
         segs = writing_segments(str(c))
         if segs:
@@ -6144,6 +6150,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
     from app.modules.arr_api_key import present_the_arr_key as _present_arr_key
     cmds, verify, files, _ak_notes = _present_arr_key(cmds, verify, files, services)
+    from app.modules import lan_checks as _lan                     # §17.1679 — "from the LAN" runs on the host
+    cmds, verify, _lan_notes = _lan.from_the_host(node, cmds, verify)
+    _ak_notes = list(_ak_notes) + _lan_notes
     from app.modules import json_grep as _jg                     # §17.1658 — JSON greps tolerate the spacing
     cmds, verify, files, _jg_notes = _jg.repair(cmds, verify, files)
     _ak_notes = list(_ak_notes) + _jg_notes
@@ -9318,9 +9327,14 @@ def rewrite_set_container_nameserver(node: Optional[dict], commands: list[str], 
     in the command (the host-tool gate, §17.1517); the verify resolves a public name inside the guest."""
     title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    # §17.1675 — the TITLE asks for the repair (the engine's own is "Give container N a working nameserver"); the body
+    # text no longer does. Live (job 5db1b088 SIP2 "VM 106: make 192.168.1.44 its static address", 2026-10-19): its text
+    # said "nameserver 192.168.1.1" and "from CT 111 `ssh …`", and this rewrite replaced the whole step with
+    # `pct set 111 --nameserver …; pct reboot 111` -- the control panel's container, rebooted, the static address dropped.
     if not (_NAMESERVER_RE.search(title) and _NS_VERB_RE.search(title)):
-        if not (_NAMESERVER_RE.search(text) and _NS_VERB_RE.search(text)):
-            return list(commands or []), list(verify or []), []
+        return list(commands or []), list(verify or []), []
+    if re.search(r"\bVM\s*#?\s*\d{2,4}\b", title):
+        return list(commands or []), list(verify or []), []            # a VM's resolver is not `pct set`
     m = _NS_CT_RE.search(title) or _NS_CT_RE.search(text)
     gid = m.group(1) if m else None
     if not gid and inventory:
