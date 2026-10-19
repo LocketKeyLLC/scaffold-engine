@@ -6128,6 +6128,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
+    # §17.1657 — an *arr API call inside its own guest with no key gets one, FIRST, so every later step (the
+    # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
+    from app.modules.arr_api_key import present_the_arr_key as _present_arr_key
+    cmds, verify, files, _ak_notes = _present_arr_key(cmds, verify, files, services)
+    from app.modules import json_grep as _jg                     # §17.1658 — JSON greps tolerate the spacing
+    cmds, verify, files, _jg_notes = _jg.repair(cmds, verify, files)
+    _ak_notes = list(_ak_notes) + _jg_notes
     # §17.1288d — a check that needs a value the run never uses is dropped, not
     # refused: live, the third draft of ADD82 had fixed everything it was told
     # and still carried `ssh … <PALWORLD_IP>` in its Verify, so the frame parked
@@ -6269,11 +6276,21 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         cmds, verify = _ri_cmds, _ri_verify
         _comp_notes = list(_comp_notes) + _ri_notes
     # §17.1574c — "probe each endpoint authenticated": the engine presents the login it holds to every GET route.
-    _pe_cmds, _pe_verify, _pe_notes = rewrite_probe_service_endpoints(
+    # §17.1662 — the engine's own API/section check (§17.1641, composed from the service's code before drafting) is
+    # final; the older probe (which only reads routes at run time and passes any answer) must not overwrite it
+    from app.modules.api_route_check import run_is_the_check as _engine_api_check
+    _pe_cmds, _pe_verify, _pe_notes = (rewrite_probe_service_endpoints(
         node, cmds, verify, services, inventory, logins=(policy or {}).get("held_logins") or [])
+        if not _engine_api_check(runbook) else (cmds, verify, []))
     if _pe_notes:
         cmds, verify = _pe_cmds, _pe_verify
         _comp_notes = list(_comp_notes) + _pe_notes
+    # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
+    from app.modules import arr_update as _au
+    _up = _au.block(node, services)
+    if _up:
+        cmds, verify = _up[0], _up[1]
+        _comp_notes = list(_comp_notes) + [{"why": _up[2]}]
     # §17.1645 — "rotate <arr app>'s API key and update every holder": generated in its guest, moved only through
     # root-only files, the app answering with it before any holder changes, each holder updated where it is a VALUE.
     from app.modules import arr_key_rotation as _akr
@@ -6321,6 +6338,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         | {str(x) for x in ((policy or {}).get("held") or [])}
     cmds, verify, _var_notes = _mv.read_a_readable_key_written_as_a_var(cmds, verify, _stored_names)
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
+    _mv_notes = list(_mv_notes) + _ak_notes
     _mv_notes = list(_fold_notes) + list(_var_notes) + list(_mv_notes)
     # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
     # safe in a written file too, so files are filled here.
@@ -6453,6 +6471,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
     from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
     refused = refused + _prints_a_credential(cmds, verify)              # §17.1652 — a key is used, never printed
+    from app.modules.check_writes import a_check_that_writes as _a_check_that_writes
+    refused = refused + _a_check_that_writes(cmds, node)                 # §17.1659 — a check does not change what it checks
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
     # §17.1288 — a check must use what the run used; a secret rides no ssh
     # command line; the neighbour table is read warm. Three readings of one frame.
@@ -6842,7 +6862,7 @@ async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
 
 
 async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
-                      inputs: dict | None = None, note: str = "") -> dict:
+                      inputs: dict | None = None, note: str = "", verdict: str | None = None) -> dict:
     """Carry out the operator's choice on a ``kind="run"`` pause. Returns
     ``{"outcome": …}`` for ``decision_pause.resolve_decision`` to finish (it
     records the decision on the job and moves it back to executing)."""
@@ -6851,11 +6871,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         return {"outcome": "bad_choice", "choices": list(CHOICES)}
     runbook = str(waiting.get("runbook") or "")
     if choice == "skip":
+        # §17.1661 — a stated verdict is recorded where §17.1644 reads it (last_verification_reason)
+        _verdict = verdict if verdict in ("passed", "failed") else None
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'skipped', output_text = COALESCE(output_text, :out), completed_at = NOW(), "
-                 "updated_at = NOW() WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
-            {"jid": job_id, "nk": node_key, "out": "Skipped by the operator at the supervised-run pause."
-                                                   + (f"\n\nOperator's note: {note.strip()}" if (note or "").strip() else "")})
+                 "updated_at = NOW(), last_verification_reason = COALESCE(:why, last_verification_reason) "
+                 "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
+            {"jid": job_id, "nk": node_key, "why": (f"skipped by the operator -- verdict {_verdict}" if _verdict else None),
+             "out": "Skipped by the operator at the supervised-run pause."
+                    + (f"\n\nOperator's verdict: {_verdict}" if _verdict else "")
+                    + (f"\n\nOperator's note: {note.strip()}" if (note or "").strip() else "")})
         return {"outcome": "skipped" if upd.rowcount else "node_gone", "node_status": "skipped"}
     if choice == "myself":
         # §17.1614c — the operator's note IS the record of what they did: live (job 0fb4ea7f T9), the note "Ollama runs in
@@ -9722,6 +9747,10 @@ def rewrite_jellyfin_metadata_report(node: Optional[dict], commands: list[str], 
     # the splitter's "(split from T2: Verify Jellyfin library paths)" and would have recorded it done without reading Radarr.
     if _JF_OTHER_APP_RE.search(title):
         return list(commands or []), list(verify or []), []
+    # §17.1660 — and what the check is ABOUT is in its title: live (job 5db1b088 T24 "Verify shared storage paths"),
+    # the census claimed a storage check because its text mentioned Jellyfin's library folders.
+    if not _JF_CENSUS_TEXT_RE.search(title):
+        return list(commands or []), list(verify or []), []
     gid = _arr_guest("jellyfin", services, inventory)
     if not gid:
         return list(commands or []), list(verify or []), []
@@ -10515,6 +10544,23 @@ def keys_the_block_writes(commands: list[str], files: Optional[list[dict]] = Non
     return out
 
 
+#: §17.1655 — a step whose job is to TAKE a backup / snapshot / copy
+_TAKES_A_BACKUP_RE = re.compile(r"^\s*(?:[A-Za-z]+\s+\d{3,5}\s*:\s*)?(?:back\s*up|backup|snapshot|archive|save\s+a\s+copy|copy)\b", re.I)
+
+
+def a_backup_is_taken_now(node: Optional[dict]) -> str:
+    """§17.1655 — ``""``, or why a backup step is never "already met".
+
+    Live (job d89078ed T7 "Backup Prowlarr config database", 2026-10-18): the pre-read listed Prowlarr's own
+    scheduled backups -- the newest from Oct 12 -- and the judge confirmed the goal, so T7 was recorded done and no
+    backup was taken before T8 replaced Prowlarr's binaries. A backup exists to hold the state of NOW; one already
+    on disk is a copy of the past, and no pre-read can show the new one."""
+    title = str((node or {}).get("title") or "")
+    if _TAKES_A_BACKUP_RE.match(title):
+        return "a backup step takes a copy of the state now; an existing backup on disk is an older one"
+    return ""
+
+
 def checks_can_witness_the_change(commands: list[str], verify: list[str],
                                   files: Optional[list[dict]] = None) -> str:
     """``""`` when some check reads back a key the block writes, else why not.
@@ -10739,6 +10785,8 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     _blind = checks_can_witness_the_change(
         [str(c) for c in (frame or {}).get("commands") or []], verify_cmds,
         (frame or {}).get("files") or [])
+    # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
+    _blind = _blind or a_backup_is_taken_now(node)
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)

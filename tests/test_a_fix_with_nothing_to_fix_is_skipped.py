@@ -53,3 +53,29 @@ def test_wired_before_the_draft():
     src = inspect.getsource(execution_agent._pause_for_decision)
     i, j = src.index("unmet_condition(run_node, _plan_rows)"), src.index("from app.modules import develop\n")
     assert i < j and "SET status = 'skipped'" in src[i:j] and "return await _pause_for_decision(job_id, _depth + 1)" in src[i:j]
+
+
+# ── §17.1661: a skipped check carries the operator's verdict ─────────────────
+
+T25 = {"node_key": "T25", "title": "Fix shared storage paths",
+       "prompt_template": "Only if T24 found failures: fix mount points or path mappings."}
+
+
+def test_a_skip_with_a_passed_verdict_settles_the_fix():
+    rows = [{"node_key": "T24", "status": "skipped", "last_verification_reason": "skipped by the operator -- verdict passed"}]
+    assert cs.unmet_condition(T25, rows)
+
+
+def test_a_failed_verdict_or_no_verdict_leaves_it_to_its_draft():
+    failed = [{"node_key": "T24", "status": "skipped", "last_verification_reason": "skipped by the operator -- verdict failed"}]
+    bare = [{"node_key": "T24", "status": "skipped", "last_verification_reason": None}]
+    assert cs.unmet_condition(T25, failed) is None and cs.unmet_condition(T25, bare) is None
+
+
+def test_the_verdict_reaches_the_record():
+    import inspect
+    from app.modules import supervised_runs as sr
+    from app.routers import jobs
+    assert "verdict=body.verdict" in inspect.getsource(jobs)
+    src = inspect.getsource(sr.resolve_run)
+    assert "last_verification_reason = COALESCE(:why, last_verification_reason)" in src and "verdict {_verdict}" in src

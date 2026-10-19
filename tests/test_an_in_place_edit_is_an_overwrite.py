@@ -44,7 +44,7 @@ def test_an_in_place_edit_gets_a_copy_first():
     lines = out.split("\n")
     i = next(j for j, ln in enumerate(lines) if ln.strip().startswith("sed -i"))
     assert 'cp -a "$CONF"' in lines[i - 1], lines[i - 1]
-    assert '[ -e "$CONF" ]' in lines[i - 1]
+    assert 'if [ -f "$CONF" ]' in lines[i - 1]
 
 
 def test_an_append_to_an_existing_file_does_too():
@@ -57,7 +57,7 @@ def test_an_append_to_an_existing_file_does_too():
 def test_a_quoted_variable_is_a_path():
     """`"$CONF"` is where the file is; the quotes are not part of it."""
     out = rt.keep_a_copy_before_overwrites('sed -i "s/a/b/" "$CONF"\n')
-    assert '[ -e "$CONF" ] && cp -a "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)"' in out
+    assert 'if [ -f "$CONF" ]; then cp -a "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)"; fi' in out
 
 
 def test_a_literal_path_works_for_both_shapes():

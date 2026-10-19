@@ -448,10 +448,10 @@ def test_every_overwrite_in_the_models_commands_is_preceded_by_a_backup():
     remote = "apt-get install -y nodejs\ntee /opt/cp/package.json <<'EOF'\n{ \"a\": 1 }\nEOF\ntee /opt/cp/server.js <<'EOF'\nconst x = 1;\nEOF\ntee -a /etc/caddy/Caddyfile <<'EOF'\nx\nEOF\ncat > /etc/x.conf <<'EOF'\ny\nEOF\ncp /tmp/a /etc/b\nsystemctl restart cp"
     out = rt.keep_a_copy_before_overwrites(remote).split("\n")
     backups = [l for l in out if '.bak.$(date' in l]
-    assert backups == ['[ -e "/opt/cp/package.json" ] && cp -a "/opt/cp/package.json" "/opt/cp/package.json.bak.$(date +%Y%m%d%H%M%S)"',
-                       '[ -e "/opt/cp/server.js" ] && cp -a "/opt/cp/server.js" "/opt/cp/server.js.bak.$(date +%Y%m%d%H%M%S)"',
-                       '[ -e "/etc/x.conf" ] && cp -a "/etc/x.conf" "/etc/x.conf.bak.$(date +%Y%m%d%H%M%S)"',
-                       '[ -e "/etc/b" ] && cp -a "/etc/b" "/etc/b.bak.$(date +%Y%m%d%H%M%S)"'], backups
+    assert backups == ['if [ -f "/opt/cp/package.json" ]; then cp -a "/opt/cp/package.json" "/opt/cp/package.json.bak.$(date +%Y%m%d%H%M%S)"; fi',
+                       'if [ -f "/opt/cp/server.js" ]; then cp -a "/opt/cp/server.js" "/opt/cp/server.js.bak.$(date +%Y%m%d%H%M%S)"; fi',
+                       'if [ -f "/etc/x.conf" ]; then cp -a "/etc/x.conf" "/etc/x.conf.bak.$(date +%Y%m%d%H%M%S)"; fi',
+                       'if [ -f "/etc/b" ]; then cp -a "/etc/b" "/etc/b.bak.$(date +%Y%m%d%H%M%S)"; fi'], backups
     assert out.index(backups[1]) + 1 == out.index("tee /opt/cp/server.js <<'EOF'"), "the copy is taken immediately before the write"
     assert "const x = 1;" in out and not any(".bak." in l for l in out if l.startswith("const")), "heredoc bodies are never touched"
     assert rt.keep_a_copy_before_overwrites("apt-get update\nsystemctl restart x") == "apt-get update\nsystemctl restart x"
@@ -468,7 +468,7 @@ async def test_the_draw_keeps_copies_and_a_cut_heredoc_counts_as_cut(monkeypatch
         return type("R", (), {"text": "```bash\ntee /opt/control-panel-backend/server.js <<'EOF'\nconst a = 1;\nEOF\nsystemctl restart control-panel\n```"})()
     monkeypatch.setattr(lr, "generate_until_nonempty", fake)
     vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, node, "brief")
-    assert vals["REMOTE_COMMANDS"].split("\n")[0] == '[ -e "/opt/control-panel-backend/server.js" ] && cp -a "/opt/control-panel-backend/server.js" "/opt/control-panel-backend/server.js.bak.$(date +%Y%m%d%H%M%S)"'
+    assert vals["REMOTE_COMMANDS"].split("\n")[0] == 'if [ -f "/opt/control-panel-backend/server.js" ]; then cp -a "/opt/control-panel-backend/server.js" "/opt/control-panel-backend/server.js.bak.$(date +%Y%m%d%H%M%S)"; fi'
     assert vals["VERIFY_INSIDE"] == "curl -s http://localhost:3001/api/capabilities", "the one-line check is never prefixed"
     rb = rt.render(rt.RUN_IN_CONTAINER, rt.values_for(rt.RUN_IN_CONTAINER, node, mt.GuestTruth(gid="111", kind="ct", status="running"), ENV, vals))
     frame = _frame(rb, node)
@@ -622,7 +622,7 @@ async def test_the_draw_applies_backup_bootstrap_and_repair_in_that_order(monkey
     lines = vals["REMOTE_COMMANDS"].split("\n")
     assert lines[1].startswith("dpkg --configure -a"), "repair first"
     assert any(l.startswith("sudo -u palworld /opt/steamcmd/steamcmd.sh +quit") for l in lines), "bootstrap as the install's user"
-    assert any(l.startswith('[ -e "/etc/systemd/system/palworld.service" ] && cp -a') for l in lines), "backup before the overwrite"
+    assert any(l.startswith('if [ -f "/etc/systemd/system/palworld.service" ]; then cp -a') for l in lines), "backup before the overwrite"
     rb = rt.render(rt.RUN_IN_VM_VIA_AGENT, rt.values_for(rt.RUN_IN_VM_VIA_AGENT, node, _truth("vm", agent=True), ENV, vals))
     frame = _frame(rb, node)
     assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]

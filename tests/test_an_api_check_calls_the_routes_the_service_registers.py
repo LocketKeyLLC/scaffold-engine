@@ -237,3 +237,14 @@ def test_the_pause_reads_the_served_page_for_a_sections_check():
     src = inspect.getsource(execution_agent._pause_for_decision)
     i = src.index("if _arc.asks_about_sections(run_node):")
     assert "develop.served_entries(_ws)" in src[i:i + 900] and "_arc.section_reads(_ws)" in src[i:i + 900]
+
+
+def test_the_older_probe_never_overwrites_the_engines_check():
+    """§17.1662 — a step worded for both (§17.1574c fires on "authenticated") keeps the engine's composed check."""
+    node = {**T26, "prompt_template": T26["prompt_template"] + " Probe each endpoint authenticated as the panel user."}
+    rb = arc.runbook(PANEL, ["/api/a", "/api/b"], ("PANEL_PASSWORD", "panel"))
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
+    frame = sr.frame_run(node, rb, spec, policy, services=[PANEL, RADARR],
+                         inventory={"vms": {}, "cts": {"111": "running"}, "names": {"111": "control-panel"}})
+    assert "for r in /api/a /api/b" in frame["commands"][0], frame["commands"]

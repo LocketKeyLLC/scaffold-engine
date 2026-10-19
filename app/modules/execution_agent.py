@@ -2876,8 +2876,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     # stamp in a row's description, and these rows had none, so the guard
                     # could never fire. A consumer's field is this query's business.
                     _plan = (await db.execute(
-                        text("SELECT node_key, title, description, status, completed_at, execution_order "
-                             "FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"),
+                        text("SELECT node_key, title, description, status, completed_at, execution_order, "
+                             "last_verification_reason FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"),
                         {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)

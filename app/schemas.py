@@ -440,6 +440,9 @@ class DecideInput(BaseModel):
     # §17.1187 — the values a run pause asked for (<NAME> placeholders in the
     # runbook's commands), keyed by name. Never stored on the job.
     inputs: dict[str, str] | None = None
+    # §17.1661 — when the operator SKIPS a check it settled another way (a read of its own), what that read showed: a
+    # fix step conditional on the check (§17.1644) then knows whether there is anything to fix
+    verdict: Literal["passed", "failed"] | None = None
 
     @model_validator(mode="after")
     def _choice_or_delegate(self):
