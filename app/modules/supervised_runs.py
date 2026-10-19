@@ -2812,7 +2812,11 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     if not commands or not declares_read_only(node):
         return []
     from app.modules.runbook_templates import template_of
-    if template_of(runbook or ""):
+    # §17.1683 — the template's frame is trusted only while its commands ARE the template's (`bash /tmp/in_ct_N.sh
+    # start|wait|last`): live, a capability replaced T2's template commands with SeriesSearch POSTs, and this gate --
+    # seeing the template's runbook -- stood aside for them
+    if template_of(runbook or "") and all(re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:start|wait|last)\b",
+                                                    str(c)) for c in commands):
         return []
     # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
     # the engine's frame like a template's. Live (job 5db1b088 PW1, 2026-10-19): "Verify control panel Palworld boxes",
@@ -8620,6 +8624,11 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     title = str((node or {}).get("title") or "")
     if not (_QUEUE_RE.search(title) and _MISSING_RE.search(text) and _SEASONS_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1683 — a step that says it changes nothing is never a search. Live (job c2518102 T2 "Fetch Sonarr wanted
+    # missing", text "Read only, change nothing"): "Fetch" matched the download verbs and the read became SeriesSearch
+    # POSTs for ten shows -- in an audit whose whole point was to present a plan before changing anything.
+    if declares_read_only(node):
         return list(commands or []), list(verify or []), []
     if _QUEUE_REMOVAL_RE.search(title):
         return list(commands or []), list(verify or []), []     # §17.1650 — taking items OUT of the queue is not a search

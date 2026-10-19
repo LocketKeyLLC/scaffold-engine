@@ -92,3 +92,26 @@ def test_a_call_to_an_api_path_is_not_a_route_inventory():
     for still in ("Inventory the control panel's endpoints", "Read the backend's routes and handlers",
                   "List every API the panel serves", "enumerate the routes of the panel"):
         assert sr._ROUTE_INVENTORY_RE.search(still), still
+
+
+def test_a_read_only_step_is_never_a_search():
+    """§17.1683 — live, "Fetch Sonarr wanted missing" (Read only, change nothing) became SeriesSearch POSTs"""
+    node = {"node_key": "T2", "title": "Fetch Sonarr wanted missing",
+            "prompt_template": ("Inside CT 104, read Sonarr's /api/v3/wanted/missing. Print one line per series and season: "
+                                "missing episodes. Read only, change nothing.")}
+    inv = {"cts": {"104": "running"}, "vms": {}, "names": {"104": "sonarr"}}
+    from app.modules.service_truth import ServiceTruth
+    son = ServiceTruth(guest="104", unit="sonarr.service", name="sonarr", argv="/opt/Sonarr/Sonarr", ports=("8989",))
+    c, v, notes = sr.rewrite_queue_missing(node, ["x"], [], [son], inv)
+    assert notes == [] and c == ["x"]
+    search = {**node, "title": "Search the missing episodes for every season",
+              "prompt_template": "Queue a search for the missing episodes of each season."}
+    assert sr.rewrite_queue_missing(search, ["x"], [], [son], inv)[2]      # a real search step still is one
+
+
+def test_the_template_trust_ends_when_its_commands_are_replaced():
+    node = {"title": "Fetch Sonarr wanted missing", "prompt_template": "Read only, change nothing."}
+    rb = "<!-- runbook-template: run_in_container -->\n## Run commands inside container 104\n"
+    assert sr.writes_in_a_read_only_step(["bash /tmp/in_ct_104.sh start", "bash /tmp/in_ct_104.sh last"], node, rb) == []
+    post = ("pct exec 104 -- sh -c 'python3 -c \"api(\\\"/api/v3/command\\\",\\\"POST\\\",{})\"'")
+    assert sr.writes_in_a_read_only_step([post], node, rb)
