@@ -885,7 +885,9 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
 _SECRET_FILE_LINE_RE = re.compile(r"^\s*`?(/[\w./@+-]+)\s+\$?\{?([A-Z][A-Z0-9_]{2,63})\}?`?\s*$")
 
 
-_SECRET_REF_NEAR_PATH_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,63})\}?[^\n]{0,160}?\bto\s+`?(/[\w./@+-]+)")
+#: §17.1667 — "… $NAME into CT 109 at /root/x.conf" too (live, job 3cc24343 T6: only "… to /path" was read)
+_SECRET_REF_NEAR_PATH_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{2,63})\}?[^\n]{0,160}?\b(?:to|into\s+(?:the\s+)?(?:CT|container|LXC)\s+"
+                                      r"\d{3,5}(?:'s)?\s*(?:at|as|:)?)\s+`?(/[\w./@+-]+)")
 #: §17.1496 — the shell's own variables are never a stored secret
 _SHELL_ENV_NAMES = frozenset({"HOME", "PATH", "USER", "PWD", "SHELL", "TERM", "LANG", "UID", "GID", "HOSTNAME",
                               "LOGNAME", "EDITOR", "TMPDIR", "OLDPWD", "IFS"})

@@ -6011,10 +6011,14 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     the names some store will supply, ``missing`` the ones nothing holds yet:
     those stay in ``inputs``, marked, so the pause can ask for them once.
     """
+    known = {str(n) for n in (policy.get("secrets") or [])} | {str(n) for n in (policy.get("held") or [])}
+    # §17.1667 — a name a store already HOLDS is a secret, whatever it is called: the name test (§17.1275) reads
+    # `AIRVPN_BITMAGNET_CONF` as a plain value, and the frame asked the operator to type the WireGuard config in.
+    inputs = [{**i, "secret": True} if str(i.get("name") or "") in known and not i.get("secret") else i
+              for i in inputs]
     secret_names = [str(i.get("name") or "") for i in inputs if i.get("secret")]
     if not secret_names:
         return commands, verify, inputs, [], []
-    known = {str(n) for n in (policy.get("secrets") or [])} | {str(n) for n in (policy.get("held") or [])}
     resolved = [n for n in secret_names if n in known]
     missing = [n for n in secret_names if n not in known]
 
@@ -6288,7 +6292,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         _comp_notes = list(_comp_notes) + _pe_notes
     # §17.1667 — "copy <host file> into container N": the engine's own pct push from the host, never an in-guest draft.
     from app.modules import host_file_push as _hfp
-    _hp = _hfp.block(node)
+    _hp = _hfp.block(node) or _hfp.secret_block(
+        node, list((policy or {}).get("held") or []) + list((policy or {}).get("secrets") or []))
     if _hp:
         cmds, verify = _hp[0], _hp[1]
         _comp_notes = list(_comp_notes) + [{"why": _hp[2]}]
