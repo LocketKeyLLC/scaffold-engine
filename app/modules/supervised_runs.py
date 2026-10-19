@@ -6140,9 +6140,6 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     from app.modules import json_grep as _jg                     # §17.1658 — JSON greps tolerate the spacing
     cmds, verify, files, _jg_notes = _jg.repair(cmds, verify, files)
     _ak_notes = list(_ak_notes) + _jg_notes
-    from app.modules import wg_quick_resolvconf as _wgr          # §17.1668 — wg-quick's DNS line needs resolvconf
-    cmds, verify, files, _wgr_notes = _wgr.repair(cmds, verify, files)
-    _ak_notes = list(_ak_notes) + _wgr_notes
     # §17.1288d — a check that needs a value the run never uses is dropped, not
     # refused: live, the third draft of ADD82 had fixed everything it was told
     # and still carried `ssh … <PALWORLD_IP>` in its Verify, so the frame parked
