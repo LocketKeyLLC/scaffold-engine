@@ -6300,6 +6300,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _hp:
         cmds, verify = _hp[0], _hp[1]
         _comp_notes = list(_comp_notes) + [{"why": _hp[2]}]
+    # §17.1669 — "set up WireGuard wgN from <config>" in a container: the engine's own block, judged by a handshake.
+    from app.modules import wireguard_up as _wgu
+    _wu = _wgu.block(node, cmds)
+    if _wu:
+        cmds, verify = _wu[0], _wu[1]
+        _comp_notes = list(_comp_notes) + [{"why": _wu[2]}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
