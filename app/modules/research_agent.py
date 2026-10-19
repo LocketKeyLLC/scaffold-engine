@@ -1372,8 +1372,17 @@ def _attach_sources_block(
 # the sentence it's attached to?). Default path (flag off) is byte-unchanged.
 # Bounded so the numbered body fits the summary prompt budget and the model can
 # realistically cite each source.
-_CITE_SUMMARY_MAX_SOURCES = 10
-_CITE_SUMMARY_SRC_CHARS = 500
+# §17.1663 — live (research ce31a443, 2026-10-19, "where to sign up for indexers…"): 756 facts were extracted, among them
+# "NZB Finder … open registration, no invite … $15 per year", "NZB Geek has open registration", "NinjaCentral opens
+# registration a few times per year" -- and the summary said "the collected sources do not document current registration
+# status". It was handed 10 sources ranked by SOURCE TYPE (official docs 1.00 beat the review sites' 0.70 every time),
+# ONE fact per URL, 500 chars each, under a 6,000-char budget. Now: every distinct fact of a URL, ranked by confidence
+# weighted by how many facts the source carries, more of them, under the cite path's own budget.
+_CITE_SUMMARY_MAX_SOURCES = 16
+_CITE_SUMMARY_SRC_CHARS = 1000
+_CITE_SUMMARY_BUDGET_CHARS = 16_500
+#: a source's weight counts its facts up to this many (one page restating a point 40 times is not 40 sources)
+_CITE_SUMMARY_FACTS_CAP = 8
 _CITE_SUMMARY_SYSTEM = (
     "You are a research summarizer. Write a concise, well-structured summary of "
     "the NUMBERED sources provided. After each sentence, cite the source "
@@ -1397,16 +1406,25 @@ def _build_numbered_summary_sources(state: "ResearchState") -> list[dict]:
             continue
         conf = e.get("confidence_score")
         conf = float(conf) if isinstance(conf, (int, float)) else 0.0
-        existing = by_url.get(url)
-        if existing is None or conf > existing["confidence_score"]:
-            by_url[url] = {
-                "url": url,
-                "source_type": e.get("source_type") or "unknown",
-                "confidence_score": round(conf, 2),
-                "text": content[:_CITE_SUMMARY_SRC_CHARS],
-            }
-    ranked = sorted(by_url.values(), key=lambda s: s["confidence_score"], reverse=True)
-    return ranked[:_CITE_SUMMARY_MAX_SOURCES]
+        cur = by_url.setdefault(url, {"url": url, "source_type": e.get("source_type") or "unknown",
+                                      "confidence_score": 0.0, "facts": []})
+        if conf > cur["confidence_score"]:
+            cur["confidence_score"] = round(conf, 2)
+            cur["source_type"] = e.get("source_type") or cur["source_type"]
+        if content not in cur["facts"]:
+            cur["facts"].append(content)                 # §17.1663 — every distinct fact the page gave, not one
+    for src in by_url.values():
+        text, kept = "", 0
+        for fact in src["facts"]:
+            piece = (" " if text else "") + fact
+            if len(text) + len(piece) > _CITE_SUMMARY_SRC_CHARS:
+                break
+            text += piece
+            kept += 1
+        src["text"] = text or src["facts"][0][:_CITE_SUMMARY_SRC_CHARS]
+        src["weight"] = src["confidence_score"] * min(len(src["facts"]), _CITE_SUMMARY_FACTS_CAP)
+    ranked = sorted(by_url.values(), key=lambda s: (s["weight"], s["confidence_score"]), reverse=True)
+    return [{k: v for k, v in s.items() if k not in ("facts", "weight")} for s in ranked[:_CITE_SUMMARY_MAX_SOURCES]]
 
 
 def _build_cite_summary_prompt_body(sources: list[dict]) -> str:
@@ -1415,7 +1433,7 @@ def _build_cite_summary_prompt_body(sources: list[dict]) -> str:
     used = 0
     for i, s in enumerate(sources, start=1):
         line = f"[{i}] {s['text']}"
-        if used + len(line) + 2 > _SUMMARY_PROMPT_BUDGET_CHARS:
+        if used + len(line) + 2 > _CITE_SUMMARY_BUDGET_CHARS:          # §17.1663 — the cite path's own budget
             break
         out.append(line)
         used += len(line) + 2
