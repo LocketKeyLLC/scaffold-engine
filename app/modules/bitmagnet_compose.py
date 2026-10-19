@@ -117,3 +117,46 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None,
             "health check -- the draft had none of the command, port 3334 or the volumes; any existing file is kept as "
             f"a dated .bak, the copy is checksum-checked and parsed by `docker compose config`, and nothing is started{started}.")
     return cmds, verify, note
+
+
+#: §17.1671b — "start the bitmagnet stack"
+_START_RE = re.compile(r"^\s*(?:start|bring\s+up|launch|run|deploy)\b[^\n]{0,30}\bbitmagnet\b", re.I)
+
+
+def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
+                files: Optional[list[dict]] = None) -> Optional[tuple[list[str], list[str], str]]:
+    """Live (job 3cc24343 T13 "Start bitmagnet stack"): every check the draft had (`docker compose ps`, `ss | grep 3333`)
+    sat inside its in-guest script, so the frame had none and was refused. The engine starts it and judges it: pull
+    (bounded), `up -d`, then wait for Postgres healthy, bitmagnet running and the web UI answering 200 on 3333 -- and,
+    behind the kill-switch, that the bitmagnet CONTAINER's public address is the tunnel's: its traffic is forwarded,
+    never through the container host's OUTPUT, so this is the leak that matters."""
+    title = str((node or {}).get("title") or "")
+    if not _START_RE.match(title):
+        return None
+    gid, d = target({**(node or {}), "title": "write bitmagnet compose"}, commands, files)
+    if not gid:
+        return None
+    dq = shlex.quote(d)
+    pull = f"cd {dq} && timeout 170 docker compose pull -q && echo \"PULLED the images in {d}\""
+    up = f"cd {dq} && docker compose up -d && echo \"STARTED the stack in {d}\""
+    wait = ('for i in $(seq 1 75); do pg=$(docker inspect -f "{{.State.Health.Status}}" bitmagnet-postgres 2>/dev/null); '
+            'bm=$(docker inspect -f "{{.State.Running}}" bitmagnet 2>/dev/null); '
+            'code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:3333/); '
+            'if [ "$pg" = healthy ] && [ "$bm" = true ] && [ "$code" = 200 ]; then '
+            'echo "UP: postgres healthy, bitmagnet running, web UI answers 200 on 3333"; exit 0; fi; sleep 2; done; '
+            'echo "FAILED: postgres=$pg bitmagnet_running=$bm web_ui_http=$code after 150 s"; '
+            'docker logs --tail 30 bitmagnet 2>&1; exit 1')
+    egress = ('ct=$(curl -s -m 15 https://ipinfo.io/ip); '
+              'in=$(docker exec bitmagnet sh -c "wget -qO- -T 15 https://ipinfo.io/ip 2>/dev/null || curl -s -m 15 https://ipinfo.io/ip" 2>/dev/null); '
+              'if [ -z "$in" ]; then echo "NOT TESTED: the bitmagnet image has no wget or curl to read its own address"; exit 0; fi; '
+              'if [ "$in" = "$ct" ]; then echo "THROUGH THE TUNNEL: the bitmagnet container leaves as $in, the same as wg0"; '
+              'else echo "FAILED: the bitmagnet container leaves as $in, the container host as $ct"; exit 1; fi')
+    q = shlex.quote
+    cmds = [f"pct exec {gid} -- sh -c {q(pull)}", f"pct exec {gid} -- sh -c {q(up)}",
+            f"pct exec {gid} -- sh -c {q(wait)}", f"pct exec {gid} -- sh -c {q(egress)}"]
+    verify = [f'pct exec {gid} -- curl -s -o /dev/null -w "%{{http_code}}" http://127.0.0.1:3333/', f"pct exec {gid} -- ss -tln"]
+    note = (f"started bitmagnet in container {gid} as the engine's own block (§17.1671b): images pulled (170 s bound), "
+            f"`docker compose up -d` in {d}, then it waits up to 150 s for Postgres healthy, bitmagnet running and the web "
+            "UI answering 200 on 3333, and reads the bitmagnet container's public address -- it must be the tunnel's, "
+            "since a container's traffic is forwarded and never passes the host's OUTPUT rules.")
+    return cmds, verify, note

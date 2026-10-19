@@ -6311,7 +6311,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         _comp_notes = list(_comp_notes) + [{"why": _kb[2]}]
     # §17.1671 — "write the official bitmagnet compose": bitmagnet's published file, never one from memory.
     from app.modules import bitmagnet_compose as _bmc
-    _bc = _bmc.block(node, cmds, files)
+    _bc = _bmc.block(node, cmds, files) or _bmc.start_block(node, cmds, files)
     if _bc:
         cmds, verify = _bc[0], _bc[1]
         _comp_notes = list(_comp_notes) + [{"why": _bc[2]}]
