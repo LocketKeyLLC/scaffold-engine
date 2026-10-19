@@ -26,7 +26,7 @@ ARG MAKE_JOBS=
 # is needed at build time anyway (Verilator's configure invokes it).
 # Discarded once the runtime stage is built.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS builder
+FROM python:3.14.8-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
 
 ARG VERILATOR_VERSION
 ARG MAKE_JOBS
@@ -57,7 +57,7 @@ RUN autoconf \
 # Stage 2: runtime — verilator binary + the toolchain its generated C++
 # needs at runtime (g++, make, perl). Plus FastAPI for the HTTP surface.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
+FROM python:3.14.8-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS runtime
 
 ARG VERILATOR_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
