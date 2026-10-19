@@ -2796,6 +2796,33 @@ def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], v
 #: §17.1680 — the line §17.1608 puts at the head of an in-guest block that only reads
 READS_ONLY_MARKER = "§17.1608: this block only reads"
 
+#: §17.1680c — what makes an in-guest program a CHANGE: an HTTP write, a file opened for writing, a process, a SQL write
+_PROGRAM_CHANGE_RE = re.compile(
+    r"method\s*=\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]|['\"](?:POST|PUT|PATCH|DELETE)['\"]|\b(?:Request|urlopen)\([^)]*\bdata\s*=\s*(?!None\b)"
+    r"|\bopen\([^)]*,\s*['\"][wax+]|\bsubprocess\b|\bos\.(?:system|remove|unlink|rename|replace|popen|makedirs|rmdir)\b"
+    r"|\bshutil\.|\b(?:INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\s|\.write\(|\.write_text\(|\.unlink\(", re.I)
+_REMOTE_BODY_RE = re.compile(r"<<'REMOTE'\n(?P<body>.*?)\nREMOTE\n", re.S)
+
+
+def a_read_only_program(node: Optional[dict], files: Optional[list[dict]]) -> bool:
+    """§17.1680c — a step that DECLARES it changes nothing, whose in-guest block is a python program with no change in it
+    (and no other shell work), is a read-only block like §17.1608's. Live (job c2518102 T2): an all-pages python read of
+    Sonarr's missing list was refused "no check at all" -- §17.1608 classifies shell lines, and a program could do
+    anything, so the engine looks inside it."""
+    if not declares_read_only(node):
+        return False
+    bodies = [m.group("body") for f in files or [] for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))]
+    if not bodies:
+        return False
+    for body in bodies:
+        py = re.search(r"python3?\s+-\s+<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\b", body, re.S)
+        if not py or _PROGRAM_CHANGE_RE.search(py.group("prog")):
+            return False
+        rest = (body[:py.start()] + body[py.end():]).splitlines()
+        if any(ln.strip() and not re.match(r"\s*(?:set\s+[-+]\w+|export\s+\w+=\S*|#)", ln) for ln in rest):
+            return False
+    return True
+
 
 def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
@@ -6567,7 +6594,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # its commands are the template's wrapper (`bash /tmp/in_ct_N.sh start`), its reads are inside the script, and the
     # check the drafter repeated (`curl … | jq …`) is one the read channel drops. Live (job c2518102 T2 "Fetch Sonarr
     # wanted missing"): one read of Sonarr's missing list, refused "this block has no check at all".
-    _reads_only_block = any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in shape_files or [])
+    _reads_only_block = (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in shape_files or [])
+                         or a_read_only_program(node, shape_files))                              # §17.1680c
     if cmds and not verify and not _reads_only_block:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
@@ -7366,7 +7394,8 @@ async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[d
     A block §17.1608 marked read-only needs no separate check (§17.1680); what it printed is the evidence, judged by
     the same judge against the step's goal. Live (job c2518102 T2): with no jq in CT 104 the read printed only "Sonarr
     API request failed", exited 0 under `trap 'exit 0'`, and was recorded done."""
-    if not any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or [])):
+    if not (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or []))
+            or a_read_only_program(waiting, waiting.get("files") or [])):                         # §17.1680c
         return []
     own = "\n".join(str(e.get("output") or "") for e in executed or [])[-6000:]
     return contradicted(await _verify_verdicts(

@@ -115,3 +115,24 @@ def test_the_template_trust_ends_when_its_commands_are_replaced():
     assert sr.writes_in_a_read_only_step(["bash /tmp/in_ct_104.sh start", "bash /tmp/in_ct_104.sh last"], node, rb) == []
     post = ("pct exec 104 -- sh -c 'python3 -c \"api(\\\"/api/v3/command\\\",\\\"POST\\\",{})\"'")
     assert sr.writes_in_a_read_only_step([post], node, rb)
+
+
+def _block(prog, extra=""):
+    return [{"path": "/tmp/in_ct_104.sh", "content": "cat > /tmp/in_ct_104_remote.sh <<'REMOTE'\nset -e\n"
+             "export DEBIAN_FRONTEND=noninteractive\n" + extra + "python3 - <<'EOF'\n" + prog + "\nEOF\nREMOTE\n"}]
+
+
+READ_PROG = ("import json,urllib.request\nreq=urllib.request.Request('http://localhost:8989/api/v3/wanted/missing',"
+             "headers={'X-Api-Key':k})\ndata=json.loads(urllib.request.urlopen(req).read())\nprint(len(data['records']))")
+RO = {"title": "Fetch Sonarr wanted missing", "prompt_template": "Read only, change nothing."}
+
+
+def test_a_read_only_program_is_recognised_and_a_writing_one_is_not():
+    """§17.1680c — live, T2's all-pages python read was refused "no check at all\""""
+    assert sr.a_read_only_program(RO, _block(READ_PROG))
+    for w in ("urllib.request.urlopen(urllib.request.Request(u, data=b'{}', method='POST'))",
+              "open('/var/lib/sonarr/x','w').write('1')", "import subprocess; subprocess.run(['rm','x'])",
+              "import os; os.remove('/x')", "c.execute('DELETE FROM Episodes')"):
+        assert not sr.a_read_only_program(RO, _block(READ_PROG + "\n" + w)), w
+    assert not sr.a_read_only_program(RO, _block(READ_PROG, extra="systemctl restart sonarr\n"))   # shell work beside it
+    assert not sr.a_read_only_program({"title": "Fetch Sonarr wanted missing"}, _block(READ_PROG))  # step never said so
