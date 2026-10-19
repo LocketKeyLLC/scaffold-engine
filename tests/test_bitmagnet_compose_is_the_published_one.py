@@ -26,8 +26,9 @@ def test_the_published_file_has_what_the_draft_lacked():
 
 
 def test_the_target_comes_from_the_draft_when_the_text_names_no_guest():
-    files = [{"path": "/tmp/in_ct_109.sh", "content": "GID=109\npct push 109 /tmp/x /root/x\n"}]
-    assert bc.target(T12, ["pct exec 109 -- true"], files) == ("109", "/opt/bitmagnet")
+    files = [{"path": "/tmp/in_ct_109.sh", "content": "GID=109\npct push \"$GID\" /tmp/x /root/x\n"}]
+    assert bc.target(T12, ["bash /tmp/in_ct_109.sh start"], files) == ("109", "/opt/bitmagnet")   # the template's form
+    assert bc.target(T12, ["bash /tmp/in_ct_109.sh start"], []) == ("109", "/opt/bitmagnet")
     assert bc.target({**T12, "prompt_template": "Write it to /srv/bm/docker-compose.yml in CT 120."}) == ("120", "/srv/bm")
     assert bc.block({**T12, "title": "Start bitmagnet stack"}, ["pct exec 109 -- true"]) is None
     assert bc.block(T12, []) is None
@@ -50,7 +51,7 @@ def test_the_block_writes_the_exact_file_and_starts_nothing(tmp_path):
 def test_the_frame_takes_it():
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
     policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": [], "can_write_files": True}
-    draft = ("## Write these files\n\n### /tmp/in_ct_109.sh\n```bash\nGID=109\npct push 109 /tmp/in_ct_109_remote.sh /root/x\n"
+    draft = ("## Write these files\n\n### /tmp/in_ct_109.sh\n```bash\nGID=109\npct push \"$GID\" /tmp/in_ct_109_remote.sh /root/x\n"
              "tee /opt/bitmagnet/docker-compose.yml <<'EOF'\nservices: {}\nEOF\n```\n\n## Run this\n\n```bash\n"
              + "\n".join(DRAFT) + "\n```\n")
     frame = sr.frame_run(T12, draft, spec, policy, services=[],

@@ -71,7 +71,9 @@ OFFICIAL_COMPOSE = """services:
 _TITLE_RE = re.compile(r"^\s*(?:create|write|add|place|make)\b[^\n]{0,40}\bbitmagnet\b[^\n]{0,30}\bcompose\b", re.I)
 _DIR_RE = re.compile(r"(?P<dir>/[\w.@+-]+(?:/[\w.@+-]+)*?)/(?:docker-)?compose\.ya?ml\b")
 _CT_RE = re.compile(r"\b(?:CT|container|LXC)\s+(?P<gid>\d{3,5})\b", re.I)
-_PCT_RE = re.compile(r"\bpct\s+(?:exec|push)\s+(\d{3,5})\b")
+#: a guest the draft targets: `pct exec N`, or the run_in_container template's own `GID=N` / `/tmp/in_ct_N.sh` (live, T12's
+#: draft named its guest only that way and the first version of this capability never fired)
+_PCT_RE = re.compile(r"\bpct\s+(?:exec|push)\s+(\d{3,5})\b|\bGID=(\d{3,5})\b|/in_ct_(\d{3,5})\.sh\b")
 _STARTS_RE = re.compile(r"\bdoes\s+not\s+start\b|\bdon'?t\s+start\b|\bnot\s+start(?:ed)?\b", re.I)
 
 
@@ -84,7 +86,7 @@ def target(node: Optional[dict], commands: Optional[list[str]] = None,
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     drafted = " ".join([str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []])
     ct = _CT_RE.search(text)
-    gids = {m.group(1) for m in _PCT_RE.finditer(drafted)}
+    gids = {next(g for g in m.groups() if g) for m in _PCT_RE.finditer(drafted)}
     gid = ct.group("gid") if ct else (next(iter(gids)) if len(gids) == 1 else "")
     d = _DIR_RE.search(text) or _DIR_RE.search(drafted)
     return (gid, d.group("dir") if d else "/opt/bitmagnet") if gid else ("", "")
