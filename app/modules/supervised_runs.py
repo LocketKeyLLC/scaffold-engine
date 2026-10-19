@@ -6011,10 +6011,14 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     the names some store will supply, ``missing`` the ones nothing holds yet:
     those stay in ``inputs``, marked, so the pause can ask for them once.
     """
+    known = {str(n) for n in (policy.get("secrets") or [])} | {str(n) for n in (policy.get("held") or [])}
+    # §17.1667 — a name a store already HOLDS is a secret, whatever it is called: the name test (§17.1275) reads
+    # `AIRVPN_BITMAGNET_CONF` as a plain value, and the frame asked the operator to type the WireGuard config in.
+    inputs = [{**i, "secret": True} if str(i.get("name") or "") in known and not i.get("secret") else i
+              for i in inputs]
     secret_names = [str(i.get("name") or "") for i in inputs if i.get("secret")]
     if not secret_names:
         return commands, verify, inputs, [], []
-    known = {str(n) for n in (policy.get("secrets") or [])} | {str(n) for n in (policy.get("held") or [])}
     resolved = [n for n in secret_names if n in known]
     missing = [n for n in secret_names if n not in known]
 
@@ -6286,6 +6290,38 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pe_notes:
         cmds, verify = _pe_cmds, _pe_verify
         _comp_notes = list(_comp_notes) + _pe_notes
+    # §17.1667 — "copy <host file> into container N": the engine's own pct push from the host, never an in-guest draft.
+    from app.modules import host_file_push as _hfp
+    _hp = _hfp.block(node) or _hfp.secret_block(
+        node, list((policy or {}).get("held") or []) + list((policy or {}).get("secrets") or []))
+    if _hp:
+        cmds, verify = _hp[0], _hp[1]
+        _comp_notes = list(_comp_notes) + [{"why": _hp[2]}]
+    # §17.1669 — "set up WireGuard wgN from <config>" in a container: the engine's own block, judged by a handshake.
+    from app.modules import wireguard_up as _wgu
+    _wu = _wgu.block(node, cmds)
+    if _wu:
+        cmds, verify = _wu[0], _wu[1]
+        _comp_notes = list(_comp_notes) + [{"why": _wu[2]}]
+    # §17.1670 — "configure the VPN kill-switch" for a container's tunnel: CT 105's measured shape, plus Docker's FORWARD.
+    from app.modules import kill_switch as _ks
+    _kb = _ks.block(node, cmds) or _ks.proof_block(node, cmds)
+    if _kb:
+        cmds, verify = _kb[0], _kb[1]
+        _comp_notes = list(_comp_notes) + [{"why": _kb[2], **(_kb[3] if len(_kb) > 3 else {})}]
+    # §17.1671 — "write the official bitmagnet compose": bitmagnet's published file, never one from memory.
+    from app.modules import bitmagnet_compose as _bmc
+    _bc = _bmc.block(node, cmds, files) or _bmc.start_block(node, cmds, files)
+    if _bc:
+        cmds, verify = _bc[0], _bc[1]
+        _comp_notes = list(_comp_notes) + [{"why": _bc[2], **(_bc[3] if len(_bc) > 3 else {})}]
+    # §17.1672 — "add <name> to Prowlarr as Generic Torznab at <url>": Prowlarr's own template, tested before it saves.
+    from app.modules import prowlarr_torznab as _ptz
+    _pt = (_ptz.block(node, lambda: _arr_guest("prowlarr", services, inventory))
+           or _ptz.test_block(node, lambda: _arr_guest("prowlarr", services, inventory), cmds, files))
+    if _pt:
+        cmds, verify = _pt[0], _pt[1]
+        _comp_notes = list(_comp_notes) + [{"why": _pt[2], **(_pt[3] if len(_pt) > 3 else {})}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
@@ -6322,6 +6358,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     for _n in _comp_notes or []:
         if isinstance(_n, dict) and isinstance(_n.get("expect"), dict):
             _expects.update({str(k): str(v) for k, v in _n["expect"].items()})
+    # §17.1671d — a capability whose block PROVES something no check can show beforehand is never "already met"
+    _always_run = next((str(_n["always_run"]) for _n in _comp_notes or []
+                        if isinstance(_n, dict) and _n.get("always_run")), "")
     # §17.1502 — a host-side call to a guest's port on loopback is wrapped to run
     # inside that guest (measured port→guest map), BEFORE the key reader and the
     # §17.1368 refusal gate, so the call reaches the service instead of parking.
@@ -6691,6 +6730,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
         "expects": _expects,                      # §17.1570g — what a rewrite's check shows when the goal holds
+        "always_run": _always_run,                # §17.1671d — the block proves what no pre-read can
     }
 
 
@@ -7580,6 +7620,27 @@ _GUEST_RUN_RE = re.compile(r"\b(?P<tool>pct\s+exec|qm\s+guest\s+exec)\s+(?P<gid>
 _HOST_TOOL_RE = re.compile(r"(?:^|[;&|(\s'\"])(?P<tool>qm|pct|pvesm|pvesh|pveam|vzdump)\s+[a-z]")
 
 
+def _guest_part(rest: str) -> str:
+    """§17.1669c — the part of `pct exec N -- …` that runs IN the guest: up to the first `;`, `&`, `|` outside quotes.
+    Live (job 3cc24343 T7): `if pct exec 109 -- test -L /etc/resolv.conf; then ns=$(pct config 109 …)` was refused
+    because the host's own `pct config`, after the `;`, was read as running inside guest 109."""
+    q, k = "", 0
+    while k < len(rest):
+        c = rest[k]
+        if c == "\\" and q != "'":
+            k += 2
+            continue
+        if q:
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        elif c in ";&|":
+            return rest[:k]
+        k += 1
+    return rest
+
+
 def a_host_file_run_inside_a_guest(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1403 — the engine writes a block's files on the HOST; inside a guest they are not there.
 
@@ -7597,7 +7658,7 @@ def a_host_file_run_inside_a_guest(commands: list[str], files: Optional[list[dic
     out: list[dict] = []
     for i, ln in enumerate(lines):
         for m in _GUEST_RUN_RE.finditer(ln):
-            gid, rest, tool = m.group("gid"), m.group("rest"), m.group("tool")
+            gid, rest, tool = m.group("gid"), _guest_part(m.group("rest")), m.group("tool")
             for p in paths:
                 if not re.search(rf"(?<![\w./-]){re.escape(p)}(?![\w./-])", rest):
                     continue
@@ -10799,7 +10860,7 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         [str(c) for c in (frame or {}).get("commands") or []], verify_cmds,
         (frame or {}).get("files") or [])
     # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
-    _blind = _blind or a_backup_is_taken_now(node)
+    _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)

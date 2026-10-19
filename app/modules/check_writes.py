@@ -30,6 +30,9 @@ def a_check_that_writes(commands: list[str], node: Optional[dict]) -> list[dict]
             if not m:
                 continue
             urls = re.findall(r"https?://[^\s'\"]+", code)      # the TARGET is the last URL (a Referer header comes first)
+            # §17.1672b — a program that calls its API by PATH (`api('/api/v1/indexer/test','POST',ix)`) names its
+            # target as the quoted path in the call itself (live, T16's Prowlarr test was refused as a write)
+            urls = urls or re.findall(r"[\"'](/[\w./-]+)[\"']", m.group(0))
             if urls and _EXEMPT_URL_RE.search(urls[-1]):
                 continue
             return [{"command": str(c)[:200], "why": (
