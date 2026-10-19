@@ -121,7 +121,10 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
             f"pct exec {gid} -- sh -c {q(save)}",
             f"pct exec {gid} -- systemctl enable netfilter-persistent",
             f"pct exec {gid} -- sh -c {q(prove)}"]
-    verify = [f"pct exec {gid} -- nft list ruleset"]
+    # §17.1670b — the exact chains, not `nft list ruleset`: live, Docker's chains made it long and its first table is the
+    # empty default `inet filter … policy accept`; the judge read that and failed a step whose switch was live and proven
+    verify = [f"pct exec {gid} -- iptables -S OUTPUT", f"pct exec {gid} -- iptables -S SCAFFOLD-KS-FWD",
+              f"pct exec {gid} -- ip6tables -S OUTPUT"]
     note = (f"built the kill-switch for {wg} in container {gid} as the engine's own block (§17.1670), mirroring CT 105 "
             f"as measured: OUTPUT drops all but lo, established, {wg}, the LAN ({lan or 'from eth0'}) and udp to the "
             "endpoint port (read from the tunnel's config); IPv6 out only by lo, the tunnel and link-local. Docker's "

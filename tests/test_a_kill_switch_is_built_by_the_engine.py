@@ -29,7 +29,9 @@ def test_left_alone():
 def test_nothing_else_rides_along():
     cmds, verify, _ = ks.block(T8, DRAFT)
     assert all(c.startswith("pct exec 109 -- ") for c in cmds)              # no CT 102, no pushed file
-    assert "9696" not in " ".join(cmds) and verify == ["pct exec 109 -- nft list ruleset"]
+    assert "9696" not in " ".join(cmds) and verify == ["pct exec 109 -- iptables -S OUTPUT",
+                                                    "pct exec 109 -- iptables -S SCAFFOLD-KS-FWD",
+                                                    "pct exec 109 -- ip6tables -S OUTPUT"]
     for c in cmds:
         assert subprocess.run(["bash", "-n", "-c", c], capture_output=True).returncode == 0, c
 
