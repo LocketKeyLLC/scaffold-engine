@@ -146,3 +146,10 @@ def test_reading_a_packaged_apps_api_is_not_a_route_inventory():
     assert sr.rewrite_inventory_service_routes(t6, ["x"], [], [], inv)[2] == []
     panel = {"title": "Read the control panel backend's routes", "prompt_template": "Read the panel's routes in CT 111."}
     assert sr._ROUTE_INVENTORY_RE.search(panel["title"]) and sr._ROUTE_SERVICE_RE.search(panel["prompt_template"])
+
+
+def test_the_templates_keep_enough_of_a_reads_output():
+    """§17.1686 — live, M1's five shows were cut to the last 60 lines (one show)"""
+    for t in (rt.RUN_IN_CONTAINER, rt.RUN_IN_VM_VIA_AGENT):
+        body = "".join(t.files.values())
+        assert "tail -n 300" in body and "tail -n 60 " not in body, t.name
