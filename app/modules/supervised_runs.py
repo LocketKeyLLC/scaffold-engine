@@ -2816,6 +2816,13 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
             local = local_form_of_a_read(segs[0])
             here = (f" Here that is `{local}`: on this machine the tool reaches its own device, so the address, login "
                     f"and password are not needed -- and the same holds for every other line written this way.") if local else ""
+            # §17.1673b — a PROGRAM is not a read even when it only prints; say what is (live, NB1 was redrafted three
+            # times as `curl …/api/v1/indexer | python3 -c "…"` against a refusal that never named the alternative)
+            if not here and re.search(r"(?:^|[|;&\s'\"(])(?:python3?|perl|node|ruby|php)\s+-[ce]\b", str(c)):
+                here = (" A program is not a read even when it only prints: filter the output with `grep -o '<pattern>'` "
+                        "or `cut`, or ask an endpoint that returns only what the step needs -- for why an *arr indexer "
+                        "fails, `/api/v1/indexerstatus` (each indexer's failure and disabled-until, no credentials), "
+                        "and its name by id with `/api/v1/indexer | grep -o '\"name\": *\"[^\"]*\"'`.")
             return [{"command": str(c), "why": (
                 f"this step says it is READ ONLY (it changes nothing), and `{segs[0].strip()[:80]}` is not a read "
                 f"the engine recognises -- it would change the machine, or reach it in a form no read takes. Use "
@@ -6511,6 +6518,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
     from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
     refused = refused + _prints_a_credential(cmds, verify)              # §17.1652 — a key is used, never printed
+    from app.modules.prints_a_secret import prints_arr_settings as _prints_arr_settings
+    refused = refused + _prints_arr_settings(cmds, verify)              # §17.1673 — an *arr settings list holds credentials
     from app.modules.check_writes import a_check_that_writes as _a_check_that_writes
     refused = refused + _a_check_that_writes(cmds, node)                 # §17.1659 — a check does not change what it checks
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)

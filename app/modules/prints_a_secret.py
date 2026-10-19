@@ -65,3 +65,48 @@ def prints_a_credential(commands: list[str], verify: list[str]) -> list[dict]:
                     "check only that it is there (`grep -c '<ApiKey>' <config.xml>`) (§17.1652).")})
                 break
     return out
+
+
+#: §17.1673 — an *arr settings collection (or one item of it): every indexer / download client / notification / app
+#: carries its credentials in its `fields` -- API keys, passkeys, cookies, passwords
+_ARR_SETTINGS_RE = re.compile(r"\bcurl\b[^|;&\n]*?https?://(?:127\.0\.0\.1|localhost|[\d.]+):\d{2,5}/api/v\d+/"
+                              r"(?P<res>indexer|downloadclient|notification|applications|indexerproxy|importlist)"
+                              r"(?:/\d+)?(?=[\"'\s?]|$)")
+
+
+def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
+    """§17.1673 — a read that PRINTS an *arr's settings list puts every credential in it into the record.
+
+    Live (job 5db1b088 NB1 "Diagnose nekoBT indexer failure", 2026-10-19): the first command was `curl -s -H "X-Api-Key:
+    $PROWLARR_API_KEY" http://127.0.0.1:9696/api/v1/indexer` -- the whole indexer list, whose `fields` hold each
+    private tracker's API key, passkey or cookie, into the run's output and the job. A body sent nowhere (`-o
+    /dev/null`), only counted (`| grep -c`, `| wc`), or read by a program that prints chosen fields is fine; the
+    failure reason lives in /api/v1/indexerstatus, which carries no credential."""
+    out: list[dict] = []
+    for c in list(commands or []) + list(verify or []):
+        # a `$( … )` substitution (the engine's in-guest key read, with its own `|`) is one word to the shell
+        s = re.sub(r"\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)", "SUBST", str(c))
+        for m in _ARR_SETTINGS_RE.finditer(s):
+            call = s[m.start():]
+            call = re.split(r"\|\||&&|;", call, maxsplit=1)[0]
+            if re.search(r"\s-o\s+/dev/null\b|--output\s+/dev/null\b|\|\s*(?:grep\s+-[A-Za-z]*c|wc)\b", call):
+                continue
+            # only chosen matches printed (`| grep -o '"name": *"[^"]*"'`), and not a credential's
+            g = re.search(r"\|\s*grep\s+-[A-Za-z]*o[A-Za-z]*\s+(?P<pat>'[^']*'|\"[^\"]*\"|\S+)", call)
+            if g and not re.search(r"key|pass|cookie|token|secret|pid|auth", g.group("pat"), re.I):
+                continue
+            # a WRITE's response echoes only what that step sent; this rule is about reading what others stored
+            if re.search(r"\s(?:-X|--request)\s*[\"']?(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary)?|--json)(?:\s|=)",
+                         s[max(s.rfind("curl", 0, m.end()), 0):m.end() + len(call)]):
+                continue
+            if re.search(r"\bpython3?\s+-c\b", s[:m.start()]) or re.search(r"\|\s*python3?\s+-c\b", call):
+                continue                      # a program reads the list and prints only what it chooses
+            res = m.group("res")
+            out.append({"command": str(c)[:200], "why": (
+                f"this read PRINTS the {res} settings of an *arr app, and each entry's `fields` carry its credentials "
+                "(API keys, passkeys, cookies, passwords) -- they would land in the run's record and the job (live, NB1 "
+                f"dumped Prowlarr's whole indexer list). Read what the step needs: why an indexer fails is in "
+                "`/api/v1/indexerstatus` (no credentials); its name and enable flag can be filtered "
+                "(`| grep -o '\"name\": *\"[^\"]*\"'`); or send the body nowhere (`-o /dev/null -w '%{http_code}'`) (§17.1673).")})
+            break
+    return out
