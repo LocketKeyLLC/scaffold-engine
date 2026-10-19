@@ -47,3 +47,15 @@ def test_the_live_text_alone_never_claims_it():
     inv = {"cts": {"111": "running"}, "vms": {"106": "running"}}
     node = {"title": "Make the Palworld address static", "prompt_template": SIP2_TEXT}
     assert rewrite_set_container_nameserver(node, ["x"], [], None, inv)[2] == []
+
+
+def test_a_step_that_sets_a_guests_proxmox_settings_gets_no_guest_template():
+    """§17.1676 — `qm set 106 …` is host work; the in-VM template would run it inside VM 106"""
+    from app.modules import runbook_templates as rt
+    node = {"title": "Proxmox: make VM 106's cloud-init address static 192.168.1.44",
+            "prompt_template": "On the Proxmox host only: `qm set 106 --ipconfig0 ip=192.168.1.44/24,gw=192.168.1.1`, "
+                               "then `qm cloudinit update 106`."}
+    assert rt._HOST_ADMIN_RE.search(node["prompt_template"])
+    for t in ("pct set 109 --nameserver 1.1.1.1", "qm cloudinit dump 106 network"):
+        assert rt._HOST_ADMIN_RE.search(t), t
+    assert not rt._HOST_ADMIN_RE.search("netplan set ethernets.eth0.dhcp4=false")

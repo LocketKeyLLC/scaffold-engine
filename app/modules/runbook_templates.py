@@ -798,8 +798,11 @@ def logs_in_with_a_stored_secret(node: dict) -> bool:
 
 
 #: §17.1603 — Proxmox's own administration tools exist only on the host
+#: §17.1676 — and a guest's own Proxmox settings: `qm set` / `pct set` / `qm cloudinit` (live, job 5db1b088 SIP2 "Proxmox:
+#: make VM 106's cloud-init address static" was drafted INSIDE VM 106, where `qm set` cannot exist)
 _HOST_ADMIN_RE = re.compile(r"\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b|\b(?:pct|qm)\s+(?:push|pull)\b"
-                            r"|\bpve-firewall\b|\bpvecm\b|/etc/pve/firewall/")   # §17.1616 — the host's firewall too
+                            r"|\bpve-firewall\b|\bpvecm\b|/etc/pve/firewall/"   # §17.1616 — the host's firewall too
+                            r"|\b(?:qm|pct)\s+set\s+\d|\bqm\s+cloudinit\b")
 
 
 def select_template(node: dict, truth, services: Optional[list] = None) -> Optional[Template]:
