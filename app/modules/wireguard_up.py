@@ -80,6 +80,7 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
                "apt-get install -y -qq --no-install-recommends wireguard-tools resolvconf")   # recommends pull a kernel
     cmds = [
         f"pct exec {gid} -- sh -c {shlex.quote(present)}",
+        restore,                     # before apt too: a container an earlier run left without DNS cannot fetch
         f"pct exec {gid} -- sh -c {shlex.quote(install)}",
         restore,
         f"pct exec {gid} -- sh -c {shlex.quote(place)}",

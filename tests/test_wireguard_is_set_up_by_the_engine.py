@@ -22,7 +22,9 @@ def test_the_live_step_is_claimed_with_the_guest_from_the_draft():
     assert "--no-install-recommends wireguard-tools resolvconf" in j and "latest-handshakes" in cmds[-1]
     order = [next(i for i, c in enumerate(cmds) if k in c) for k in
              ("apt-get install", "test -L /etc/resolv.conf", "install -m 600", "getent hosts", "timeout 120 systemctl restart")]
-    assert order == sorted(order)                        # DNS restored and the Endpoint resolving BEFORE the start
+    restores = [i for i, c in enumerate(cmds) if "test -L /etc/resolv.conf" in c]
+    apt = next(i for i, c in enumerate(cmds) if "apt-get install" in c)
+    assert restores[0] < apt < restores[1] < order[2] < order[3] < order[4]   # DNS before apt AND after it; Endpoint before start
     assert verify == ["pct exec 109 -- ip -4 addr show wg0", "pct exec 109 -- ip -4 rule show"]
 
 
