@@ -1,0 +1,117 @@
+r"""§17.1671 — "write the official bitmagnet docker-compose.yml" is the engine's own file, from bitmagnet's install page.
+
+Live (job 3cc24343 T12 "Create bitmagnet compose file", 2026-10-19; text: "Write official bitmagnet docker-compose.yml
+(bitmagnet + PostgreSQL) with port 3333 mapped. Does NOT start containers."): the model wrote the compose from memory --
+no `command:` (bitmagnet runs as `worker run --keys=http_server --keys=queue_server --keys=dht_crawler`; without it there
+is no web UI, no Torznab and no crawler), no BitTorrent port 3334/tcp+udp, no config volume, no Postgres `shm_size`.
+The engine already carries its own deploy shapes (FlareSolverr §17.1516, Byparr §17.1535); this is the same for
+bitmagnet: OFFICIAL_COMPOSE below is https://bitmagnet.io/setup/installation.html as published (read 2026-10-19), with
+only the relative paths kept relative to the directory the step names. The file is carried as base64 (no quoting of
+YAML through two shells), any existing file is kept as a dated .bak, the copy is checksum-compared and parsed by
+`docker compose config` -- and nothing is started.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import re
+import shlex
+from typing import Optional
+
+#: https://bitmagnet.io/setup/installation.html (Docker Compose), as published 2026-10-19
+OFFICIAL_COMPOSE = """services:
+  bitmagnet:
+    image: ghcr.io/bitmagnet-io/bitmagnet:latest
+    container_name: bitmagnet
+    ports:
+      # API and WebUI port:
+      - "3333:3333"
+      # BitTorrent ports:
+      - "3334:3334/tcp"
+      - "3334:3334/udp"
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PASSWORD=postgres
+    #      - TMDB_API_KEY=your_api_key
+    volumes:
+      - ./config:/root/.config/bitmagnet
+    command:
+      - worker
+      - run
+      - --keys=http_server
+      - --keys=queue_server
+      # disable the next line to run without DHT crawler
+      - --keys=dht_crawler
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bitmagnet-postgres
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    #    ports:
+    #      - "5432:5432" Expose this port if you'd like to dig around in the database
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=bitmagnet
+      - PGUSER=postgres
+    shm_size: 1g
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready
+      start_period: 20s
+      interval: 10s
+"""
+
+_TITLE_RE = re.compile(r"^\s*(?:create|write|add|place|make)\b[^\n]{0,40}\bbitmagnet\b[^\n]{0,30}\bcompose\b", re.I)
+_DIR_RE = re.compile(r"(?P<dir>/[\w.@+-]+(?:/[\w.@+-]+)*?)/(?:docker-)?compose\.ya?ml\b")
+_CT_RE = re.compile(r"\b(?:CT|container|LXC)\s+(?P<gid>\d{3,5})\b", re.I)
+_PCT_RE = re.compile(r"\bpct\s+(?:exec|push)\s+(\d{3,5})\b")
+_STARTS_RE = re.compile(r"\bdoes\s+not\s+start\b|\bdon'?t\s+start\b|\bnot\s+start(?:ed)?\b", re.I)
+
+
+def target(node: Optional[dict], commands: Optional[list[str]] = None,
+           files: Optional[list[dict]] = None) -> tuple[str, str]:
+    """(guest id, directory) the compose file goes to -- or empty strings."""
+    title = str((node or {}).get("title") or "")
+    if not _TITLE_RE.match(title):
+        return "", ""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    drafted = " ".join([str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []])
+    ct = _CT_RE.search(text)
+    gids = {m.group(1) for m in _PCT_RE.finditer(drafted)}
+    gid = ct.group("gid") if ct else (next(iter(gids)) if len(gids) == 1 else "")
+    d = _DIR_RE.search(text) or _DIR_RE.search(drafted)
+    return (gid, d.group("dir") if d else "/opt/bitmagnet") if gid else ("", "")
+
+
+def block(node: Optional[dict], commands: Optional[list[str]] = None,
+          files: Optional[list[dict]] = None) -> Optional[tuple[list[str], list[str], str]]:
+    gid, d = target(node, commands, files)
+    if not gid:
+        return None
+    path = f"{d}/docker-compose.yml"
+    b64 = base64.b64encode(OFFICIAL_COMPOSE.encode()).decode()
+    sha = hashlib.sha256(OFFICIAL_COMPOSE.encode()).hexdigest()
+    p, dq = shlex.quote(path), shlex.quote(d)
+    write = (f"mkdir -p {dq}/config {dq}/data/postgres; "
+             f"if [ -f {p} ]; then cp -a {p} {p}.bak.$(date +%Y%m%d%H%M%S); fi; "
+             f"echo {b64} | base64 -d > {p}.scaffold-new && "
+             f"[ \"$(sha256sum < {p}.scaffold-new | cut -d' ' -f1)\" = {sha} ] && mv -f {p}.scaffold-new {p} && "
+             f"echo \"WROTE {path}: bitmagnet's published compose (sha256 {sha[:12]})\"")
+    check = f"cd {dq} && docker compose config --quiet && echo \"PARSES: docker compose reads {path}\""
+    cmds = [f"pct exec {gid} -- sh -c {shlex.quote(write)}", f"pct exec {gid} -- sh -c {shlex.quote(check)}"]
+    verify = [f"pct exec {gid} -- cat {p}"]
+    started = "" if _STARTS_RE.search(" ".join(str((node or {}).get(k) or "") for k in ("prompt_template", "description"))) \
+        else " (the step does not say to start it; starting is the next step's)"
+    note = ("wrote bitmagnet's published docker-compose.yml (§17.1671, https://bitmagnet.io/setup/installation.html): "
+            "the `worker run --keys=http_server --keys=queue_server --keys=dht_crawler` command, the web/API port 3333, "
+            f"the BitTorrent port 3334 tcp+udp, the config and Postgres data volumes under {d}, Postgres 16 with its "
+            "health check -- the draft had none of the command, port 3334 or the volumes; any existing file is kept as "
+            f"a dated .bak, the copy is checksum-checked and parsed by `docker compose config`, and nothing is started{started}.")
+    return cmds, verify, note
