@@ -79,6 +79,9 @@ def test_the_rules_go_in_allow_first_then_drop_and_the_boot_files_match(tmp_path
     assert "iptables -A OUTPUT -o eth0 -p udp --dport 1637 -j ACCEPT" in out
     assert "iptables -A SCAFFOLD-KS-FWD -o eth0 -j DROP" in calls
     assert "iptables -I DOCKER-USER 1 -j SCAFFOLD-KS-FWD" in calls
+    # §17.1670d — the local Docker bridges are open BEFORE the DROP (the host must reach its own published port)
+    assert out.index("iptables -A OUTPUT -o br-+ -j ACCEPT") < out.index("iptables -P OUTPUT DROP")
+    assert "iptables -A OUTPUT -o docker0 -j ACCEPT" in out
 
     et = tmp_path / "etc-iptables"
     save = _inner(cmds[4]).replace("/etc/wireguard/wg0.conf", str(conf)).replace("/etc/iptables", str(et))
@@ -87,6 +90,7 @@ def test_the_rules_go_in_allow_first_then_drop_and_the_boot_files_match(tmp_path
     v4f = (et / "rules.v4").read_text().splitlines()
     assert v4f[0] == "*filter" and v4f[-1] == "COMMIT" and ":OUTPUT DROP [0:0]" in v4f
     assert "-A OUTPUT -o eth0 -p udp --dport 1637 -j ACCEPT" in v4f and "-A SCAFFOLD-KS-FWD -o eth0 -j DROP" in v4f
+    assert "-A OUTPUT -o br-+ -j ACCEPT" in v4f and "-A OUTPUT -o br-+ -j ACCEPT" in (et / "rules.v6").read_text()
     assert ":FORWARD DROP [0:0]" in (et / "rules.v6").read_text().splitlines()
 
 

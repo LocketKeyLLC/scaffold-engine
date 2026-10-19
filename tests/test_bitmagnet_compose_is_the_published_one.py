@@ -122,3 +122,9 @@ def test_the_waits_pass_hold_and_fail_as_they_should(tmp_path):
     r = run(mid, have=False, active=True); assert r.returncode == 0 and "STILL PULLING" in r.stdout
     r = run(last, have=False, active=True); assert r.returncode == 1 and "still running after every wait" in r.stdout
     r = run(mid, have=False, active=False); assert r.returncode == 1 and "ended without the images" in r.stdout
+
+
+def test_the_wait_is_bounded_by_the_clock():
+    """live: 75 × (2 s + a 3 s curl) outran the runner's 180 s call"""
+    w = bc.start_block(T13, ["bash /tmp/in_ct_109.sh start"])[0][8]
+    assert "end=$(( $(date +%s) + 150 ))" in w and "seq 1 75" not in w

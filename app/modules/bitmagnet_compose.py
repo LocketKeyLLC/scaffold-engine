@@ -152,7 +152,9 @@ def start_block(node: Optional[dict], commands: Optional[list[str]] = None,
                    'echo "STILL PULLING (the next command keeps waiting)"; exit 0; fi; ')
                 + 'echo "FAILED: the pull ended without the images"; exit 1')
     up = f"cd {dq} && docker compose up -d && echo \"STARTED the stack in {d}\""
-    wait = ('for i in $(seq 1 75); do pg=$(docker inspect -f "{{.State.Health.Status}}" bitmagnet-postgres 2>/dev/null); '
+    # bounded by the CLOCK, not a count: live, 75 × (2 s + a 3 s curl) outran the runner's 180 s
+    wait = ('end=$(( $(date +%s) + 150 )); while [ "$(date +%s)" -lt "$end" ]; do '
+            'pg=$(docker inspect -f "{{.State.Health.Status}}" bitmagnet-postgres 2>/dev/null); '
             'bm=$(docker inspect -f "{{.State.Running}}" bitmagnet 2>/dev/null); '
             'code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:3333/); '
             'if [ "$pg" = healthy ] && [ "$bm" = true ] && [ "$code" = 200 ]; then '

@@ -74,6 +74,10 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
           + ensure("iptables", "OUTPUT", f"-o {wg} -j ACCEPT")
           + ensure("iptables", "OUTPUT", '-o eth0 -d "$lan" -j ACCEPT')
           + ensure("iptables", "OUTPUT", '-o eth0 -p udp --dport "$port" -j ACCEPT')
+          # §17.1670d — Docker's own bridges are container networks INSIDE this machine, not a way out: live, with them
+          # dropped the container host could not reach its own published port (docker-proxy → 172.x, curl 3333 → 000)
+          + ensure("iptables", "OUTPUT", "-o docker0 -j ACCEPT")
+          + ensure("iptables", "OUTPUT", "-o br-+ -j ACCEPT")
           + "iptables -P OUTPUT DROP; "
           "iptables -N SCAFFOLD-KS-FWD 2>/dev/null || true; "
           + ensure("iptables", "SCAFFOLD-KS-FWD", '-o eth0 -d "$lan" -j RETURN')
@@ -81,13 +85,15 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
           + "iptables -N DOCKER-USER 2>/dev/null || true; "
           "iptables -C DOCKER-USER -j SCAFFOLD-KS-FWD 2>/dev/null || iptables -I DOCKER-USER 1 -j SCAFFOLD-KS-FWD; "
           "iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -I FORWARD 1 -j DOCKER-USER; "
-          f'echo "KILL-SWITCH v4: out only by lo, {wg}, the LAN $lan and udp/$port to the endpoint; forwarded '
-          'traffic leaves eth0 only for the LAN"')
+          f'echo "KILL-SWITCH v4: out only by lo, {wg}, the local Docker bridges, the LAN $lan and udp/$port to the '
+          'endpoint; forwarded traffic leaves eth0 only for the LAN"')
     v6 = ("ip6tables -P OUTPUT ACCEPT; "
           + ensure("ip6tables", "OUTPUT", "-o lo -j ACCEPT")
           + ensure("ip6tables", "OUTPUT", "-m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
           + ensure("ip6tables", "OUTPUT", f"-o {wg} -j ACCEPT")
           + ensure("ip6tables", "OUTPUT", "-o eth0 -d fe80::/10 -j ACCEPT")
+          + ensure("ip6tables", "OUTPUT", "-o docker0 -j ACCEPT")
+          + ensure("ip6tables", "OUTPUT", "-o br-+ -j ACCEPT")
           + "ip6tables -P OUTPUT DROP; ip6tables -P FORWARD DROP; "
           f'echo "KILL-SWITCH v6: out only by lo, {wg} and link-local"')
     # the boot copy is the engine's own rules (Docker writes its chains itself when it starts); a live restore would
@@ -99,12 +105,14 @@ def block(node: Optional[dict], commands: Optional[list[str]] = None) -> Optiona
                     ":DOCKER-USER - [0:0]", ":SCAFFOLD-KS-FWD - [0:0]", "-A OUTPUT -o lo -j ACCEPT",
                     "-A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT", f"-A OUTPUT -o {wg} -j ACCEPT",
                     "-A OUTPUT -o eth0 -d $lan -j ACCEPT", "-A OUTPUT -o eth0 -p udp --dport $port -j ACCEPT",
+                    "-A OUTPUT -o docker0 -j ACCEPT", "-A OUTPUT -o br-+ -j ACCEPT",
                     "-A DOCKER-USER -j SCAFFOLD-KS-FWD", "-A SCAFFOLD-KS-FWD -o eth0 -d $lan -j RETURN",
                     "-A SCAFFOLD-KS-FWD -o eth0 -j DROP", "COMMIT")
             + " > /etc/iptables/rules.v4; printf \"%s\\n\" "
             + lines("*filter", ":INPUT ACCEPT [0:0]", ":FORWARD DROP [0:0]", ":OUTPUT DROP [0:0]",
                     "-A OUTPUT -o lo -j ACCEPT", "-A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
-                    f"-A OUTPUT -o {wg} -j ACCEPT", "-A OUTPUT -o eth0 -d fe80::/10 -j ACCEPT", "COMMIT")
+                    f"-A OUTPUT -o {wg} -j ACCEPT", "-A OUTPUT -o eth0 -d fe80::/10 -j ACCEPT",
+                    "-A OUTPUT -o docker0 -j ACCEPT", "-A OUTPUT -o br-+ -j ACCEPT", "COMMIT")
             + " > /etc/iptables/rules.v6; iptables-restore --test < /etc/iptables/rules.v4 && "
             "ip6tables-restore --test < /etc/iptables/rules.v6 && "
             "echo \"SAVED for boot: /etc/iptables/rules.v4 and rules.v6 (they parse)\"")
