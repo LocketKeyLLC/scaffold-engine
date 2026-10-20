@@ -197,3 +197,29 @@ def test_its_frame_needs_no_separate_check():
     f = sr.frame_run(node, "## Run this\n\n```bash\n" + T5_CMD + "\n```\n", spec, policy, services=[],
                      inventory={"vms": {}, "cts": {"104": "running"}, "names": {"104": "sonarr"}})
     assert f["commands"] and not [r for r in f["refused"] if "no check at all" in r["why"] or "READ ONLY" in r["why"]], f["refused"]
+
+
+# --- §17.1699: the pushed-file form of the same read is a read-only program too -----------------------------------
+
+T3_PROG = 'import json\nimport urllib.request\n\nkey = open("/var/lib/sonarr/config.xml").read().split("<ApiKey>")[1].split("<")[0]\n\nreq = urllib.request.Request(\n    "http://127.0.0.1:8989/api/v3/qualityprofile",\n    headers={"X-Api-Key": key},\n)\nprofiles = json.load(urllib.request.urlopen(req))\n\nprint("Total profiles:", len(profiles))\nfor i, p in enumerate(profiles):\n    print(f"Profile {i}: id={p[\'id\']} name={p[\'name\']}")\n\nif len(profiles) >= 2:\n    second = profiles[1]\n    print(f"Second profile: id={second[\'id\']} name={second[\'name\']}")\n\n    req2 = urllib.request.Request(\n        "http://127.0.0.1:8989/api/v3/series",\n        headers={"X-Api-Key": key},\n    )\n    series = json.load(urllib.request.urlopen(req2))\n\n    using = [s for s in series if s.get("qualityProfileId") == second["id"]]\n    print(f"Series using second profile: {len(using)}")\n    for s in using:\n        print(f"  {s[\'title\']} (id={s[\'id\']})")\n'   # live, job e5e22b92 T3
+T3_CMDS = ["pct push 104 /tmp/sonarr_summary.py /tmp/sonarr_summary.py", "pct exec 104 -- python3 /tmp/sonarr_summary.py"]
+T3_NODE = {"node_key": "T3", "title": "Read second quality profile",
+           "description": "Read-only: fetch the second quality profile and list which series use it."}
+
+
+def test_a_pushed_python_read_is_a_read_only_program():
+    files = [{"path": "/tmp/sonarr_summary.py", "content": T3_PROG}]
+    assert sr.read_only_pushed_programs(T3_CMDS, files)
+    assert sr.a_read_only_program(T3_NODE, files, T3_CMDS)
+    assert sr.writes_in_a_read_only_step(T3_CMDS, T3_NODE, "", files) == []
+
+
+def test_the_family_still_refuses_a_change_or_a_stranger():
+    put = T3_PROG.replace('headers={"X-Api-Key": key},\n)', 'headers={"X-Api-Key": key}, method="PUT",\n)', 1)
+    assert put != T3_PROG
+    assert not sr.read_only_pushed_programs(T3_CMDS, [{"path": "/tmp/sonarr_summary.py", "content": put}])
+    assert not sr.read_only_pushed_programs(T3_CMDS, [])                                   # a file the block does not write
+    assert not sr.read_only_pushed_programs(T3_CMDS + ["pct exec 104 -- systemctl restart sonarr"],
+                                            [{"path": "/tmp/sonarr_summary.py", "content": T3_PROG}])
+    assert not sr.read_only_pushed_programs(["pct exec 104 -- python3 /tmp/other.py"],
+                                            [{"path": "/tmp/sonarr_summary.py", "content": T3_PROG}])

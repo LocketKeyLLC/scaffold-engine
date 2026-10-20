@@ -2871,6 +2871,41 @@ def a_read_only_python_command(cmd: str) -> bool:
     return bool(m) and not _PROGRAM_CHANGE_RE.search(m.group("prog"))
 
 
+_PCT_PUSH_RE = re.compile(r"^\s*pct\s+push\s+(?P<gid>\d{3,5})\s+(?P<src>/tmp/[\w.-]+)\s+(?P<dst>/tmp/[\w.-]+)\s*$")
+_PCT_PY_FILE_RE = re.compile(r"^\s*pct\s+exec\s+(?P<gid>\d{3,5})\s+--\s+python3?\s+(?P<path>/tmp/[\w.-]+)\s*$")
+
+
+def read_only_pushed_programs(commands: Optional[list[str]], files: Optional[list[dict]]) -> bool:
+    """§17.1699 — every command is a read-only python program reaching a guest: piped in (§17.1694d), or a file the
+    block writes under /tmp, `pct push`ed to the guest's /tmp and run there with `python3`, its content free of change.
+
+    Live (job e5e22b92 T3 "Read second quality profile"): the drafter wrote §17.1680c's program as /tmp/sonarr_summary.py,
+    `pct push 104 …` and `pct exec 104 -- python3 /tmp/sonarr_summary.py` -- the third form of one read, refused "not a
+    read" and "no check" like the first two. The family is recognised, not each spelling."""
+    if not commands:
+        return False
+    progs = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    pushed: dict[tuple[str, str], str] = {}
+    for c in commands:
+        m = _PCT_PUSH_RE.match(str(c))
+        if m and m.group("src") in progs:
+            pushed[(m.group("gid"), m.group("dst"))] = progs[m.group("src")]
+    for c in commands:
+        c = str(c)
+        if a_read_only_python_command(c):
+            continue
+        if _PCT_PUSH_RE.match(c):
+            m = _PCT_PUSH_RE.match(c)
+            if m.group("src") in progs:
+                continue
+            return False
+        m = _PCT_PY_FILE_RE.match(c)
+        prog = pushed.get((m.group("gid"), m.group("path"))) if m else None
+        if prog is None or _PROGRAM_CHANGE_RE.search(prog):
+            return False
+    return True
+
+
 def a_read_only_program(node: Optional[dict], files: Optional[list[dict]],
                         commands: Optional[list[str]] = None) -> bool:
     """§17.1680c — a step that DECLARES it changes nothing, whose in-guest block is a python program with no change in it
@@ -2881,8 +2916,8 @@ def a_read_only_program(node: Optional[dict], files: Optional[list[dict]],
         return False
     bodies = [m.group("body") for f in files or [] for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))]
     if not bodies:
-        # §17.1694d — or every command is one read-only python program piped into the guest
-        return bool(commands) and all(a_read_only_python_command(c) for c in commands)
+        # §17.1694d/1699 — or every command is a read-only python program reaching the guest
+        return read_only_pushed_programs(commands, files)
     for body in bodies:
         py = re.search(r"python3?\s+-\s+<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\b", body, re.S)
         if not py or _PROGRAM_CHANGE_RE.search(py.group("prog")):
@@ -2934,7 +2969,8 @@ def a_login_read(seg: str) -> bool:
     return all(f.group("path").startswith(("/tmp/", "/dev/null")) for f in _LOGIN_FILE_RE.finditer(s))
 
 
-def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
+def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "",
+                               files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
     Live (job 0fb4ea7f MC1, 2026-10-18): "On the Proxmox host: check CPU1 memory channel C … change nothing, read
@@ -2947,6 +2983,8 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     and ssh lines are how it reaches the guest) and §17.1634 already strips a read-only block's own options.
     """
     if not commands or not declares_read_only(node):
+        return []
+    if read_only_pushed_programs(commands, files):                   # §17.1694d/1699 — one read program, in any form
         return []
     from app.modules.runbook_templates import template_of
     # §17.1683 — the template's frame is trusted only while its commands ARE the template's (`bash /tmp/in_ct_N.sh
@@ -6682,7 +6720,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
-    refused = refused + writes_in_a_read_only_step(cmds, node, runbook)   # §17.1637
+    refused = refused + writes_in_a_read_only_step(cmds, node, runbook, shape_files)   # §17.1637, §17.1699
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
