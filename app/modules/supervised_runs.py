@@ -7287,6 +7287,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ok = False
         repeated_reason = _cut
         logger.warning("supervised_run_script_cut job=%s node=%s", job_id, node_key)
+    # §17.1691 — a read-only step whose own output was cut (the runner's 20,000 characters, the template's 300 lines)
+    _read_cut = a_read_was_cut(waiting, executed)
+    if _read_cut and ok:
+        ok = False
+        repeated_reason = _read_cut
+        logger.warning("supervised_run_read_cut job=%s node=%s", job_id, node_key)
     # §17.1390 — applied after the other downgrades so it cannot be clobbered by
     # the `repeated_reason` assignment above: a step nothing checked is not done.
     if _unverified and ok:
@@ -7427,6 +7433,39 @@ def goal_claim(title: str, description: str = "") -> str:
 
 #: how much of a step's description the judge reads (§17.1396)
 _CLAIM_CAP = 1200
+
+
+#: §17.1691 — the line the in-guest templates print when the step's log is longer than the tail they keep
+TEMPLATE_CUT_MARK = "[CUT: the step printed"
+
+
+def a_read_was_cut(waiting: Optional[dict], executed: list[dict]) -> str:
+    """§17.1691 — why a READ-ONLY step's own output cannot be evidence of the whole read ("" when it can).
+
+    A read-only step's record is its answer (§17.1680b), and two cuts left it holding a fraction while it was recorded
+    done. Live (job e5e22b92, 2026-10-20): T1 "Login qBittorrent list torrents" printed the torrent list as one JSON line
+    and the runner returned its first 20,000 characters (local_runner_mcp's `[:20000]`, silent) -- 10 torrents, the
+    tenth cut mid-field; T2 "Read full Sonarr queue" printed Sonarr's pretty JSON and the in-guest template kept the
+    last 300 lines -- 7 of 91 records. Only a step that declares it changes nothing is judged: a change's output is not
+    its evidence, its checks are."""
+    if not declares_read_only(waiting):
+        return ""
+    from app.modules.rehearsal import RUNNER_OUTPUT_CAP
+    for e in executed or []:
+        out = str(e.get("output") or "")
+        cmd = str(e.get("command") or "")[:80]
+        if TEMPLATE_CUT_MARK in out:
+            m = re.search(r"\[CUT: the step printed (\d+) lines", out)
+            return (f"this read printed {m.group(1) if m else 'more than 300'} lines inside the guest and the record keeps "
+                    "the last 300, so what it saw is mostly not in it -- the step is not done. Print what the step needs, "
+                    "not the raw response: counts, and one short line per item with only the fields that matter "
+                    "(a `python3 - <<'PY'` program that makes the call and prints a summary).")
+        if len(out) >= RUNNER_OUTPUT_CAP - 64:
+            return (f"`{cmd}` printed at least {RUNNER_OUTPUT_CAP:,} characters and the runner returns no more than that, "
+                    "silently, so the read was cut -- the step is not done. Print what the step needs, not the raw "
+                    "response: counts, and one short line per item with only the fields that matter (in the guest, a "
+                    "`python3` program that parses the response and prints a summary).")
+    return ""
 
 
 async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[dict]) -> list[dict]:
