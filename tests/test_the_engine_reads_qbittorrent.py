@@ -93,3 +93,16 @@ def test_the_program_logs_in_and_summarises_without_printing_the_password():
 def test_a_refused_login_is_a_failure():
     r = _run("wrong", [])
     assert r.returncode == 1 and "FAILED: qBittorrent refused the login" in r.stdout
+
+
+def test_a_step_that_only_mentions_qbittorrent_is_not_claimed_and_an_apostrophe_is_not_a_quote():
+    """§17.1711 — live, job e5e22b92 PI1 (a Sonarr manual-import preview) was claimed with filter 's container (ct 104)…'"""
+    pi1 = {"node_key": "PI1", "title": "Preview a manual import of the two finished Power Rangers packs",
+           "description": ("Read-only, change nothing. Inside Sonarr's container (CT 104): find Sonarr's download folder from its "
+                           "qBittorrent download client settings, and list the entries whose names contain 'Beast Morphers S26 "
+                           "COMPLETE' or 'Super.Megaforce.S01'.")}
+    assert not qr.wants(pi1)
+    assert qr.name_filter(pi1) == ["beast", "morphers", "s26", "complete"]
+    for claimed in ({"title": "List the Power Rangers torrents in qBittorrent", "description": "Read-only, change nothing."},
+                    {"title": "Check the downloads", "description": "Read-only: list qBittorrent torrents whose name has 'Scrubs'."}):
+        assert qr.wants(claimed), claimed

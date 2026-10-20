@@ -6569,6 +6569,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _qb:
         cmds, verify = _qb[0], _qb[1]
         _comp_notes = list(_comp_notes) + [{"why": _qb[2]}]
+    # §17.1712 — "import FOLDER … -> SEASON n": Sonarr's own preview, mapped by each file's own number, ONE ManualImport.
+    from app.modules import arr_manual_import as _ami
+    _mi = _ami.block(node, lambda: _arr_guest("sonarr", services, inventory))
+    if _mi:
+        cmds, verify = _mi[0], _mi[1]
+        _comp_notes = list(_comp_notes) + [{"why": _mi[2]}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
