@@ -759,3 +759,9 @@ async def test_a_step_that_only_reads_draws_no_separate_check(monkeypatch):
     drawn.clear()
     vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, change, "brief")
     assert any("VERIFY_INSIDE" in d for d in drawn) and vals["VERIFY_INSIDE"]          # a change still gets its check
+
+
+def test_the_check_prompt_carries_no_other_steps_example_and_forbids_programs():
+    """§17.1703 — live, R3 drew this prompt's old `/opt/palworld/PalServer.sh` example; RC3 drew `| python3 -c` twice"""
+    assert "palworld" not in rt.FREE_PARAM_SYSTEM_VERIFY.lower()
+    assert "NEVER a program" in rt.FREE_PARAM_SYSTEM_VERIFY and "grep -o" in rt.FREE_PARAM_SYSTEM_VERIFY

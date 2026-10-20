@@ -704,6 +704,7 @@ def read_only_command(cmd: str, runner_side: bool = False) -> bool:
         return False
     if not facts.commands:
         return False
+    wrapped_only = True     # §17.1704 — every command a wrapper whose inside was judged (with its own unsafe screen)
     for argv, head in zip(facts.commands, facts.heads, strict=True):
         if argv[0].rsplit("/", 1)[-1] == "ssh":   # §17.1151 — the remote command is judged like a local one
             ok, _why = ssh_remote_read_only(argv, lambda x: read_only_command(x, runner_side))
@@ -725,6 +726,7 @@ def read_only_command(cmd: str, runner_side: bool = False) -> bool:
             if not script or not read_only_command(script, runner_side):
                 return False
             continue
+        wrapped_only = False
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
             continue
         if not runner_side and engine_side_read(argv):  # §17.1633 — `ollama list` (engine side only; see _ENGINE_READ_SUBCOMMANDS)
@@ -744,6 +746,11 @@ def read_only_command(cmd: str, runner_side: bool = False) -> bool:
             outs = [argv[i + 1] for i, a in enumerate(argv) if a in ("-o", "-O") and i + 1 < len(argv)]
             if not (outs and all(o == "/dev/null" for o in outs) and not any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T") for a in argv[1:])):
                 return False
+    # §17.1704 — the raw-text screen cannot follow `\"…\"` nested in a `"…"` word: live (job e5e22b92 RC3), the check
+    # `pct exec 104 -- bash -c "curl … \"http://…/queue?page=1&pageSize=100\" | grep -o …"` was refused for an
+    # "unquoted" `&` that is quoted. A wrapper's inside was judged above, unescaped, with this same screen.
+    if wrapped_only:
+        return True
     try:
         from app.modules.assist_guide import find_shell_unsafe_commands
         if find_shell_unsafe_commands("```bash\n" + c + "\n```"):
