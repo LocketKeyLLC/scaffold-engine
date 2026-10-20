@@ -39,6 +39,17 @@ SHAPES: tuple[Shape, ...] = (
           "an indexer object from Prowlarr's `/api/v1/indexer` has no top-level `categories`: they are in "
           "`capabilities.categories` (`[{id, name, subCategories: [{id, name}]}]`), so this read finds none on any "
           "indexer and reports a false zero"),
+    # §17.1694e — live, job e5e22b92 T13 "Re-enable healthy indexers": `POST /api/v1/indexer/test/{id}` with `{}` and a POST
+    # to save -- the test endpoint validates a whole object (§17.1647, §17.1672b) and an update is a PUT of the whole object
+    Shape("prowlarr", re.compile(r"\b(?:re-?)?enabl|\bdisabl|\btest\b", re.I), "/api/v1/indexer/test",
+          "Prowlarr indexer TEST and UPDATE: get the indexer's full object with `GET /api/v1/indexer/{id}`; test it with "
+          "`POST /api/v1/indexer/test` and that WHOLE object as the body (a 400 lists why it fails; there is no "
+          "`/indexer/test/{id}`); change it with `PUT /api/v1/indexer/{id}` and the WHOLE object with the field changed "
+          "(e.g. `enable: true`) -- never POST to save, never a partial body; then read it back with `GET "
+          "/api/v1/indexer/{id}` and print the field, which is the step's check.",
+          re.compile(r"/indexer/test/(?:\{|\d|['\"]\s*\+|%)"),
+          "Prowlarr has no `/api/v1/indexer/test/{id}`: the test is `POST /api/v1/indexer/test` with the indexer's whole "
+          "object as the body, so this call answers 404/405 and tests nothing"),
     Shape("prowlarr", re.compile(r"\bsync|\bapplications?\b|\bsonarr\b", re.I), "/api/v1/applications",
           "Prowlarr `GET /api/v1/applications` -> per application (Sonarr, Radarr): `id`, `name`, `syncLevel` "
           "(`disabled` | `addOnly` | `fullSync`), `tags`, and `fields` as `[{name, value}]` -- the sync categories are "
@@ -118,7 +129,7 @@ def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]
         if s.wrong is None:
             continue
         for t in texts:
-            if s.endpoint not in t or "capabilities" in t:
+            if s.endpoint not in t or (s.endpoint == "/api/v1/indexer" and "capabilities" in t):
                 continue
             m = s.wrong.search(t)
             if m:

@@ -71,3 +71,19 @@ def test_the_refusal_drives_a_redraft():
     hit = aas.wrong_fields(["bash /tmp/in_ct_102.sh start"], [T4_FILE])
     assert any(m in hit[0]["why"] for m in sr._SHAPE_REFUSALS)
     assert sr.shape_retry_note({"kind": "run", "refused": hit})
+
+
+def test_an_indexer_change_is_shown_test_put_and_read_back():
+    """§17.1694e — live, job e5e22b92 T13 tested with `POST /api/v1/indexer/test/{id}` + `{}` and saved with a POST"""
+    t13 = {"title": "Re-enable healthy indexers",
+           "description": "Change, operator approval first: in Prowlarr, test the disabled indexers Internet Archive and "
+                          "Torrent Downloads (Prowlarr's own indexer test); re-enable each one that passes."}
+    b = aas.drafter_block(t13)
+    assert "POST /api/v1/indexer/test` and that WHOLE object" in b and "PUT /api/v1/indexer/{id}" in b
+    assert "python3 - <<'PY'" not in b                         # a change gets no read-only shape
+    live = {"path": "/tmp/in_ct_102.sh", "content": "<<'REMOTE'\nindexers = get(\"/api/v1/indexer\")\n"
+            "result = post(f\"/api/v1/indexer/test/{idx['id']}\", {})\nREMOTE\n"}
+    hit = aas.wrong_fields(["bash /tmp/in_ct_102.sh start"], [live])
+    assert hit and "no `/api/v1/indexer/test/{id}`" in hit[0]["why"]
+    right = dict(live, content=live["content"].replace("f\"/api/v1/indexer/test/{idx['id']}\", {}", "\"/api/v1/indexer/test\", idx"))
+    assert aas.wrong_fields(["x"], [right]) == []
