@@ -981,6 +981,10 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 f"so this download hangs until the runner's 180 s timeout -- it did, twice. The resolver is set on the "
                 f"host (`{'qm' if kind == 'VM' else 'pct'} set {tgid} --nameserver "
                 f"\"{getattr(truth, 'dns_hint', '') or '<DNS_SERVER>'}\"` + a reboot); the engine inserts that step and this one waits for it.")})
+    # §17.1690 — a guest-side line that runs a tool the guest was measured without (jq in the *arr containers)
+    if tgid and getattr(truth, "tools", None):
+        from app.modules.guest_tools import calls_a_missing_tool
+        out.extend(calls_a_missing_tool(commands or [], files, tgid, truth.tools))
     if (not guests and not subjects) or not inv:
         return out
     cts, vms = inv["cts"], inv["vms"]
