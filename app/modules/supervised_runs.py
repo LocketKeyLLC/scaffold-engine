@@ -2824,6 +2824,47 @@ def a_read_only_program(node: Optional[dict], files: Optional[list[dict]]) -> bo
     return True
 
 
+#: §17.1689 — a lone `curl` login, optionally wrapped in `pct exec N -- sh|bash -c '…'`
+_LOGIN_WRAP_RE = re.compile(r"^\s*pct\s+exec\s+\d{3,5}\s+--\s+(?:bash|sh)\s+-c\s+(?P<arg>.+?)\s*$", re.S)
+_LOGIN_FILE_RE = re.compile(r"(?:^|\s)(?:-c|--cookie-jar|-o|--output|-D|--dump-header)\s+['\"]?(?P<path>[^\s'\"]+)")
+
+
+def a_login_read(seg: str) -> bool:
+    """§17.1689 — a `curl` that only LOGS IN is a read in a read-only step. Live (job e5e22b92 T1 "Login qBittorrent list
+    torrents", 2026-10-20): qBittorrent has no readable key (§17.1384), so listing its torrents is `POST
+    /api/v2/auth/login` into a cookie jar, then a GET -- and the read-only gate refused the login as a change, though
+    §17.1362b already holds that a login changes no configuration. Only a single curl whose every URL ends in an auth verb,
+    writing its cookies/output under /tmp, with nothing chained to it, is a login."""
+    s = str(seg or "").strip()
+    m = _LOGIN_WRAP_RE.match(s)
+    if m:
+        try:
+            parts = shlex.split(m.group("arg"))
+        except ValueError:
+            return False
+        if len(parts) != 1:
+            return False
+        s = parts[0].strip()
+    try:
+        lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return False
+    if not toks or toks[0] != "curl" or any(t and set(t) <= set(";&|<>()") for t in toks) or re.search(r"`|\$\(", s):
+        return False
+    if re.search(r"-X\s*['\"]?(?:PUT|PATCH|DELETE)\b", s, re.I):
+        return False
+    urls = list(_URL_PATH_RE.finditer(s))
+    if not urls:
+        return False
+    for u in urls:
+        seg_ = [x for x in (u.group("path") or "").split("/") if x]
+        if not seg_ or seg_[-1].lower() not in _AUTH_VERBS:
+            return False
+    return all(f.group("path").startswith(("/tmp/", "/dev/null")) for f in _LOGIN_FILE_RE.finditer(s))
+
+
 def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
@@ -2852,7 +2893,7 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     if run_is_the_check(runbook or ""):
         return []
     for c in commands:
-        segs = writing_segments(str(c))
+        segs = [s for s in writing_segments(str(c)) if not a_login_read(s)]
         if segs:
             local = local_form_of_a_read(segs[0])
             here = (f" Here that is `{local}`: on this machine the tool reaches its own device, so the address, login "
