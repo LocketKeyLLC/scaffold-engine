@@ -26,6 +26,7 @@ class Shape:
     wrong: Optional[re.Pattern] = None   # a draft pattern the shape rules out
     why: str = ""
     alone: Optional[re.Pattern] = None   # step wording that names this resource without naming the service
+    endpoint_re: Optional[re.Pattern] = None   # §17.1713 — how a draft spells the endpoint (base + '/queue' too)
 
 
 SHAPES: tuple[Shape, ...] = (
@@ -91,7 +92,14 @@ SHAPES: tuple[Shape, ...] = (
           "answer `{page, pageSize, totalRecords, records}` -- read every page until `totalRecords`. A queue record: "
           "`seriesId`, `episodeId`, `seasonNumber`, `title`, `status`, `trackedDownloadState`, `sizeleft`, `indexer`. "
           "A missing record is an episode: `seriesId`, `seasonNumber`, `episodeNumber`, `airDateUtc`, `monitored` "
-          "(`includeSeries=true` adds the series)."),
+          "(`includeSeries=true` adds the series).",
+          # §17.1713 — live (job e5e22b92 RC5, an operator-approved swap): `get('/queue?includeEpisode=true')` twice --
+          # Sonarr answers 10 records by default, so the step's item, among ~130, was not on that page
+          wrong=re.compile(r"""['"](?:[^'"\n]*/api/v3)?/(?:queue|wanted/missing)(?:\?(?![^'"\n]*page[Ss]ize)[^'"\n]*)?['"]"""),
+          why="Sonarr's `/queue` and `/wanted/missing` are PAGED -- 10 records by default -- and this call names no "
+              "`pageSize`, so it sees the first page only and misses (or acts on the wrong) item; pass `pageSize=1000` "
+              "or read every page until `totalRecords`",
+          endpoint_re=re.compile(r"/(?:api/v3/)?(?:queue|wanted/missing)\b")),
 )
 
 
@@ -133,7 +141,8 @@ def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]
         if s.wrong is None:
             continue
         for t in texts:
-            if s.endpoint not in t or (s.endpoint == "/api/v1/indexer" and "capabilities" in t):
+            if (s.endpoint not in t and not (s.endpoint_re and s.endpoint_re.search(t))) \
+                    or (s.endpoint == "/api/v1/indexer" and "capabilities" in t):
                 continue
             m = s.wrong.search(t)
             if m:
