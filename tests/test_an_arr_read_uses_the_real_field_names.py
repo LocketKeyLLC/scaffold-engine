@@ -52,7 +52,7 @@ def test_a_season_search_that_never_says_sonarr_gets_the_release_shape():
     """§17.1694b — live, job e5e22b92 T5 was drafted as a series list: its text never named Sonarr"""
     t5 = {"title": "Search Robot Chicken S11",
           "description": "Read-only: run interactive search for Robot Chicken Season 11 on TV-capable indexers. Do not grab."}
-    assert "/api/v3/release?seriesId=" in aas.drafter_block(t5)
+    assert "/api/v3/release?seriesId=" in aas.drafter_block(t5) and "plain STRINGS" in aas.drafter_block(t5)
     assert "/api/v3/release" not in aas.drafter_block({"title": "Search the logs", "description": "grep the journal."})
 
 
