@@ -746,9 +746,11 @@ def _api_names_the_checks_read(verify: list[str]) -> dict:
 
 
 #: §17.1698 — what writes a FILE (not an API): live, job e5e22b92 T13's program only opened Prowlarr's config.xml to read
-#: its <ApiKey> and changed the indexer with a PUT, and §17.1359 read the path's mere presence as "writes the config"
+#: its <ApiKey> and changed the indexer with a PUT, and §17.1359 read the path's mere presence as "writes the config".
+#: The template's own wrapper (`cat > /tmp/in_ct_N_remote.sh`, the unit's /root/.scaffold_step.* files) is not a write.
 _FILE_WRITE_RE = re.compile(
-    r"\bsed\s+(?:-[a-zA-Z]*i|--in-place)|(?<![<>&\d])>>?\s*['\"]?/|\btee\b|\b(?:cp|mv|install)\s+\S|"
+    r"\bsed\s+(?:-[a-zA-Z]*i|--in-place)|(?<![<>&\d])>>?\s*['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|\btee\b|"
+    r"\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|"
     r"\bopen\([^)]*,\s*['\"][wax+]|\.write\(|\.write_text\(|\bxmlstarlet\s+ed\b|\bET\.|ElementTree|\bperl\s+-[a-z]*i")
 
 
