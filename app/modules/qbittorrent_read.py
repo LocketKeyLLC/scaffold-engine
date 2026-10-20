@@ -58,14 +58,22 @@ READ_PY = (
 
 _QBT_RE = re.compile(r"\bq(?:bit(?:torrent)?|bt)\b", re.I)
 _READ_WORDS_RE = re.compile(r"\b(?:list|read|show|check|inspect|look|find|status|torrents?)\b", re.I)
-_QUOTED_RE = re.compile(r"""['"“‘]([^'"”’]{3,60})['"”’]""")
+#: §17.1711 — a quote opens and closes at a word boundary: the apostrophe in "Sonarr's" is not a quote
+_QUOTED_RE = re.compile(r"""(?<![\w])['"“‘]([^'"”’\n]{3,60})['"”’](?![\w])""")
+#: §17.1711 — qBittorrent is the step's SUBJECT: in its title, or "qBittorrent('s) torrents" / "torrents in qBittorrent"
+_SUBJECT_RE = re.compile(r"\bq(?:bit(?:torrent)?|bt)(?:'s)?\s+torrents?\b|\btorrents?\s+in\s+q(?:bit(?:torrent)?|bt)\b", re.I)
 
 
 def wants(node: Optional[dict]) -> bool:
-    """A step that only reads, about qBittorrent's torrents."""
+    """A step that only reads, about qBittorrent's torrents -- qBittorrent its subject, not a word in passing.
+
+    §17.1711 — live (job e5e22b92 PI1, a Sonarr manual-import preview that mentioned "its qBittorrent download client
+    settings"): the step was claimed and its "name filter" read from "Sonarr's container … find Sonarr"."""
     from app.modules.supervised_runs import only_reads
+    title = str((node or {}).get("title") or "")
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
-    return bool(_QBT_RE.search(text) and _READ_WORDS_RE.search(text) and only_reads(node))
+    subject = bool(_QBT_RE.search(title)) or bool(_SUBJECT_RE.search(text))
+    return bool(subject and _READ_WORDS_RE.search(text) and only_reads(node))
 
 
 def name_filter(node: Optional[dict]) -> list[str]:
