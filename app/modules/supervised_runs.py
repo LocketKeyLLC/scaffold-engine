@@ -8974,12 +8974,14 @@ _CLEAR_STALLED_PY = (
     "BASE='http://127.0.0.1:8989'; KEY=sys.argv[1]; REST=sys.argv[2:]; DRY='dry' in REST\n"
     # §17.1709 — an optional minimum age in hours ("added more than N hours ago" in the step)
     "MINH=next((float(a) for a in REST if re.fullmatch(r'[0-9.]+', a)), 0.0)\n"
+    # §17.1710 — an optional series scope ("--series=<title>", the series the step quotes)
+    "SERIES=next((a[9:].strip().lower() for a in REST if a.startswith('--series=')), '')\n"
     "def api(p,method='GET',body=None):\n"
     "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
     "data=json.dumps(body).encode() if body is not None else None)\n"
     "    u=urllib.request.urlopen(r,timeout=30); d=u.read()\n"
     "    return json.loads(d) if d else None\n"
-    "q=api('/api/v3/queue?pageSize=2000&includeUnknownSeriesItems=true') or {}\n"
+    "q=api('/api/v3/queue?pageSize=2000&includeUnknownSeriesItems=true&includeSeries=true') or {}\n"
     "recs=q.get('records') or []\n"
     "now=datetime.datetime.now(datetime.timezone.utc)\n"
     "def age_h(r):\n"
@@ -8996,10 +8998,11 @@ _CLEAR_STALLED_PY = (
     "    nometa=bool(re.fullmatch(r'[0-9A-Fa-f]{40}', str(r.get('title') or '')))\n"
     "    dead=('stall' in blob) or ('no connection' in blob) or ('no files found' in blob) or ('no peers' in blob) or nometa\n"
     "    if not dead: return False\n"
+    "    if SERIES and str((r.get('series') or {}).get('title') or '').lower()!=SERIES: return False\n"
     "    a=age_h(r)\n"
     "    return not MINH or (a is not None and a>=MINH)\n"
     "ids=[r.get('id') for r in recs if stalled(r) and r.get('id') is not None]\n"
-    "print('STALLED: %d of %d queue items%s' % (len(ids), len(recs), (' (added more than %g h ago)' % MINH) if MINH else ''))\n"
+    "print('STALLED: %d of %d queue items%s%s' % (len(ids), len(recs), (' of %s' % SERIES) if SERIES else '', (' (added more than %g h ago)' % MINH) if MINH else ''))\n"
     "if DRY:\n"
     "    print('WOULD REMOVE %d (blocklist) then re-search them' % len(ids)); sys.exit(0)\n"
     "if ids:\n"
@@ -9038,7 +9041,11 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
     if not gid:
         return list(commands or []), list(verify or []), []
     _minh = re.search(r"\bmore than\s+(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b", text, re.I)    # §17.1709
-    payload = f'python3 -c "{_CLEAR_STALLED_PY}" "<SONARR_API_KEY>"' + (f' "{_minh.group(1)}"' if _minh else "")
+    # §17.1710 — the series the step quotes ('How I Met Your Mother'), so one show's stalls are cleared, not every show's
+    _series = next((m.group(1).strip() for m in re.finditer(r"""['"“‘]([A-Za-z0-9][\w .:&!,-]{2,60})['"”’]""", text)
+                    if not re.search(r"(?i)\b(?:queue|stall|torrent|hash|metadata)\b", m.group(1))), "")
+    payload = (f'python3 -c "{_CLEAR_STALLED_PY}" "<SONARR_API_KEY>"' + (f' "{_minh.group(1)}"' if _minh else "")
+               + (f' "--series={_series}"' if _series else ""))
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
     check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
              f'-w "sonarr queue API HTTP %{{http_code}}" -H "X-Api-Key: $SONARR_API_KEY" '

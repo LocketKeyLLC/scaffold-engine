@@ -132,3 +132,22 @@ def test_the_steps_age_reaches_the_program():
             "prompt_template": "select the items whose title is a bare hash AND that were added more than 6 hours ago"}
     cmds, _v, _n = rewrite_clear_stalled(node, ["x"], ["y"], SERVICES, INV)
     assert cmds[0].rstrip("'").endswith('"<SONARR_API_KEY>" "6"'), cmds[0][-60:]
+
+
+def test_a_quoted_series_scopes_the_clear_to_that_show():
+    """§17.1710 — "clear the stalled 'How I Met Your Mother' downloads" must not clear every show's stalls"""
+    himym = {"title": "How I Met Your Mother"}
+    recs = [{"id": 1, "title": "How.I.Met.Your.Mother.S06E20.720p", "series": himym, "status": "warning", "added": _ago(3),
+             "statusMessages": [{"messages": ["The download is stalled with no connections"]}]},
+            {"id": 2, "title": "%040x" % 0xc1a9, "series": himym, "status": "queued", "added": _ago(3), "statusMessages": []},
+            {"id": 3, "title": "Power.Rangers.S26E01", "series": {"title": "Power Rangers"}, "added": _ago(3),
+             "statusMessages": [{"messages": ["The download is stalled with no connections"]}]},
+            {"id": 4, "title": "How.I.Met.Your.Mother.S06E07.720p", "series": himym, "status": "downloading", "added": _ago(3)}]
+    out, calls = _run_stub({"records": recs, "totalRecords": 4}, "--series=How I Met Your Mother")
+    dels = [c for c in calls if c[0] == "DELETE"]
+    assert "STALLED: 2 of 4 queue items of how i met your mother" in out
+    assert sorted(dels[0][2]["ids"]) == [1, 2]
+    node = {"title": "Clear the stalled HIMYM downloads",
+            "prompt_template": "Remove the stalled downloads of 'How I Met Your Mother' through Sonarr's queue."}
+    cmds, _v, _n = rewrite_clear_stalled(node, ["x"], ["y"], SERVICES, INV)
+    assert '"--series=How I Met Your Mother"' in cmds[0]
