@@ -7644,9 +7644,36 @@ async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[d
             or a_read_only_program(waiting, waiting.get("files") or [], waiting.get("commands") or [])):   # §17.1680c/1694d
         return []
     own = "\n".join(str(e.get("output") or "") for e in executed or [])[-6000:]
-    return contradicted(await _verify_verdicts(
+    verdicts = await _verify_verdicts(
         goal_claim(str(waiting.get("title") or node_key), str((waiting.get("description") or ""))),
-        ["(this block's own reads)"], "== V1 ==\n" + (own.strip() or "(it printed nothing)")))
+        ["(this block's own reads)"], "== V1 ==\n" + (own.strip() or "(it printed nothing)"))
+    against = contradicted(verdicts)
+    if against:
+        return against
+    # §17.1706 — `contradicted` alone downgrades so an unsure judge never fails real WORK; a read has no work to
+    # protect. Live (job e5e22b92 SC4 "Read Scrubs S1 pack grab and queue"): the program looked Scrubs up by the wrong
+    # id, printed only "Scrubs series not found", and the judge answered `unknown` ("the claim's expected queue listing
+    # is not demonstrated") -- recorded done. A read the judge cannot confirm, that printed almost nothing, is not done.
+    substance = read_substance(own)
+    if (verdicts and not any(str(v.get("verdict") or "") == "confirmed" for v in verdicts)
+            and len(substance) <= READ_SUBSTANCE_MIN_LINES):
+        shown = "; ".join(substance) or "nothing"
+        return [{"id": "V1", "verdict": "contradicted", "reason": (
+            f"this read printed only {shown!r}, and nothing in it shows what the step asked for (the judge: "
+            f"{str((verdicts[0] or {}).get('reason') or 'unknown')[:200]}). A read that shows nothing is not done.")}]
+    return []
+
+
+#: §17.1706 — the in-guest template's own lines, which are not what a read found
+_TEMPLATE_CHATTER_RE = re.compile(
+    r"^\s*(?:started scaffold-\S+ inside \d+|scaffold-\S+ finished \(exit \d+\)|STILL RUNNING: .*|"
+    r"\(the log was printed by the phase that saw .*\)|wrote /tmp/\S+ \(\d+ bytes.*\)|\$ .*|-- exit \d+)\s*$")
+READ_SUBSTANCE_MIN_LINES = 2
+
+
+def read_substance(output: str) -> list[str]:
+    """§17.1706 — the lines a read printed that are its findings, not the template's start/wait/finish chatter."""
+    return [ln.strip() for ln in str(output or "").splitlines() if ln.strip() and not _TEMPLATE_CHATTER_RE.match(ln)]
 
 
 async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
