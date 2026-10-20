@@ -153,3 +153,19 @@ def test_the_templates_keep_enough_of_a_reads_output():
     for t in (rt.RUN_IN_CONTAINER, rt.RUN_IN_VM_VIA_AGENT):
         body = "".join(t.files.values())
         assert "tail -n 300" in body and "tail -n 60 " not in body, t.name
+
+
+# --- §17.1693: the "no check" refusal names the shape a read-only step is accepted in ------------------------------
+
+LOOP = ('API_KEY=$(grep -oP "(?<=<ApiKey>)[^<]+" /var/lib/sonarr/config.xml)\n'
+        'while true; do\n  R=$(curl -s "http://localhost:8989/api/v3/queue?page=$P&apikey=$API_KEY")\n'
+        '  N=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin)[\'records\']))")\n'
+        '  [ "$N" -eq 0 ] && break; P=$((P+1))\ndone')
+
+
+def test_a_refused_read_is_told_the_shape_that_passes():
+    f = _frame(LOOP, "Read full Sonarr queue")                       # live, job e5e22b92 T2's redraft (shape)
+    hit = [r for r in f["refused"] if "no check at all" in r["why"]]
+    assert hit and "python3 - <<'PY'" in hit[0]["why"] and "SUMMARY" in hit[0]["why"], f["refused"]
+    change = {"title": "Change Sonarr's port", "prompt_template": "Set Sonarr's port to 9999."}
+    assert sr._read_only_shape_hint(change) == ""                     # a change is still told to add a check

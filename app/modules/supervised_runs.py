@@ -2793,6 +2793,22 @@ def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], v
         f"no address, login or password is asked")}]
 
 
+def _read_only_shape_hint(node: Optional[dict]) -> str:
+    """§17.1693 — for a step that only reads, the "no check" refusal names the shape that IS its own evidence.
+
+    Live (job e5e22b92 T2 "Read full Sonarr queue", redrafted twice): a shell `while` loop of curl pages with
+    `python3 -c` fragments was refused "no check at all" -- §17.1608 marks only plain read lines and §17.1680c only a
+    single python program -- and the refusal told the drafter to add a check, which a read does not need. The engine
+    names the shape it accepts, and the summary §17.1691 requires."""
+    if not declares_read_only(node):
+        return ""
+    return (" This step only READS, so it needs no separate check when the in-guest block is ONE `python3 - <<'PY'` "
+            "program and nothing else (§17.1680c): read the key from the service's config file, call the API with "
+            "urllib (GET only, every page until `totalRecords` is reached), and print a SUMMARY -- the totals, then one "
+            "short line per item with only the fields the step needs -- never the raw JSON, which the record cannot "
+            "hold (§17.1691). Its own output is then judged against the step's goal.")
+
+
 #: §17.1680 — the line §17.1608 puts at the head of an in-guest block that only reads
 READS_ONLY_MARKER = "§17.1608: this block only reads"
 
@@ -6643,7 +6659,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
-            "the service active -- not the command that made it.")}]
+            "the service active -- not the command that made it." + _read_only_shape_hint(node))}]
         _no_check, verify, _engine_fills = fill_what_the_engine_holds(
             _no_check, cmds, verify, inventory)
         refused = refused + _no_check
