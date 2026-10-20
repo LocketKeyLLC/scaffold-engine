@@ -1139,6 +1139,14 @@ class ContentCut(RuntimeError):
     fence never closed) twice, at the normal cap and at three times it."""
 
 
+def _sr_only_reads(node: dict) -> bool:
+    from app.modules.supervised_runs import only_reads
+    try:
+        return only_reads(node)
+    except Exception:
+        return False
+
+
 def content_is_cut(raw_text: str) -> bool:
     """An opening fence with no closing fence is a draw that ran out of tokens.
     Live, ADD100's 139-line server.js ended `const runRes = await axios.post(
@@ -1371,6 +1379,12 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     out: dict[str, str] = {}
     base_cap = min(1500, int(getattr(settings, "node_generation_max_tokens", 1500) or 1500))
     for p in free:
+        # §17.1701 — a step that only READS is its own evidence (§17.1680): no separate check is drawn. Live (job e5e22b92
+        # R3 "Search each missing Scrubs S1 episode"), the draw for Sonarr's container came back `ls -la
+        # /opt/palworld/PalServer.sh` -- a check of another guest's game server, which would have failed a good read.
+        if p.name == "VERIFY_INSIDE" and _sr_only_reads(node):
+            out[p.name] = ""
+            continue
         prompt = (f"STEP: {node.get('title') or ''}\n\n{_text(node)}\n\n{brief_text[:4000]}\n\n{context}{note}"
                   f"Write the {p.hint} for this step.")
         text = ""
