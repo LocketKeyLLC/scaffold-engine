@@ -1070,7 +1070,15 @@ FREE_PARAM_SYSTEM_VERIFY = (
     "You fill ONE parameter of a fixed, already-approved script: a single READ-ONLY command that runs inside a "
     "guest machine and whose output shows whether THIS step's goal is already met (df, ls, cat, systemctl "
     "is-active, dpkg -l, ss, ip). Check what this step itself leaves behind: for an install, the binary, "
-    "directory or file it installs (`ls -la /opt/palworld/PalServer.sh`), not a service a later step creates. "
+    "directory or file it installs (`ls -la /opt/<app>/<binary>`, with the step's own path), not a service a later "
+    "step creates. "
+    # §17.1703 — live (job e5e22b92): R3, a read of Sonarr, drew this prompt's old literal example
+    # `ls -la /opt/palworld/PalServer.sh` as its check; RC3, a grab through Sonarr's API, drew `curl … | python3 -c …`
+    # twice, which the runner's read channel refuses, and the step was refused "no check at all".
+    "For a change made through a service's HTTP API, read it back through that API: `curl -s` the endpoint with the "
+    "key read from the service's config file inside the guest, piped to `grep -o` for the fields that show the change. "
+    "NEVER a program (`python3 -c`, `perl -e`, `node -e`): the runner's read channel refuses them and the check is "
+    "dropped. One line, at most 800 characters. "
     # §17.1355 — live, ADD132's check was `ls -la /tmp/in_ct_103.sh`: the engine's OWN
     # wrapper, on the wrong machine, proving nothing. The slot never said that path
     # was not the step's to look at.
