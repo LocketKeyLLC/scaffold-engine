@@ -6572,6 +6572,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _qb:
         cmds, verify = _qb[0], _qb[1]
         _comp_notes = list(_comp_notes) + [{"why": _qb[2]}]
+    # §17.1715 — "add the public tracker list to qBittorrent (new downloads / the stuck torrents)": login in its guest.
+    from app.modules import qbittorrent_trackers as _qtr
+    _tr = _qtr.block(node, lambda: _arr_guest("qbittorrent", services, inventory))
+    if _tr:
+        cmds, verify = _tr[0], _tr[1]
+        _comp_notes = list(_comp_notes) + [{"why": _tr[2]}]
     # §17.1712 — "import FOLDER … -> SEASON n": Sonarr's own preview, mapped by each file's own number, ONE ManualImport.
     from app.modules import arr_manual_import as _ami
     _mi = _ami.block(node, lambda: _arr_guest("sonarr", services, inventory))
