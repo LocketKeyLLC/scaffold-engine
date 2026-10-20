@@ -1713,7 +1713,10 @@ class Settings(BaseSettings):
     max_upstream_chars: int = Field(default=24000, ge=100, le=200000)
     # §17.1653 — a REPORT step summarises every step of the job: at 8,000 chars over 45 sections each kept ~40 chars and
     # the report named steps from fragments (job 5db1b088 T31). Its own, larger budget.
-    max_report_upstream_chars: int = Field(default=40000, ge=1000, le=200000)
+    # §17.1700 — 100000: live (job e5e22b92 P1, a per-series fix plan over ten inputs) 88,816 chars were cut to 40,000
+    # and the one input it most needed (M4, which episodes are missing) lost its last series. The cloud models a report
+    # runs on read far more than that.
+    max_report_upstream_chars: int = Field(default=100000, ge=1000, le=200000)
     # §17.477 (Phase 3) — when over max_upstream_chars, allocate each upstream
     # node's surviving char budget by (verifier confidence × length) instead of
     # length alone, so higher-confidence upstream context is preserved. NULL

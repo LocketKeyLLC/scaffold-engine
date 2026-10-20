@@ -44,3 +44,9 @@ def test_wired_for_report_steps_only():
     src = inspect.getsource(ea)
     assert "_context_keys = list(dict.fromkeys(list(depends_on) + await _settled_keys(db, job_id, node_key)))" in src
     assert "budget=settings.max_report_upstream_chars if _reports else None" in src
+
+
+def test_the_report_budget_holds_the_live_plan_inputs():
+    """§17.1700 — live, job e5e22b92 P1's ten inputs were 88,816 chars; at 40,000 its key input lost a series"""
+    from app.config import Settings
+    assert Settings.model_fields["max_report_upstream_chars"].default >= 88_816
