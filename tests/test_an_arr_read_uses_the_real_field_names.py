@@ -46,3 +46,11 @@ def test_the_live_draft_is_refused_and_the_right_one_is_not():
 def test_both_ends_are_wired():
     assert "_aas.drafter_block(run_node)" in inspect.getsource(ea)
     assert "_wrong_fields(cmds, shape_files)" in inspect.getsource(sr.frame_run)
+
+
+def test_a_season_search_that_never_says_sonarr_gets_the_release_shape():
+    """§17.1694b — live, job e5e22b92 T5 was drafted as a series list: its text never named Sonarr"""
+    t5 = {"title": "Search Robot Chicken S11",
+          "description": "Read-only: run interactive search for Robot Chicken Season 11 on TV-capable indexers. Do not grab."}
+    assert "/api/v3/release?seriesId=" in aas.drafter_block(t5)
+    assert "/api/v3/release" not in aas.drafter_block({"title": "Search the logs", "description": "grep the journal."})

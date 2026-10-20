@@ -25,6 +25,7 @@ class Shape:
     text: str               # what the drafter is shown
     wrong: Optional[re.Pattern] = None   # a draft pattern the shape rules out
     why: str = ""
+    alone: Optional[re.Pattern] = None   # step wording that names this resource without naming the service
 
 
 SHAPES: tuple[Shape, ...] = (
@@ -62,7 +63,9 @@ SHAPES: tuple[Shape, ...] = (
           "Sonarr's indexers and returns the releases WITHOUT grabbing any (a grab is `POST /api/v3/release`); per "
           "release: `title`, `indexer`, `size`, `seeders`, `quality.quality.name`, `rejected`, `rejections` (why Sonarr "
           "would not take it). It can take a minute or more: give urllib a long timeout. Print counts and one short line "
-          "per release, never the raw list."),
+          "per release, never the raw list.",
+          alone=re.compile(r"\binteractive\s+search\b[^.]*?(?:\bS\d{1,2}\b|\bseasons?\b|\bepisodes?\b)|"
+                           r"\bsearch\s+\S.{0,60}?\bS\d{1,2}(?:E\d{1,3})?\b", re.I)),
     Shape("sonarr", re.compile(r"\bindexers?\b", re.I), "/api/v3/indexer",
           "Sonarr `GET /api/v3/indexer` -> the indexers Sonarr itself holds (Prowlarr's synced ones end in "
           "\"(Prowlarr)\"): `id`, `name`, `enableRss`, `enableAutomaticSearch`, `enableInteractiveSearch`, `priority`, "
@@ -84,7 +87,9 @@ def _text(node: Optional[dict]) -> str:
 def for_step(node: Optional[dict]) -> list[Shape]:
     """The shapes a step needs: its text names the service and the resource."""
     text = _text(node)
-    return [s for s in SHAPES if re.search(rf"\b{s.service}\b", text, re.I) and s.resource.search(text)]
+    # §17.1694b — "run interactive search for Robot Chicken Season 11" names Sonarr's release search without "Sonarr"
+    return [s for s in SHAPES if (re.search(rf"\b{s.service}\b", text, re.I) and s.resource.search(text))
+            or (s.alone is not None and s.alone.search(text))]
 
 
 def drafter_block(node: Optional[dict]) -> str:
