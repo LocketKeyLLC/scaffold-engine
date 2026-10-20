@@ -8970,8 +8970,10 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
 #: again), then MissingEpisodeSearch so Sonarr re-grabs better-seeded releases. Two API calls, no
 #: loop (the bulk endpoint clears all at once — within the 180 s budget). Single-quoted Python only.
 _CLEAR_STALLED_PY = (
-    "import sys,json,urllib.request\n"
-    "BASE='http://127.0.0.1:8989'; KEY=sys.argv[1]; DRY=len(sys.argv)>2 and sys.argv[2]=='dry'\n"
+    "import sys,json,re,urllib.request,datetime\n"
+    "BASE='http://127.0.0.1:8989'; KEY=sys.argv[1]; REST=sys.argv[2:]; DRY='dry' in REST\n"
+    # §17.1709 — an optional minimum age in hours ("added more than N hours ago" in the step)
+    "MINH=next((float(a) for a in REST if re.fullmatch(r'[0-9.]+', a)), 0.0)\n"
     "def api(p,method='GET',body=None):\n"
     "    r=urllib.request.Request(BASE+p,method=method,headers={'X-Api-Key':KEY,'Content-Type':'application/json'},"
     "data=json.dumps(body).encode() if body is not None else None)\n"
@@ -8979,6 +8981,10 @@ _CLEAR_STALLED_PY = (
     "    return json.loads(d) if d else None\n"
     "q=api('/api/v3/queue?pageSize=2000&includeUnknownSeriesItems=true') or {}\n"
     "recs=q.get('records') or []\n"
+    "now=datetime.datetime.now(datetime.timezone.utc)\n"
+    "def age_h(r):\n"
+    "    try: return (now-datetime.datetime.fromisoformat(str(r.get('added') or '').replace('Z','+00:00'))).total_seconds()/3600\n"
+    "    except Exception: return None\n"
     "def stalled(r):\n"
     # §17.1515 — target a DEAD download (no seeders), not an import problem. An importBlocked/
     # importPending item downloaded fine and is stuck on naming — blocklisting it would discard a
@@ -8986,23 +8992,29 @@ _CLEAR_STALLED_PY = (
     "    state=str(r.get('trackedDownloadState') or '').lower()\n"
     "    if state in ('importblocked','importpending','importing'): return False\n"
     "    blob=(json.dumps(r.get('statusMessages') or [])+' '+str(r.get('errorMessage') or '')).lower()\n"
-    "    return ('stall' in blob) or ('no connection' in blob) or ('no files found' in blob) or ('no peers' in blob)\n"
+    # §17.1709 — and a magnet that never fetched its metadata: the queue titles it by its bare 40-hex hash
+    "    nometa=bool(re.fullmatch(r'[0-9A-Fa-f]{40}', str(r.get('title') or '')))\n"
+    "    dead=('stall' in blob) or ('no connection' in blob) or ('no files found' in blob) or ('no peers' in blob) or nometa\n"
+    "    if not dead: return False\n"
+    "    a=age_h(r)\n"
+    "    return not MINH or (a is not None and a>=MINH)\n"
     "ids=[r.get('id') for r in recs if stalled(r) and r.get('id') is not None]\n"
-    "print('STALLED: %d of %d queue items' % (len(ids), len(recs)))\n"
+    "print('STALLED: %d of %d queue items%s' % (len(ids), len(recs), (' (added more than %g h ago)' % MINH) if MINH else ''))\n"
     "if DRY:\n"
-    "    print('WOULD REMOVE %d (blocklist) then re-search' % len(ids)); sys.exit(0)\n"
+    "    print('WOULD REMOVE %d (blocklist) then re-search them' % len(ids)); sys.exit(0)\n"
     "if ids:\n"
     "    try:\n"
     "        api('/api/v3/queue/bulk?removeFromClient=true&blocklist=true&skipRedownload=false','DELETE',{'ids':ids})\n"
     "        print('REMOVED %d stalled (blocklisted)' % len(ids))\n"
     "    except Exception as e:\n"
-    "        print('FAILED bulk remove: %r' % e)\n"
-    "try:\n"
-    "    api('/api/v3/command','POST',{'name':'MissingEpisodeSearch'}); print('RE-SEARCH: MissingEpisodeSearch triggered')\n"
-    "except Exception as e:\n"
-    "    print('RE-SEARCH failed: %r' % e)\n"
-    "print('RESULT: cleared %d stalled, re-search running' % len(ids))\n"
+    "        print('FAILED bulk remove: %r' % e); sys.exit(1)\n"
+    # §17.1709 — skipRedownload=false already re-searches EXACTLY the removed episodes; the library-wide
+    # MissingEpisodeSearch this used to add hit ~1000 missing episodes on indexers already answering 429.
+    "print('RE-SEARCH: Sonarr searches the %d removed episodes again (skipRedownload=false)' % len(ids))\n"
+    "print('RESULT: cleared %d stalled' % len(ids))\n"
 )
+
+
 _CLEAR_STALLED_RE = re.compile(r"\b(?:clear|remove|purge|cancel|clean)\b.*\b(?:stalled|stuck|dead|failed)\b|\bstalled\b.*\b(?:download|torrent|queue)\b", re.I)
 
 
@@ -9025,16 +9037,19 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
     gid = _arr_guest("sonarr", services, inventory)
     if not gid:
         return list(commands or []), list(verify or []), []
-    payload = f'python3 -c "{_CLEAR_STALLED_PY}" "<SONARR_API_KEY>"'
+    _minh = re.search(r"\bmore than\s+(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b", text, re.I)    # §17.1709
+    payload = f'python3 -c "{_CLEAR_STALLED_PY}" "<SONARR_API_KEY>"' + (f' "{_minh.group(1)}"' if _minh else "")
     run = f"pct exec {gid} -- sh -c {_sq_payload(payload)}"
     check = (f'pct exec {gid} -- curl -s --fail-with-body -o /dev/null '
              f'-w "sonarr queue API HTTP %{{http_code}}" -H "X-Api-Key: $SONARR_API_KEY" '
              f'"http://127.0.0.1:8989/api/v3/queue?pageSize=1"')
     note = [{"why": (
         f"drafted the clear-stalled from the engine's own shape (§17.1515): inside guest {gid} it reads the "
-        f"Sonarr queue, bulk-removes every stalled/errored item with blocklist=true (so the dead release is not "
-        f"grabbed again) and removeFromClient=true (drops the partials from qBittorrent), then triggers "
-        f"MissingEpisodeSearch to pull better-seeded releases — two API calls, no per-item loop.")}]
+        f"Sonarr queue, bulk-removes every stalled/errored item -- and every magnet that never fetched its metadata "
+        f"(titled by its bare hash){(' added more than ' + _minh.group(1) + ' h ago') if _minh else ''} -- with "
+        f"blocklist=true (so the dead release is not grabbed again), removeFromClient=true (drops the partials from "
+        f"qBittorrent) and skipRedownload=false (Sonarr searches those episodes again) -- one API call, no loop, no "
+        f"library-wide search (§17.1709).")}]
     return [run], [check], note
 
 
