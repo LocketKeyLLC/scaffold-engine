@@ -80,7 +80,7 @@ def test_an_indexer_change_is_shown_test_put_and_read_back():
                           "Torrent Downloads (Prowlarr's own indexer test); re-enable each one that passes."}
     b = aas.drafter_block(t13)
     assert "POST /api/v1/indexer/test` and that WHOLE object" in b and "PUT /api/v1/indexer/{id}" in b
-    assert "SEPARATE Verify" in b
+    assert "SEPARATE Verify" in b and "PRETTY-PRINTS" in b and "/api/v1/indexer/{id}` (its numeric id)" in b
     assert "python3 - <<'PY'" not in b                         # a change gets no read-only shape
     live = {"path": "/tmp/in_ct_102.sh", "content": "<<'REMOTE'\nindexers = get(\"/api/v1/indexer\")\n"
             "result = post(f\"/api/v1/indexer/test/{idx['id']}\", {})\nREMOTE\n"}

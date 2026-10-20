@@ -46,9 +46,11 @@ SHAPES: tuple[Shape, ...] = (
           "`POST /api/v1/indexer/test` and that WHOLE object as the body (a 400 lists why it fails; there is no "
           "`/indexer/test/{id}`); change it with `PUT /api/v1/indexer/{id}` and the WHOLE object with the field changed "
           "(e.g. `enable: true`) -- never POST to save, never a partial body. The step's CHECK is a SEPARATE Verify "
-          "command, not a read inside the program (a change is never its own evidence): inside the guest, `GET "
-          "/api/v1/indexer` with the key read from config.xml, piped to `grep -o` for each changed indexer's "
-          "`\"name\"` and `\"enable\"` -- never the whole object, whose `fields` hold credentials.",
+          "command, not a read inside the program (a change is never its own evidence): ONE per changed indexer, "
+          "inside the guest, `GET /api/v1/indexer/{id}` (its numeric id) with the key read from config.xml, piped to "
+          "`grep -o '\"enable\": *[a-z]*\\|\"name\": *\"[^\"]*\"'` -- Prowlarr PRETTY-PRINTS its JSON, so a grep "
+          "that pairs `name` and `enable` on one line matches nothing, before the change or after it (live, T13). "
+          "Never print the whole object: its `fields` hold credentials.",
           re.compile(r"/indexer/test/(?:\{|\d|['\"]\s*\+|%)"),
           "Prowlarr has no `/api/v1/indexer/test/{id}`: the test is `POST /api/v1/indexer/test` with the indexer's whole "
           "object as the body, so this call answers 404/405 and tests nothing"),
