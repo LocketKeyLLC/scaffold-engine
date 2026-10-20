@@ -54,3 +54,13 @@ def test_a_season_search_that_never_says_sonarr_gets_the_release_shape():
           "description": "Read-only: run interactive search for Robot Chicken Season 11 on TV-capable indexers. Do not grab."}
     assert "/api/v3/release?seriesId=" in aas.drafter_block(t5)
     assert "/api/v3/release" not in aas.drafter_block({"title": "Search the logs", "description": "grep the journal."})
+
+
+def test_a_read_is_drafted_in_the_accepted_shape_from_the_first_draft():
+    """§17.1694c — live, T5's draft asked for <SONARR_SERIES_ID> and checked with `"id"`"""
+    t5 = {"title": "Search Robot Chicken S11",
+          "description": "Read-only: run interactive search for Robot Chicken Season 11 on TV-capable indexers. Do not grab."}
+    b = aas.drafter_block(t5)
+    assert "python3 - <<'PY'" in b and "never ask for an id" in b
+    change = {"title": "Widen TV-capable categories", "description": "Change Prowlarr's indexer categories."}
+    assert aas.drafter_block(change) and "python3 - <<'PY'" not in aas.drafter_block(change)

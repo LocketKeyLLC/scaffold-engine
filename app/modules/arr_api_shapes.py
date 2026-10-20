@@ -96,8 +96,18 @@ def drafter_block(node: Optional[dict]) -> str:
     shapes = for_step(node)
     if not shapes:
         return ""
-    return "\n".join(["## The API shapes this step reads (the engine's record of these services)",
-                      "Use these field names; do not guess others.", ""] + [f"- {s.text}" for s in shapes])
+    lines = ["## The API shapes this step reads (the engine's record of these services)",
+             "Use these field names; do not guess others.", ""] + [f"- {s.text}" for s in shapes]
+    # §17.1694c — a read is drafted in the shape the engine accepts as its own evidence, from the first draft: live,
+    # job e5e22b92 T5's draft asked the operator for <SONARR_SERIES_ID> (Sonarr holds it) and checked with `"id"`
+    from app.modules.supervised_runs import declares_read_only
+    if declares_read_only(node):
+        lines += ["", "This step only READS. Write its in-guest block as ONE `python3 - <<'PY'` program and nothing else: "
+                  "read the API key from the service's config.xml, look up every id the step needs by name inside the "
+                  "program (e.g. the series by `title` from `GET /api/v3/series`) -- never ask for an id the service "
+                  "holds -- make only GET calls with urllib, and print a SUMMARY (totals, then one short line per item). "
+                  "It needs no separate check: its own output is judged against the step's goal."]
+    return "\n".join(lines)
 
 
 def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]:
