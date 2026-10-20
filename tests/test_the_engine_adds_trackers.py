@@ -64,8 +64,9 @@ class _Qbt(BaseHTTPRequestHandler):
         if p == "/api/v2/app/setPreferences":
             _Qbt.prefs.update(json.loads(body["json"][0]))
         if p == "/api/v2/torrents/addTrackers":
-            for h in body["hashes"][0].split("|"):
-                _Qbt.trackers[h] = body["urls"][0].split("\n")
+            if "hash" not in body:                       # §17.1715b — the real qBittorrent 4.5 answers 400 to `hashes`
+                self.send_response(400); self.end_headers(); return
+            _Qbt.trackers[body["hash"][0]] = body["urls"][0].split("\n")
         self._ok(b"")
 
 
@@ -88,7 +89,8 @@ def test_the_live_request_sets_new_downloads_and_fixes_only_the_stuck_torrents()
     assert r.returncode == 0, r.stdout + r.stderr
     assert _Qbt.prefs["add_trackers_enabled"] is True and len(_Qbt.prefs["add_trackers"].split("\n")) == 6
     adds = [c for c in _Qbt.calls if c[0] == "POST" and c[1] == "/api/v2/torrents/addTrackers"]
-    assert len(adds) == 1 and adds[0][2]["hashes"] == ["h1|h2"]                 # the seeding Scrubs pack is left alone
+    assert sorted(a[2]["hash"][0] for a in adds) == ["h1", "h2"]                # one call per torrent; Scrubs left alone
+    assert sorted(_Qbt.trackers) == ["h1", "h2"] and "ADDED: trackers to 2 of 2 stuck torrents" in r.stdout
     assert any(c[0] == "POST" and c[1] == "/api/v2/torrents/reannounce" for c in _Qbt.calls)
     assert "NEW DOWNLOADS: add_trackers_enabled=True, 6 trackers set" in r.stdout and "STUCK: 2 torrents" in r.stdout
     assert "s3cret" not in r.stdout + r.stderr
