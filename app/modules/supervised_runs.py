@@ -2716,6 +2716,28 @@ def declares_read_only(node: Optional[dict]) -> bool:
     return bool(_READ_ONLY_STEP_RE.search(work))
 
 
+#: §17.1695 — a verification step: its title leads with a reading verb and nothing in its text changes anything
+_VERIFY_TITLE_RE = re.compile(r"^\s*(?:[A-Z]+\d*\s*[:—-]\s*)?(?:verify|confirm|check|list|count|recount|show|inspect|"
+                              r"measure|audit)\b", re.I)
+_CHANGE_VERB_RE = re.compile(r"\b(?:add|set|change|enable|re-?enable|disable|delete|remove|install|uninstall|restart|"
+                             r"stop|start|fix|update|widen|map|grab|apply|create|write|edit|move|rename|replace|"
+                             r"trigger|queue|search(?:es)?\s+for)\b", re.I)
+
+
+def only_reads(node: Optional[dict]) -> bool:
+    """§17.1695 — a step whose output is its evidence: one that declares it changes nothing (§17.1637), or a
+    verification step -- its title leads with verify/confirm/check/list/recount… and its text names no change.
+
+    Live (job e5e22b92 T11 "Verify Sonarr indexers", text "List Sonarr's indexers to confirm all TV-capable enabled
+    indexers are present."): one read-only python program, refused "this block has no check at all" because the
+    text never says "read-only". A check of a check is not a thing; what it read is the answer."""
+    if declares_read_only(node):
+        return True
+    title = str((node or {}).get("title") or "")
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    return bool(_VERIFY_TITLE_RE.match(title)) and not _CHANGE_VERB_RE.search(text)
+
+
 #: §17.1637b — the options that send a tool to a REMOTE copy of what it reads locally: ipmitool's interface, host,
 #: login and password (`-I lanplus -H <BMC_IP> -U <BMC_USER> -P …`). On the machine whose BMC it is, the same read
 #: needs none of them.
@@ -2802,7 +2824,7 @@ def _read_only_shape_hint(node: Optional[dict]) -> str:
     `python3 -c` fragments was refused "no check at all" -- §17.1608 marks only plain read lines and §17.1680c only a
     single python program -- and the refusal told the drafter to add a check, which a read does not need. The engine
     names the shape it accepts, and the summary §17.1691 requires."""
-    if not declares_read_only(node):
+    if not only_reads(node):                                          # §17.1695
         return ""
     return (" This step only READS, so it needs no separate check when the in-guest block is ONE `python3 - <<'PY'` "
             "program and nothing else (§17.1680c): read the key from the service's config file, call the API with "
@@ -2841,7 +2863,7 @@ def a_read_only_program(node: Optional[dict], files: Optional[list[dict]],
     (and no other shell work), is a read-only block like §17.1608's. Live (job c2518102 T2): an all-pages python read of
     Sonarr's missing list was refused "no check at all" -- §17.1608 classifies shell lines, and a program could do
     anything, so the engine looks inside it."""
-    if not declares_read_only(node):
+    if not only_reads(node):                                          # §17.1695
         return False
     bodies = [m.group("body") for f in files or [] for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))]
     if not bodies:
@@ -7503,7 +7525,7 @@ def a_read_was_cut(waiting: Optional[dict], executed: list[dict]) -> str:
     tenth cut mid-field; T2 "Read full Sonarr queue" printed Sonarr's pretty JSON and the in-guest template kept the
     last 300 lines -- 7 of 91 records. Only a step that declares it changes nothing is judged: a change's output is not
     its evidence, its checks are."""
-    if not declares_read_only(waiting):
+    if not only_reads(waiting):                                       # §17.1695
         return ""
     from app.modules.rehearsal import RUNNER_OUTPUT_CAP
     for e in executed or []:
