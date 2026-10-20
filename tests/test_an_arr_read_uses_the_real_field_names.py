@@ -88,3 +88,17 @@ def test_an_indexer_change_is_shown_test_put_and_read_back():
     assert hit and "no `/api/v1/indexer/test/{id}`" in hit[0]["why"]
     right = dict(live, content=live["content"].replace("f\"/api/v1/indexer/test/{idx['id']}\", {}", "\"/api/v1/indexer/test\", idx"))
     assert aas.wrong_fields(["x"], [right]) == []
+
+
+def test_a_paged_list_read_without_a_page_size_is_refused():
+    """§17.1713 — live, job e5e22b92 RC5 read `get('/queue?includeEpisode=true')` twice: 10 of ~130 records"""
+    live = {"path": "/tmp/in_ct_104.sh", "content": ("<<'REMOTE'\nbase = 'http://localhost:8989/api/v3'\n"
+            "queue = get('/queue?includeEpisode=true')\nREMOTE\n")}
+    hit = aas.wrong_fields(["bash /tmp/in_ct_104.sh start"], [live])
+    assert hit and "PAGED" in hit[0]["why"] and "queue?includeEpisode" in hit[0]["command"]
+    for ok in ("queue = get('/queue?includeEpisode=true&pageSize=1000')",
+               "q = api('/api/v3/queue?pageSize=2000&includeUnknownSeriesItems=true')",
+               "data = get(f'/wanted/missing?page={page}&pageSize={page_size}&includeSeries=true')"):
+        assert aas.wrong_fields(["x"], [dict(live, content=live["content"].replace("queue = get('/queue?includeEpisode=true')", ok))]) == [], ok
+    bare = dict(live, content=live["content"].replace("'/queue?includeEpisode=true'", "'/queue'"))
+    assert aas.wrong_fields(["x"], [bare])
