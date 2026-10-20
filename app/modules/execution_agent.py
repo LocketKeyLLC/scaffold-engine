@@ -957,7 +957,7 @@ def fair_shares(sizes: dict, budget: int, weights: dict | None = None) -> dict:
 
 
 def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None,
-                           labels: dict | None = None, budget: int | None = None) -> str:
+                           labels: dict | None = None, budget: int | None = None, primary: list | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
 
@@ -992,9 +992,13 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
     truncated_keys: list[str] = []
     _budget = int(budget or settings.max_upstream_chars)          # §17.1653 — a report step passes its own
     if total_chars > _budget:
-        shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget,
-                             {nk: _conf_or_default(confs[nk]) for nk in texts}
-                             if settings.upstream_confidence_ranking_enabled else None)
+        # §17.1688 — a report step reads every settled step (§17.1653), but what it SYNTHESISES is its own depends_on:
+        # live (job c2518102 T20 "Synthesize root cause findings"), its nine research steps shared the budget with every
+        # raw measurement and came out cut. Its direct inputs weigh 4× in the fair share.
+        _prim = {str(k) for k in (primary or [])}
+        _w = {nk: (_conf_or_default(confs[nk]) if settings.upstream_confidence_ranking_enabled else 1.0)
+                  * (4.0 if nk in _prim else 1.0) for nk in texts}
+        shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget, _w)
         for nk in texts:
             share = max(settings.compile_output_min_chunk, shares[nk])
             if len(texts[nk]) > share:
@@ -1983,7 +1987,8 @@ async def execute_next_node(
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
         _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished,
                                                  labels=_upstream_labels,
-                                                 budget=settings.max_report_upstream_chars if _reports else None)
+                                                 budget=settings.max_report_upstream_chars if _reports else None,
+                                                 primary=list(depends_on) if _reports else None)   # §17.1688
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 

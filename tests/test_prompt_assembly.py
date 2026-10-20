@@ -201,20 +201,23 @@ class TestTruncateOutput:
         text = "x" * 100
         assert pa.truncate_output(text, 100) == text
 
+    # §17.1688 — the cut FILLS its budget (it kept 20% + 20%, so a 2,000-char section came out at ~800 and its middle,
+    # where a research step's verdicts sit, was lost): head ~60% and tail ~40% of (cap − 40 for the marker)
     def test_over_cap_inserts_truncation_marker(self):
         text = "A" * 5000 + "B" * 5000  # 10000 chars
-        out = pa.truncate_output(text, 2000)  # 20% head, 20% tail = 400+400
-        assert out.startswith("A" * 400)
-        assert out.endswith("B" * 400)
-        assert "[...truncated 9200 chars...]" in out
+        out = pa.truncate_output(text, 2000)  # keep 1960: head 1176, tail 784
+        assert out.startswith("A" * 1176)
+        assert out.endswith("B" * 784)
+        assert "[...truncated 8040 chars...]" in out
+        assert len(out) <= 2000
 
-    def test_head_tail_each_get_20pct_of_cap(self):
+    def test_head_tail_fill_the_cap(self):
         text = "z" * 1000
         out = pa.truncate_output(text, 100)
-        # head=20, tail=20, marker between
-        assert out[:20] == "z" * 20
-        assert out[-20:] == "z" * 20
-        assert "truncated" in out
+        # keep 60: head 36, tail 24, marker between
+        assert out[:36] == "z" * 36
+        assert out[-24:] == "z" * 24
+        assert "truncated" in out and len(out) <= 100
 
 
 # ---------------------------------------------------------------------------

@@ -37,3 +37,24 @@ def test_a_research_step_reads_a_measurement_of_this_size():
     """§17.1687 — T9's dataset (~6.9k) and M1's five shows (~9k) fit the default upstream budget"""
     from app.config import Settings
     assert Settings.model_fields["max_upstream_chars"].default >= 6900 + 9000
+
+
+def test_a_cut_keeps_what_it_is_given_and_the_middle_too():
+    """§17.1688 — truncate_output kept 20% + 20% of its budget; a research step's middle (its verdicts) was lost"""
+    from app.modules.prompt_assembly import truncate_output
+    text = "HEAD " * 400 + "VERDICT: category sync NOT MET " + "TAIL " * 400
+    out = truncate_output(text, 3000)
+    assert 2900 <= len(out) <= 3000, len(out)
+    assert truncate_output("short", 3000) == "short"
+
+
+def test_a_synthesis_step_reads_its_own_inputs_first():
+    """§17.1688 — T20's research inputs shared the budget with every raw measurement"""
+    from app.modules.execution_agent import _format_upstream_block
+    ups = {f"R{i}": ("research finding " * 200) for i in range(1, 10)}          # nine ~3.4k research outputs (live: 2.4–5k)
+    ups.update({f"M{i}": ("raw measurement " * 1500) for i in range(1, 12)})   # eleven ~24k measurements
+    block = _format_upstream_block(ups, "T20", budget=40000, primary=[f"R{i}" for i in range(1, 10)])
+    def section(k):
+        i = block.index(f"### {k}\n"); j = block.find("\n### ", i + 1)
+        return block[i:j if j > 0 else len(block)]
+    assert all("truncated" not in section(f"R{i}") for i in range(1, 10))      # the step's own inputs whole

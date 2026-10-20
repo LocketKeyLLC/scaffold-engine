@@ -614,12 +614,16 @@ def system_for_tool(tool: str) -> str:
 
 
 def truncate_output(content: str, max_chars: int) -> str:
-    """Preserve first/last 20% with a marker in the middle. Bytes-safe."""
+    """Keep the first ~60% and last ~40% of ``max_chars`` with a marker in the middle. Bytes-safe.
+
+    §17.1688 — it kept 20% + 20%: a section given 2,000 chars came out at ~800 and its MIDDLE -- where a research step's
+    verdicts sit -- was dropped. Live (job c2518102 T20/T22), 40,000-char report budgets came out at ~19,000 and
+    T16's "category sync NOT MET" never reached the plan. The result now fills what it is given."""
     if len(content) <= max_chars:
         return content
-    keep = max_chars
-    head_len = int(keep * 0.2)
-    tail_len = int(keep * 0.2)
+    keep = max(0, max_chars - 40)                        # room for the marker
+    head_len = int(keep * 0.6)
+    tail_len = keep - head_len
     removed = len(content) - head_len - tail_len
     return (
         content[:head_len]

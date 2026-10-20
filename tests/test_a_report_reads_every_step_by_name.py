@@ -23,7 +23,7 @@ def test_each_section_says_which_step_it_is():
 
 def test_a_report_budget_keeps_each_result():
     outs = {f"T{i}": ("x" * 300 + f"\nPASS result {i}\n" + "x" * 600, None) for i in range(40)}
-    small = ea._format_upstream_block(outs, "T99")
+    small = ea._format_upstream_block(outs, "T99", budget=8000)      # §17.1687 — the default is no longer small
     big = ea._format_upstream_block(outs, "T99", budget=40000)
     assert "PASS result 7" not in small and all(f"PASS result {i}" in big for i in range(40))
 
