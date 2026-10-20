@@ -2986,6 +2986,10 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
         return []
     if read_only_pushed_programs(commands, files):                   # §17.1694d/1699 — one read program, in any form
         return []
+    # §17.1705 — the engine's own completeness read (§17.1504: `curl … | python3 -c "<its program>"`) is the engine's frame
+    # (it reaches the guest single-quoted, so its quotes are `'\''` in the command)
+    if commands and all(_COMPLETENESS_PY.replace("'", "'\\''") in str(c) for c in commands):
+        return []
     from app.modules.runbook_templates import template_of
     # §17.1683 — the template's frame is trusted only while its commands ARE the template's (`bash /tmp/in_ct_N.sh
     # start|wait|last`): live, a capability replaced T2's template commands with SeriesSearch POSTs, and this gate --
@@ -8805,7 +8809,10 @@ def rewrite_completeness_check(node: Optional[dict], commands: list[str], verify
     title = str((node or {}).get("title") or "")
     # §17.1507 — only a CHECK, never an action step. "Queue missing episodes" matched the
     # old detector on "missing episode" and was hijacked into a read that queued nothing.
-    if not (_COMPLETENESS_RE.search(text) and _SEASONS_RE.search(text)) or _COMPLETENESS_ACTION_RE.search(title):
+    # §17.1705 — "complete" must be what the step IS (its title), not a word it quotes: live (job e5e22b92 SC1 "Read
+    # Scrubs S1 episodes, releases and packs"), the prompt listed pack titles to look for -- "'Season 1', 'Complete'" --
+    # and the whole read was replaced with a library-completeness report.
+    if not (_COMPLETENESS_RE.search(title) and _SEASONS_RE.search(text)) or _COMPLETENESS_ACTION_RE.search(title):
         return list(commands or []), list(verify or []), []
     app = "radarr" if re.search(r"\bradarr\b|\bmovies?\b", text, re.I) else "sonarr"
     gid = _arr_guest(app, services, inventory)

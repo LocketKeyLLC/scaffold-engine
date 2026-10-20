@@ -135,3 +135,21 @@ def test_frame_run_rewrites_completeness_before_the_key_reader():
     src = inspect.getsource(sr)
     assert "rewrite_completeness_check(node, cmds, verify, services, inventory)" in src
     assert src.index("rewrite_completeness_check(node, cmds") < src.index("read_on_the_machine(cmds")
+
+
+def test_a_step_that_only_quotes_complete_is_not_claimed():
+    """§17.1705 — live, job e5e22b92 SC1 listed pack titles to look for ("'Season 1', 'Complete'") and was replaced"""
+    sc1 = {"title": "Read Scrubs S1 episodes, releases and packs",
+           "prompt_template": ("Read-only, change nothing. Inside Sonarr's container (CT 104): find Scrubs … print only the "
+                               "releases whose title looks like a whole-season or complete pack (S01 without an episode "
+                               "number, 'Season 1', 'Complete') …")}
+    assert rewrite_completeness_check(sc1, ["<draft>"], [], SERVICES, INV) == (["<draft>"], [], [])
+
+
+def test_the_engines_own_completeness_read_passes_the_read_only_gate():
+    """§17.1705 — the engine's block is `curl … | python3 -c "<its program>"`, which §17.1637 refused when read-only"""
+    from app.modules import supervised_runs as sr
+    ro = {**NODE, "prompt_template": NODE["prompt_template"] + " Read only, change nothing."}
+    cmds, _v, _n = rewrite_completeness_check(ro, ["<model draft>"], ["true"], SERVICES, INV)
+    assert sr.declares_read_only(ro) and cmds != ["<model draft>"]
+    assert sr.writes_in_a_read_only_step(cmds, ro) == []
