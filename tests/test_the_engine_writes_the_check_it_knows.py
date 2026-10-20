@@ -116,7 +116,8 @@ def test_it_only_fires_when_the_draft_named_none():
     src = inspect.getsource(sr.frame_run)
     i = src.index("fill_what_the_engine_holds(")
     guard = src[max(0, i - 900):i]
-    assert "if cmds and not verify:" in guard
+    # §17.1680 — the guard also stands aside for a block the engine marked read-only; it still fires only with no check
+    assert "if cmds and not verify" in guard
 
 
 def test_the_addition_is_announced_not_silent():

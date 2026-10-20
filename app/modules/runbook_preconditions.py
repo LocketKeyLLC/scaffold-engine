@@ -745,6 +745,15 @@ def _api_names_the_checks_read(verify: list[str]) -> dict:
     return out
 
 
+#: §17.1698 — what writes a FILE (not an API): live, job e5e22b92 T13's program only opened Prowlarr's config.xml to read
+#: its <ApiKey> and changed the indexer with a PUT, and §17.1359 read the path's mere presence as "writes the config".
+#: The template's own wrapper (`cat > /tmp/in_ct_N_remote.sh`, the unit's /root/.scaffold_step.* files) is not a write.
+_FILE_WRITE_RE = re.compile(
+    r"\bsed\s+(?:-[a-zA-Z]*i|--in-place)|(?<![<>&\d])>>?\s*['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|\btee\b|"
+    r"\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|"
+    r"\bopen\([^)]*,\s*['\"][wax+]|\.write\(|\.write_text\(|\bxmlstarlet\s+ed\b|\bET\.|ElementTree|\bperl\s+-[a-z]*i")
+
+
 async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: list[str],
                                                services: Optional[list] = None, reading=None) -> list[dict]:
     r"""§17.1359 — the work writes a setting into a config the file has no concept of,
@@ -794,8 +803,8 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
         gid = str(getattr(svc, "guest", "") or "")
         if not names or not cfg.startswith("/") or not gid.isdigit():
             continue
-        if cfg not in joined:
-            continue                       # the block does not write this config
+        if cfg not in joined or not _FILE_WRITE_RE.search(joined):
+            continue                       # the block does not write this config (§17.1698: naming it to READ the key is not)
         for name in sorted(names):
             if (cfg, name) in seen:
                 continue
@@ -981,6 +990,10 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
                 f"so this download hangs until the runner's 180 s timeout -- it did, twice. The resolver is set on the "
                 f"host (`{'qm' if kind == 'VM' else 'pct'} set {tgid} --nameserver "
                 f"\"{getattr(truth, 'dns_hint', '') or '<DNS_SERVER>'}\"` + a reboot); the engine inserts that step and this one waits for it.")})
+    # §17.1690 — a guest-side line that runs a tool the guest was measured without (jq in the *arr containers)
+    if tgid and getattr(truth, "tools", None):
+        from app.modules.guest_tools import calls_a_missing_tool
+        out.extend(calls_a_missing_tool(commands or [], files, tgid, truth.tools))
     if (not guests and not subjects) or not inv:
         return out
     cts, vms = inv["cts"], inv["vms"]

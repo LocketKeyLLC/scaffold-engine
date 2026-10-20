@@ -932,8 +932,32 @@ def _result_of(output_text: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def fair_shares(sizes: dict, budget: int, weights: dict | None = None) -> dict:
+    """§17.1684b — max-min fair: every upstream output that fits its fair share is kept WHOLE, and what it does not use
+    goes to the larger ones; only the largest are cut. Live (job c2518102 T9): shares proportional to confidence × LENGTH
+    gave T8's 40k of raw profile JSON (confidence 1.0) almost the whole 40000-char budget, and T4's 150-char answer
+    ("Total missing movies: 0") was cut to "Total mis". `weights` (confidence) tilt the fair share; length never earns more."""
+    out = {k: 0 for k in sizes}
+    left = dict(sizes)
+    remaining = max(0, int(budget))
+    w = {k: float((weights or {}).get(k) or 1.0) for k in sizes}
+    while left and remaining > 0:
+        total_w = sum(w[k] for k in left) or 1.0
+        fair = {k: remaining * w[k] / total_w for k in left}
+        fits = [k for k in left if left[k] <= fair[k]]
+        if not fits:
+            for k in left:
+                out[k] += int(fair[k])
+            break
+        for k in fits:
+            out[k] += left[k]
+            remaining -= left[k]
+            del left[k]
+    return out
+
+
 def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None,
-                           labels: dict | None = None, budget: int | None = None) -> str:
+                           labels: dict | None = None, budget: int | None = None, primary: list | None = None) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
 
@@ -968,22 +992,16 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
     truncated_keys: list[str] = []
     _budget = int(budget or settings.max_upstream_chars)          # §17.1653 — a report step passes its own
     if total_chars > _budget:
-        if settings.upstream_confidence_ranking_enabled:
-            weights = {
-                nk: _conf_or_default(confs[nk]) * len(texts[nk])
-                for nk in texts
-            }
-            denom = sum(weights.values()) or 1.0
-        else:
-            weights = {nk: float(len(texts[nk])) for nk in texts}
-            denom = float(total_chars) or 1.0
+        # §17.1688 — a report step reads every settled step (§17.1653), but what it SYNTHESISES is its own depends_on:
+        # live (job c2518102 T20 "Synthesize root cause findings"), its nine research steps shared the budget with every
+        # raw measurement and came out cut. Its direct inputs weigh 4× in the fair share.
+        _prim = {str(k) for k in (primary or [])}
+        _w = {nk: (_conf_or_default(confs[nk]) if settings.upstream_confidence_ranking_enabled else 1.0)
+                  * (4.0 if nk in _prim else 1.0) for nk in texts}
+        shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget, _w)
         for nk in texts:
-            orig_len = len(texts[nk])
-            share = max(
-                settings.compile_output_min_chunk,
-                int(_budget * weights[nk] / denom),
-            )
-            if orig_len > share:
+            share = max(settings.compile_output_min_chunk, shares[nk])
+            if len(texts[nk]) > share:
                 texts[nk] = _truncate_output(texts[nk], share)
                 truncated_keys.append(nk)
         logger.info(
@@ -1151,8 +1169,12 @@ def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> s
 
 
 #: §17.1565 — a step whose work is to shape what earlier steps produced: a report, a summary, a list.
+#: §17.1684 — and the steps that COMBINE what came before: live (job c2518102 T9 "Aggregate missing media dataset", T20
+#: "Synthesize root cause findings … Merge all research"), with the default 8000-char budget split by length, T8's 40k of
+#: raw profile JSON took it and T9 wrote "payload truncated" for the measurements it had been handed
 _FORMATS_UPSTREAM_RE = re.compile(
-    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate)\b", re.I)
+    r"\b(?:format|summari[sz]e|report|compile|write\s+up|present|collate|consolidate|tabulate"
+    r"|aggregate|combine|synthesi[sz]e|merge|roll\s*up)\b", re.I)
 
 
 def formats_what_came_before(node: dict) -> str:
@@ -1965,7 +1987,8 @@ async def execute_next_node(
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
         _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished,
                                                  labels=_upstream_labels,
-                                                 budget=settings.max_report_upstream_chars if _reports else None)
+                                                 budget=settings.max_report_upstream_chars if _reports else None,
+                                                 primary=list(depends_on) if _reports else None)   # §17.1688
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 
@@ -3037,6 +3060,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                job_id, run_node.get("node_key"), len(_before))
         except Exception as exc:
             logger.warning("previous_attempt_skipped job=%s err=%r", job_id, exc)
+        # §17.1694 — the *arr API shapes the step reads, so the draft uses the real field names
+        try:
+            from app.modules import arr_api_shapes as _aas
+            _shapes = _aas.drafter_block(run_node)
+            if _shapes:
+                up_block = (up_block + "\n\n" + _shapes).strip()
+        except Exception as exc:
+            logger.warning("arr_api_shapes_skipped job=%s err=%r", job_id, exc)
         # §17.1611 — what earlier steps of this job read on the same guest (not only the declared upstream)
         try:
             from app.modules import guest_evidence as _ge
@@ -3752,9 +3783,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1426 — a DEVELOPED step is code; `systemctl is-active`/`is-enabled` is the same whether the code
         # exists or not. Live, ADD127 ("add authentication and wire the systemd service") was recorded already
         # met from those two reads alone while the panel answered 200 with no credential.
-        _state_only = _developed and all(
-            re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in (frame.get("verify") or [""]))
-        _state_only = _state_only or _engine_check      # §17.1641 — the run IS the check; the unit active is not the goal
+        _state_only = not supervised_runs.may_be_already_met(run_node, frame, _developed, _engine_check)  # §17.1426/1641/1692
         if _depth < 6 and not _state_only:
             try:
                 _met = await supervised_runs.already_met(spec, run_node, frame, _env)
@@ -3888,7 +3917,15 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
     try:
         _ch = await _sr.channel(db)
         if _ch is None:
-            return None
+            # §17.1685 — "no runner" and "a runner that does not answer" are different facts. Live (job c2518102,
+            # 2026-10-19 23:00): the Proxmox host went down mid-run, channel() answered None, and three Shell
+            # measurement steps (M1–M3) took the ordinary path -- their RUNBOOK written as output and marked done --
+            # so the research steps after them "researched" with no data. A registered runner that cannot be
+            # reached HOLDS the step (pending, needs_approval): the work waits for the machine, nothing is faked.
+            _state, _why = await _sr.channel_state(db)
+            if _state != "unreachable":
+                return None
+            logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
         # §17.1200 — a decision is consumed by the attempt it authorised. It is
         # recorded to stop ONE pending node being asked twice in a single pass;
         # it must not silence the ask for a node that has since run and been

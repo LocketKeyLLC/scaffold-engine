@@ -215,6 +215,33 @@ async def frame_decision(node: dict, *, brief: str = "", upstream: str = "") -> 
 
 # ── park / resolve ──────────────────────────────────────────────────────
 
+def frame_id_of(frame: Optional[dict]) -> str:
+    """§17.1681 — the identity of a RUN frame: a hash of exactly what approving it would run (commands, checks, the
+    files it writes). "" for a frame that runs nothing (a decision node's question)."""
+    import hashlib
+    f = frame or {}
+    files = [(str((x or {}).get("path") or ""), str((x or {}).get("content") or "")) for x in (f.get("files") or [])]
+    if not f.get("commands") and not files:
+        return ""
+    blob = json.dumps({"c": [str(c) for c in f.get("commands") or []], "v": [str(v) for v in f.get("verify") or []],
+                       "f": files}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def frame_is_stale(given: Optional[str], current: Optional[str]) -> bool:
+    """§17.1681 — the operator approved frame `given`, and the frame parked now is `current`. Live (job c2518102 T2,
+    2026-10-19): the run a re-ask starts re-parked T2 with a different draft ten seconds after the operator read the
+    first one, and the approval ran the frame they had never seen. Only a GIVEN id that differs is stale: a caller that
+    sends none (an older client) keeps today's behaviour."""
+    return bool(given) and bool(current) and str(given) != str(current)
+
+
+async def parked_frame_id(db: AsyncSession, job_id: str) -> str:
+    row = (await db.execute(text("SELECT metadata->'awaiting_decision'->>'frame_id' FROM jobs WHERE id = :jid"),
+                            {"jid": job_id})).first()
+    return str(row[0] or "") if row else ""
+
+
 async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, frame: dict) -> Optional[dict]:
     """Write the question on the job, move it to ``awaiting_decision`` and
     return the SSE payload. The node stays ``pending`` — nothing was claimed."""
@@ -228,6 +255,7 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
         # §17.1407 — and what it stands on, so the answer can re-check it with no extra read
         "depends_on": list(node.get("depends_on") or []),
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,
+        "frame_id": frame_id_of(frame),          # §17.1681 — what an approval of THIS frame would run
     }
     await db.execute(
         text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb) WHERE id = :jid"),

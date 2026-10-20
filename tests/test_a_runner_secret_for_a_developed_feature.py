@@ -88,8 +88,10 @@ def test_no_secret_in_the_runner_stops_the_delivery(tmp_path):
 
 def test_service_state_alone_never_makes_a_developed_step_already_met():
     src = inspect.getsource(execution_agent._pause_for_decision)
-    assert "_state_only = _developed and all(" in src
+    assert "supervised_runs.may_be_already_met(run_node, frame, _developed, _engine_check)" in src     # §17.1692
     assert "if _depth < 6 and not _state_only:" in src
+    assert sr.may_be_already_met({"title": "Add authentication"}, {"verify": ["systemctl is-active panel"]},
+                                 developed=True) is False
 
 
 def test_the_filler_carries_no_dollar_and_passes_the_unset_variable_rule():

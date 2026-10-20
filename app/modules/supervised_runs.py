@@ -161,6 +161,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "this step says it is READ ONLY",                # §17.1637
+                   "a field this endpoint's objects do not have",   # §17.1694
                    "inside single quotes is left alone by the shell",   # §17.1638
                    "and nothing sets it",                           # §17.1348
                    "but set in a DIFFERENT command",               # §17.1398
@@ -335,6 +336,7 @@ _WHOSE_GAP: dict[str, str] = {
     "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
     "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "this step says it is READ ONLY": "drafter",                  # §17.1637 — reads only, with what the machine has
+    "a field this endpoint's objects do not have": "drafter",     # §17.1694 — the shape names the real field
     "inside single quotes is left alone by the shell": "drafter",   # §17.1638 — no `$` before an uppercase letter
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
@@ -2714,6 +2716,28 @@ def declares_read_only(node: Optional[dict]) -> bool:
     return bool(_READ_ONLY_STEP_RE.search(work))
 
 
+#: §17.1695 — a verification step: its title leads with a reading verb and nothing in its text changes anything
+_VERIFY_TITLE_RE = re.compile(r"^\s*(?:[A-Z]+\d*\s*[:—-]\s*)?(?:verify|confirm|check|list|count|recount|show|inspect|"
+                              r"measure|audit)\b", re.I)
+_CHANGE_VERB_RE = re.compile(r"\b(?:add|set|change|enable|re-?enable|disable|delete|remove|install|uninstall|restart|"
+                             r"stop|start|fix|update|widen|map|grab|apply|create|write|edit|move|rename|replace|"
+                             r"trigger|queue|search(?:es)?\s+for)\b", re.I)
+
+
+def only_reads(node: Optional[dict]) -> bool:
+    """§17.1695 — a step whose output is its evidence: one that declares it changes nothing (§17.1637), or a
+    verification step -- its title leads with verify/confirm/check/list/recount… and its text names no change.
+
+    Live (job e5e22b92 T11 "Verify Sonarr indexers", text "List Sonarr's indexers to confirm all TV-capable enabled
+    indexers are present."): one read-only python program, refused "this block has no check at all" because the
+    text never says "read-only". A check of a check is not a thing; what it read is the answer."""
+    if declares_read_only(node):
+        return True
+    title = str((node or {}).get("title") or "")
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    return bool(_VERIFY_TITLE_RE.match(title)) and not _CHANGE_VERB_RE.search(text)
+
+
 #: §17.1637b — the options that send a tool to a REMOTE copy of what it reads locally: ipmitool's interface, host,
 #: login and password (`-I lanplus -H <BMC_IP> -U <BMC_USER> -P …`). On the machine whose BMC it is, the same read
 #: needs none of them.
@@ -2793,7 +2817,160 @@ def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], v
         f"no address, login or password is asked")}]
 
 
-def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "") -> list[dict]:
+def _dropped_note(runbook: str) -> str:
+    """§17.1696 — the checks the draft offered and the engine could not keep, named in the "no check" refusal."""
+    try:
+        dropped = dropped_checks(runbook or "")
+    except Exception:
+        return ""
+    if not dropped:
+        return ""
+    parts = "; ".join(f"`{c[:120]}{'…' if len(c) > 120 else ''}` was dropped -- {why}" for c, why in dropped[:2])
+    return (f" The draft DID offer a check, and it could not be kept: {parts}. Write it as one short read inside the "
+            "guest: `curl -s` the endpoint with the key read from the config file, piped to `grep -o` for the fields "
+            "that show the change (e.g. `\"enable\": *[a-z]*`) -- no program, under 400 characters.")
+
+
+def _read_only_shape_hint(node: Optional[dict]) -> str:
+    """§17.1693 — for a step that only reads, the "no check" refusal names the shape that IS its own evidence.
+
+    Live (job e5e22b92 T2 "Read full Sonarr queue", redrafted twice): a shell `while` loop of curl pages with
+    `python3 -c` fragments was refused "no check at all" -- §17.1608 marks only plain read lines and §17.1680c only a
+    single python program -- and the refusal told the drafter to add a check, which a read does not need. The engine
+    names the shape it accepts, and the summary §17.1691 requires."""
+    if not only_reads(node):                                          # §17.1695
+        return ""
+    return (" This step only READS, so it needs no separate check when the in-guest block is ONE `python3 - <<'PY'` "
+            "program and nothing else (§17.1680c): read the key from the service's config file, call the API with "
+            "urllib (GET only, every page until `totalRecords` is reached), and print a SUMMARY -- the totals, then one "
+            "short line per item with only the fields the step needs -- never the raw JSON, which the record cannot "
+            "hold (§17.1691). Its own output is then judged against the step's goal.")
+
+
+#: §17.1680 — the line §17.1608 puts at the head of an in-guest block that only reads
+READS_ONLY_MARKER = "§17.1608: this block only reads"
+
+#: §17.1680c — what makes an in-guest program a CHANGE: an HTTP write, a file opened for writing, a process, a SQL write
+_PROGRAM_CHANGE_RE = re.compile(
+    r"method\s*=\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]|['\"](?:POST|PUT|PATCH|DELETE)['\"]|\b(?:Request|urlopen)\([^)]*\bdata\s*=\s*(?!None\b)"
+    r"|\bopen\([^)]*,\s*['\"][wax+]|\bsubprocess\b|\bos\.(?:system|remove|unlink|rename|replace|popen|makedirs|rmdir)\b"
+    r"|\bshutil\.|\b(?:INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\s|\.write\(|\.write_text\(|\.unlink\(", re.I)
+_REMOTE_BODY_RE = re.compile(r"<<'REMOTE'\n(?P<body>.*?)\nREMOTE\n", re.S)
+
+
+#: §17.1694d — `pct exec N -- python3 - <<'TAG'` … `TAG`: the program travels on stdin into the guest
+_GUEST_PY_HEREDOC_RE = re.compile(r"^\s*pct\s+exec\s+\d{3,5}\s+--\s+python3?\s+-\s*<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\s*$",
+                                  re.S)
+
+
+def a_read_only_python_command(cmd: str) -> bool:
+    """§17.1694d — a host command that pipes ONE python program into a guest (`pct exec N -- python3 - <<'PY' … PY`)
+    with no change in it. Live (job e5e22b92 T5 "Search Robot Chicken S11"): the drafter wrote §17.1680c's program in
+    this form instead of inside the in-guest script; the same program, refused twice as "not a read" and "no check"."""
+    m = _GUEST_PY_HEREDOC_RE.match(str(cmd or ""))
+    return bool(m) and not _PROGRAM_CHANGE_RE.search(m.group("prog"))
+
+
+_PCT_PUSH_RE = re.compile(r"^\s*pct\s+push\s+(?P<gid>\d{3,5})\s+(?P<src>/tmp/[\w.-]+)\s+(?P<dst>/tmp/[\w.-]+)\s*$")
+_PCT_PY_FILE_RE = re.compile(r"^\s*pct\s+exec\s+(?P<gid>\d{3,5})\s+--\s+python3?\s+(?P<path>/tmp/[\w.-]+)\s*$")
+
+
+def read_only_pushed_programs(commands: Optional[list[str]], files: Optional[list[dict]]) -> bool:
+    """§17.1699 — every command is a read-only python program reaching a guest: piped in (§17.1694d), or a file the
+    block writes under /tmp, `pct push`ed to the guest's /tmp and run there with `python3`, its content free of change.
+
+    Live (job e5e22b92 T3 "Read second quality profile"): the drafter wrote §17.1680c's program as /tmp/sonarr_summary.py,
+    `pct push 104 …` and `pct exec 104 -- python3 /tmp/sonarr_summary.py` -- the third form of one read, refused "not a
+    read" and "no check" like the first two. The family is recognised, not each spelling."""
+    if not commands:
+        return False
+    progs = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    pushed: dict[tuple[str, str], str] = {}
+    for c in commands:
+        m = _PCT_PUSH_RE.match(str(c))
+        if m and m.group("src") in progs:
+            pushed[(m.group("gid"), m.group("dst"))] = progs[m.group("src")]
+    for c in commands:
+        c = str(c)
+        if a_read_only_python_command(c):
+            continue
+        if _PCT_PUSH_RE.match(c):
+            m = _PCT_PUSH_RE.match(c)
+            if m.group("src") in progs:
+                continue
+            return False
+        m = _PCT_PY_FILE_RE.match(c)
+        prog = pushed.get((m.group("gid"), m.group("path"))) if m else None
+        if prog is None or _PROGRAM_CHANGE_RE.search(prog):
+            return False
+    return True
+
+
+def a_read_only_program(node: Optional[dict], files: Optional[list[dict]],
+                        commands: Optional[list[str]] = None) -> bool:
+    """§17.1680c — a step that DECLARES it changes nothing, whose in-guest block is a python program with no change in it
+    (and no other shell work), is a read-only block like §17.1608's. Live (job c2518102 T2): an all-pages python read of
+    Sonarr's missing list was refused "no check at all" -- §17.1608 classifies shell lines, and a program could do
+    anything, so the engine looks inside it."""
+    if not only_reads(node):                                          # §17.1695
+        return False
+    bodies = [m.group("body") for f in files or [] for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))]
+    if not bodies:
+        # §17.1694d/1699 — or every command is a read-only python program reaching the guest
+        return read_only_pushed_programs(commands, files)
+    for body in bodies:
+        py = re.search(r"python3?\s+-\s+<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\b", body, re.S)
+        if not py or _PROGRAM_CHANGE_RE.search(py.group("prog")):
+            return False
+        rest = (body[:py.start()] + body[py.end():]).splitlines()
+        if any(ln.strip() and not re.match(r"\s*(?:set\s+[-+]\w+|export\s+\w+=\S*|#)", ln) for ln in rest):
+            return False
+    return True
+
+
+#: §17.1689 — a lone `curl` login, optionally wrapped in `pct exec N -- sh|bash -c '…'`
+_LOGIN_WRAP_RE = re.compile(r"^\s*pct\s+exec\s+\d{3,5}\s+--\s+(?:bash|sh)\s+-c\s+(?P<arg>.+?)\s*$", re.S)
+_LOGIN_FILE_RE = re.compile(r"(?:^|\s)(?:-c|--cookie-jar|-o|--output|-D|--dump-header)\s+['\"]?(?P<path>[^\s'\"]+)")
+
+
+def a_login_read(seg: str) -> bool:
+    """§17.1689 — a `curl` that only LOGS IN is a read in a read-only step. Live (job e5e22b92 T1 "Login qBittorrent list
+    torrents", 2026-10-20): qBittorrent has no readable key (§17.1384), so listing its torrents is `POST
+    /api/v2/auth/login` into a cookie jar, then a GET -- and the read-only gate refused the login as a change, though
+    §17.1362b already holds that a login changes no configuration. Only a single curl whose every URL ends in an auth verb,
+    writing its cookies/output under /tmp, with nothing chained to it, is a login."""
+    s = str(seg or "").strip()
+    m = _LOGIN_WRAP_RE.match(s)
+    if m:
+        try:
+            parts = shlex.split(m.group("arg"))
+        except ValueError:
+            return False
+        if len(parts) != 1:
+            return False
+        s = parts[0].strip()
+    try:
+        lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return False
+    if not toks or toks[0] != "curl" or any(t and set(t) <= set(";&|<>()") for t in toks) or re.search(r"`|\$\(", s):
+        return False
+    if re.search(r"-X\s*['\"]?(?:PUT|PATCH|DELETE)\b", s, re.I):
+        return False
+    urls = list(_URL_PATH_RE.finditer(s))
+    if not urls:
+        return False
+    for u in urls:
+        seg_ = [x for x in (u.group("path") or "").split("/") if x]
+        if not seg_ or seg_[-1].lower() not in _AUTH_VERBS:
+            return False
+    return all(f.group("path").startswith(("/tmp/", "/dev/null")) for f in _LOGIN_FILE_RE.finditer(s))
+
+
+def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runbook: str = "",
+                               files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1637 — a step that says it changes nothing, drafted with a line that changes something.
 
     Live (job 0fb4ea7f MC1, 2026-10-18): "On the Proxmox host: check CPU1 memory channel C … change nothing, read
@@ -2807,8 +2984,14 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     """
     if not commands or not declares_read_only(node):
         return []
+    if read_only_pushed_programs(commands, files):                   # §17.1694d/1699 — one read program, in any form
+        return []
     from app.modules.runbook_templates import template_of
-    if template_of(runbook or ""):
+    # §17.1683 — the template's frame is trusted only while its commands ARE the template's (`bash /tmp/in_ct_N.sh
+    # start|wait|last`): live, a capability replaced T2's template commands with SeriesSearch POSTs, and this gate --
+    # seeing the template's runbook -- stood aside for them
+    if template_of(runbook or "") and all(re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:start|wait|last)\b",
+                                                    str(c)) for c in commands):
         return []
     # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
     # the engine's frame like a template's. Live (job 5db1b088 PW1, 2026-10-19): "Verify control panel Palworld boxes",
@@ -2817,7 +3000,9 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     if run_is_the_check(runbook or ""):
         return []
     for c in commands:
-        segs = writing_segments(str(c))
+        if a_read_only_python_command(str(c)):                       # §17.1694d
+            continue
+        segs = [s for s in writing_segments(str(c)) if not a_login_read(s)]
         if segs:
             local = local_form_of_a_read(segs[0])
             here = (f" Here that is `{local}`: on this machine the tool reaches its own device, so the address, login "
@@ -4470,7 +4655,8 @@ def verify_commands(text_out: str) -> list[str]:
     for fence in _FENCE_RE.findall(body):
         cands.extend(block_commands(fence))
     prose = _FENCE_RE.sub(" ", body)
-    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,200})`", prose))
+    # §17.1696 — 400: a check that reads its key in the guest and greps one field is ~200 characters by itself
+    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,400})`", prose))
     out: list[str] = []
     for c in cands:
         # §17.1187 — a <PLACEHOLDER> reads as a redirect to the shell gate; judge
@@ -4480,6 +4666,36 @@ def verify_commands(text_out: str) -> list[str]:
         if c not in out and not c.startswith("/") and read_only_command(shape, runner_side=True):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
+
+
+def dropped_checks(text_out: str) -> list[tuple[str, str]]:
+    """§17.1696 — the checks a runbook's ## Verify OFFERED that `verify_commands` did not keep, and why.
+
+    Live (job e5e22b92 T13 "Re-enable healthy indexers", three drafts): each Verify held a check -- `pct exec 102 --
+    bash -c "curl … /api/v1/indexer | python3 -c \"…print(i['name'], i['enable'])…\""` -- and each frame was refused
+    "this block has no check at all": the inline literal was over 200 characters (never a candidate) and a program is
+    not a read the runner's channel takes. The refusal named neither, so every redraft repeated it."""
+    from app.modules.assist_state_check import read_only_command
+    body = _section(text_out, "Verify")
+    kept = set(verify_commands(text_out))
+    out: list[tuple[str, str]] = []
+    prose = _FENCE_RE.sub(" ", body)
+    for m in re.finditer(r"`([^`\n]{2,4000})`", prose):
+        c = m.group(1).strip()
+        if c in kept or c.startswith("/") or not re.match(r"[a-z]", c):
+            continue
+        if len(c) > 400:
+            why = f"it is {len(c)} characters and a check is read as one line of 400 at most"
+        elif re.search(r"(?:^|[|;&\s\\\"'(])(?:python3?|perl|node|ruby|php)\s+-[ce]\b", c):
+            why = "a program (`python3 -c`) is not a read the runner's read channel takes"
+        elif not read_only_command(_PLACEHOLDER_RE.sub("x", c), runner_side=True):
+            why = "the runner's read channel does not take it as a read"
+        else:
+            continue
+        if not re.search(r"\b(?:pct|qm|curl|grep|cat|systemctl|ss|ip|wg)\b", c):
+            continue                                                   # prose in backticks, not a command
+        out.append((c, why))
+    return out
 
 
 # ── inputs the runbook needs (§17.1187) ──────────────────────────────────
@@ -6504,7 +6720,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462
     # §17.1285 — a step about a guest whose commands never leave the host.
     refused = refused + commands_never_reach_the_guest(cmds, node, shape_files, inventory)   # §17.1344
-    refused = refused + writes_in_a_read_only_step(cmds, node, runbook)   # §17.1637
+    refused = refused + writes_in_a_read_only_step(cmds, node, runbook, shape_files)   # §17.1637, §17.1699
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
@@ -6555,13 +6771,19 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # (`wg show`, the public-address read, the IPv6 read) and its frame was refused "this block has no check at all"
     if cmds and not verify:
         verify = with_own_checks(node, verify, cmds)
-    if cmds and not verify:
+    # §17.1680 — and a template block the engine itself marked read-only (§17.1608's `set +e` line) is the same case:
+    # its commands are the template's wrapper (`bash /tmp/in_ct_N.sh start`), its reads are inside the script, and the
+    # check the drafter repeated (`curl … | jq …`) is one the read channel drops. Live (job c2518102 T2 "Fetch Sonarr
+    # wanted missing"): one read of Sonarr's missing list, refused "this block has no check at all".
+    _reads_only_block = (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in shape_files or [])
+                         or a_read_only_program(node, shape_files, cmds))                        # §17.1680c/1694d
+    if cmds and not verify and not _reads_only_block:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
-            "the service active -- not the command that made it.")}]
+            f"the service active -- not the command that made it.{_read_only_shape_hint(node)}{_dropped_note(runbook)}")}]
         _no_check, verify, _engine_fills = fill_what_the_engine_holds(
             _no_check, cmds, verify, inventory)
         refused = refused + _no_check
@@ -6575,6 +6797,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
+    from app.modules.arr_api_shapes import wrong_fields as _wrong_fields
+    refused = refused + _wrong_fields(cmds, shape_files)                  # §17.1694
     refused = refused + a_sed_program_that_does_not_compile(cmds)         # §17.1617
     from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
     refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
@@ -7169,6 +7393,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                                        for t in _missing]
             logger.warning("supervised_run_expected_print_missing job=%s node=%s missing=%r",
                            job_id, node_key, [t[:60] for t in _missing])
+    # §17.1680b — a read-only block with no separate check (§17.1680) is judged by its OWN output: the same judge, the
+    # step's goal, the block's reads as the one piece of evidence. Live (job c2518102 T2): with no jq in CT 104 the read
+    # printed only "Sonarr API request failed", §17.1608's `trap 'exit 0'` made it exit 0, and it was recorded done.
+    if ok and not verify_cmds:
+        _against = await judge_a_read_only_block(waiting, node_key, executed)
+        if _against:
+            ok = False
+            refuted = list(refuted) + _against
+            logger.warning("supervised_run_read_block_contradicted job=%s node=%s first=%r",
+                           job_id, node_key, str(_against[0].get("reason"))[:140])
     # §17.1281 — nothing a run printed reaches the record, the response or the
     # log with an engine-held value or a secret-shaped token in it.
     for e in executed:
@@ -7195,6 +7429,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ok = False
         repeated_reason = _cut
         logger.warning("supervised_run_script_cut job=%s node=%s", job_id, node_key)
+    # §17.1691 — a read-only step whose own output was cut (the runner's 20,000 characters, the template's 300 lines)
+    _read_cut = a_read_was_cut(waiting, executed)
+    if _read_cut and ok:
+        ok = False
+        repeated_reason = _read_cut
+        logger.warning("supervised_run_read_cut job=%s node=%s", job_id, node_key)
     # §17.1390 — applied after the other downgrades so it cannot be clobbered by
     # the `repeated_reason` assignment above: a step nothing checked is not done.
     if _unverified and ok:
@@ -7335,6 +7575,72 @@ def goal_claim(title: str, description: str = "") -> str:
 
 #: how much of a step's description the judge reads (§17.1396)
 _CLAIM_CAP = 1200
+
+
+def may_be_already_met(node: Optional[dict], frame: Optional[dict], developed: bool = False,
+                       engine_check: bool = False) -> bool:
+    """§17.1302 asks the machine whether a step is ALREADY done before running it; this says when that question means
+    anything.
+
+    §17.1426 — not for DEVELOPED code judged by `systemctl is-active|is-enabled` alone (live, ADD127 recorded met while
+    the panel answered 200 with no credential). §17.1641 — not when the run IS the check. §17.1692 — never for a step
+    that declares it only READS: its output is its answer, and there is nothing for it to have already done. Live (job
+    e5e22b92 T1 "Login qBittorrent list torrents", reset after §17.1691): the check `test -s /tmp/qb_cookies.txt` still
+    held from the first run, the step was recorded already met, and the torrent list was never read."""
+    verify = (frame or {}).get("verify") or [""]
+    if developed and all(re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in verify):
+        return False
+    if engine_check:
+        return False
+    return not declares_read_only(node)
+
+
+#: §17.1691 — the line the in-guest templates print when the step's log is longer than the tail they keep
+TEMPLATE_CUT_MARK = "[CUT: the step printed"
+
+
+def a_read_was_cut(waiting: Optional[dict], executed: list[dict]) -> str:
+    """§17.1691 — why a READ-ONLY step's own output cannot be evidence of the whole read ("" when it can).
+
+    A read-only step's record is its answer (§17.1680b), and two cuts left it holding a fraction while it was recorded
+    done. Live (job e5e22b92, 2026-10-20): T1 "Login qBittorrent list torrents" printed the torrent list as one JSON line
+    and the runner returned its first 20,000 characters (local_runner_mcp's `[:20000]`, silent) -- 10 torrents, the
+    tenth cut mid-field; T2 "Read full Sonarr queue" printed Sonarr's pretty JSON and the in-guest template kept the
+    last 300 lines -- 7 of 91 records. Only a step that declares it changes nothing is judged: a change's output is not
+    its evidence, its checks are."""
+    if not only_reads(waiting):                                       # §17.1695
+        return ""
+    from app.modules.rehearsal import RUNNER_OUTPUT_CAP
+    for e in executed or []:
+        out = str(e.get("output") or "")
+        cmd = str(e.get("command") or "")[:80]
+        if TEMPLATE_CUT_MARK in out:
+            m = re.search(r"\[CUT: the step printed (\d+) lines", out)
+            return (f"this read printed {m.group(1) if m else 'more than 300'} lines inside the guest and the record keeps "
+                    "the last 300, so what it saw is mostly not in it -- the step is not done. Print what the step needs, "
+                    "not the raw response: counts, and one short line per item with only the fields that matter "
+                    "(a `python3 - <<'PY'` program that makes the call and prints a summary).")
+        if len(out) >= RUNNER_OUTPUT_CAP - 64:
+            return (f"`{cmd}` printed at least {RUNNER_OUTPUT_CAP:,} characters and the runner returns no more than that, "
+                    "silently, so the read was cut -- the step is not done. Print what the step needs, not the raw "
+                    "response: counts, and one short line per item with only the fields that matter (in the guest, a "
+                    "`python3` program that parses the response and prints a summary).")
+    return ""
+
+
+async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[dict]) -> list[dict]:
+    """§17.1680b — the contradicted verdicts for a read-only template block's OWN output ([] when it is not one).
+
+    A block §17.1608 marked read-only needs no separate check (§17.1680); what it printed is the evidence, judged by
+    the same judge against the step's goal. Live (job c2518102 T2): with no jq in CT 104 the read printed only "Sonarr
+    API request failed", exited 0 under `trap 'exit 0'`, and was recorded done."""
+    if not (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or []))
+            or a_read_only_program(waiting, waiting.get("files") or [], waiting.get("commands") or [])):   # §17.1680c/1694d
+        return []
+    own = "\n".join(str(e.get("output") or "") for e in executed or [])[-6000:]
+    return contradicted(await _verify_verdicts(
+        goal_claim(str(waiting.get("title") or node_key), str((waiting.get("description") or ""))),
+        ["(this block's own reads)"], "== V1 ==\n" + (own.strip() or "(it printed nothing)")))
 
 
 async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str,
@@ -8587,6 +8893,11 @@ def rewrite_queue_missing(node: Optional[dict], commands: list[str], verify: lis
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     title = str((node or {}).get("title") or "")
     if not (_QUEUE_RE.search(title) and _MISSING_RE.search(text) and _SEASONS_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1683 — a step that says it changes nothing is never a search. Live (job c2518102 T2 "Fetch Sonarr wanted
+    # missing", text "Read only, change nothing"): "Fetch" matched the download verbs and the read became SeriesSearch
+    # POSTs for ten shows -- in an audit whose whole point was to present a plan before changing anything.
+    if declares_read_only(node):
         return list(commands or []), list(verify or []), []
     if _QUEUE_REMOVAL_RE.search(title):
         return list(commands or []), list(verify or []), []     # §17.1650 — taking items OUT of the queue is not a search
@@ -10369,8 +10680,10 @@ def _guest_by_name_fragment(text: str, services: Optional[list], inventory: Opti
 #: §17.1572 — "inventory / list / map the endpoints|routes|API of <service>" is a READ the engine owns:
 #: grep the service's route registrations and its config keys under its /opt/<name>* directories.
 #: §17.1602 — `read` the verb, never the adjective: "Create a read-only Proxmox API token" matched "read … API"
+#: §17.1682 — `api` as a URL path (`/api/v3/wanted/missing`) is a call TO an API, not the service's code: live (job c2518102
+#: T2 "Fetch Sonarr wanted missing", text "read Sonarr's /api/v3/wanted/missing …"), the read became a route inventory
 _ROUTE_INVENTORY_RE = re.compile(r"\b(?:inventory|inventor(?:y|ies)|list|enumerate|map|read(?![-‐ ]only|[-‐ ]write)|catalog(?:ue)?|survey)\b[^.;\n]{0,50}"
-                                 r"\b(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
+                                 r"(?<![/\w])(?:endpoints?|routes?|api(?:s)?|handlers?|code\s*base|codebase|source)\b", re.I)
 _ROUTE_SERVICE_RE = re.compile(r"\b(control-?panel|panel|backend|express|node|flask|fastapi)\b", re.I)
 
 
@@ -10401,6 +10714,12 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     text = _node_text(node)
     title = str((node or {}).get("title") or "")
     if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
+        return list(commands or []), list(verify or []), []
+    # §17.1682b — "read" alone (not inventory/enumerate/list/map/catalog/survey) claims only a service built from code the
+    # engine can read (_ROUTE_SERVICE_RE): live (job c2518102 T6), "read qBittorrent's torrent list from its local Web API"
+    # became an inventory of /opt/qbittorrent* -- a packaged app, no routes to read
+    _m = _ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)
+    if _m and re.match(r"read\b", _m.group(0), re.I) and not _ROUTE_SERVICE_RE.search(text):
         return list(commands or []), list(verify or []), []
     own = _own_step_text(node)
     name, gid, _unit = _named_guest(own, services, inventory)

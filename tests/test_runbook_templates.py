@@ -737,3 +737,25 @@ async def test_an_unknown_app_id_is_the_one_thing_the_model_is_asked(monkeypatch
     assert vals == {"APP_ID": "896660"} and len(asked) == 1
     full = rt.values_for(rt.INSTALL_STEAM_SERVER, node, _truth("vm", agent=True), ENV, vals)
     assert full["APP_ID"] == "896660" and full["GAME"] == "steamapp" and full["INSTALL_DIR"] == "/opt/steamapp"
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_only_reads_draws_no_separate_check(monkeypatch):
+    """§17.1701 — live, job e5e22b92 R3 (a read of Sonarr) drew the check `ls -la /opt/palworld/PalServer.sh`"""
+    import app.utils.llm_retry as lr
+    drawn = []
+
+    async def fake(gen, prompt, params, *, system, **kw):
+        drawn.append(kw.get("label", ""))
+        if "VERIFY_INSIDE" in kw.get("label", ""):
+            return type("R", (), {"text": "```bash\nls -la /opt/palworld/PalServer.sh\n```"})()
+        return type("R", (), {"text": "```bash\npython3 - <<'PY'\nprint(1)\nPY\n```"})()
+    monkeypatch.setattr(lr, "generate_until_nonempty", fake)
+    r3 = {"node_key": "R3", "title": "Search each missing Scrubs S1 episode",
+          "description": "Read-only, change nothing. Inside Sonarr's container (CT 104): search each missing episode."}
+    vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, r3, "brief")
+    assert vals["VERIFY_INSIDE"] == "" and not any("VERIFY_INSIDE" in d for d in drawn)
+    change = {**r3, "title": "Re-enable Torrent Downloads", "description": "Enable the indexer in Prowlarr."}
+    drawn.clear()
+    vals = await rt.fill_free_params(rt.RUN_IN_CONTAINER, change, "brief")
+    assert any("VERIFY_INSIDE" in d for d in drawn) and vals["VERIFY_INSIDE"]          # a change still gets its check

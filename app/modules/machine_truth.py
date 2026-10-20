@@ -82,6 +82,7 @@ class GuestTruth:
     key_known_by: Optional[str] = None    # the finished plan step that installed this host's key
     resolves: Optional[bool] = None       # §17.1313 — `getent hosts deb.debian.org` inside the guest answered
     units: Optional[list[str]] = None     # §17.1327 — the service units the guest HAS (`systemctl list-unit-files`)
+    tools: Optional[dict] = None          # §17.1690 — {tool: present} from `which` inside the guest
     dns_hint: str = ""                    # §17.1313 — a sibling guest's `nameserver:` line, for the fix step
     reads: dict[str, str] = field(default_factory=dict)   # evidence, by read
 
@@ -193,7 +194,8 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
                      fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
                      plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,
                      guest_uptime: Optional[float] = None,
-                     sibling_config: str = "", units_text: str = "") -> GuestTruth:
+                     sibling_config: str = "", units_text: str = "",
+                     tools_read: Optional[tuple[Optional[bool], str]] = None) -> GuestTruth:
     """The pure half: build the truth from texts the reads returned. Tested on
     the live fixtures; ``read_guest_truth`` only fetches the texts."""
     from app.modules.runbook_preconditions import key_known_for
@@ -272,6 +274,12 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
                 names.append(_UNIT_SUFFIX_RE.sub("", w[0]))
         t.units = names[:400]
         t.reads["systemctl list-unit-files"] = f"{len(t.units)} units"
+    # §17.1690 — the tools the guest HAS, so a block that pipes into one it lacks is refused before it runs.
+    if tools_read is not None:
+        from app.modules.guest_tools import parse_which
+        t.tools = parse_which(tools_read[1], tools_read[0])
+        if t.tools is not None:
+            t.reads["which"] = ", ".join(f"{k} {'present' if v else 'MISSING'}" for k, v in t.tools.items())
     t.key_known_by = key_known_for(gid, t.name, plan)
     return t
 
@@ -329,20 +337,26 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
             _ok, _up = await _probe(spec, _cmd)
             guest_uptime = uptime_s(unwrap_guest_exec(_cmd, _up)) if _ok else None
     units_text = ""
+    tools_read: Optional[tuple[Optional[bool], str]] = None
     if spec is not None:
+        from app.modules.guest_tools import PROBE_ARGS
         _list = "systemctl list-unit-files --type=service --no-legend"
         if kind == "ct" and ((inventory or {}).get("cts") or {}).get(gid) == "running":
             _ok, units_text = await _probe(spec, f"pct exec {gid} -- {_list}")
             units_text = units_text if _ok else ""
+            tools_read = await _probe(spec, f"pct exec {gid} -- which {PROBE_ARGS}")       # §17.1690
         elif kind == "vm" and agent_ping is not None and agent_ping[0]:
             from app.modules.assist_local_runner import unwrap_guest_exec
             _cmd = f"qm guest exec {gid} -- {_list}"
             _ok, _out = await _probe(spec, _cmd)
             units_text = unwrap_guest_exec(_cmd, _out) if _ok else ""
+            _tcmd = f"qm guest exec {gid} -- which {PROBE_ARGS}"                               # §17.1690
+            _tok, _tout = await _probe(spec, _tcmd)
+            tools_read = (_tok, unwrap_guest_exec(_tcmd, _tout)) if _tok is not None else None
     t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
                          agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "",
                          guest_uptime=guest_uptime,
-                         units_text=units_text)
+                         units_text=units_text, tools_read=tools_read)
     logger.warning("machine_truth guest=%s %s", gid, {k: (f"{len(v)} units" if k == "units" and v is not None else v)
                                                       for k, v in t.to_dict().items() if k not in ("reads", "disks")})
     return t
