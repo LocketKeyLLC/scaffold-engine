@@ -169,8 +169,11 @@ def test_the_engines_check_is_final_and_is_never_already_met():
     assert "_engine_check = _run_is_the_check(runbook)" in src
     for guard in ('_ro = "" if (_developed or frame.get("expects") or _engine_check) else',
                   '_missing = [] if (_developed or frame.get("expects") or _engine_check) else',
-                  "_state_only = _state_only or _engine_check"):
+                  "_state_only = not supervised_runs.may_be_already_met(run_node, frame, _developed, _engine_check)"):
         assert guard in src, guard
+    # §17.1692 — the guard moved into one function; it still says no for the engine's own check
+    from app.modules import supervised_runs
+    assert supervised_runs.may_be_already_met({"title": "Change the panel"}, {"verify": ["curl x"]}, engine_check=True) is False
 
 
 # ── §17.1646: `'\''` reopens a single-quoted payload ─────────────────────────

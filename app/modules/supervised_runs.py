@@ -7435,6 +7435,24 @@ def goal_claim(title: str, description: str = "") -> str:
 _CLAIM_CAP = 1200
 
 
+def may_be_already_met(node: Optional[dict], frame: Optional[dict], developed: bool = False,
+                       engine_check: bool = False) -> bool:
+    """§17.1302 asks the machine whether a step is ALREADY done before running it; this says when that question means
+    anything.
+
+    §17.1426 — not for DEVELOPED code judged by `systemctl is-active|is-enabled` alone (live, ADD127 recorded met while
+    the panel answered 200 with no credential). §17.1641 — not when the run IS the check. §17.1692 — never for a step
+    that declares it only READS: its output is its answer, and there is nothing for it to have already done. Live (job
+    e5e22b92 T1 "Login qBittorrent list torrents", reset after §17.1691): the check `test -s /tmp/qb_cookies.txt` still
+    held from the first run, the step was recorded already met, and the torrent list was never read."""
+    verify = (frame or {}).get("verify") or [""]
+    if developed and all(re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in verify):
+        return False
+    if engine_check:
+        return False
+    return not declares_read_only(node)
+
+
 #: §17.1691 — the line the in-guest templates print when the step's log is longer than the tail they keep
 TEMPLATE_CUT_MARK = "[CUT: the step printed"
 

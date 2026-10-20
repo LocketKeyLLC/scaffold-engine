@@ -3775,9 +3775,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1426 — a DEVELOPED step is code; `systemctl is-active`/`is-enabled` is the same whether the code
         # exists or not. Live, ADD127 ("add authentication and wire the systemd service") was recorded already
         # met from those two reads alone while the panel answered 200 with no credential.
-        _state_only = _developed and all(
-            re.search(r"\bsystemctl\s+is-(?:active|enabled|failed)\b", str(c)) for c in (frame.get("verify") or [""]))
-        _state_only = _state_only or _engine_check      # §17.1641 — the run IS the check; the unit active is not the goal
+        _state_only = not supervised_runs.may_be_already_met(run_node, frame, _developed, _engine_check)  # §17.1426/1641/1692
         if _depth < 6 and not _state_only:
             try:
                 _met = await supervised_runs.already_met(spec, run_node, frame, _env)
