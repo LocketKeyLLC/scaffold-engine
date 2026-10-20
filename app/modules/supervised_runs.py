@@ -2817,6 +2817,20 @@ def local_reads_in_a_read_only_step(node: Optional[dict], commands: list[str], v
         f"no address, login or password is asked")}]
 
 
+def _dropped_note(runbook: str) -> str:
+    """§17.1696 — the checks the draft offered and the engine could not keep, named in the "no check" refusal."""
+    try:
+        dropped = dropped_checks(runbook or "")
+    except Exception:
+        return ""
+    if not dropped:
+        return ""
+    parts = "; ".join(f"`{c[:120]}{'…' if len(c) > 120 else ''}` was dropped -- {why}" for c, why in dropped[:2])
+    return (f" The draft DID offer a check, and it could not be kept: {parts}. Write it as one short read inside the "
+            "guest: `curl -s` the endpoint with the key read from the config file, piped to `grep -o` for the fields "
+            "that show the change (e.g. `\"enable\": *[a-z]*`) -- no program, under 400 characters.")
+
+
 def _read_only_shape_hint(node: Optional[dict]) -> str:
     """§17.1693 — for a step that only reads, the "no check" refusal names the shape that IS its own evidence.
 
@@ -4603,7 +4617,8 @@ def verify_commands(text_out: str) -> list[str]:
     for fence in _FENCE_RE.findall(body):
         cands.extend(block_commands(fence))
     prose = _FENCE_RE.sub(" ", body)
-    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,200})`", prose))
+    # §17.1696 — 400: a check that reads its key in the guest and greps one field is ~200 characters by itself
+    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,400})`", prose))
     out: list[str] = []
     for c in cands:
         # §17.1187 — a <PLACEHOLDER> reads as a redirect to the shell gate; judge
@@ -4613,6 +4628,36 @@ def verify_commands(text_out: str) -> list[str]:
         if c not in out and not c.startswith("/") and read_only_command(shape, runner_side=True):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
+
+
+def dropped_checks(text_out: str) -> list[tuple[str, str]]:
+    """§17.1696 — the checks a runbook's ## Verify OFFERED that `verify_commands` did not keep, and why.
+
+    Live (job e5e22b92 T13 "Re-enable healthy indexers", three drafts): each Verify held a check -- `pct exec 102 --
+    bash -c "curl … /api/v1/indexer | python3 -c \"…print(i['name'], i['enable'])…\""` -- and each frame was refused
+    "this block has no check at all": the inline literal was over 200 characters (never a candidate) and a program is
+    not a read the runner's channel takes. The refusal named neither, so every redraft repeated it."""
+    from app.modules.assist_state_check import read_only_command
+    body = _section(text_out, "Verify")
+    kept = set(verify_commands(text_out))
+    out: list[tuple[str, str]] = []
+    prose = _FENCE_RE.sub(" ", body)
+    for m in re.finditer(r"`([^`\n]{2,4000})`", prose):
+        c = m.group(1).strip()
+        if c in kept or c.startswith("/") or not re.match(r"[a-z]", c):
+            continue
+        if len(c) > 400:
+            why = f"it is {len(c)} characters and a check is read as one line of 400 at most"
+        elif re.search(r"(?:^|[|;&\s\\\"'(])(?:python3?|perl|node|ruby|php)\s+-[ce]\b", c):
+            why = "a program (`python3 -c`) is not a read the runner's read channel takes"
+        elif not read_only_command(_PLACEHOLDER_RE.sub("x", c), runner_side=True):
+            why = "the runner's read channel does not take it as a read"
+        else:
+            continue
+        if not re.search(r"\b(?:pct|qm|curl|grep|cat|systemctl|ss|ip|wg)\b", c):
+            continue                                                   # prose in backticks, not a command
+        out.append((c, why))
+    return out
 
 
 # ── inputs the runbook needs (§17.1187) ──────────────────────────────────
@@ -6700,7 +6745,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
-            f"the service active -- not the command that made it.{_read_only_shape_hint(node)}")}]
+            f"the service active -- not the command that made it.{_read_only_shape_hint(node)}{_dropped_note(runbook)}")}]
         _no_check, verify, _engine_fills = fill_what_the_engine_holds(
             _no_check, cmds, verify, inventory)
         refused = refused + _no_check

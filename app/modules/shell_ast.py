@@ -68,6 +68,21 @@ def _unquote(s: str) -> str:
     return m.group(2) if m else s
 
 
+#: §17.1697 — inside "…" bash removes a backslash only before $ ` " \ and newline
+_DQ_ESCAPE_RE = re.compile(r"\\([$`\"\\\n])")
+
+
+def _dq_value(raw: str) -> str:
+    """§17.1697 — the value of a double-quoted word: its content with bash's double-quote escapes resolved.
+
+    Live (job e5e22b92 T13, three drafts): the in-container template renders its check as `pct exec 102 -- bash -c
+    "curl -s -H \\"X-Api-Key: \\$(grep -oP … config.xml)\\" http://127.0.0.1:9696/api/v1/indexer | grep -o …"`
+    (§17.1496 escapes it for that slot). The value kept `\\"` and `\\$`, the inner script parsed as `\\"X-Api-Key:`
+    and `\\$`, the read failed closed, the check was dropped and the frame refused "no check at all"."""
+    inner = raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == '"' else raw
+    return _DQ_ESCAPE_RE.sub(r"\1", inner)
+
+
 def _word_value(node, src: bytes) -> str:
     """§17.1572b — the VALUE of an argument word, a concatenation resolved child by child.
 
@@ -84,11 +99,12 @@ def _word_value(node, src: bytes) -> str:
             if ch.type == "raw_string":
                 parts.append(_text(ch, src)[1:-1])
             elif ch.type == "string":
-                raw = _text(ch, src)
-                parts.append(raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == '"' else raw)
+                parts.append(_dq_value(_text(ch, src)))                       # §17.1697
             else:
                 parts.append(re.sub(r"\\(.)", r"\1", _text(ch, src)))
         return "".join(parts)
+    if node.type == "string":
+        return _dq_value(_text(node, src))                                   # §17.1697
     return _unquote(_text(node, src))
 
 
