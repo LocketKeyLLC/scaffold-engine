@@ -6673,6 +6673,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
+    from app.modules.arr_api_shapes import wrong_fields as _wrong_fields
+    refused = refused + _wrong_fields(cmds, shape_files)                  # §17.1694
     refused = refused + a_sed_program_that_does_not_compile(cmds)         # §17.1617
     from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
     refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])

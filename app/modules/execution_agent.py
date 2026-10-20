@@ -3060,6 +3060,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                job_id, run_node.get("node_key"), len(_before))
         except Exception as exc:
             logger.warning("previous_attempt_skipped job=%s err=%r", job_id, exc)
+        # §17.1694 — the *arr API shapes the step reads, so the draft uses the real field names
+        try:
+            from app.modules import arr_api_shapes as _aas
+            _shapes = _aas.drafter_block(run_node)
+            if _shapes:
+                up_block = (up_block + "\n\n" + _shapes).strip()
+        except Exception as exc:
+            logger.warning("arr_api_shapes_skipped job=%s err=%r", job_id, exc)
         # §17.1611 — what earlier steps of this job read on the same guest (not only the declared upstream)
         try:
             from app.modules import guest_evidence as _ge
