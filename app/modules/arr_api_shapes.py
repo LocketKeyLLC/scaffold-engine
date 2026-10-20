@@ -123,6 +123,7 @@ def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]
             m = s.wrong.search(t)
             if m:
                 line = next((ln for ln in t.splitlines() if s.wrong.search(ln)), m.group(0))
-                out.append({"command": line.strip()[:200], "why": s.why + f" (§17.1694). {s.text}"})
+                out.append({"command": line.strip()[:200],
+                            "why": f"this reads a field this endpoint's objects do not have: {s.why} (§17.1694). {s.text}"})
                 break
     return out

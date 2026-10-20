@@ -64,3 +64,10 @@ def test_a_read_is_drafted_in_the_accepted_shape_from_the_first_draft():
     assert "python3 - <<'PY'" in b and "never ask for an id" in b
     change = {"title": "Widen TV-capable categories", "description": "Change Prowlarr's indexer categories."}
     assert aas.drafter_block(change) and "python3 - <<'PY'" not in aas.drafter_block(change)
+
+
+def test_the_refusal_drives_a_redraft():
+    """registered like every shape refusal (§17.1269): the redraft note recognises it"""
+    hit = aas.wrong_fields(["bash /tmp/in_ct_102.sh start"], [T4_FILE])
+    assert any(m in hit[0]["why"] for m in sr._SHAPE_REFUSALS)
+    assert sr.shape_retry_note({"kind": "run", "refused": hit})

@@ -161,6 +161,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "elevates only the first command of a line",    # §17.1283
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "this step says it is READ ONLY",                # §17.1637
+                   "a field this endpoint's objects do not have",   # §17.1694
                    "inside single quotes is left alone by the shell",   # §17.1638
                    "and nothing sets it",                           # §17.1348
                    "but set in a DIFFERENT command",               # §17.1398
@@ -335,6 +336,7 @@ _WHOSE_GAP: dict[str, str] = {
     "does not parse on its own": "drafter",                       # §17.1616 — one line per command, or a file
     "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "this step says it is READ ONLY": "drafter",                  # §17.1637 — reads only, with what the machine has
+    "a field this endpoint's objects do not have": "drafter",     # §17.1694 — the shape names the real field
     "inside single quotes is left alone by the shell": "drafter",   # §17.1638 — no `$` before an uppercase letter
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
@@ -2820,7 +2822,21 @@ _PROGRAM_CHANGE_RE = re.compile(
 _REMOTE_BODY_RE = re.compile(r"<<'REMOTE'\n(?P<body>.*?)\nREMOTE\n", re.S)
 
 
-def a_read_only_program(node: Optional[dict], files: Optional[list[dict]]) -> bool:
+#: §17.1694d — `pct exec N -- python3 - <<'TAG'` … `TAG`: the program travels on stdin into the guest
+_GUEST_PY_HEREDOC_RE = re.compile(r"^\s*pct\s+exec\s+\d{3,5}\s+--\s+python3?\s+-\s*<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\s*$",
+                                  re.S)
+
+
+def a_read_only_python_command(cmd: str) -> bool:
+    """§17.1694d — a host command that pipes ONE python program into a guest (`pct exec N -- python3 - <<'PY' … PY`)
+    with no change in it. Live (job e5e22b92 T5 "Search Robot Chicken S11"): the drafter wrote §17.1680c's program in
+    this form instead of inside the in-guest script; the same program, refused twice as "not a read" and "no check"."""
+    m = _GUEST_PY_HEREDOC_RE.match(str(cmd or ""))
+    return bool(m) and not _PROGRAM_CHANGE_RE.search(m.group("prog"))
+
+
+def a_read_only_program(node: Optional[dict], files: Optional[list[dict]],
+                        commands: Optional[list[str]] = None) -> bool:
     """§17.1680c — a step that DECLARES it changes nothing, whose in-guest block is a python program with no change in it
     (and no other shell work), is a read-only block like §17.1608's. Live (job c2518102 T2): an all-pages python read of
     Sonarr's missing list was refused "no check at all" -- §17.1608 classifies shell lines, and a program could do
@@ -2829,7 +2845,8 @@ def a_read_only_program(node: Optional[dict], files: Optional[list[dict]]) -> bo
         return False
     bodies = [m.group("body") for f in files or [] for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))]
     if not bodies:
-        return False
+        # §17.1694d — or every command is one read-only python program piped into the guest
+        return bool(commands) and all(a_read_only_python_command(c) for c in commands)
     for body in bodies:
         py = re.search(r"python3?\s+-\s+<<\s*'?(?P<tag>\w+)'?\n(?P<prog>.*?)\n(?P=tag)\b", body, re.S)
         if not py or _PROGRAM_CHANGE_RE.search(py.group("prog")):
@@ -2909,6 +2926,8 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     if run_is_the_check(runbook or ""):
         return []
     for c in commands:
+        if a_read_only_python_command(str(c)):                       # §17.1694d
+            continue
         segs = [s for s in writing_segments(str(c)) if not a_login_read(s)]
         if segs:
             local = local_form_of_a_read(segs[0])
@@ -6652,14 +6671,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # check the drafter repeated (`curl … | jq …`) is one the read channel drops. Live (job c2518102 T2 "Fetch Sonarr
     # wanted missing"): one read of Sonarr's missing list, refused "this block has no check at all".
     _reads_only_block = (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in shape_files or [])
-                         or a_read_only_program(node, shape_files))                              # §17.1680c
+                         or a_read_only_program(node, shape_files, cmds))                        # §17.1680c/1694d
     if cmds and not verify and not _reads_only_block:
         _no_check = [{"command": cmds[0][:120], "why": (
             "this block has no check at all: nothing would confirm it, and a step recorded done on exit "
             "codes alone is how a change that did nothing passes (§17.1343: the key was written, the file "
             "had it, and the application never read it). Name at least one command that READS the result "
             "the step is supposed to leave -- the value back out of the API, the key inside its section, "
-            "the service active -- not the command that made it." + _read_only_shape_hint(node))}]
+            f"the service active -- not the command that made it.{_read_only_shape_hint(node)}")}]
         _no_check, verify, _engine_fills = fill_what_the_engine_holds(
             _no_check, cmds, verify, inventory)
         refused = refused + _no_check
@@ -7511,7 +7530,7 @@ async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[d
     the same judge against the step's goal. Live (job c2518102 T2): with no jq in CT 104 the read printed only "Sonarr
     API request failed", exited 0 under `trap 'exit 0'`, and was recorded done."""
     if not (any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or []))
-            or a_read_only_program(waiting, waiting.get("files") or [])):                         # §17.1680c
+            or a_read_only_program(waiting, waiting.get("files") or [], waiting.get("commands") or [])):   # §17.1680c/1694d
         return []
     own = "\n".join(str(e.get("output") or "") for e in executed or [])[-6000:]
     return contradicted(await _verify_verdicts(

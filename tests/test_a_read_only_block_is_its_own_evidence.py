@@ -169,3 +169,31 @@ def test_a_refused_read_is_told_the_shape_that_passes():
     assert hit and "python3 - <<'PY'" in hit[0]["why"] and "SUMMARY" in hit[0]["why"], f["refused"]
     change = {"title": "Change Sonarr's port", "prompt_template": "Set Sonarr's port to 9999."}
     assert sr._read_only_shape_hint(change) == ""                     # a change is still told to add a check
+
+
+# --- §17.1694d: the same program piped into the guest from the host is a read-only program too --------------------
+
+T5_CMD = 'pct exec 104 -- python3 - <<\'PY\'\nimport json, urllib.request, urllib.parse\n\nAPI = "http://127.0.0.1:8989/api/v3"\nKEY = open("/var/lib/sonarr/config.xml").read().split("<ApiKey>")[1].split("<")[0]\n\ndef get(path, **params):\n    qs = urllib.parse.urlencode(params)\n    url = f"{API}/{path}?{qs}" if qs else f"{API}/{path}"\n    req = urllib.request.Request(url, headers={"X-Api-Key": KEY})\n    with urllib.request.urlopen(req, timeout=180) as r:\n        return json.load(r)\n\nseries_list = get("series")\ntarget = next((s for s in series_list if s["title"] == "Robot Chicken"), None)\nif target is None:\n    print("series \'Robot Chicken\' not found")\n    raise SystemExit(1)\n\nseason = next((se for se in target["seasons"] if se["seasonNumber"] == 11), None)\nif season is None:\n    print("season 11 not found on series")\n    raise SystemExit(1)\n\nreleases = get("release", seriesId=target["id"], seasonNumber=11)\nprint(f"seriesId={target[\'id\']}  season=11  releases={len(releases)}")\nfor rel in releases:\n    q = rel.get("quality", {}).get("quality", {}).get("name", "?")\n    rej = "; ".join(rel.get("rejections", [])) if rel.get("rejected") else ""\n    print(f"- {rel.get(\'title\',\'?\')} | {rel.get(\'indexer\',\'?\')} | {rel.get(\'size\',0)} | seeders={rel.get(\'seeders\',0)} | {q} | rejected={rel.get(\'rejected\',False)} {(\'| \' + rej) if rej else \'\'}")\nPY'   # live, job e5e22b92 T5
+
+
+def test_a_guest_piped_python_read_is_a_read_only_program():
+    node = {"node_key": "T5", "title": "Search Robot Chicken S11",
+            "description": "Read-only: run interactive search for Robot Chicken Season 11. Do not grab."}
+    assert sr.a_read_only_python_command(T5_CMD)
+    assert sr.writes_in_a_read_only_step([T5_CMD], node) == []
+    assert sr.a_read_only_program(node, [], [T5_CMD])
+    grab = T5_CMD.replace('releases = get("release", seriesId=target["id"], seasonNumber=11)',
+                          'urllib.request.urlopen(urllib.request.Request(API + "/release", data=b"{}", method="POST"))')
+    assert grab != T5_CMD and not sr.a_read_only_python_command(grab)
+    assert sr.writes_in_a_read_only_step([grab], node)
+    assert not sr.a_read_only_program({"title": "Grab it", "description": "Grab the release."}, [], [T5_CMD])
+
+
+def test_its_frame_needs_no_separate_check():
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": [], "held_logins": [], "can_write_files": True}
+    node = {"node_key": "T5", "title": "Search Robot Chicken S11", "tool": "Shell",
+            "prompt_template": "Read-only: run interactive search for Robot Chicken Season 11. Do not grab."}
+    f = sr.frame_run(node, "## Run this\n\n```bash\n" + T5_CMD + "\n```\n", spec, policy, services=[],
+                     inventory={"vms": {}, "cts": {"104": "running"}, "names": {"104": "sonarr"}})
+    assert f["commands"] and not [r for r in f["refused"] if "no check at all" in r["why"] or "READ ONLY" in r["why"]], f["refused"]
