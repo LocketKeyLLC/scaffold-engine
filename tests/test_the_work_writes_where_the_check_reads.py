@@ -200,3 +200,18 @@ async def test_the_container_templates_own_wrapper_is_not_a_config_write(monkeyp
     assert texts and "cat > /tmp/in_ct_102_remote.sh" in texts[0]
     verify = ['pct exec 102 -- bash -c "curl -s http://127.0.0.1:9696/api/v1/indexer | grep -o enable"']
     assert await rp.writes_where_the_check_does_not_read(_Spec(), texts, verify, [PROWLARR]) == []
+
+
+@pytest.mark.asyncio
+async def test_parsing_the_config_with_elementtree_is_not_writing_it(monkeypatch):
+    """§17.1707 — live, job e5e22b92 PR4 read Sonarr's key with ET.parse and was refused as writing config.xml"""
+    _transport(monkeypatch, lambda cmd: "0\n")
+    sonarr = ServiceTruth(guest="104", unit="sonarr.service", name="sonarr", state="active", ports=("8989",),
+                          data_dir="/var/lib/sonarr", configs=("/var/lib/sonarr/config.xml",))
+    pr4 = ("python3 - <<'PY'\nimport xml.etree.ElementTree as ET\nconfig_path = '/var/lib/sonarr/config.xml'\n"
+           "tree = ET.parse(config_path)\napi_key = tree.getroot().find('ApiKey').text\n"
+           "queue_page = 1\nstatus, _ = post('/api/v3/release', payload)\nPY\n")
+    verify = ['pct exec 104 -- bash -c "curl -s http://localhost:8989/api/v3/queue | grep -o title"']
+    assert await rp.writes_where_the_check_does_not_read(_Spec(), [pr4], verify, [sonarr]) == []
+    written = pr4.replace("api_key = tree", "tree.write(config_path)\napi_key = tree")
+    assert await rp.writes_where_the_check_does_not_read(_Spec(), [written], verify, [sonarr])   # an ET write still is
