@@ -77,7 +77,7 @@ SHAPES: tuple[Shape, ...] = (
           "Sonarr `GET /api/v3/release?seriesId=N&seasonNumber=S` (or `?episodeId=E`) runs an interactive search across "
           "Sonarr's indexers and returns the releases WITHOUT grabbing any (a grab is `POST /api/v3/release`); per "
           "release: `title`, `indexer`, `size`, `seeders`, `quality.quality.name`, `rejected`, `rejections` (why Sonarr "
-          "would not take it -- a list of plain STRINGS, e.g. \"Existing file meets cutoff: SDTV\", not objects). It can take a minute or more: give urllib a long timeout. Print counts and one short line "
+          "would not take it -- a list of plain STRINGS, e.g. \"Existing file meets cutoff: SDTV\", not objects). It can take a minute or more: give urllib a long timeout. A release's `guid` and `downloadUrl`, and the answer to a grab, can carry the indexer's or Prowlarr's key: never print them -- print the title, indexer and seeders. Print counts and one short line "
           "per release, never the raw list.",
           alone=re.compile(r"\binteractive\s+search\b[^.]*?(?:\bS\d{1,2}\b|\bseasons?\b|\bepisodes?\b)|"
                            r"\bsearch\s+\S.{0,60}?\bS\d{1,2}(?:E\d{1,3})?\b", re.I)),

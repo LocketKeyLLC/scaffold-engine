@@ -2828,7 +2828,7 @@ def _dropped_note(runbook: str) -> str:
     parts = "; ".join(f"`{c[:120]}{'…' if len(c) > 120 else ''}` was dropped -- {why}" for c, why in dropped[:2])
     return (f" The draft DID offer a check, and it could not be kept: {parts}. Write it as one short read inside the "
             "guest: `curl -s` the endpoint with the key read from the config file, piped to `grep -o` for the fields "
-            "that show the change (e.g. `\"enable\": *[a-z]*`) -- no program, under 400 characters.")
+            "that show the change (e.g. `\"enable\": *[a-z]*`) -- no program, under 800 characters.")
 
 
 def _read_only_shape_hint(node: Optional[dict]) -> str:
@@ -4655,8 +4655,10 @@ def verify_commands(text_out: str) -> list[str]:
     for fence in _FENCE_RE.findall(body):
         cands.extend(block_commands(fence))
     prose = _FENCE_RE.sub(" ", body)
-    # §17.1696 — 400: a check that reads its key in the guest and greps one field is ~200 characters by itself
-    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,400})`", prose))
+    # §17.1696 — a check that reads its key in the guest and greps one field is ~200 characters by itself; §17.1702 —
+    # 800: live (job e5e22b92 RC3), a Sonarr queue check for one series was 451, dropped twice. The runner's read
+    # classification, not the length, decides what a check may be.
+    cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,800})`", prose))
     out: list[str] = []
     for c in cands:
         # §17.1187 — a <PLACEHOLDER> reads as a redirect to the shell gate; judge
@@ -4684,8 +4686,8 @@ def dropped_checks(text_out: str) -> list[tuple[str, str]]:
         c = m.group(1).strip()
         if c in kept or c.startswith("/") or not re.match(r"[a-z]", c):
             continue
-        if len(c) > 400:
-            why = f"it is {len(c)} characters and a check is read as one line of 400 at most"
+        if len(c) > 800:
+            why = f"it is {len(c)} characters and a check is read as one line of 800 at most"
         elif re.search(r"(?:^|[|;&\s\\\"'(])(?:python3?|perl|node|ruby|php)\s+-[ce]\b", c):
             why = "a program (`python3 -c`) is not a read the runner's read channel takes"
         elif not read_only_command(_PLACEHOLDER_RE.sub("x", c), runner_side=True):

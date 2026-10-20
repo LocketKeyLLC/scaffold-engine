@@ -32,3 +32,14 @@ def test_double_quote_escapes_are_resolved_as_bash_does():
     from app.modules.shell_ast import analyze
     f = analyze('bash -c "echo \\"a\\" \\$HOME \\\\ \\n"')
     assert f.commands[0][2] == 'echo "a" $HOME \\ \\n'      # \n is not an escape inside "…"
+
+
+
+def test_a_queue_check_of_live_length_is_kept():
+    """§17.1702 — live, job e5e22b92 RC3's Sonarr queue check was 451 characters and was dropped twice"""
+    filt = r"""grep -o '\"title\": *\"[^\"]*Robot.Chicken[^\"]*\"\|\"status\": *\"[a-z]*\"\|\"episodeId\": *[0-9]*\|\"trackedDownloadState\": *\"[a-zA-Z]*\"\|\"trackedDownloadStatus\": *\"[a-zA-Z]*\"'"""
+    cmd = (r'''pct exec 104 -- bash -c "curl -s -H \"X-Api-Key: \$(grep -oP '(?<=<ApiKey>)[^<]+' /var/lib/sonarr/config.xml)\" '''
+           r"""'http://127.0.0.1:8989/api/v3/queue?page=1&pageSize=500&includeEpisode=true&includeSeries=true' | """ + filt
+           + r''' | head -n 60 | sort | uniq -c | sort -rn | head -n 40 | cat"''')
+    assert 400 < len(cmd) <= 800, len(cmd)
+    assert sr.verify_commands("## Verify\n\n- `" + cmd + "`\n") == [cmd]
