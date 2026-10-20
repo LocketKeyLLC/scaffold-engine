@@ -43,3 +43,16 @@ def test_a_queue_check_of_live_length_is_kept():
            + r''' | head -n 60 | sort | uniq -c | sort -rn | head -n 40 | cat"''')
     assert 400 < len(cmd) <= 800, len(cmd)
     assert sr.verify_commands("## Verify\n\n- `" + cmd + "`\n") == [cmd]
+
+
+def test_a_quoted_ampersand_inside_an_escaped_wrapper_is_not_unsafe():
+    """§17.1704 — live, job e5e22b92 RC3's check (drawn three times) was refused for a quoted `&`"""
+    from app.modules.assist_state_check import read_only_command
+    live = (r'''pct exec 104 -- bash -c "curl -s -H \"X-Api-Key: \$(grep -oP '(?<=<ApiKey>).*?(?=</ApiKey>)' /var/lib/sonarr/config.xml)\" '''
+            r'''\"http://localhost:8989/api/v3/queue?page=1&pageSize=100\" | grep -o '\"title\":\"[^\"]*Robot Chicken[^\"]*\",\"status\":\"[^\"]*\",\"episodeId\":[0-9]*' | head -5"''')
+    assert read_only_command(live, runner_side=True)
+    # the inside is still screened: an UNQUOTED `&` inside the wrapper backgrounds the curl
+    bad = r'''pct exec 104 -- bash -c "curl -s http://localhost:8989/api/v3/queue?page=1&pageSize=100 | head -5"'''
+    assert not read_only_command(bad, runner_side=True)
+    # and a bare command keeps the raw screen
+    assert not read_only_command("curl -s --url=http://x/?a=1&b=2", runner_side=True)
