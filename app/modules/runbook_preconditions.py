@@ -745,6 +745,13 @@ def _api_names_the_checks_read(verify: list[str]) -> dict:
     return out
 
 
+#: §17.1698 — what writes a FILE (not an API): live, job e5e22b92 T13's program only opened Prowlarr's config.xml to read
+#: its <ApiKey> and changed the indexer with a PUT, and §17.1359 read the path's mere presence as "writes the config"
+_FILE_WRITE_RE = re.compile(
+    r"\bsed\s+(?:-[a-zA-Z]*i|--in-place)|(?<![<>&\d])>>?\s*['\"]?/|\btee\b|\b(?:cp|mv|install)\s+\S|"
+    r"\bopen\([^)]*,\s*['\"][wax+]|\.write\(|\.write_text\(|\bxmlstarlet\s+ed\b|\bET\.|ElementTree|\bperl\s+-[a-z]*i")
+
+
 async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: list[str],
                                                services: Optional[list] = None, reading=None) -> list[dict]:
     r"""§17.1359 — the work writes a setting into a config the file has no concept of,
@@ -794,8 +801,8 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
         gid = str(getattr(svc, "guest", "") or "")
         if not names or not cfg.startswith("/") or not gid.isdigit():
             continue
-        if cfg not in joined:
-            continue                       # the block does not write this config
+        if cfg not in joined or not _FILE_WRITE_RE.search(joined):
+            continue                       # the block does not write this config (§17.1698: naming it to READ the key is not)
         for name in sorted(names):
             if (cfg, name) in seen:
                 continue

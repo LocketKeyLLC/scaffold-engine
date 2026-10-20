@@ -164,3 +164,23 @@ def test_the_refusal_asks_the_drafter_again():
     from app.modules.supervised_runs import refusal_kinds
     refused = [{"why": "… Do the write through the same API the check reads."}]
     assert refusal_kinds({"refused": refused}) == {"same API the check reads"}
+
+
+PROWLARR = ServiceTruth(guest="102", unit="prowlarr.service", name="prowlarr", state="active",
+                        ports=("9696",), data_dir="/var/lib/prowlarr",
+                        configs=("/var/lib/prowlarr/config.xml",))
+
+
+@pytest.mark.asyncio
+async def test_a_block_that_only_reads_its_key_from_the_config_is_not_judged(monkeypatch):
+    """§17.1698 — live, job e5e22b92 T13: the program opened config.xml only for its <ApiKey> and changed the indexer
+    with a PUT; the path's presence was read as "writes the config" and the frame was refused"""
+    seen = _transport(monkeypatch, lambda cmd: "0\n")
+    t13 = ('python3 - <<\'PY\'\nwith open("/var/lib/prowlarr/config.xml") as f:\n    KEY = f.read().split("<ApiKey>")[1]\n'
+           'indexers = get("/api/v1/indexer")\nfull["enable"] = True\nput(f"/api/v1/indexer/{i}", full)\nPY\n')
+    verify = ['pct exec 102 -- bash -c "curl -s http://127.0.0.1:9696/api/v1/indexer | grep -o enable"']
+    assert await rp.writes_where_the_check_does_not_read(_Spec(), [t13], verify, [PROWLARR]) == []
+    assert seen == []
+    written = t13.replace('with open("/var/lib/prowlarr/config.xml") as f:',
+                          'with open("/var/lib/prowlarr/config.xml", "w") as f:')
+    assert await rp.writes_where_the_check_does_not_read(_Spec(), [written], verify, [PROWLARR])   # a real write still is
