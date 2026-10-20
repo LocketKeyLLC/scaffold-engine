@@ -2894,6 +2894,9 @@ def read_only_pushed_programs(commands: Optional[list[str]], files: Optional[lis
         c = str(c)
         if a_read_only_python_command(c):
             continue
+        from app.modules.qbittorrent_read import is_engine_read as _qbt_read
+        if _qbt_read(c):                                    # §17.1708 — the engine's own qBittorrent read
+            continue
         if _PCT_PUSH_RE.match(c):
             m = _PCT_PUSH_RE.match(c)
             if m.group("src") in progs:
@@ -6560,6 +6563,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _pt:
         cmds, verify = _pt[0], _pt[1]
         _comp_notes = list(_comp_notes) + [{"why": _pt[2], **(_pt[3] if len(_pt) > 3 else {})}]
+    # §17.1708 — "read/list qBittorrent's torrents": a login then a GET, in its guest, the password via the environment.
+    from app.modules import qbittorrent_read as _qbr
+    _qb = _qbr.block(node, lambda: _arr_guest("qbittorrent", services, inventory))
+    if _qb:
+        cmds, verify = _qb[0], _qb[1]
+        _comp_notes = list(_comp_notes) + [{"why": _qb[2]}]
     # §17.1656 — "update <arr app> to <version>": from the measured tarball install, never apt.
     from app.modules import arr_update as _au
     _up = _au.block(node, services)
