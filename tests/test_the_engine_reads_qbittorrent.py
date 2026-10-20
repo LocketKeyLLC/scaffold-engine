@@ -106,3 +106,44 @@ def test_a_step_that_only_mentions_qbittorrent_is_not_claimed_and_an_apostrophe_
     for claimed in ({"title": "List the Power Rangers torrents in qBittorrent", "description": "Read-only, change nothing."},
                     {"title": "Check the downloads", "description": "Read-only: list qBittorrent torrents whose name has 'Scrubs'."}):
         assert qr.wants(claimed), claimed
+
+
+class _FakeStatus(_Fake):
+    def do_GET(self):
+        if "SID=abc" not in (self.headers.get("Cookie") or ""):
+            self.send_response(403); self.end_headers(); return
+        body = {"/api/v2/app/version": b"v4.6.4",
+                "/api/v2/transfer/info": json.dumps({"connection_status": "firewalled", "dht_nodes": 0,
+                                                     "dl_info_speed": 2048, "up_info_speed": 0}).encode(),
+                "/api/v2/app/preferences": json.dumps({"listen_port": 61661, "upnp": False, "random_port": False,
+                                                       "current_network_interface": "wg0", "web_ui_password": "NOPE",
+                                                       "proxy_password": "NOPE2", "max_active_downloads": 3}).encode()}.get(self.path)
+        self.send_response(200 if body else 404); self.end_headers(); self.wfile.write(body or b"")
+
+
+def test_the_connection_read_reports_status_and_never_a_password_field():
+    """§17.1714 — connected/firewalled, DHT, port, interface; the preference whitelist never prints a password field"""
+    srv = HTTPServer(("127.0.0.1", 0), _FakeStatus)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    prog = qr.STATUS_PY.replace("127.0.0.1:" + qr._PORT, "127.0.0.1:%d" % srv.server_address[1])
+    try:
+        r = subprocess.run([sys.executable, "-"], input=prog, capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "QBT_PASS": "s3cret"})
+    finally:
+        srv.shutdown()
+    assert r.returncode == 0, r.stderr
+    assert "CONNECTION: firewalled | DHT nodes 0" in r.stdout and "PREF listen_port = 61661" in r.stdout
+    assert "PREF current_network_interface = wg0" in r.stdout and "PREF max_active_downloads = 3" in r.stdout
+    assert "NOPE" not in r.stdout and "s3cret" not in r.stdout
+
+
+def test_a_connection_step_gets_the_status_read_with_no_refusal():
+    qs = {"node_key": "QS1", "title": "Check qBittorrent's connection status", "tool": "Shell",
+          "description": "Read-only, change nothing. Read qBittorrent's connection status: connected or firewalled, DHT nodes, "
+                         "listening port and interface, compared with the VPN's forwarded port."}
+    qs["prompt_template"] = qs["description"]
+    assert qr.wants_status(qs) and not qr.wants_status(T1)
+    f = _frame(qs)
+    assert qr.is_engine_read(f["commands"][0]) and qr.STATUS_PY in f["commands"][0]
+    assert f["commands"][1:] == ["pct exec 105 -- ss -tlnu", "pct exec 105 -- ip -4 -brief addr"]
+    assert not f["refused"], [r["why"][:160] for r in f["refused"]]

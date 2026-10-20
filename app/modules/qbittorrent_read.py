@@ -56,6 +56,29 @@ READ_PY = (
     "    print('... and %d more' % (len(sel) - 60))\n"
 )
 
+#: §17.1714 — the CONNECTION read: same login, then transfer/info and a whitelist of preferences (never a password field)
+STATUS_PY = (
+    "import os, sys, json, urllib.request, urllib.parse, http.cookiejar\n"
+    "base = 'http://127.0.0.1:" + _PORT + "'\n"
+    "jar = http.cookiejar.CookieJar()\n"
+    "op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))\n"
+    "body = urllib.parse.urlencode({'username': '" + _USER + "', 'password': os.environ.get('QBT_PASS', '')}).encode()\n"
+    "ans = op.open(urllib.request.Request(base + '/api/v2/auth/login', data=body, headers={'Referer': base}), timeout=30).read().decode(errors='replace').strip()\n"
+    "if ans != 'Ok.':\n"
+    "    print('FAILED: qBittorrent refused the login: ' + ans[:80]); sys.exit(1)\n"
+    "get = lambda p: json.loads(op.open(base + p, timeout=30).read() or b'null')\n"
+    "print('VERSION: ' + op.open(base + '/api/v2/app/version', timeout=30).read().decode().strip())\n"
+    "ti = get('/api/v2/transfer/info') or {}\n"
+    "print('CONNECTION: %s | DHT nodes %s | down %.0f KB/s | up %.0f KB/s' % (ti.get('connection_status'), ti.get('dht_nodes'),\n"
+    "      float(ti.get('dl_info_speed') or 0) / 1024, float(ti.get('up_info_speed') or 0) / 1024))\n"
+    "pr = get('/api/v2/app/preferences') or {}\n"
+    "SAFE = ['listen_port', 'random_port', 'upnp', 'current_network_interface', 'current_interface_address', 'dht', 'pex', 'lsd',\n"
+    "        'encryption', 'anonymous_mode', 'proxy_type', 'proxy_peer_connections', 'queueing_enabled', 'max_active_downloads',\n"
+    "        'max_active_torrents', 'max_active_uploads', 'dont_count_slow_torrents', 'max_connec', 'max_connec_per_torrent',\n"
+    "        'max_uploads', 'dl_limit', 'up_limit', 'enable_multi_connections_from_same_ip', 'announce_to_all_trackers', 'add_trackers_enabled']\n"
+    "for k in SAFE:\n"
+    "    if k in pr: print('PREF %s = %s' % (k, pr[k]))\n"
+)
 _QBT_RE = re.compile(r"\bq(?:bit(?:torrent)?|bt)\b", re.I)
 _READ_WORDS_RE = re.compile(r"\b(?:list|read|show|check|inspect|look|find|status|torrents?)\b", re.I)
 #: §17.1711 — a quote opens and closes at a word boundary: the apostrophe in "Sonarr's" is not a quote
@@ -76,6 +99,15 @@ def wants(node: Optional[dict]) -> bool:
     return bool(subject and _READ_WORDS_RE.search(text) and only_reads(node))
 
 
+_STATUS_RE = re.compile(r"\b(?:connection|connectivity|connected|firewalled|port|dht|peers?|reachab\w*|network)\b", re.I)
+
+
+def wants_status(node: Optional[dict]) -> bool:
+    """§17.1714 — a qBittorrent read about its CONNECTION (status, port, firewall, DHT, peers), not its torrent list."""
+    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    return wants(node) and bool(_STATUS_RE.search(text))
+
+
 def name_filter(node: Optional[dict]) -> list[str]:
     """The words of the first name the step quotes (e.g. 'Mighty Morphin'), lower-cased; [] for all torrents."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
@@ -92,10 +124,15 @@ def command(gid: str, words: list[str]) -> str:
             f"python3 - <<'PY'\n{READ_PY}PY")
 
 
+def status_command(gid: str) -> str:
+    return f'pct exec {gid} -- env QBT_PASS="$MASS_PASSWORD" QBT_FILTER=\'[]\' python3 - <<\'PY\'\n{STATUS_PY}PY'
+
+
 def is_engine_read(cmd: str) -> bool:
-    """The engine's own qBittorrent read, exactly as `command` writes it."""
+    """The engine's own qBittorrent read (torrents or connection), exactly as `command`/`status_command` write it."""
     c = str(cmd or "")
-    return READ_PY in c and bool(re.match(r"\s*pct\s+exec\s+\d{3,5}\s+--\s+env\s+QBT_PASS=\"\$MASS_PASSWORD\"\s+QBT_FILTER=", c))
+    return ((READ_PY in c or STATUS_PY in c)
+            and bool(re.match(r"\s*pct\s+exec\s+\d{3,5}\s+--\s+env\s+QBT_PASS=\"\$MASS_PASSWORD\"\s+QBT_FILTER=", c)))
 
 
 def block(node: Optional[dict], qbt_guest: Callable[[], Optional[str]]) -> Optional[tuple[list[str], list[str], str]]:
@@ -104,6 +141,13 @@ def block(node: Optional[dict], qbt_guest: Callable[[], Optional[str]]) -> Optio
     gid = qbt_guest()
     if not gid:
         return None
+    if wants_status(node):                                                    # §17.1714
+        cmds = [status_command(gid), f"pct exec {gid} -- ss -tlnu", f"pct exec {gid} -- ip -4 -brief addr"]
+        return cmds, [], (f"read qBittorrent's CONNECTION as the engine's own block (§17.1714): inside guest {gid}, a login "
+                          "with the stored password via the environment, then transfer/info (connected or firewalled, DHT "
+                          "nodes, speeds) and a whitelist of preferences (listening port, interface, UPnP, DHT/PeX/LSD, "
+                          "encryption, queueing limits, proxy type -- never a password field); plus the guest's listening "
+                          "ports and addresses, to compare with the VPN's forwarded port. Nothing changes.")
     words = name_filter(node)
     note = (f"read qBittorrent as the engine's own block (§17.1708): inside guest {gid}, the stored password reaches the "
             "program through the environment (never printed), it logs in to its loopback Web UI and GETs "

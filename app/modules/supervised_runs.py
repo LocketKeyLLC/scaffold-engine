@@ -2897,6 +2897,9 @@ def read_only_pushed_programs(commands: Optional[list[str]], files: Optional[lis
         from app.modules.qbittorrent_read import is_engine_read as _qbt_read
         if _qbt_read(c):                                    # §17.1708 — the engine's own qBittorrent read
             continue
+        from app.modules.assist_state_check import read_only_command as _roc
+        if _roc(c, runner_side=True):                       # §17.1714 — a plain read beside the program (ss, ip)
+            continue
         if _PCT_PUSH_RE.match(c):
             m = _PCT_PUSH_RE.match(c)
             if m.group("src") in progs:
