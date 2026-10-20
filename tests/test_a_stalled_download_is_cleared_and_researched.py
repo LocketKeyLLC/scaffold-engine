@@ -46,7 +46,7 @@ def test_the_verify_is_read_only_safe():
     assert v != "true" and "python3" not in v and "$(" not in v and read_only_command(v)
 
 
-def _run_stub(queue):
+def _run_stub(queue, *args):
     calls = []
 
     def fake(req, timeout=None):
@@ -57,7 +57,7 @@ def _run_stub(queue):
 
     with mock.patch.object(ur, "urlopen", fake):
         import sys
-        sys.argv = ["-c", "thekey"]
+        sys.argv = ["-c", "thekey", *args]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             exec(_CLEAR_STALLED_PY, {"__name__": "__main__"})
@@ -74,11 +74,13 @@ def test_only_stalled_items_are_bulk_removed_with_blocklist_then_a_research():
         {"id": 4, "errorMessage": "The download is stalled with no connections"},
     ], "totalRecords": 4}
     out, calls = _run_stub(queue)
-    assert "STALLED: 2 of 4" in out and "REMOVED 2" in out and "MissingEpisodeSearch" in out
+    assert "STALLED: 2 of 4" in out and "REMOVED 2" in out and "searches the 2 removed episodes again" in out
     dels = [c for c in calls if c[0] == "DELETE"]
     assert dels and dels[0][2]["ids"] == [1, 4], "only the no-seeder stalls; the importBlocked item is spared"
     assert "blocklist=true" in dels[0][1] and "removeFromClient=true" in dels[0][1]
-    assert any(c[0] == "POST" and c[2] and c[2].get("name") == "MissingEpisodeSearch" for c in calls)
+    assert "skipRedownload=false" in dels[0][1]
+    # §17.1709 — no library-wide MissingEpisodeSearch: skipRedownload=false re-searches exactly these episodes
+    assert not [c for c in calls if c[0] == "POST"]
 
 
 def test_an_import_blocked_item_is_never_blocklisted():
@@ -101,3 +103,32 @@ def test_frame_run_runs_clear_stalled_before_the_key_reader():
     src = inspect.getsource(sr)
     assert "rewrite_clear_stalled(node, cmds, verify, services, inventory)" in src
     assert src.index("rewrite_clear_stalled(node, cmds") < src.index("read_on_the_machine(cmds")
+
+
+
+def _ago(h):
+    import datetime
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_magnet_that_never_fetched_its_metadata_is_stalled_past_the_steps_age():
+    """§17.1709 — live (job e5e22b92 MD1): 15 queue items titled by a bare hash, 12 older than 6 h"""
+    old = [{"id": 100 + i, "title": "%040x" % (0xabc + i), "status": "queued", "trackedDownloadState": "downloading",
+            "statusMessages": [], "added": _ago(186)} for i in range(12)]
+    young = [{"id": 200 + i, "title": "%040x" % (0xdef + i), "status": "queued", "trackedDownloadState": "downloading",
+              "statusMessages": [], "added": _ago(2.6)} for i in range(3)]
+    ok = [{"id": 300, "title": "Show.S01E01.1080p", "status": "downloading", "added": _ago(200)},
+          {"id": 301, "title": "%040x" % 0x123, "trackedDownloadState": "importBlocked", "added": _ago(200)}]
+    out, calls = _run_stub({"records": old + young + ok, "totalRecords": 17}, "6")
+    dels = [c for c in calls if c[0] == "DELETE"]
+    assert "STALLED: 12 of 17 queue items (added more than 6 h ago)" in out
+    assert dels and sorted(dels[0][2]["ids"]) == [100 + i for i in range(12)]
+    out2, calls2 = _run_stub({"records": old + young + ok, "totalRecords": 17})
+    assert "STALLED: 15 of 17" in out2                                   # no age in the step: every stuck magnet
+
+
+def test_the_steps_age_reaches_the_program():
+    node = {"title": "Remove the stuck metadata-less torrents through Sonarr",
+            "prompt_template": "select the items whose title is a bare hash AND that were added more than 6 hours ago"}
+    cmds, _v, _n = rewrite_clear_stalled(node, ["x"], ["y"], SERVICES, INV)
+    assert cmds[0].rstrip("'").endswith('"<SONARR_API_KEY>" "6"'), cmds[0][-60:]
