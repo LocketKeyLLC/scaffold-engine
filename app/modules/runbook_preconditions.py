@@ -751,7 +751,9 @@ def _api_names_the_checks_read(verify: list[str]) -> dict:
 _FILE_WRITE_RE = re.compile(
     r"\bsed\s+(?:-[a-zA-Z]*i|--in-place)|(?<![<>&\d])>>?\s*['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|\btee\b|"
     r"\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+['\"]?/(?!tmp/|dev/|root/\.scaffold_step)|"
-    r"\bopen\([^)]*,\s*['\"][wax+]|\.write\(|\.write_text\(|\bxmlstarlet\s+ed\b|\bET\.|ElementTree|\bperl\s+-[a-z]*i")
+    r"\bopen\([^)]*,\s*['\"][wax+]|\.write\(|\.write_text\(|\bxmlstarlet\s+ed\b|\bperl\s+-[a-z]*i")
+#: §17.1707 — not `ET.`/ElementTree: live (job e5e22b92 PR4), `ET.parse(config_path)` to read the <ApiKey> was taken as a
+#: config write; an ElementTree WRITE is `tree.write(…)`, which `.write(` already catches.
 
 
 async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: list[str],
