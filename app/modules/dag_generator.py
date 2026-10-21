@@ -1230,6 +1230,53 @@ def detect_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
     return out
 
 
+def collapse_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
+    """§17.1729 — the deterministic last resort when the redrafts still carry numbered copies: each group becomes
+    its FIRST node, renamed to work over every confirmed item, depending on everything any copy depended on, and
+    everything that depended on any copy now depends on it. Live (job f9ca3ee1, 2026-10-21): three drafts, the
+    Ollama copies were merged by the model, the four "Install k3s agent laptop N" copies came back every time.
+    Mutates ``tasks`` in place; returns the groups merged."""
+    groups = detect_invented_counts(tasks, brief_text)
+    for g in groups:
+        by_id = {t.get("id"): t for t in tasks}
+        keep_id, drop = g["ids"][0], set(g["ids"][1:])
+        keep = by_id.get(keep_id)
+        if keep is None:
+            continue
+        noun = g["noun"]
+        m = _NUMBERED_TITLE.match(str(keep.get("name") or "").strip())
+        prefix = (m.group("stem")[: -len(m.group("noun"))] if m else str(keep.get("name") or "")).rstrip()
+        # Names are cut to five words by _normalize_tasks; the full meaning rides in the notes.
+        joined = re.search(r"\b(?:on|to|for|into|onto)$", prefix, re.I)
+        tail = ["every", noun] if joined else [",", "every", noun]
+        words = prefix.split()[: 5 - 2]
+        keep["name"] = (" ".join(words) + (" " if joined else "") + " ".join(tail)).replace(" ,", ",")
+        keep["notes"] = (f"Do this for EVERY {noun} confirmed earlier in the plan, one after another — how many there "
+                         f"are is what that step found, not a fixed number (§17.1729 merged {', '.join(g['ids'])}). "
+                         f"As drafted for one {noun}: {keep.get('notes') or ''}").strip()
+        deps: list[str] = []
+        for i in g["ids"]:
+            for d in (by_id.get(i) or {}).get("depends_on") or []:
+                if d not in g["ids"] and d not in deps:
+                    deps.append(d)
+        keep["depends_on"] = deps
+        if any((by_id.get(i) or {}).get("is_deliverable") for i in g["ids"]):
+            keep["is_deliverable"] = True
+        tasks[:] = [t for t in tasks if t.get("id") not in drop]
+        for t in tasks:
+            if t is keep:
+                continue
+            dl = t.get("depends_on") or []
+            if any(d in drop or d == keep_id for d in dl):
+                new: list[str] = []
+                for d in dl:
+                    d2 = keep_id if d in drop else d
+                    if d2 not in new:
+                        new.append(d2)
+                t["depends_on"] = new
+    return groups
+
+
 def render_invented_count_corrections(groups: list[dict], next_attempt: int) -> str:
     lines = [f"## Invented counts (attempt {next_attempt})", ""]
     for g in groups:
@@ -1754,6 +1801,14 @@ async def generate_dag(
                     "dag_dead_end_auto_linked: job=%s orphans=%s primary=%s",
                     job_id, orphans, primary,
                 )
+
+    # §17.1729 — numbered copies the redrafts did not merge are merged here, before nodes are normalized.
+    _merged = collapse_invented_counts(tasks, json.dumps(brief_data))
+    if _merged:
+        validator_warnings.append(
+            "invented_counts_merged: " + "; ".join(
+                f"{', '.join(g['ids'])} → {g['ids'][0]} (one step for every confirmed {g['noun']})" for g in _merged))
+        logger.warning("dag_invented_counts_merged: job=%s groups=%s", job_id, [g["ids"] for g in _merged])
 
     # 3b-4b. Node-count enforcement + normalize + semantic validation
     # (single try/except so any ValueError from these steps fails the job cleanly)

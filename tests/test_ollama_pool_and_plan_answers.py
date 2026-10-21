@@ -367,3 +367,63 @@ async def test_the_planner_is_sent_back_to_write_one_node(monkeypatch):
     redraft = [p for p in prompts if "Decompose this refined brief" in p][1]
     assert "Invented counts" in redraft and "T1, T2" in redraft
     assert any(w.startswith("invented_count_found_1_attempt_1") for w in result["warnings"])
+
+
+@pytest.mark.smoke
+def test_copies_the_redrafts_left_are_merged_into_one_node():
+    """Live: after three drafts T14–T17 'Install k3s agent laptop N' were still four copies."""
+    tasks = [
+        {"id": "T13", "name": "Retrieve k3s join token", "depends_on": ["T12"]},
+        *[{"id": f"T{13 + i}", "name": f"Install k3s agent laptop {i}", "depends_on": ["T13"],
+           "notes": f"SSH to laptop {i}, install k3s agent."} for i in (1, 2, 3, 4)],
+        {"id": "T18", "name": "Verify cluster node readiness", "depends_on": ["T14", "T15", "T16", "T17"]},
+        {"id": "T19", "name": "Deploy Ollama on laptop1", "depends_on": ["T18"]},
+        {"id": "T20", "name": "Deploy Ollama on laptop2", "depends_on": ["T18"]},
+        {"id": "T21", "name": "Configure engine pool", "depends_on": ["T19", "T20"]},
+    ]
+    merged = dag_generator.collapse_invented_counts(tasks, json.dumps(_K8S_BRIEF))
+    assert [g["ids"] for g in merged] == [["T14", "T15", "T16", "T17"], ["T19", "T20"]]
+    by = {t["id"]: t for t in tasks}
+    assert set(by) == {"T13", "T14", "T18", "T19", "T21"}
+    assert by["T14"]["name"] == "Install k3s agent, every laptop"
+    assert by["T19"]["name"] == "Deploy Ollama on every laptop"
+    assert by["T14"]["depends_on"] == ["T13"]
+    assert by["T18"]["depends_on"] == ["T14"] and by["T21"]["depends_on"] == ["T19"]
+    assert "EVERY laptop confirmed earlier" in by["T14"]["notes"]
+    assert dag_generator.collapse_invented_counts(tasks, json.dumps(_K8S_BRIEF)) == []    # idempotent
+
+
+async def test_generate_dag_merges_what_the_redrafts_left(monkeypatch):
+    """Production path: generate_dag persists ONE node, not the copies."""
+    copies = {"strategy": "s", "tasks": [
+        {"id": "T1", "name": "Confirm the laptops", "type": "action", "inputs": [], "outputs": ["list"],
+         "depends_on": [], "tool": "LLM", "domain": None, "assigned_model": None, "notes": "n"},
+        *[{"id": f"T{i + 1}", "name": f"Install k3s agent laptop{i}", "type": "action", "inputs": ["list"],
+           "outputs": [f"a{i}"], "depends_on": ["T1"], "tool": "Shell", "domain": None, "assigned_model": None,
+           "notes": "n"} for i in (1, 2, 3)],
+        {"id": "T5", "name": "Verify nodes", "type": "validation", "inputs": ["a1"], "outputs": ["ok"],
+         "depends_on": ["T2", "T3", "T4"], "tool": "Shell", "domain": None, "assigned_model": None, "notes": "n",
+         "is_deliverable": True}]}
+
+    async def _stub(brief_data, route_kwargs):
+        return {"dag_data": json.loads(json.dumps(copies)), "raw_text": "", "model": "m", "duration_ms": 0,
+                "warnings": [], "error": None, "attempts": 3, "validator_calls": 3}
+
+    inserted: list[str] = []
+    row = MagicMock()
+    row.first.return_value = ("planning", dict(_K8S_BRIEF), None, None, None, 0, False)
+
+    async def _exec(stmt, params=None):
+        sql = str(stmt)
+        if "INSERT INTO dag_nodes" in sql and params:
+            for p in (params if isinstance(params, list) else [params]):
+                inserted.append(p.get("title") or p.get("name") or "")
+        return row
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=_exec)
+    with patch.object(dag_generator, "_generate_dag_with_validator", _stub):
+        result = await dag_generator.generate_dag(str(uuid4()), db)
+    assert any("invented_counts_merged" in w for w in (result.get("warnings") or [])), result
+    titles = " | ".join(inserted)
+    assert "Install k3s agent, every laptop" in titles
+    assert "laptop2" not in titles and "laptop3" not in titles
