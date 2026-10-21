@@ -427,3 +427,28 @@ async def test_generate_dag_merges_what_the_redrafts_left(monkeypatch):
     titles = " | ".join(inserted)
     assert "Install k3s agent, every laptop" in titles
     assert "laptop2" not in titles and "laptop3" not in titles
+
+
+@pytest.mark.smoke
+def test_mid_title_numbers_and_the_planners_n_are_a_series_and_a_lone_n_joins_its_every():
+    """§17.1742 — live corrected re-plan of f9ca3ee1: "Join laptop 1/2/N as worker", and T10 "Guide OS install
+    laptop N" beside T8 "Guide OS install, every laptop"."""
+    tasks = [
+        {"id": "T8", "name": "Guide OS install, every laptop", "depends_on": ["T7", "T2"]},
+        {"id": "T10", "name": "Guide OS install laptop N", "depends_on": ["T7", "T2"]},
+        {"id": "T11", "name": "Configure LAN and SSH laptops", "depends_on": ["T8", "T10"]},
+        {"id": "T15", "name": "Get k3s join token", "depends_on": ["T14"]},
+        {"id": "T16", "name": "Join laptop 1 as worker", "depends_on": ["T15", "T13"]},
+        {"id": "T17", "name": "Join laptop 2 as worker", "depends_on": ["T15", "T13"]},
+        {"id": "T18", "name": "Join laptop N as worker", "depends_on": ["T15", "T13"]},
+        {"id": "T19", "name": "Verify cluster node status", "depends_on": ["T16", "T17", "T18"]},
+    ]
+    assert [g["ids"] for g in dag_generator.detect_invented_counts(tasks, json.dumps(_K8S_BRIEF))] == [["T16", "T17", "T18"]]
+    merged = dag_generator.collapse_invented_counts(tasks, json.dumps(_K8S_BRIEF))
+    by = {t["id"]: t for t in tasks}
+    assert set(by) == {"T8", "T11", "T15", "T16", "T19"}, sorted(by)
+    assert by["T16"]["name"] == "Join every laptop as worker"
+    assert by["T19"]["depends_on"] == ["T16"] and by["T11"]["depends_on"] == ["T8"]
+    assert [g["ids"] for g in merged] == [["T16", "T17", "T18"], ["T8", "T10"]]
+    assert dag_generator.detect_invented_counts(
+        [{"id": "A", "name": "Start VM 106"}, {"id": "B", "name": "Start VM 110"}], "") == []

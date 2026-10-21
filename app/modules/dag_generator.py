@@ -1197,6 +1197,9 @@ def wire_orphan_terminal_nodes(tasks: list[dict]) -> list[str]:
 _NUM_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine",
               10: "ten", 11: "eleven", 12: "twelve"}
 _NUMBERED_TITLE = re.compile(r"^(?P<stem>.*?\b(?P<noun>[A-Za-z][A-Za-z-]{2,}))\s*#?(?P<n>\d{1,2})$")
+#: §17.1742 — the number in the MIDDLE ("Join laptop 1 as worker"), and the planner's own "N" for the rest
+#: ("Join laptop N as worker"). Live (job f9ca3ee1, the corrected re-plan): "laptop 1", "laptop 2", "laptop N".
+_NUMBERED_ANYWHERE = re.compile(r"^(?P<pre>.*?\b(?P<noun>[A-Za-z][A-Za-z-]{2,}))\s*#?(?P<n>\d{1,2}|N)\b(?P<post>.*)$")
 
 
 def detect_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
@@ -1210,17 +1213,19 @@ def detect_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
     brief never states "N <noun>" (digit or word, up to two words between). Measured over the 18 stored plans
     (790 steps, 20 numbered titles): f9ca3ee1's two groups and nothing else."""
     import collections
-    groups: dict[tuple[str, str], list[tuple[int, str]]] = collections.defaultdict(list)
+    groups: dict[tuple[str, str, str], list[tuple[int, str]]] = collections.defaultdict(list)
     for t in tasks or []:
-        m = _NUMBERED_TITLE.match(str(t.get("name") or t.get("title") or "").strip())
+        m = _NUMBERED_ANYWHERE.match(str(t.get("name") or t.get("title") or "").strip())
         if m:
-            groups[(m.group("stem").strip().lower(), m.group("noun").lower())].append(
-                (int(m.group("n")), str(t.get("id") or t.get("node_key") or "")))
+            n = 99 if m.group("n") == "N" else int(m.group("n"))          # §17.1742 — "N" is the rest of the series
+            groups[(m.group("pre").strip().lower(), m.group("noun").lower(), m.group("post").strip().lower())].append(
+                (n, str(t.get("id") or t.get("node_key") or "")))
     text = (brief_text or "").lower()
     out: list[dict] = []
-    for (_stem, noun), members in groups.items():
+    for (_pre, noun, _post), members in groups.items():
         nums = sorted(n for n, _ in members)
-        if len(nums) < 2 or nums != list(range(1, len(nums) + 1)):
+        digits = [n for n in nums if n != 99]
+        if len(nums) < 2 or digits != list(range(1, len(digits) + 1)) or nums.count(99) > 1:
             continue
         k = len(nums)
         said = rf"\b(?:{k}|{_NUM_WORDS.get(k, k)})\s+(?:[a-z-]+\s+){{0,2}}{re.escape(noun)}"
@@ -1244,13 +1249,17 @@ def collapse_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
         if keep is None:
             continue
         noun = g["noun"]
-        m = _NUMBERED_TITLE.match(str(keep.get("name") or "").strip())
-        prefix = (m.group("stem")[: -len(m.group("noun"))] if m else str(keep.get("name") or "")).rstrip()
+        m = _NUMBERED_ANYWHERE.match(str(keep.get("name") or "").strip())
+        prefix = (m.group("pre")[: -len(m.group("noun"))] if m else str(keep.get("name") or "")).rstrip()
         # Names are cut to five words by _normalize_tasks; the full meaning rides in the notes.
         joined = re.search(r"\b(?:on|to|for|into|onto)$", prefix, re.I)
-        tail = ["every", noun] if joined else [",", "every", noun]
-        words = prefix.split()[: 5 - 2]
-        keep["name"] = (" ".join(words) + (" " if joined else "") + " ".join(tail)).replace(" ,", ",")
+        post = (m.group("post").strip() if m else "")
+        if post:                                   # §17.1742 — "Join laptop 1 as worker" → "Join every laptop as worker"
+            keep["name"] = " ".join((prefix.split() + ["every", noun] + post.split())[:5])
+        else:
+            tail = ["every", noun] if joined else [",", "every", noun]
+            words = prefix.split()[: 5 - 2]
+            keep["name"] = (" ".join(words) + (" " if joined else "") + " ".join(tail)).replace(" ,", ",")
         keep["notes"] = (f"Do this for EVERY {noun} confirmed earlier in the plan, one after another — how many there "
                          f"are is what that step found, not a fixed number (§17.1729 merged {', '.join(g['ids'])}). "
                          f"As drafted for one {noun}: {keep.get('notes') or ''}").strip()
@@ -1274,7 +1283,46 @@ def collapse_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
                     if d2 not in new:
                         new.append(d2)
                 t["depends_on"] = new
+    groups += _merge_a_lone_n_into_its_every(tasks)
     return groups
+
+
+def _repoint(tasks: list[dict], drop: str, keep_id: str) -> None:
+    for t in tasks:
+        dl = t.get("depends_on") or []
+        if drop in dl:
+            new: list[str] = []
+            for d in dl:
+                d2 = keep_id if d == drop else d
+                if d2 not in new and d2 != t.get("id"):
+                    new.append(d2)
+            t["depends_on"] = new
+
+
+def _merge_a_lone_n_into_its_every(tasks: list[dict]) -> list[dict]:
+    """§17.1742 — a lone "… laptop N" step beside an "… every laptop" step with the same opening is the same work:
+    merged into the "every" one. Live (job f9ca3ee1): T8 "Guide OS install, every laptop" (merged by §17.1729) and
+    T10 "Guide OS install laptop N — repeat walkthrough for each remaining laptop"."""
+    merged: list[dict] = []
+    for t in list(tasks):
+        m = _NUMBERED_ANYWHERE.match(str(t.get("name") or "").strip())
+        if not m or m.group("n") != "N":
+            continue
+        noun = m.group("noun").lower()
+        head = re.sub(r"[^a-z0-9 ]", "", m.group("pre")[: -len(m.group("noun"))].lower()).split()[:2]
+        every = next((o for o in tasks if o is not t and f"every {noun}" in str(o.get("name") or "").lower()
+                      and re.sub(r"[^a-z0-9 ]", "", str(o.get("name") or "").lower()).split()[:2] == head), None)
+        if every is None or not head:
+            continue
+        deps = list(every.get("depends_on") or [])
+        for d in t.get("depends_on") or []:
+            if d not in deps and d != every.get("id"):
+                deps.append(d)
+        every["depends_on"] = deps
+        tasks[:] = [x for x in tasks if x is not t]
+        _repoint(tasks, str(t.get("id")), str(every.get("id")))
+        merged.append({"noun": noun, "count": 0, "ids": [str(every.get("id")), str(t.get("id"))]})
+    return merged
 
 
 def render_invented_count_corrections(groups: list[dict], next_attempt: int) -> str:

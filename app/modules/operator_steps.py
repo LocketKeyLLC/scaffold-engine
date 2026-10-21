@@ -41,7 +41,14 @@ _OPERATORS_RE = re.compile(
     r"\bin\s+their\s+own\s+account\b|\bin\s+(?:the\s+)?my\s+spectrum\s+app\b|\badmin\s+console\b|"
     # §17.1493 — not "reports": what the operator SAID is not a task for them ("The operator reports the torrents look
     # halted WITH several peers" handed ADD169 — reading qBittorrent's API — to the operator)
-    r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens)\b",
+    r"\bthe\s+operator\s+(?:then\s+)?(?:approves|adds|reserves|logs\s+in|signs\s+in|installs|opens)\b|"
+    # §17.1742 — the planner's own phrasings for work only the operator's hands can do. Live (job f9ca3ee1, the laptops
+    # with no OS yet): "Ask operator to report each laptop's make/model…", "Operator performs physical install; engine
+    # provides instructions only", "Walkthrough: connect each laptop to LAN…" -- every one ran as an LLM text and would
+    # have been recorded done with nothing installed. "Ask … operator" only as an instruction opening a sentence (the
+    # stored corpus says "never ask the operator for …" four times). Measured over 797 stored steps: those 5, no other.
+    r"(?:^\s*|[.;:!?]\s+)ask\s+(?:the\s+)?operator\s+(?:to|for)\b|\boperator\s+(?:performs|executes|physically)\b|"
+    r"\bengine\s+provides\s+instructions\s+only\b|\bwalkthrough\s*(?::|for\s+(?:the\s+)?operator\b)",
     re.I)
 # §17.1468 — a sentence ends at punctuation followed by a space or the end; the dots inside `192.168.1.44`,
 # `homelab-demo.duckdns.org` or `106.fw` do not end it. Live (ADD152): the operator's part was cut to
