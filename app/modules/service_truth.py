@@ -1230,6 +1230,24 @@ def send_loopback_into_its_guest(
     return out_cmds, out_verify, notes
 
 
+_PCT_PUSH_FILE_RE = re.compile(r"(?<![\w-])pct\s+push\s+(?P<gid>\d{3,5})\s+(?P<src>/\S+)\s+(?P<dst>/\S+)")
+
+
+def pushed_and_run_in(commands: Optional[list[str]]) -> dict:
+    """§17.1723b — ``{host path: guest id}`` for a file the block `pct push`es into a guest and then runs there
+    (`pct exec N -- python3|bash|sh <dst>`). Live (job e5e22b92 SG1's redraft): `pct push 104 /tmp/grab_s3.py
+    /tmp/grab_s3.py` and `pct exec 104 -- python3 /tmp/grab_s3.py` -- the program's `127.0.0.1:8989` was refused as a
+    line that "runs on the HOST", while every line of it runs in Sonarr's own guest."""
+    text = "\n".join(str(c) for c in commands or [])
+    out: dict = {}
+    for m in _PCT_PUSH_FILE_RE.finditer(text):
+        run = re.compile(rf"(?<![\w-])pct\s+exec\s+{m.group('gid')}\s+--\s+(?:python3?|bash|sh)\s+"
+                         rf"{re.escape(m.group('dst'))}(?![\w./-])")
+        if run.search(text):
+            out[m.group("src")] = m.group("gid")
+    return out
+
+
 def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
                          services: list) -> list[dict]:
     r"""§17.1368 — a block running ON THE HOST reaching a guest's port on loopback.
@@ -1261,6 +1279,9 @@ def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
         return []
     texts = [str(c) for c in commands or []] + \
             [str((f or {}).get("content") or "") for f in files or []]
+    inside = pushed_and_run_in(commands)                       # §17.1723b
+    file_guest = {len(commands or []) + i: inside.get(str((f or {}).get("path") or ""))
+                  for i, f in enumerate(files or [])}
     # §17.1368 — judged over the whole BLOCK, because the loopback and the port are
     # usually on different lines. Live, the draft built
     # `url = f"http://127.0.0.1:{port}/api/v3/downloadclient"` and passed the
@@ -1271,7 +1292,24 @@ def loopback_on_the_host(commands: list[str], files: Optional[list[dict]],
                                              "\n".join(texts))]
     out: list[dict] = []
     seen: set = set()
-    for t in texts:
+    for ti, t in enumerate(texts):
+        gid = file_guest.get(ti)
+        if gid:
+            # §17.1723b — a file the block pushes into guest N and runs there: every line runs in N, so a loopback
+            # port is right when N's own service holds it, and wrong only when another guest's does
+            for ln in t.split("\n"):
+                for m in _LOOPBACK_PORT_RE.finditer(ln):
+                    port = m.group("port") or m.group("p2") or ""
+                    svc = by_port.get(port)
+                    if not svc or port in seen or str(getattr(svc, "guest", "")) in ("", gid):
+                        continue
+                    seen.add(port)
+                    out.append({"command": ln.strip()[:200], "why": (
+                        f"this file runs inside guest {gid} (the block pushes it there and runs it) and reaches port "
+                        f"{port} on loopback, but {port} belongs to {getattr(svc, 'name', 'a service')} in guest "
+                        f"{getattr(svc, 'guest', '?')} (measured: " + (svc.says() if hasattr(svc, "says") else "")
+                        + f"). Run the file in that guest instead, with `{exec_hint(svc)}` (§17.1723b).")})
+            continue
         # §17.1368 — a TRANSCRIPT is not a block. T20's record is a session inside
         # container 105 (`root@download-client:~# … curl -I http://localhost:8080`)
         # where that line was right; judged as a host-side draft it reads wrong.

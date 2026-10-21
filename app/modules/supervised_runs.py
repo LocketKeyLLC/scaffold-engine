@@ -149,6 +149,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "does not parse on its own",                               # §17.1616
                    "sed rejects this program",                                # §17.1617
                    "ON THE HOST", "not valid Python", "cannot even be split",
+                   "the reply is read before it is parsed",           # §17.1723
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
                    "dies at the first one that hangs",            # §17.1274
@@ -358,7 +359,7 @@ _WHOSE_GAP: dict[str, str] = {
     # ── the block's shape is the drafter's to fix ───────────────────────────
     **{m: "drafter" for m in (
         "substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
-        "ON THE HOST", "not valid Python", "cannot even be split",
+        "ON THE HOST", "not valid Python", "cannot even be split", "the reply is read before it is parsed",
         "only passes a stored value", "waits on something off this machine",
         "dies at the first one that hangs", "against a",
         "whether the KEY `propertyName` appears", "by a phrase list",
@@ -3348,6 +3349,104 @@ def payload_will_not_compile(commands: list[str]) -> list[dict]:
                 out.append({"command": cmd, "why": (
                     f"{what} could not be compiled ({type(exc).__name__}), so it cannot be offered "
                     f"as runnable.")})
+    return out
+
+
+#: §17.1723 — a `python3 - <<'TAG'` program: the tag QUOTED, so the shell hands the body over untouched; the closing tag
+#: may end the `sh -c '…'` word it sits in (`PY'`)
+_QUOTED_PY_HEREDOC_RE = re.compile(
+    r"""python3?\s+-\s*<<-?\s*(?P<q>['"])(?P<tag>[A-Za-z_]\w*)(?P=q)[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)['"]?[ \t]*(?=\n|$|[;&|)])""",
+    re.S)
+
+
+def _quoted_heredoc_programs(commands: list[str], files: Optional[list[dict]] = None) -> list[tuple[str, str, str]]:
+    """``[(what it is, source, where it is)]`` for every quoted-tag Python heredoc in the commands and the files."""
+    out: list[tuple[str, str, str]] = []
+    texts = [(str(c), "the command") for c in commands or []] + \
+            [(str((f or {}).get("content") or ""), f"the file {(f or {}).get('path') or ''}".strip())
+             for f in files or []]
+    for body, where in texts:
+        for m in _QUOTED_PY_HEREDOC_RE.finditer(body):
+            # inside `sh -c '…'` a `'\''` is one quote by the time python reads it
+            out.append((f"the `python3 <<{m.group('tag')}` program", m.group("body").replace("'\\''", "'"), where))
+    return out
+
+
+def a_heredoc_program_will_not_compile(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    r"""§17.1723 — §17.1257's compile, for the shape the engine teaches most: `python3 - <<'PY'`.
+
+    `python_payloads` reads `-c` payloads and `printf | tee x.py` scripts only, so a heredoc program -- in a command,
+    or inside the in-guest script the template writes -- reached the operator uncompiled. Live (job e5e22b92 SG1, a
+    Sonarr grab of the S3 pack, 2026-10-21): `pct exec 104 -- sh -c 'python3 - <<"PY" … PY'` with
+    `print(f"SERIES: {pr[0].get(\"title\")}")` -- a backslash outside a string, which no Python accepts -- framed
+    `refused: []`. An unquoted tag is skipped: the shell expands that body before python sees it."""
+    out: list[dict] = []
+    for what, src, where in _quoted_heredoc_programs(commands, files):
+        try:
+            ast.parse(src)
+        except SyntaxError as exc:
+            lines = src.splitlines()
+            line = lines[exc.lineno - 1].strip() if exc.lineno and exc.lineno <= len(lines) else ""
+            out.append({"command": (line or where)[:200], "why": (
+                f"{what} in {where[:80]} is not valid Python and would fail the moment it ran: {exc.msg} "
+                f"(line {exc.lineno})" + (f" -- {line[:120]!r}" if line else "")
+                + ". It was compiled before offering it (§17.1723), so the error is certain. A quoted heredoc hands "
+                  "the body to python exactly as written: never escape a quote in it -- use the other quote "
+                  "character (`get('title')` inside an f\"…\" string) or a plain variable.")})
+        except (ValueError, RecursionError):
+            continue
+    return out
+
+
+def _json_load_of(node) -> Optional[str]:
+    """The name `json.load(NAME)` parses, if `node` is that call."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "load" \
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "json" \
+            and node.args and isinstance(node.args[0], ast.Name):
+        return node.args[0].id
+    return None
+
+
+_PLAIN_STMTS = (ast.Return, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)
+
+
+def the_reply_is_read_before_it_is_parsed(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1723 — `r.read(…)` and `json.load(r)` on one response: the read consumes what `json.load` was to parse.
+
+    Live (job e5e22b92 SG1): `return r.status, json.load(r) if r.read(1) else {}` in the helper that POSTs the grab --
+    `read(1)` takes the `{`, `json.load` fails on the rest, and the program dies AFTER Sonarr took the grab, so the
+    queue read-back never runs and the step reads failed for a change that happened. Judged within one `with … as r:`
+    body or one statement, so two helpers that each name their reply `r` are not confused."""
+    out: list[dict] = []
+    progs = _quoted_heredoc_programs(commands, files) + [(w, s, l) for w, s, l in _py_sources(commands, files) if s]
+    for what, src, where in progs:
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        scopes: list[list] = []
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.With, ast.AsyncWith)):
+                names = {i.optional_vars.id for i in n.items if isinstance(i.optional_vars, ast.Name)}
+                scopes.append([names, [x for b in n.body for x in ast.walk(b)]])
+            elif isinstance(n, _PLAIN_STMTS):
+                scopes.append([None, list(ast.walk(n))])
+        for names, nodes in scopes:
+            loaded = {v for v in (_json_load_of(x) for x in nodes) if v}
+            reads = [x for x in nodes if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+                     and x.func.attr in ("read", "readline", "readlines") and isinstance(x.func.value, ast.Name)]
+            both = loaded & {x.func.value.id for x in reads} & (names if names is not None else loaded)
+            if both:
+                v = sorted(both)[0]
+                at = min(x.lineno for x in reads if x.func.value.id == v)
+                lines = src.splitlines()
+                line = lines[at - 1].strip() if at <= len(lines) else ""
+                out.append({"command": (line or where)[:200], "why": (
+                    f"in {what}, `{v}.read(…)` and `json.load({v})` take the same reply: the reply is read before it "
+                    f"is parsed, so `json.load` gets what is left (nothing, or the body without its first bytes) and "
+                    f"raises -- after the request was already made (§17.1723). Read the body once "
+                    f"(`body = {v}.read()`), then `json.loads(body) if body else {{}}`.")})
+                break
     return out
 
 
@@ -6803,6 +6902,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1257 — compile what the block hands to another interpreter. Supersedes
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
     refused = refused + payload_will_not_compile(cmds)
+    refused = refused + a_heredoc_program_will_not_compile(cmds, shape_files)           # §17.1723
+    refused = refused + the_reply_is_read_before_it_is_parsed(cmds, shape_files)        # §17.1723
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds, shape_files)
     # §17.1355 — the block mistook the engine's own scaffolding for the work:
