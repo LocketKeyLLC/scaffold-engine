@@ -99,7 +99,7 @@ def test_the_routes_are_the_ones_its_code_registers():
 
 def _frame(runbook):
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
     return sr.frame_run(T26, runbook, spec, policy, services=[PANEL, RADARR],
                         inventory={"vms": {}, "cts": {"111": "running"}, "names": {"111": "control-panel"}})
 
@@ -247,7 +247,7 @@ def test_the_older_probe_never_overwrites_the_engines_check():
     node = {**T26, "prompt_template": T26["prompt_template"] + " Probe each endpoint authenticated as the panel user."}
     rb = arc.runbook(PANEL, ["/api/a", "/api/b"], ("PANEL_PASSWORD", "panel"))
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["PANEL_PASSWORD"], "held_logins": LOGINS}
     frame = sr.frame_run(node, rb, spec, policy, services=[PANEL, RADARR],
                          inventory={"vms": {}, "cts": {"111": "running"}, "names": {"111": "control-panel"}})
     assert "for r in /api/a /api/b" in frame["commands"][0], frame["commands"]

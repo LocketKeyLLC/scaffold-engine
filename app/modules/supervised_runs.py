@@ -192,6 +192,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "has no check at all",                           # §17.1345
                    "reads every `$UPPER` reference as a secret",     # §17.1578
                    "writes the secret's NAME where its VALUE belongs",   # §17.1581
+                   "which sudo LOGS",                               # §17.1720
                    "the call can only fail",                        # §17.1346
                    "this edit changes NOTHING",                     # §17.1353
                    "no check reads that API back",                  # §17.1362
@@ -302,6 +303,7 @@ _WHOSE_GAP: dict[str, str] = {
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
     # ── the machine contradicts the block ────────────────────────────────────
+    "which sudo LOGS": "machine",            # §17.1720 — the runner at hand must be updated; no redraft helps
     "is stopped (`": "machine",
     "fails before it starts": "machine",
     "is already taken on this host": "machine",
@@ -5859,6 +5861,40 @@ def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> lis
     return out
 
 
+#: §17.1720 — the first runner that hands a secret to the root shell on stdin, not through sudo (which logs it)
+_RUNNER_FEEDS_SECRETS_ON_STDIN = 24
+
+
+def secrets_sudo_would_log(commands: list[str], policy: dict) -> list[dict]:
+    """§17.1720 — a held secret, on a runner that elevates and is older than helper 24: refused, Run off.
+
+    Live (host pve, 2026-10-21, helper 23): every engine qBittorrent block was logged by sudo as
+    `ENV=MASS_PASSWORD=<the value>` in the host's journal. That runner passes a secret to the root shell with
+    `sudo -n --preserve-env=NAME`, and sudo logs every variable it preserves; helper 24 writes the value to the root
+    shell's stdin. Until the machine runs it, no block that carries a secret is offered to run there."""
+    if not (policy or {}).get("sudo"):
+        return []
+    helper = str((policy or {}).get("helper") or "").strip()
+    try:
+        if helper and int(helper) >= _RUNNER_FEEDS_SECRETS_ON_STDIN:
+            return []
+    except ValueError:
+        pass
+    held = {str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])}
+    out: list[dict] = []
+    for cmd in commands or []:
+        hits = sorted({m.group(1) for m in _SECRET_REF_RE.finditer(str(cmd or ""))} & held)
+        if hits:
+            names = ", ".join(f"`${n}`" for n in hits)
+            out.append({"command": str(cmd)[:200], "why": (
+                f"this block needs {names}, and the runner at hand (helper {helper or '?'}) hands a secret to sudo with "
+                f"`--preserve-env`, which sudo LOGS -- the value would land in the machine's journal as "
+                f"`ENV={hits[0]}=…` (§17.1720). Update the runner first (Settings → Machines, paste the install line on "
+                f"the machine): helper {_RUNNER_FEEDS_SECRETS_ON_STDIN} gives the value to the root shell on stdin.")})
+            break
+    return out
+
+
 def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
                                        verify: Optional[list[str]] = None) -> list[dict]:
     """§17.1581 — a held secret's NAME typed where its VALUE belongs.
@@ -6745,6 +6781,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1283 — a runner older than helper 19 elevates only the head of a line.
     refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     refused = refused + locals_the_runner_reads_as_secrets(list(cmds) + list(verify), policy)   # §17.1578
+    refused = refused + secrets_sudo_would_log(list(cmds) + list(verify), policy)               # §17.1720
     refused = refused + single_quoted_names_the_runner_reads_as_secrets(list(cmds), policy)   # §17.1638 — the supervised path only
     refused = refused + a_secret_name_written_as_its_value(cmds, files, policy, verify)         # §17.1581
     refused = refused + read_head_redirects_into_system(cmds, policy)   # §17.1462

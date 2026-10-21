@@ -103,7 +103,7 @@ def test_a_short_or_missing_list_changes_nothing():
 
 def test_the_step_is_claimed_with_its_check_and_no_refusal_and_others_are_not():
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["MASS_PASSWORD"], "held_logins": [], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["MASS_PASSWORD"], "held_logins": [], "can_write_files": True}
     qbt = ServiceTruth(guest="105", unit="qbittorrent-nox.service", name="qbittorrent-nox", state="active",
                        ports=("61661", "8080"), data_dir="/var/lib/qbittorrent-nox", configs=())
     f = sr.frame_run(TR1, "## Run this\n\n```bash\necho draft\n```\n", spec, policy, services=[qbt],

@@ -1390,7 +1390,7 @@ def test_frame_run_refuses_the_live_add82_script_for_all_three():
     runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106.sh") +
                "\n```\n\n## Run this\n```bash\n" + ADD82_RUN + "\n```\n\n## Verify\n- `" + ADD82_VERIFY[0] +
                "`\n- `" + ADD82_VERIFY[1] + "`\n")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy)
     assert frame["commands"] and frame["files"]
@@ -1415,7 +1415,7 @@ def test_a_check_the_run_cannot_fill_is_dropped_only_when_another_check_remains(
     from app.modules import supervised_runs as sr
     runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106.sh") +
                "\n```\n\n## Run this\n```bash\n" + ADD82_RUN + "\n```\n\n## Verify\n- `" + ADD82_VERIFY[1] + "`\n")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy)
     assert "appears only in the verify" in sr.refusal_kinds(frame)
@@ -1512,7 +1512,7 @@ def test_frame_run_refuses_the_live_fourth_draft_for_the_guessed_account_only():
     from app.modules import supervised_runs as sr
     runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106_v3.sh") +
                "\n```\n\n## Run this\n```bash\n" + ADD82_RUN_V3 + "\n```\n\n## Verify\n- `qm agent 106 ping`\n")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
     assert sr.refusal_kinds(frame) == {"is an assumption"}, [r["why"][:90] for r in frame["refused"]]
@@ -1537,7 +1537,7 @@ def test_the_guest_word_for_the_placeholder():
 def test_the_live_1142_runbook_passes_every_shape_gate():
     from app.modules import supervised_runs as sr
     runbook = _fx("add82_runbook_1142.md")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
     assert frame["refused"] == [], [r["why"][:90] for r in frame["refused"]]
@@ -1580,7 +1580,7 @@ def test_installing_the_means_of_reaching_the_guest_is_not_a_host_write_that_mis
 def test_the_live_1145_runbook_is_clean_at_the_frame():
     from app.modules import supervised_runs as sr
     runbook = _fx("add82_runbook_1145.md")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy, env={"profile": "You work as root@pve."})
     assert frame["refused"] == [], [r["why"][:120] for r in frame["refused"]]
@@ -1619,7 +1619,7 @@ def test_the_live_1148_runbook_has_its_run_command_after_the_file():
     files = sr.file_writes(rb)
     assert [f["path"] for f in files] == ["/tmp/install_guest_agent.sh"]
     assert "bash /tmp/install_guest_agent.sh" not in files[0]["content"], "the run fence is not part of the file"
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, rb, spec, policy, env={"profile": "You work as root@pve."})
     assert frame["commands"] and frame["files"]
@@ -1670,7 +1670,7 @@ def test_a_sweep_is_a_read():
 def test_the_live_1151_runbook_is_refused_for_what_is_wrong_and_not_for_the_sweep():
     from app.modules import supervised_runs as sr
     rb = _fx("add82_runbook_2057_third.md")
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     env = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
                                                     "106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
@@ -1705,7 +1705,7 @@ def test_the_hosts_own_address_is_not_the_guests():
 
 # ───── §17.1288m — the held password by name; never argv; a wait pings the guest
 
-POLICY_MASS = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+POLICY_MASS = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
 
 
 def test_the_live_1155_runbook_is_refused_for_its_three_faults():

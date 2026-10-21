@@ -821,8 +821,8 @@ def test_a_simple_command_is_elevated_as_before():
 
 def test_the_secret_names_still_travel_into_the_inner_shell():
     r = _load_runner_script()
-    out = r.elevate('curl -H "X-Api-Key: $PROWLARR_API_KEY" http://x | head -1', "--preserve-env=PROWLARR_API_KEY ")
-    assert out.startswith("sudo -n --preserve-env=PROWLARR_API_KEY bash -c ") and "$PROWLARR_API_KEY" in out
+    out = r.elevate('curl -H "X-Api-Key: $PROWLARR_API_KEY" http://x | head -1', ["PROWLARR_API_KEY"])
+    assert out.startswith("sudo -n bash -c ") and "$PROWLARR_API_KEY" in out       # §17.1720 — read from stdin
 
 
 def test_operators_inside_quotes_do_not_count():
@@ -836,6 +836,6 @@ def test_run_supervised_uses_elevate():
     src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
     i = src.index("async def run_supervised(")
     body = src[i:src.index("\n    @mcp.tool", i + 10)] if "\n    @mcp.tool" in src[i + 10:] else src[i:]
-    assert "run_cmd = elevate(command, keep)" in body
+    assert "run_cmd = elevate(command, refs)" in body
     assert "f\"sudo -n {keep}{_SUDO_RE" not in body, "the head-only form is gone"
     assert int(_load_runner_script().HELPER_VERSION) >= 19   # §17.1288l bumped it to 20 (tables mirrored)

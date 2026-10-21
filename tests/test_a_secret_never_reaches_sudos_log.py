@@ -49,8 +49,9 @@ def test_run_block_sends_the_rewritten_line_and_the_value_out_of_band(monkeypatc
 def test_the_runner_drops_them_when_it_elevates():
     sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "scripts"))
     import local_runner_mcp as r
-    got = r.elevate('PANEL_PASSWORD="$PANEL_PASSWORD" bash /tmp/x.sh', "--preserve-env=PANEL_PASSWORD ")
-    assert got == "sudo -n --preserve-env=PANEL_PASSWORD bash /tmp/x.sh"
+    got = r.elevate('PANEL_PASSWORD="$PANEL_PASSWORD" bash /tmp/x.sh', ["PANEL_PASSWORD"])
+    assert got == "sudo -n bash -c " + __import__("shlex").quote(
+        "IFS= read -r -d '' PANEL_PASSWORD; export PANEL_PASSWORD; bash /tmp/x.sh")      # §17.1720 — on stdin
 
 
 def test_the_filler_opens_without_create():
@@ -81,11 +82,11 @@ def test_the_runner_elevates_it_as_a_whole_root_shell():
     sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "scripts"))
     import local_runner_mcp as r
     wrapped = asup.wrap_for_secrets('pct exec 111 -- curl -u panel:"$PANEL_PASSWORD" http://x')
-    got = r.elevate(wrapped, "--preserve-env=PANEL_PASSWORD ")
-    assert got.startswith("sudo -n --preserve-env=PANEL_PASSWORD bash -c ")
+    got = r.elevate(wrapped, ["PANEL_PASSWORD"])
+    assert got.startswith("sudo -n bash -c ") and "preserve-env" not in got
     # and the runner on its own (next reinstall) wraps an unwrapped line that carries a secret
-    got2 = r.elevate('pct exec 111 -- curl -u panel:"$PANEL_PASSWORD" http://x', "--preserve-env=PANEL_PASSWORD ")
-    assert got2.startswith("sudo -n --preserve-env=PANEL_PASSWORD bash -c ")
+    got2 = r.elevate('pct exec 111 -- curl -u panel:"$PANEL_PASSWORD" http://x', ["PANEL_PASSWORD"])
+    assert got2.startswith("sudo -n bash -c ") and "preserve-env" not in got2
 
 
 def test_bash_level_sudos_view_holds_the_name_not_the_value(tmp_path):
@@ -99,7 +100,7 @@ def test_bash_level_sudos_view_holds_the_name_not_the_value(tmp_path):
     b.mkdir()
     (b / "sudo").write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$SEEN"\n')
     (b / "sudo").chmod(0o755)
-    line = r.elevate(asup.wrap_for_secrets('echo -u panel:"$PANEL_PASSWORD"'), "--preserve-env=PANEL_PASSWORD ")
+    line = r.elevate(asup.wrap_for_secrets('echo -u panel:"$PANEL_PASSWORD"'), ["PANEL_PASSWORD"])
     env = {**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "SEEN": str(tmp_path / "seen"), "PANEL_PASSWORD": "s3cret"}
     subprocess.run(["bash", "-c", line], env=env, check=True)
     seen = (tmp_path / "seen").read_text()
