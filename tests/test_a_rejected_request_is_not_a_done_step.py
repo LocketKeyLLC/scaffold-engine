@@ -124,7 +124,7 @@ def _executed_ok():
              "output": '[{"errorMessage":"\'App Profile Id\' must be greater than \'0\'"}]'}]
 
 
-async def _run(verdicts, *, verify=("curl -s http://h/api/v1/indexer",)):
+async def _run(verdicts, *, verify=("curl -s http://h/api/v1/indexer",), printed=""):
     db = AsyncMock()
     claim = MagicMock(); claim.rowcount = 1
     db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
@@ -134,7 +134,7 @@ async def _run(verdicts, *, verify=("curl -s http://h/api/v1/indexer",)):
          patch("app.modules.assist_supervised.gate_block", return_value=([POST], [])), \
          patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed_ok())), \
          patch("app.modules.assist_local_runner.run_probes",
-               new=AsyncMock(return_value=("== V1 ==\n", [{"id": "V1", "command": verify[0]}] if verify else []))), \
+               new=AsyncMock(return_value=(f"== V1 ==\n{printed}\n", [{"id": "V1", "command": verify[0]}] if verify else []))), \
          patch.object(sr, "_verify_verdicts", AsyncMock(return_value=verdicts)), \
          patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
         out = await sr.resolve_run(db, "j", "ADD96", "run", waiting)
@@ -155,11 +155,15 @@ async def test_exit_zero_with_contradicting_checks_is_not_done():
 
 @pytest.mark.asyncio
 async def test_an_ambiguous_check_never_fails_work_that_happened():
-    """Asymmetric on purpose: evidence AGAINST downgrades, absence does not."""
-    for verdicts in ([{"verdict": "unknown", "reason": "no output"}],
+    """Asymmetric on purpose: evidence AGAINST downgrades, an unclear ANSWER does not.
+
+    §17.1738 — "unclear" means the check answered something the judge could not settle. A check that printed
+    NOTHING is not unclear (live, job 7d30fe4f T3–T5 were recorded done on blank checks); that case is
+    `test_a_check_that_printed_nothing_is_not_done` below."""
+    for verdicts in ([{"verdict": "unknown", "reason": "could not tell"}],
                      [],
                      [{"verdict": "confirmed", "reason": "it is there"}]):
-        out, _ = await _run(verdicts)
+        out, _ = await _run(verdicts, printed='[{"id": 3, "name": "1337x"}]')
         assert out["outcome"] == "ran", verdicts
         assert out["node_status"] == "done"
 
@@ -760,3 +764,10 @@ def test_the_channel_rules_tell_the_drafter_to_ask_the_api_first():
     assert "AN API TELLS YOU ITS OWN RULES" in sr.CHANNEL_RULES
     assert "App Profile Id" in sr.CHANNEL_RULES          # the real error, quoted
     assert "print the full response body and stop" in sr.CHANNEL_RULES
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_printed_nothing_is_not_done():
+    """§17.1738 — the old fixture of the test above: the check came back blank and the judge said "unknown"."""
+    out, _ = await _run([{"verdict": "unknown", "reason": "no output"}])
+    assert out["node_status"] == "failed" and "printed nothing" in out["reason"]

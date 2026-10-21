@@ -151,28 +151,53 @@ def test_frame_run_carries_both_fixes_on_the_live_command():
     assert "is spliced into `pct exec`'s command line" in whys         # §17.1733: the password goes to stdin
 
 
-def test_the_rules_worked_example_passes_every_gate():
-    """§17.1734 — a rule must not teach what a gate refuses: the CHANNEL_RULES example, as a block, through frame_run."""
+def _rule_examples():
     import re
     from app.modules import supervised_runs as sr
     rule = sr.CHANNEL_RULES[sr.CHANNEL_RULES.index("(§17.1734)"):]
     rule = rule[:rule.index("\n")]
-    run, check = re.findall(r"`(pct exec 101 -- sh -c '.*?'(?: <<< \"\$JELLYFIN_MARK_PASSWORD\")?)`", rule)
-    assert "<<<" in run and "<<<" not in check
-    rb = f"## Run this\n\n```bash\n{run}\n```\n\n## Verify\n\n- `{check}`\n"
-    node = {"node_key": "T3", "title": "Create user mark", "description": "Create the Jellyfin user mark."}
+    found = re.findall(r"`(pct exec 101 -- sh -c '.*?' <<< \"\$JELLYFIN_MARK_PASSWORD\")`", rule)
+    create = next(x for x in found if "/Users/New" in x)
+    login = next(x for x in found if "/Users/AuthenticateByName" in x)
+    return create, login
+
+
+def _frame(node, rb):
+    from app.modules import supervised_runs as sr
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_MARK_PASSWORD"],
               "secrets": ["JELLYFIN_MARK_PASSWORD"], "can_write_files": True}
-    inv = {"names": {"101": "jellyfin", "104": "sonarr"}}
-    frame = sr.frame_run(node, rb, spec, policy, env={}, inventory=inv)
+    return sr.frame_run(node, rb, spec, policy, env={}, inventory={"names": {"101": "jellyfin"}})
+
+
+def test_the_rules_worked_example_passes_every_gate():
+    """§17.1734/§17.1739 — a rule must not teach what a gate refuses: both CHANNEL_RULES examples, through frame_run."""
+    create, login = _rule_examples()
+    # the create step, checked by logging in as the new user
+    frame = _frame({"node_key": "T3", "title": "Create user mark", "description": "Create the Jellyfin user mark."},
+                   f"## Run this\n\n```bash\n{create}\n```\n\n## Verify\n\n- `{login}`\n")
     assert frame["refused"] == [], [r["why"][:200] for r in frame["refused"]]
     assert frame["inputs"] == []
     assert "<JELLYFIN_API_KEY>" not in " ".join(frame["commands"]), "the engine filled the key"
     # §17.1736 — one guest shell, and the password stays OUTSIDE it, on the host's here-string
     assert frame["commands"][0].count("sh -c '") == 1, frame["commands"][0]
     assert frame["commands"][0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\""), frame["commands"][0]
-    assert frame["verify"], "the check survived the read channel"
+    # the login test as its own step: a CHECK whose run is the login, judged by the 200 it prints
+    frame = _frame({"node_key": "T7", "title": "Verify mark authentication",
+                    "description": "Log in as mark with JELLYFIN_MARK_PASSWORD. Done when it prints `200`."},
+                   f"## Run this\n\n```bash\n{login}\n```\n")
+    assert frame["refused"] == [], [r["why"][:200] for r in frame["refused"]]
+    assert frame["inputs"] == []
+
+
+@pytest.mark.smoke
+def test_an_admin_login_with_the_mass_password_is_still_refused():
+    """§17.1384 stands for what it was written against."""
+    guess = ("pct exec 101 -- sh -c 'read -r V; printf \"{\\\"Username\\\":\\\"jellyfin\\\",\\\"Pw\\\":\\\"%s\\\"}\" \"$V\" | "
+             "curl -s -X POST --data-binary @- http://127.0.0.1:8096/Users/AuthenticateByName' <<< \"$MASS_PASSWORD\"")
+    assert machine_values.authenticates_instead_of_reading_the_key([guess])
+    _create, login = _rule_examples()
+    assert machine_values.authenticates_instead_of_reading_the_key([login]) == []
 
 
 @pytest.mark.smoke
@@ -205,21 +230,3 @@ def test_a_payload_with_its_stdin_is_not_wrapped_again():
     filled, _v, _n = machine_values.read_on_the_machine([cmd], [], {"names": {"101": "jellyfin"}})
     assert filled[0].count("sh -c '") == 1 and filled[0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\"")
     assert "scaffold-engine" in filled[0]
-
-
-def test_a_user_creation_with_no_check_gets_a_keyless_check_that_the_channel_runs():
-    """§17.1737 — live T4 "Create user natalie": no check, and the keyed filler is refused by the read channel."""
-    from app.modules import supervised_runs as sr
-    cmd = (
-        "pct exec 101 -- sh -c 'read -r V; printf \"{\\\"Name\\\":\\\"natalie\\\",\\\"Password\\\":\\\"%s\\\"}\" \"$V\" | "
-        "curl -s --fail-with-body -X POST -H \"Content-Type: application/json\" -H \"X-Emby-Token: <JELLYFIN_API_KEY>\" "
-        "--data-binary @- http://127.0.0.1:8096/Users/New' <<< \"$JELLYFIN_NATALIE_PASSWORD\"")
-    rb = f"## Run this\n\n```bash\n{cmd}\n```\n"
-    node = {"node_key": "T4", "title": "Create user natalie", "description": "Create the Jellyfin user natalie."}
-    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_NATALIE_PASSWORD"],
-              "secrets": ["JELLYFIN_NATALIE_PASSWORD"], "can_write_files": True}
-    frame = sr.frame_run(node, rb, spec, policy, env={}, inventory={"names": {"101": "jellyfin"}})
-    assert frame["refused"] == [], [r["why"][:160] for r in frame["refused"]]
-    assert any("/Users/Public" in v and "natalie" in v for v in frame["verify"]), frame["verify"]
-    assert all(sr._channel_would_run(v) for v in frame["verify"])

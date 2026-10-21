@@ -1125,7 +1125,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it as a trailing comment: `python3 /tmp/x.py # $NAME` (never a `NAME="$NAME"` prefix — sudo logs it). A password a CALL needs (a login) is fed to that call on stdin from the host instead: `pct exec <id> -- sh -c 'tr -d "\\n" | curl … --data-urlencode password@- …' <<< "$NAME"`.
-- A KEY THE ENGINE READS AND A PASSWORD THE STORE HOLDS, IN ONE CALL (§17.1734). A service whose key lives in its own database (Jellyfin) is reached INSIDE its guest with the placeholder `<JELLYFIN_API_KEY>` written where the key goes, inside the single-quoted `pct exec <id> -- sh -c '…'` payload -- the engine fills it there; never read a key yourself, never take the first row of a key table (it may be another service's). A held password that call needs goes to the guest on STDIN and the guest's own shell puts it in the JSON body (an API reads a password from its body, never from the URL): `pct exec 101 -- sh -c 'read -r V; printf "{\\"Name\\":\\"mark\\",\\"Password\\":\\"%s\\"}" "$V" | curl -s --fail-with-body -X POST -H "Content-Type: application/json" -H "X-Emby-Token: <JELLYFIN_API_KEY>" --data-binary @- http://127.0.0.1:8096/Users/New' <<< "$JELLYFIN_MARK_PASSWORD"`. Check it with a read that needs no key: `pct exec 101 -- sh -c 'curl -s http://127.0.0.1:8096/Users/Public | grep -o "\\"Name\\":\\"mark\\""'`.
+- A KEY THE ENGINE READS AND A PASSWORD THE STORE HOLDS, IN ONE CALL (§17.1734). A service whose key lives in its own database (Jellyfin) is reached INSIDE its guest with the placeholder `<JELLYFIN_API_KEY>` written where the key goes, inside the single-quoted `pct exec <id> -- sh -c '…'` payload -- the engine fills it there; never read a key yourself, never take the first row of a key table (it may be another service's). A held password that call needs goes to the guest on STDIN and the guest's own shell puts it in the JSON body (an API reads a password from its body, never from the URL): `pct exec 101 -- sh -c 'read -r V; printf "{\\"Name\\":\\"mark\\",\\"Password\\":\\"%s\\"}" "$V" | curl -s --fail-with-body -X POST -H "Content-Type: application/json" -H "X-Emby-Token: <JELLYFIN_API_KEY>" --data-binary @- http://127.0.0.1:8096/Users/New' <<< "$JELLYFIN_MARK_PASSWORD"`. A step that CHECKS a user exists or can log in does not create it again: it logs in AS that user, with that user's own stored password on stdin, and prints only the HTTP status (never the token) -- `pct exec 101 -- sh -c 'read -r V; printf "{\\"Username\\":\\"mark\\",\\"Pw\\":\\"%s\\"}" "$V" | curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -H "X-Emby-Authorization: MediaBrowser Client=\\"scaffold\\", Device=\\"engine\\", DeviceId=\\"scaffold-engine\\", Version=\\"1\\"" --data-binary @- http://127.0.0.1:8096/Users/AuthenticateByName' <<< "$JELLYFIN_MARK_PASSWORD"` -- and its Done when is that it prints `200`. (This Jellyfin hides users from its login screen: `/Users/Public` answers `[]`, so it proves nothing.)
 - ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
@@ -1929,7 +1929,8 @@ def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
     # a change to read back -- exempt by identity, not by `--fail`: ADD132's `curl --fail-with-body -X PUT`
     # fails on a 400 yet proves nothing about the value the PUT left, which is this gate's case.
     accepted = {str(a).strip() for a in acceptance or []}
-    cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted]
+    cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted
+                 and not a_login_test(str(c))]                     # §17.1739 — a login test changes nothing
     from app.modules.runbook_preconditions import files_the_block_runs     # §17.1420 — one definition
     ran = [str((f or {}).get("content") or "") for f in files_the_block_runs(cmd_texts, files)]
     changed = api_ports_changed(cmd_texts + ran)
@@ -3747,6 +3748,8 @@ def curl_writes_without_fail(commands: list[str]) -> list[dict]:
     out: list[dict] = []
     for c in commands or []:
         cmd = str(c)
+        if a_login_test(cmd):
+            continue          # §17.1739 — it reports the status itself (`-w %{http_code}`) and is judged on `200`
         if _CURL_WRITE.search(cmd) and not _CURL_FAILS.search(cmd):
             out.append({"command": cmd, "why": (
                 "this `curl` sends a change but cannot report an HTTP error: `curl -s` exits 0 "
@@ -4779,9 +4782,22 @@ def verify_commands(text_out: str) -> list[str]:
         # the shape with a dummy value, keep the raw command for the operator.
         shape = _PLACEHOLDER_RE.sub("x", c)
         # §17.1666 — a check runs through the RUNNER's read channel: judged as the runner judges it
-        if c not in out and not c.startswith("/") and read_only_command(shape, runner_side=True):
+        if c not in out and not c.startswith("/") and (read_only_command(shape, runner_side=True)
+                                                        or a_login_test(c)):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
+
+
+def a_login_test(check: str) -> bool:
+    """§17.1739 — a check that logs in AS the user under test, with that user's own stored password on stdin, and prints
+    only the HTTP status. It is not a read the read-only channel takes (a POST, a `read`), and it need not be: a check
+    that names a stored secret runs on the supervised path with the block's own values (`run_verify`, §17.1281). Live
+    (job 7d30fe4f): "Create user mark" had no keyless check on a Jellyfin whose `/Users/Public` answers `[]`; the login
+    is the one thing that proves the user and the password both landed."""
+    from app.modules.machine_values import _logs_in_as_its_own_user
+    c = str(check or "")
+    return ("/Users/AuthenticateByName" in c and "-o /dev/null" in c and "%{http_code}" in c
+            and _logs_in_as_its_own_user(c))
 
 
 def dropped_checks(text_out: str) -> list[tuple[str, str]]:
@@ -7626,6 +7642,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 _against = contradicted(await _verify_verdicts(
                     goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted,
                     expects={str(k): str(v) for k, v in (waiting.get("expects") or {}).items()}))
+                # §17.1738 — a check that printed NOTHING is evidence too: a filter that found nothing found the
+                # thing missing, and checks that all came back blank confirmed nothing.
+                _against = list(_against) + blank_checks(pasted, ran)
                 if _against:
                     ok = False
                     refuted = _against
@@ -8115,7 +8134,7 @@ def a_check_the_channel_will_refuse(verify: list[str]) -> list[dict]:
         # `ssh … "systemctl is-active …"` is fine, the same line with
         # `<PALWORLD_USER>@<GUEST_IP>` is not).
         shape = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(v))   # `<IP>` is two chars
-        if read_only_command(shape):
+        if read_only_command(shape) or a_login_test(str(v)):        # §17.1739 — a login test runs supervised
             continue
         out.append({"command": str(v)[:120], "why": (
             "the verify channel will refuse this check, so it would prove nothing and the step "
@@ -8664,6 +8683,38 @@ def contradicted(verdicts: list[dict]) -> list[dict]:
 
 #: §17.1239 — how long to let a dropped channel settle before re-reading.
 _RECHECK_DELAY_S = 4
+
+
+_FILTER_TAIL_RE = re.compile(r"\|\s*(?:grep|egrep|fgrep|awk|jq|sed\s+-n)\b[^|]*['\"]?\s*$")
+_MARKER_RE = re.compile(r"^== (V\d+) ==\n(.*?)(?=^== V\d+ ==\n|\Z)", re.M | re.S)
+_SILENT_BY_DESIGN_RE = re.compile(r"\bgrep\s+(?:-\w*\s+)*-\w*q|\s--quiet\b|\s--silent\b|(?:^|[\s;&|(])(?:test|\[)\s|\bis-active\s+-q\b")
+
+
+def blank_checks(pasted: str, ran: list[dict]) -> list[dict]:
+    """§17.1738 — the checks that RAN and printed nothing, judged.
+
+    Live (job 7d30fe4f T3/T4/T5, 2026-10-21): "Create user mark/natalie/julie may" each checked
+    `curl -s …/Users/Public | grep -E -o '"Name": *"mark"'`. This Jellyfin hides users from its login screen, so
+    `/Users/Public` answers `[]` (measured in §17.1384 already) and every check printed NOTHING -- and every step was
+    recorded done, "1 command(s) ran, all exited 0". The judge grades a blank answer `unknown`, and only
+    `contradicted` downgrades (§17.1233). But a filter that printed nothing is not ambiguous: the thing it filters
+    for is not there. So: a ran check whose command ends in a filter (`| grep …`, `| awk …`, `| jq …`, `| sed -n …`)
+    and printed nothing is contradicted; and when EVERY ran check printed nothing, nothing confirmed the step."""
+    outs = {m.group(1): m.group(2).strip() for m in _MARKER_RE.finditer(pasted or "")}
+    # a check that is silent by design (`grep -q`, `test -f`, `--quiet`) says nothing by printing nothing
+    done = [r for r in (ran or []) if r.get("ran") is not False and r.get("id") in outs
+            and not _SILENT_BY_DESIGN_RE.search(str(r.get("command") or ""))]
+    out: list[dict] = []
+    for r in done:
+        cmd = str(r.get("command") or "").rstrip().rstrip("'\"").rstrip()
+        if not outs[r["id"]] and _FILTER_TAIL_RE.search(cmd + " "):
+            out.append({"verdict": "contradicted", "id": r["id"], "reason": (
+                f"`{str(r.get('command'))[:120]}` filters for what the step should have left, and printed NOTHING: "
+                f"what it looks for is not there (§17.1738)")})
+    if done and not out and all(not outs[r["id"]] for r in done):
+        out.append({"verdict": "contradicted", "id": done[0]["id"], "reason": (
+            f"all {len(done)} check(s) ran and printed nothing, so nothing confirmed the work (§17.1738)")})
+    return out
 
 
 async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]) -> tuple[str, list[dict]]:
@@ -11433,7 +11484,7 @@ def _status_only_probe(check: str) -> bool:
 def _reads_only(cmd: str) -> bool:
     from app.modules.assist_state_check import read_only_command
     c = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(cmd or ""))     # a placeholder is a value, not a verb
-    return read_only_command(c)
+    return read_only_command(c) or a_login_test(str(cmd or ""))      # §17.1739 — a login test reads, it sets nothing
 
 
 #: §17.1625 — the engine's in-guest templates: their block runs INSIDE guest N through the host's script
