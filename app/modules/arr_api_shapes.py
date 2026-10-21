@@ -117,6 +117,19 @@ SHAPES: tuple[Shape, ...] = (
           why="Sonarr's `/history/series` answers a plain LIST of events, not `{records}`: reading `records` off it "
               "crashes (`'list' object has no attribute 'get'`) or finds nothing; iterate the list itself",
           endpoint_re=re.compile(r"/history/series\b")),
+    # §17.1718 — live (job e5e22b92 HI1, after §17.1717): `get('/episode', timeout=180)` filtered by seriesId afterwards;
+    # Sonarr 4.0.20 answered 400 Bad Request, and the read stopped before its queue and history
+    Shape("sonarr", re.compile(r"\bepisodes?\b|\bhas\s*file\b|\bwithout\s+(?:a\s+)?files?\b", re.I), "/api/v3/episode",
+          "Sonarr `GET /api/v3/episode?seriesId=N` (optionally `&seasonNumber=S`) -> that series' episodes: `id`, "
+          "`seasonNumber`, `episodeNumber`, `title`, `hasFile`, `monitored`, `airDateUtc`, `episodeFileId`. It NEEDS "
+          "`seriesId` (or `episodeIds=`): without one Sonarr answers 400 Bad Request -- it never lists every series' "
+          "episodes. `GET /api/v3/episode/{id}` is one episode.",
+          # the call has NO other argument (or only a timeout): drafts that pass `{'seriesId': …}` as params are right
+          wrong=re.compile(r"""['"](?:[^'"\n]*/api/v3)?/episode(?:\?(?![^'"\n]*(?:seriesId|episodeIds|episodeFileId))[^'"\n]*)?['"]"""
+                           r"""\s*(?:\)|,\s*timeout\s*=)"""),
+          why="Sonarr's `GET /api/v3/episode` NEEDS `seriesId` (or `episodeIds`): without one it answers 400 Bad "
+              "Request, so the read stops here; ask for `/episode?seriesId=<the series' id>&seasonNumber=S`",
+          endpoint_re=re.compile(r"/(?:api/v3/)?episode\b")),
 )
 
 
