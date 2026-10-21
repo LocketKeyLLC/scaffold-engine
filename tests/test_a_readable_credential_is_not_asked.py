@@ -144,8 +144,29 @@ def test_frame_run_carries_both_fixes_on_the_live_command():
     rb = f"## Run this\n\n```bash\n{_T3_LIVE}\n```\n\n## Verify\n\n- `pct exec 101 -- systemctl is-active jellyfin`\n"
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_MARK_PASSWORD"], "can_write_files": True}
-    inv = {"guests": [{"id": "101", "name": "jellyfin", "kind": "ct"}]}
+    inv = {"names": {"101": "jellyfin", "104": "sonarr"}}
     frame = sr.frame_run(node, rb, spec, policy, env={}, inventory=inv)
     whys = " | ".join(r["why"] for r in frame["refused"])
     assert "which does not hold one" not in whys                      # §17.1732: the engine fixed the read
     assert "is spliced into `pct exec`'s command line" in whys         # §17.1733: the password goes to stdin
+
+
+def test_the_rules_worked_example_passes_every_gate():
+    """§17.1734 — a rule must not teach what a gate refuses: the CHANNEL_RULES example, as a block, through frame_run."""
+    import re
+    from app.modules import supervised_runs as sr
+    rule = sr.CHANNEL_RULES[sr.CHANNEL_RULES.index("(§17.1734)"):]
+    rule = rule[:rule.index("\n")]
+    run, check = re.findall(r"`(pct exec 101 -- sh -c '.*?'(?: <<< \"\$JELLYFIN_MARK_PASSWORD\")?)`", rule)
+    assert "<<<" in run and "<<<" not in check
+    rb = f"## Run this\n\n```bash\n{run}\n```\n\n## Verify\n\n- `{check}`\n"
+    node = {"node_key": "T3", "title": "Create user mark", "description": "Create the Jellyfin user mark."}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_MARK_PASSWORD"],
+              "secrets": ["JELLYFIN_MARK_PASSWORD"], "can_write_files": True}
+    inv = {"names": {"101": "jellyfin", "104": "sonarr"}}
+    frame = sr.frame_run(node, rb, spec, policy, env={}, inventory=inv)
+    assert frame["refused"] == [], [r["why"][:200] for r in frame["refused"]]
+    assert frame["inputs"] == []
+    assert "<JELLYFIN_API_KEY>" not in " ".join(frame["commands"]), "the engine filled the key"
+    assert frame["verify"], "the check survived the read channel"
