@@ -58,7 +58,9 @@ def test_a_decision_node_that_asks_the_operator_nothing_is_a_task():
         assert dp.asks_the_operator(ask), ask["title"]
     src = inspect.getsource(dp.pending_decision)
     assert "if asks_the_operator(node):" in src and "SET node_type = 'task'" in src and "LIMIT 1" not in src
-    assert src.index("asks_the_operator(node)") < src.index("SET node_type = 'task'")
+    # §17.1730 — a credential the engine can read is rewritten as work BEFORE the question; the §17.1581 demotion is the last
+    assert src.index("asks_the_operator(node)") < src.rindex("SET node_type = 'task'")
+    assert src.index("asks_for_a_readable_credential(node)") < src.index("asks_the_operator(node)")
 
 
 def test_a_held_secrets_name_written_as_its_value_is_refused_and_its_right_forms_pass():

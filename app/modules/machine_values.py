@@ -827,6 +827,17 @@ _AUTH_HEADERS: dict[str, tuple[str, ...]] = {
 }
 
 
+_GUEST_PAYLOAD_RE = re.compile(r"<<'REMOTE'\n.*?\nREMOTE\n", re.S)
+
+
+def _host_part(body: str) -> str:
+    """The text of a written file that runs on the HOST: a template's `<<'REMOTE'` payload is removed when the
+    file sends it into a guest (`pct push` / the agent's `--pass-stdin`), because that payload runs there."""
+    if "pct push" in body or "--pass-stdin" in body:
+        return _GUEST_PAYLOAD_RE.sub("", body)
+    return body
+
+
 def a_host_program_needs_a_key_only_the_guest_can_read(
         commands: list[str], files: Optional[list[dict]] = None,
         policy: Optional[dict] = None) -> list[dict]:
@@ -860,7 +871,10 @@ def a_host_program_needs_a_key_only_the_guest_can_read(
             continue                           # not a file this block runs
         if "pct exec" in run_text.split(path)[0].rsplit("\n", 1)[-1]:
             continue                           # the program itself runs in a guest
-        low = body.lower()
+        # §17.1731 — a guest template's file carries the guest's own script as a `<<'REMOTE'` heredoc that it pushes
+        # INTO the guest and runs there; only what is left runs on the host. Live: the engine's own Jellyfin key
+        # step (read and prove it inside CT 101) was refused as "a host program calling jellyfin's API".
+        low = _host_part(body).lower()
         for app, headers in _AUTH_HEADERS.items():
             r = _SERVICES.get(app)
             if r is None or not any(h in low for h in headers):
@@ -1124,3 +1138,36 @@ def read_the_credential_instead(app: str, node: dict) -> dict:
              f"is known to exist (print only its length, never the key). [Rewritten by the engine, §17.1730: the "
              f"plan had asked the operator for this credential as {was!r}.]")
     return {"title": f"Get {app} API key", "description": text_, "prompt_template": text_}
+
+
+_KEY_STEP_RE = re.compile(r"Get (?P<app>[a-z]+)'s API key ON THE MACHINE")
+
+#: §17.1731 — after the key exists, prove it opens the service's API from inside its own guest.
+_KEY_WORKS: dict[str, str] = {
+    "jellyfin": ('code=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Emby-Token: $K" http://127.0.0.1:8096/Users); '
+                 'echo "jellyfin key works: $code"; [ "$code" = "200" ]'),
+}
+
+
+def key_step_app(node: dict) -> Optional[str]:
+    """§17.1731 — the service whose key this step gets, when the step is the one §17.1730 wrote; else None."""
+    t = " ".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    m = _KEY_STEP_RE.search(t)
+    return m.group("app") if m and m.group("app") in _SERVICES and "§17.1730" in t else None
+
+
+def key_step_commands(app: str) -> str:
+    """§17.1731 — the commands, inside the service's own guest, that make sure the engine's key exists and works:
+    the engine's own idempotent create (§17.1385) where it has one, the engine's own read (§17.1382), then a call
+    with it. Never the key itself on the output -- only its length and the API's answer."""
+    r = _SERVICES[app]
+    lines = []
+    make = create_key_on_the_machine(app)
+    if make:
+        lines.append(make)
+    lines += [f"K=\"$({r.read(None)})\"",
+              f'[ -n "$K" ] || {{ echo "FAILED: no {app} key could be read from {r.where}"; exit 1; }}',
+              f'echo "{app} key found (length ${{#K}})"']
+    if app in _KEY_WORKS:
+        lines.append(_KEY_WORKS[app])
+    return "\n".join(lines)
