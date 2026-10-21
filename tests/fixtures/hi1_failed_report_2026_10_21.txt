@@ -1,0 +1,201 @@
+## Run this
+```bash
+bash /tmp/in_ct_104.sh start
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh wait
+bash /tmp/in_ct_104.sh last
+```
+
+## Files written
+- `/tmp/in_ct_104.sh`
+
+## Ran inside the guest
+```bash
+python3 - <<'PY'
+import urllib.request, urllib.parse, json, xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+with open('/var/lib/sonarr/config.xml') as f:
+    root = ET.parse(f).getroot()
+    api_key = root.find('ApiKey').text
+base = 'http://localhost:8989/api/v3'
+headers = {'X-Api-Key': api_key}
+def get(path, timeout=180):
+    req = urllib.request.Request(base + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+series_list = get('/series')
+himym = next(s for s in series_list if s.get('tvdbId') == 75760)
+series_id = himym['id']
+season6 = next(se for se in himym['seasons'] if se['seasonNumber'] == 6)
+stats = season6['statistics']
+print(f"Season 6: have {stats['episodeFileCount']} of {stats['episodeCount']} (totalEpisodeCount={stats['totalEpisodeCount']})")
+missing = get(f'/wanted/missing?seriesId={series_id}&seasonNumber=6&pageSize=1000')
+missing_eps = [rec['episodeNumber'] for rec in missing['records'] if rec.get('seasonNumber') == 6]
+if missing_eps:
+    print(f"Missing episode numbers: {sorted(missing_eps)}")
+else:
+    print("No missing episodes")
+queue = get('/queue?pageSize=1000')
+seen_titles = set()
+for rec in queue['records']:
+    if rec.get('seriesId') == series_id and rec.get('seasonNumber') == 6:
+        title = rec.get('title', '')[:80]
+        if title in seen_titles:
+            continue
+        seen_titles.add(title)
+        status = rec.get('status', '')
+        tds = rec.get('trackedDownloadState', '')
+        tdst = rec.get('trackedDownloadStatus', '')
+        sizeleft_gb = rec.get('sizeleft', 0) / (1024**3) if rec.get('sizeleft') else 0
+        print(f"QUEUE: {title} | status={status} | trackedDownloadState={tds} | trackedDownloadStatus={tdst} | sizeleft={sizeleft_gb:.2f}GB")
+        for sm in rec.get('statusMessages', []):
+            sm_title = sm.get('title', '')[:200]
+            sm_msgs = '; '.join(sm.get('messages', []))[:200]
+            print(f"  statusMessage: {sm_title} | {sm_msgs}")
+history = get(f'/history/series?seriesId={series_id}&seasonNumber=6&pageSize=1000')
+cutoff = datetime(2026, 10, 21, 0, 0, 0, tzinfo=timezone.utc)
+events = []
+for rec in history.get('records', []):
+    date_str = rec.get('date', '')
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+    except:
+        continue
+    if dt >= cutoff:
+        events.append(rec)
+events.sort(key=lambda r: r.get('date', ''))
+for rec in events[-30:]:
+    date = rec.get('date', '')
+    event_type = rec.get('eventType', '')
+    ep_num = rec.get('episodeNumber', '')
+    source_title = rec.get('sourceTitle', '')[:70]
+    print(f"HISTORY: {date} | {event_type} | ep={ep_num} | {source_title}")
+PY
+```
+
+## The engine drafted this
+- drafted from the engine's template `run_in_container`: the script's shape is the engine's own, pre-gated; the model wrote only the commands that run inside the guest
+
+## Executed on pve-runner (supervised, operator-approved)
+$ write /tmp/in_ct_104.sh (6297 bytes)
+wrote /tmp/in_ct_104.sh (6297 bytes, 117 lines)
+$ bash /tmp/in_ct_104.sh start
+started scaffold-HI1 inside 104
+Season 6: have 15 of 24 (totalEpisodeCount=24)
+Missing episode numbers: [1, 2, 3, 4, 5, 6, 7, 7, 8, 9, 10, 10, 11, 12, 13, 14, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 23, 24, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43]
+QUEUE: How I Met Your Mother S06 S06 (1080p Web x265 HEVC AAC 5.1 | status=downloading | trackedDownloadState=downloading | trackedDownloadStatus=ok | sizeleft=0.82GB
+Traceback (most recent call last):
+  File "<stdin>", line 44, in <module>
+AttributeError: 'list' object has no attribute 'get'
+FAILED: scaffold-HI1 ended with exit=1
+rc=1
+
+## What went wrong, and what to try
+
+## 👉 Do this next
+
+**Run this now:**
+
+```bash
+pct exec 104 -- bash -lc "python3 -c \"
+import urllib.request, json
+r = urllib.request.urlopen('http://localhost:8989/api/v3/queue?pageSize=1000', timeout=10)
+data = json.load(r)
+for rec in data.get('records', []):
+if rec.get('seriesId') == 75760 and rec.get('seasonNumber') == 6:
+print(rec.get('title','')[:80], '|', rec.get('status'), '|', rec.get('trackedDownloadState'), '|', rec.get('trackedDownloadStatus'), '|', round(rec.get('sizeleft',0)/1e9,2), 'GB')
+for sm in rec.get('statusMessages', []):
+print('  ', sm.get('title','')[:200], '|', ' '.join(sm.get('messages',[]))[:200])
+\""
+```
+
+Then tell me what it shows.
+
+---
+
+## Diagnosis
+
+The script crashed at line 44 with `AttributeError: 'list' object has no attribute 'get'`. That means the code called `.get()` on something that is actually a Python **list**, not a dictionary. In Sonarr's queue API, `statusMessages` is a **list of message objects** — each entry is a dict, but the code treated the whole list as a dict. The season statistics and queue output before the crash are correct; only the statusMessages parsing is broken.
+
+## Fix
+
+📍 On: the Proxmox host shell (root@pve)
+
+The script lives at `/tmp/in_ct_104.sh` on the host and runs Python inside CT 104. Replace it with a corrected version that iterates over `statusMessages` as a list:
+
+**Paste 1 of 2** — wait for the prompt to come back before the next one. If the prompt turns into `>` instead of coming back, the paste was clipped — press Ctrl-C and tell me.
+
+```bash
+cat > /tmp/in_ct_104.sh <<'EOF'
+#!/bin/bash
+set -e
+pct exec 104 -- bash -lc 'python3 - <<PYEOF
+import urllib.request, json
+from datetime import datetime, timezone
+
+base = "http://localhost:8989/api/v3"
+
+# 1) Season statistics
+r = urllib.request.urlopen(base + "/series/75760", timeout=10)
+series = json.load(r)
+stats = series.get("seasons", [])
+for s in stats:
+    if s.get("seasonNumber") == 6:
+        print(f"Season 6: have {s.get(\"statistics\",{}).get(\"episodeFileCount\")} of {s.get(\"statistics\",{}).get(\"totalEpisodeCount\")}")
+
+# 2) Queue
+r = urllib.request.urlopen(base + "/queue?pageSize=1000", timeout=10)
+queue = json.load(r)
+for rec in queue.get("records", []):
+    if rec.get("seriesId") == 75760 and rec.get("seasonNumber") == 6:
+        print("QUEUE:", rec.get("title","")[:80], "|", rec.get("status"), "|", rec.get("trackedDownloadState"), "|", rec.get("trackedDownloadStatus"), "|", round(rec.get("sizeleft",0)/1e9,2), "GB")
+        for sm in rec.get("statusMessages", []):
+            print("  MSG:", sm.get("title","")[:200], "|", " ".join(sm.get("messages",[]))[:200])
+
+# 3) History
+EOF
+```
+
+**Paste 2 of 2** — wait for the prompt to come back before the next one.
+
+```bash
+cat >> /tmp/in_ct_104.sh <<'EOF'
+r = urllib.request.urlopen(base + "/history/series?seriesId=75760&seasonNumber=6", timeout=10)
+history = json.load(r)
+cutoff = datetime(2026,10,21,0,0,0, tzinfo=timezone.utc)
+events = [e for e in history.get("records", []) if datetime.fromisoformat(e.get("date","1970-01-01T00:00:00Z").replace("Z","+00:00")) >= cutoff]
+for e in events[-30:]:
+    print("HIST:", e.get("date"), "|", e.get("eventType"), "| ep", e.get("episodeNumber"), "|", e.get("sourceTitle","")[:70])
+PYEOF'
+EOF
+```
+
+**Then confirm it arrived intact** — this must print `1552`. Any other number means a paste was clipped; tell me the number and we redo that piece.
+
+```bash
+wc -c /tmp/in_ct_104.sh
+```
+
+Then run it:
+
+```bash
+bash /tmp/in_ct_104.sh start
+```
+
+You should see the season statistics line, one QUEUE line per distinct download, MSG lines under each, and up to 30 HIST lines — with no traceback.
+
+## Then
+
+Run the script again and confirm all three sections print cleanly. The queue section should show the same `How I Met Your Mother S06` download plus any others, each followed by its statusMessages entries.
+
+## If that fails
+
+If you still see an `AttributeError`, paste the full traceback including the line number — the fix above addresses the known list-vs-dict bug, but a different line number would point to a different field with the same issue.
+
+---
+ℹ️ **Adjusted for your system:** split a 1599-character block into 2 pastes with a byte-count check, because a block this size arrives truncated in most terminals.

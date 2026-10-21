@@ -142,7 +142,7 @@ async def test_a_step_never_tried_carries_nothing():
 async def test_the_block_tells_the_drafter_what_to_do_with_it():
     got = await carry_forward(_DB(row=REPORT), "j", "ADD132")
     assert got.startswith("THIS STEP HAS BEEN TRIED BEFORE AND FAILED")
-    assert "must differ in the way the diagnosis says" in got
+    assert "the diagnosis is the engine's own reading of it and can be wrong" in got   # §17.1717
     assert "already done and must not be undone" in got
 
 

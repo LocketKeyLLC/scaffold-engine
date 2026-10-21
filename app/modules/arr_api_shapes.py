@@ -168,3 +168,42 @@ def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]
                             "why": f"this reads a field this endpoint's objects do not have: {s.why} (§17.1694). {s.text}"})
                 break
     return out
+
+
+#: §17.1717 — an *arr API on its own port (Sonarr 8989, Radarr 7878, Prowlarr 9696, Lidarr 8686)
+_ARR_API_RE = re.compile(r"(?:localhost|127\.0\.0\.1|\b(?:\d{1,3}\.){3}\d{1,3}):(?P<port>8989|7878|9696|8686)/api\b")
+_ARR_NAME = {"8989": "Sonarr", "7878": "Radarr", "9696": "Prowlarr", "8686": "Lidarr"}
+_KEY_RE = re.compile(r"x-api-key|\bapikey\s*=", re.I)
+_TVDB_RE = re.compile(r"\btvdbId\s*[:=]?\s*(\d{4,8})\b", re.I)
+
+
+def calls_that_cannot_work(commands: list[str], files: Optional[list[dict]], node: Optional[dict]) -> list[dict]:
+    """§17.1717 — ``[{command, why}]`` for *arr API calls that fail before they reach anything.
+
+    Live (job e5e22b92 HI1's second draft, 2026-10-21, a read of the HIMYM S6 import): `urlopen(base + "/series/75760")`
+    with no `X-Api-Key` -- Sonarr answered 401 to the first call -- and 75760 is the step's `tvdbId`, not Sonarr's
+    series id. Both were copied from the engine's own suggested fix (§17.1717, `previous_attempt`)."""
+    texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
+    out: list[dict] = []
+    for t in texts:
+        m = _ARR_API_RE.search(t)
+        if m and not _KEY_RE.search(t):
+            app = _ARR_NAME[m.group("port")]
+            out.append({"command": next((ln.strip() for ln in t.splitlines() if _ARR_API_RE.search(ln)), m.group(0))[:200],
+                        "why": f"this calls {app}'s API with no `X-Api-Key` header: {app} answers 401 to every API call "
+                               f"without its key, so the step fails at its first call (§17.1717). Read the key from "
+                               f"{app}'s config.xml inside the program and send it as `X-Api-Key` on every request."})
+            break
+    tv = _TVDB_RE.search(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))
+    if tv:
+        n = tv.group(1)
+        bad = re.compile(rf"/series/{n}\b|\bseriesId\W{{0,6}}{n}\b")
+        for t in texts:
+            m = bad.search(t)
+            if m:
+                out.append({"command": next((ln.strip() for ln in t.splitlines() if bad.search(ln)), m.group(0))[:200],
+                            "why": f"{n} is the step's `tvdbId`, not Sonarr's series id: `/series/{n}` and "
+                                   f"`seriesId={n}` name a different series or none (§17.1717). Find the series in "
+                                   f"`GET /api/v3/series` by `tvdbId == {n}` and use its `id`."})
+                break
+    return out
