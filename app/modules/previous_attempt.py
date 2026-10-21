@@ -62,12 +62,29 @@ def _sections(report: str) -> list:
     return out
 
 
+#: §17.1717 — a script the engine SUGGESTED in its diagnosis was never run: it is not carried as a template
+_FENCE_RE = re.compile(r"^```[^\n]*\n.*?(?:^```[ \t]*$|\Z)", re.M | re.S)
+_NOT_CARRIED = ("[a script the engine suggested here -- never run, never checked against this step's rules -- "
+                "is not carried; write the step's own draft]")
+
+
+def _without_suggested_scripts(head: str, body: str) -> str:
+    """§17.1717 — live (job e5e22b92 HI1, 2026-10-21): the first attempt crashed reading Sonarr's history; the
+    engine's diagnosis blamed the wrong line and its `## Fix` held a whole script -- no `X-Api-Key`, the tvdbId as
+    Sonarr's series id. The redraft copied that script and failed at its first call (401). What RAN (`Executed on`)
+    is the machine's answer and is kept whole; the diagnosis' prose is kept; its suggested code is not."""
+    if "executed on" in head.lower():
+        return body
+    return _FENCE_RE.sub(_NOT_CARRIED, body)
+
+
 def what_failed(report: str) -> str:
     """The decisive part of a previous attempt's report, for the drafter."""
     kept: list = []
     for head, body in _sections(report):
         if not any(w.lower() in head.lower() for w in _WANTED):
             continue
+        body = _without_suggested_scripts(head, body)
         if not body:
             continue
         kept.append(f"### {head}\n{body[:_SECTION_CHARS]}")
@@ -149,10 +166,14 @@ async def carry_forward(db, job_id: str, node_key: str, reading=None) -> str:
     if reading is not None:
         reading.note(f"{node_key}'s previous attempts",
                      f"{len(reports)} report(s), {len(every)} distinct complaint(s) from the machine")
+    # §17.1717 — the diagnosis is the engine's GUESS: live (HI1) it named the wrong line, and "differ in the way the
+    # diagnosis says" made its suggested script the draft
     head = ("THIS STEP HAS BEEN TRIED BEFORE AND FAILED. What ran, what the machine answered, and the "
-            "engine's own reading of it are below. Do not repeat the attempt that failed: the draft you "
-            "write now must differ in the way the diagnosis says, and anything the last attempt got "
-            "RIGHT (a value written, a service restarted, a login proved) is already done and must not "
+            "engine's own reading of it are below. Do not repeat the attempt that failed. The machine's answer "
+            "(the error line in what ran) is the evidence; the diagnosis is the engine's own reading of it and can be "
+            "wrong -- check it against that error line before following it, and keep to this step's own rules and "
+            "API shapes (the diagnosis' suggested commands were never run and are not carried). Anything the last "
+            "attempt got RIGHT (a value written, a service restarted, a login proved) is already done and must not "
             "be undone.")
     if len(every) > 1:
         head += ("\n\nEVERY COMPLAINT THE MACHINE HAS MADE ABOUT THIS STEP, ACROSS ALL ATTEMPTS — your "
