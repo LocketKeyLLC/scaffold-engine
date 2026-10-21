@@ -25,7 +25,8 @@ from typing import Callable, Optional
 
 _PORT = "8989"
 _TVDB_RE = re.compile(r"\btvdbId\s*[:=]?\s*(\d{4,8})\b", re.I)
-_FOLDER_RE = re.compile(r"\bFOLDER\s+(?P<path>/\S+)\s*->\s*SEASON\s+(?P<season>\d{1,3})"
+#: §17.1722 — a path with spaces is quoted: `FOLDER "/media/downloads/Power Rangers Super Ninja Steel (Season 25, 2018)" ->`
+_FOLDER_RE = re.compile(r"""\bFOLDER\s+(?:"(?P<qpath>/[^"\n]+)"|(?P<path>/\S+))\s*->\s*SEASON\s+(?P<season>\d{1,3})"""
                         r"(?:\s+COUNT\s+(?P<count>\d{1,4}))?(?:\s+SKIP\s+(?P<skip>[A-Za-z0-9._-]+))?", re.I)
 _TITLE_RE = re.compile(r"\bimport\b", re.I)
 
@@ -52,7 +53,10 @@ IMPORT_PY = (
     "        print('FAILED: %s holds %d files to import, the step says %d -- nothing imported' % (f['path'],len(keep),f['count'])); sys.exit(1)\n"
     "    nums=[]\n"
     "    for p in keep:\n"
-    "        m=re.search(r'[Ss]\\d{1,3}[Ee](\\d{1,3})', str(p.get('path') or '').rsplit('/',1)[-1])\n"
+    "        base=str(p.get('path') or '').rsplit('/',1)[-1]\n"
+    "        m=re.search(r'[Ss]\\d{1,3}[Ee](\\d{1,3})', base)\n"
+    # §17.1722 — a pack whose files name only the episode: `Episode 7 The Need for Speed.mkv`
+    "        m=m or re.match(r'(?i)(?:episode|ep)[ ._-]*(\\d{1,3})(?!\\d)', base)\n"
     "        n=int(m.group(1)) if m else None\n"
     "        if n is None or n not in eps:\n"
     "            print('FAILED: %s maps to no episode of season %d -- nothing imported' % (str(p.get('path'))[-70:],f['season'])); sys.exit(1)\n"
@@ -87,10 +91,11 @@ def plan(node: Optional[dict]) -> Optional[dict]:
     tv = _TVDB_RE.search(text)
     folders, seen = [], set()
     for m in _FOLDER_RE.finditer(text):
-        if m.group("path") in seen:
+        path = m.group("qpath") or m.group("path").rstrip(".,;")
+        if path in seen:
             continue
-        seen.add(m.group("path"))
-        f = {"path": m.group("path").rstrip(".,;"), "season": int(m.group("season"))}
+        seen.add(path)
+        f = {"path": path, "season": int(m.group("season"))}
         if m.group("count"):
             f["count"] = int(m.group("count"))
         if m.group("skip"):
