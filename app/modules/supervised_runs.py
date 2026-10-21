@@ -9176,6 +9176,26 @@ _CLEAR_STALLED_PY = (
 _CLEAR_STALLED_RE = re.compile(r"\b(?:clear|remove|purge|cancel|clean)\b.*\b(?:stalled|stuck|dead|failed)\b|\bstalled\b.*\b(?:download|torrent|queue)\b", re.I)
 
 
+#: §17.1724 — the title names ONE download ("the stuck … download"), not the stalled downloads
+_ONE_DOWNLOAD_RE = re.compile(r"\b(?:download|torrent|pack|release|item)\b(?!s)", re.I)
+#: a title that opens with a read: "Verify the 5 stalled downloads are gone from Sonarr queue" was claimed as a bulk delete
+_READ_TITLE_RE = re.compile(r"\s*(?:verify|confirm|check|list|read|show|count|find|inspect|report)\b", re.I)
+_PLURAL_DOWNLOADS_RE = re.compile(r"\b(?:all|every|downloads|torrents|packs|releases|items)\b", re.I)
+
+
+def _one_download_or_a_read(node: Optional[dict], title: str) -> bool:
+    """§17.1724 — a step the bulk clear-stalled must not claim: one named download, or a step that only reads.
+
+    Live (job e5e22b92 SM4 "Remove the stuck Power Rangers S3 Legacy download", 2026-10-21): the step asked for ONE
+    torrent -- found by its title, `skipRedownload=true`, "touch nothing else" -- and §17.1515 claimed it: a bulk
+    DELETE of every stalled item, a re-search, and a series filter read from the release's quoted title
+    ("Power Rangers: Mighty Morphin", a name Sonarr's series does not have). Its title regex also matched
+    "Verify the 5 stalled downloads are gone from Sonarr queue" -- a read, claimed as a bulk delete."""
+    if only_reads(node) or _READ_TITLE_RE.match(title):
+        return True
+    return bool(_ONE_DOWNLOAD_RE.search(title)) and not _PLURAL_DOWNLOADS_RE.search(title)
+
+
 def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: list[str],
                           services: Optional[list] = None,
                           inventory: Optional[dict] = None) -> tuple[list[str], list[str], list[dict]]:
@@ -9190,7 +9210,7 @@ def rewrite_clear_stalled(node: Optional[dict], commands: list[str], verify: lis
     key read on the machine (§17.1503) via `<SONARR_API_KEY>`."""
     text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     title = str((node or {}).get("title") or "")
-    if not _CLEAR_STALLED_RE.search(title):
+    if not _CLEAR_STALLED_RE.search(title) or _one_download_or_a_read(node, title):
         return list(commands or []), list(verify or []), []
     gid = _arr_guest("sonarr", services, inventory)
     if not gid:
