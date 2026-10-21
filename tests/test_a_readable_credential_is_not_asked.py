@@ -105,3 +105,47 @@ def test_an_ordinary_container_step_does_not_take_the_key_template():
     truth = mt.GuestTruth(gid="101", kind="ct", status="running", agent=False, key_known_by=None)
     node = {"node_key": "T3", "title": "Create user mark", "description": "Inside jellyfin's container, POST /Users/New."}
     assert rt.select_template(node, truth) is not rt.GET_SERVICE_KEY
+
+
+# ── §17.1732 / §17.1733 — T3's live command ───────────────────────────────────────────────────────
+
+_T3_LIVE = ("pct exec 101 -- sh -c 'curl -s --fail-with-body -X POST \"http://127.0.0.1:8096/Users/New?Name=mark&Password="
+            "'\"$JELLYFIN_MARK_PASSWORD\"'\" -H \"X-Emby-Token: $(sed -n \"s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p\" "
+            "/var/lib/jellyfin/config.xml | head -1)\"'")
+
+
+@pytest.mark.smoke
+def test_a_key_read_from_the_wrong_file_becomes_the_placeholder():
+    cmds, _v, notes = machine_values.a_key_read_from_the_wrong_place_is_the_placeholder([_T3_LIVE], [])
+    assert '-H "X-Emby-Token: <JELLYFIN_API_KEY>"' in cmds[0] and "config.xml" not in cmds[0]
+    assert notes and "§17.1732" in notes[0]["why"]
+    right = "pct exec 103 -- sh -c 'curl -H \"X-Api-Key: $(sed -n \"s:.*<ApiKey>\\(.*\\)</ApiKey>.*:\\1:p\" /var/lib/radarr/config.xml)\" x'"
+    assert machine_values.a_key_read_from_the_wrong_place_is_the_placeholder([right], [])[0] == [right]
+
+
+@pytest.mark.smoke
+def test_a_secret_spliced_into_a_guest_exec_line_is_refused_and_stdin_passes():
+    from app.modules import supervised_runs as sr
+    pol = {"held": ["JELLYFIN_MARK_PASSWORD"]}
+    out = sr.secret_in_a_guest_exec_command_line([_T3_LIVE], pol)
+    assert len(out) == 1 and "is spliced into `pct exec`'s command line" in out[0]["why"]
+    assert any(m in out[0]["why"] for m in sr._SHAPE_REFUSALS), "a refusal no redraft recognises is a dead end"
+    stdin = ("pct exec 101 -- sh -c 'read -r V; printf \"%s\" \"$V\" | curl -s --data-binary @- http://x' "
+             "<<< \"$JELLYFIN_MARK_PASSWORD\"")
+    assert sr.secret_in_a_guest_exec_command_line([stdin], pol) == []
+    assert sr.secret_in_a_guest_exec_command_line(["pct exec 101 -- systemctl is-active jellyfin"], pol) == []
+    assert sr.secret_in_a_guest_exec_command_line(['pct exec 105 -- sh -c "curl -u admin:$MASS_PASSWORD x"'],
+                                                   {"held": ["MASS_PASSWORD"]})
+
+
+def test_frame_run_carries_both_fixes_on_the_live_command():
+    from app.modules import supervised_runs as sr
+    node = {"node_key": "T3", "title": "Create user mark", "description": "POST /Users/New in jellyfin."}
+    rb = f"## Run this\n\n```bash\n{_T3_LIVE}\n```\n\n## Verify\n\n- `pct exec 101 -- systemctl is-active jellyfin`\n"
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_MARK_PASSWORD"], "can_write_files": True}
+    inv = {"guests": [{"id": "101", "name": "jellyfin", "kind": "ct"}]}
+    frame = sr.frame_run(node, rb, spec, policy, env={}, inventory=inv)
+    whys = " | ".join(r["why"] for r in frame["refused"])
+    assert "which does not hold one" not in whys                      # §17.1732: the engine fixed the read
+    assert "is spliced into `pct exec`'s command line" in whys         # §17.1733: the password goes to stdin

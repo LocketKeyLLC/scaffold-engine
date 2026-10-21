@@ -187,6 +187,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is run as a READ, unprivileged",                # §17.1462
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
+                   "is spliced into `pct exec`'s command line",      # §17.1733
                    "is a value the engine READS",                   # §17.1384
                    "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
@@ -328,6 +329,7 @@ _WHOSE_GAP: dict[str, str] = {
     "nothing can give it the key": "engine",      # §17.1385 — read it, or mint it
     "is a value the engine READS": "engine",      # §17.1384
     "which does not hold one": "engine",          # §17.1383
+    "is spliced into `pct exec`'s command line": "drafter",   # §17.1733 — only a redraft moves it to stdin
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
@@ -5068,6 +5070,82 @@ def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict
     return out
 
 
+_GUEST_EXEC_LINE_RE = re.compile(r"^\s*(?:pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\b")
+
+
+_GUEST_SHELL_RE = re.compile(r"\b(?:ba|da)?sh\s+-c\s")
+
+
+def _host_expanded_refs(line: str) -> list[str]:
+    """The `$NAME`s the HOST shell expands INTO a guest shell script on this line (`… sh -c '…'`): outside single
+    quotes, after the `sh -c`, and not the here-string after `<<<` (that is the value going on stdin -- the remedy).
+    A value handed over as `env NAME="$S" prog` is not judged here (the engine's own qBittorrent reads use it; its
+    process-list exposure is a separate item)."""
+    g = _GUEST_SHELL_RE.search(line)
+    if not g:
+        return []
+    after = g.end()
+    out: list[str] = []
+    in_sq = in_dq = False
+    i = 0
+    stdin_from = line.find("<<<")
+    while i < len(line):
+        ch = line[i]
+        if stdin_from >= 0 and i >= stdin_from and not in_sq and not in_dq:
+            break
+        if in_sq:
+            in_sq = ch != "'"
+        elif ch == "\\":
+            i += 1
+        elif ch == "'" and not in_dq:
+            in_sq = True
+        elif ch == '"':
+            in_dq = not in_dq
+        elif ch == "$":
+            m = _ENV_REF_RE.match(line, i)
+            if m:
+                if i > after:
+                    out.append(m.group(1))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def secret_in_a_guest_exec_command_line(commands: list[str], policy: Optional[dict] = None) -> list[dict]:
+    """§17.1733 — a secret the host expands into `pct exec` / `qm guest exec`'s own arguments.
+
+    Live (job 7d30fe4f T3, 2026-10-21): "Create user mark" ran
+    `pct exec 101 -- sh -c 'curl … "http://127.0.0.1:8096/Users/New?Name=mark&Password='"$JELLYFIN_MARK_PASSWORD"'" …'`
+    -- the quotes closed around the name so the HOST expanded it: the password rides `pct exec`'s argv on the host
+    (any process list, the runner's record) and the guest shell's command line, and as a URL parameter Jellyfin's
+    /Users/New ignores it (the password is a JSON body field), so `mark` would have been made with none. The
+    §17.1288b ssh rule covered ssh only. The value goes on STDIN, which the guest's own shell reads."""
+    from app.modules.runbook_inputs import secret_name
+    held = {str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])}
+    out: list[dict] = []
+    for cmd in commands or []:
+        for line in str(cmd or "").splitlines():
+            m = _GUEST_EXEC_LINE_RE.match(line)
+            if not m:
+                continue
+            names = [n for n in _host_expanded_refs(line) if n in held or secret_name(n)]
+            if not names:
+                continue
+            n, gid = names[0], m.group(1)
+            example = ("pct exec " + gid + " -- sh -c 'read -r V; printf \"{\\\"Name\\\":\\\"…\\\",\\\"Password\\\":\\\"%s\\\"}\" "
+                       "\"$V\" | curl -s --data-binary @- -H \"Content-Type: application/json\" …' <<< \"$" + n + "\"")
+            out.append({"command": line.strip()[:200], "why": (
+                f"`${n}` is spliced into `pct exec`'s command line: the host expands it, so the value rides the "
+                f"arguments of `pct exec {gid}` on the host (any process list, the runner's record) and the guest "
+                f"shell's command line -- and a password in a URL is not where an API reads it. Give the value to "
+                f"the guest on STDIN and let the guest's shell put it where it belongs: `{example}` -- the "
+                f"here-string is the only place the name appears (a value that may hold `\"` or `\\\\` is put into the JSON by "
+                f"`python3 -c 'import json,sys; …json.dumps(…)'` reading stdin, where the guest has python3).")})
+            break
+    return out
+
+
 _NEIGH_READ_RE = re.compile(r"\bip\s+(?:-4\s+|-6\s+)?(?:neigh|neighbour|neighbor|n)\b|\barp\s+-[an]\b")
 _SWEEP_RE = re.compile(r"\bnmap\s+-sn\b|\barp-scan\b|\bfping\b|\bping\b[^\n]*\$\(seq\b|\bseq\b[^\n]*\n?[^\n]*\bping\b|\{1\.\.25[0-4]\}[^\n]*\bping\b|\bping\b[^\n]*\{1\.\.25[0-4]\}")
 
@@ -6773,7 +6851,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # fills it. A stored secret's `$NAME` is left for the runner to inject.
     _stored_names = {str(x) for x in ((policy or {}).get("secrets") or [])} \
         | {str(x) for x in ((policy or {}).get("held") or [])}
+    # §17.1732 — a key read from a file that does not hold it becomes the placeholder the reader below fills.
+    cmds, verify, _wp_notes = _mv.a_key_read_from_the_wrong_place_is_the_placeholder(cmds, verify)
     cmds, verify, _var_notes = _mv.read_a_readable_key_written_as_a_var(cmds, verify, _stored_names)
+    _var_notes = list(_wp_notes) + list(_var_notes)
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
     _mv_notes = list(_mv_notes) + _ak_notes
     _mv_notes = list(_fold_notes) + list(_var_notes) + list(_mv_notes)
@@ -6963,6 +7044,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1367 — a value read from a machine, pasted into a shell word.
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
+    refused = refused + secret_in_a_guest_exec_command_line(cmds, policy)       # §17.1733
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
     from app.modules.arr_api_shapes import wrong_fields as _wrong_fields

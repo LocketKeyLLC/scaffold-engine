@@ -1171,3 +1171,39 @@ def key_step_commands(app: str) -> str:
     if app in _KEY_WORKS:
         lines.append(_KEY_WORKS[app])
     return "\n".join(lines)
+
+
+def a_key_read_from_the_wrong_place_is_the_placeholder(
+        commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1732 — a `$(…)` that reads a readable service's key from a file that does not hold it becomes the
+    `<APP_API_KEY>` placeholder, which `read_on_the_machine` (next) fills with the read that works.
+
+    Live (job 7d30fe4f T3, 2026-10-21): three drafts of "Create user mark" read Jellyfin's key with
+    `$(sed -n "s:.*<ApiKey>…" /var/lib/jellyfin/config.xml | head -1)`; §17.1383's gate refused each ("which does
+    not hold one") and the step parked with Run greyed. The gap is registered as the ENGINE's (`_WHOSE_GAP`), and the
+    engine holds the right read -- so it puts it there instead of asking the drafter a fourth time. Only a
+    substitution `reads_a_key_where_the_service_does_not_keep_it` would refuse is touched."""
+    notes: list[dict] = []
+
+    def fix(text: str) -> str:
+        s, i = str(text), 0
+        while True:
+            j = s.find("$(", i)
+            if j < 0:
+                return s
+            end = _close_paren(s, j + 1)
+            if end < 0:
+                return s
+            inner = s[j + 2:end]
+            bad = reads_a_key_where_the_service_does_not_keep_it([inner])
+            app = next((a for a in _SERVICES if bad and f"{a}'s API key" in bad[0]["why"]), None)
+            if app:
+                ph = f"<{app.upper()}_API_KEY>"
+                notes.append({"why": f"the draft read {app}'s key from a file that does not hold it; the engine put "
+                                     f"{ph} there, which it fills with the read from {_SERVICES[app].where} (§17.1732)"})
+                s = s[:j] + ph + s[end + 1:]
+                i = j + len(ph)
+            else:
+                i = j + 2
+
+    return [fix(c) for c in commands or []], [fix(v) for v in verify or []], notes
