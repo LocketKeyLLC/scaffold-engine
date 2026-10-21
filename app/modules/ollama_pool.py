@@ -208,6 +208,8 @@ skipped, so one machine unplugged does not fail the engine's work; cloud tags st
 - each machine pulls the engine's role models (MODEL_* settings, or the engine's GET /models) that fit its RAM;
   a model too big for a machine stays on the engine's own Ollama — say which model goes where;
 - the plan ENDS with a step on the engine host that sets OLLAMA_POOL_URLS to those addresses, redeploys the
-  engine, and reads /health showing every pool member "up" with the models it holds.
+  engine, and reads /health showing every pool member "up" with the models it holds;
+- a "keeps working when one machine is lost" check comes AFTER that step and proves it on the ENGINE: one
+  member stopped, an engine model call still answers and /health names that member down.
 
 """

@@ -35,6 +35,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+from app.modules.job_state import sql_status_list
 
 logger = logging.getLogger("scaffold.execution_resume")
 
@@ -44,6 +45,14 @@ logger = logging.getLogger("scaffold.execution_resume")
 _RESUME_TASKS: set[asyncio.Task] = set()
 
 CRASH_RESUME_BUDGET_SUMMARY = "crash_resume_budget_exhausted"
+
+#: §17.1728 — the statuses a job holds only while a run OWNS it. ``execute_all_nodes`` flips a job to ``running``
+#: before it claims a node and every exit moves it off again; ``executing`` is "planned, nothing running" — the status
+#: a plan-only approval (``/approve`` without execute) and every finished decision step leave behind. Both startup
+#: sweeps read ``running|executing`` as mid-run, so a restart RELAUNCHED an idle plan: live (job f9ca3ee1,
+#: 2026-10-21) the rebuild re-drove a job the operator had approved for planning only, and it parked its first
+#: hands-on step (a LAN scan) with Run suggested. The reconcile, had the resume valve been off, would have failed it.
+MID_RUN_STATUSES: tuple[str, ...] = ("running",)
 
 
 async def _drain_execution(job_id: str) -> None:
@@ -116,17 +125,18 @@ async def resume_orphaned_executions(*, spawn: bool = True) -> dict[str, Any]:
     resumed: list[str] = []
     budget_failed: list[str] = []
 
+    mid_run = sql_status_list(MID_RUN_STATUSES)
     async with async_session() as db:
         # Candidates: a job still running/executing at startup that owns at
         # least one DAG node. In a freshly-started process no executor exists,
         # so any such row is a crash-orphan. Umbrella parents (status
         # 'aggregating', no DAG) and jobs still in early phases are excluded.
-        candidates = (await db.execute(text("""
+        candidates = (await db.execute(text(f"""
             SELECT j.id AS id,
                    j.resume_attempts AS resume_attempts,
                    j.resume_done_marker AS resume_done_marker
               FROM jobs j
-             WHERE j.status IN ('running', 'executing')
+             WHERE j.status IN ({mid_run})
                AND EXISTS (SELECT 1 FROM dag_nodes n WHERE n.job_id = j.id)
              ORDER BY j.updated_at ASC
         """))).mappings().all()
@@ -150,12 +160,12 @@ async def resume_orphaned_executions(*, spawn: bool = True) -> dict[str, Any]:
                 # Guarded on the current status so a racing writer that already
                 # moved the row wins. completed_at is auto-stamped by the
                 # migration-047 terminal trigger.
-                failed = (await db.execute(text("""
+                failed = (await db.execute(text(f"""
                     UPDATE jobs
                        SET status = 'failed',
                            error_summary = :summary,
                            updated_at = NOW()
-                     WHERE id = :jid AND status IN ('running', 'executing')
+                     WHERE id = :jid AND status IN ({mid_run})
                      RETURNING id
                 """), {"jid": job_id, "summary": CRASH_RESUME_BUDGET_SUMMARY})).first()
                 if failed is not None:
@@ -170,13 +180,13 @@ async def resume_orphaned_executions(*, spawn: bool = True) -> dict[str, Any]:
             # Claim: flip off 'running' (execute_all_nodes' guard rejects a job
             # already 'running') to 'executing', and record the counter +
             # progress marker atomically. Guarded so a racing owner wins.
-            claimed = (await db.execute(text("""
+            claimed = (await db.execute(text(f"""
                 UPDATE jobs
                    SET status = 'executing',
                        resume_attempts = :attempts,
                        resume_done_marker = :marker,
                        updated_at = NOW()
-                 WHERE id = :jid AND status IN ('running', 'executing')
+                 WHERE id = :jid AND status IN ({mid_run})
                  RETURNING id
             """), {
                 "jid": job_id, "attempts": attempts, "marker": done_count,

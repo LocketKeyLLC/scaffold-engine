@@ -316,3 +316,54 @@ async def test_generate_dag_hands_the_planner_the_answers_and_the_feasibility():
     assert '"operator_answers"' in rendered and "work together as one pool" in rendered
     assert '"engine_feasibility"' in rendered and "must use k3s" in rendered
     assert "§17.1725" in rendered and "§17.1726" in rendered
+
+
+# ---------------------------------------------------------------------------
+# §17.1729 — a count nobody gave is not planned as numbered copies
+# ---------------------------------------------------------------------------
+
+_LIVE_TITLES = [  # job f9ca3ee1's re-plan, 2026-10-21 (titles only)
+    ("T11", "Install k3s control plane"), ("T13", "Install k3s agent laptop1"),
+    ("T14", "Install k3s agent laptop2"), ("T15", "Install k3s agent laptop3"),
+    ("T16", "Install k3s agent laptop4"), ("T18", "Deploy Ollama on laptop1"),
+    ("T19", "Deploy Ollama on laptop2"), ("T20", "Deploy Ollama on laptop3"),
+    ("T21", "Deploy Ollama on laptop4"), ("T22", "Configure engine pool URLs"),
+]
+
+
+@pytest.mark.smoke
+def test_numbered_copies_for_a_count_nobody_gave_are_found():
+    tasks = [{"id": i, "name": n} for i, n in _LIVE_TITLES]
+    got = dag_generator.detect_invented_counts(tasks, json.dumps(_K8S_BRIEF))
+    assert [g["ids"] for g in got] == [["T13", "T14", "T15", "T16"], ["T18", "T19", "T20", "T21"]]
+    # the same steps are fine when the operator SAID how many
+    assert dag_generator.detect_invented_counts(tasks, "I have four old laptops") == []
+    assert dag_generator.detect_invented_counts(tasks, "the 4 Dell laptops") == []
+    # numbered things that are names, not a count: VM 106 / VM 110, net0
+    named = [{"id": "A", "name": "Start VM 106"}, {"id": "B", "name": "Start VM 110"},
+             {"id": "C", "name": "Attach veth105i0 to vmbr0"}]
+    assert dag_generator.detect_invented_counts(named, "") == []
+
+
+async def test_the_planner_is_sent_back_to_write_one_node(monkeypatch):
+    """Production loop: an invented count drives a redraft carrying the correction."""
+    from app import model_router as _mr
+    monkeypatch.setattr(settings, "dag_validator_enabled", True)
+    monkeypatch.setattr(settings, "dag_validator_max_retries", 1)
+    copies = json.dumps({"strategy": "s", "tasks": [
+        {"id": f"T{i}", "name": f"Install k3s agent laptop{i}", "type": "action", "inputs": [], "outputs": [f"o{i}"],
+         "depends_on": [], "tool": "Shell", "domain": None, "assigned_model": None, "notes": "n",
+         "is_deliverable": i == 2} for i in (1, 2)]})
+    prompts: list[str] = []
+    replies = iter([_resp(copies), _resp(json.dumps({"issues": []})), _resp(_DAG), _resp(json.dumps({"issues": []}))])
+
+    async def _gen(prompt, *a, **k):
+        prompts.append(prompt)
+        return next(replies)
+    with patch.object(_mr, "generate", new=AsyncMock(side_effect=_gen)), \
+         patch("app.modules.flywheel.retrieve_exemplars", new=AsyncMock(return_value="")):
+        result = await dag_generator._generate_dag_with_validator(_K8S_BRIEF, {"role": "model_general"})
+    assert result["attempts"] == 2
+    redraft = [p for p in prompts if "Decompose this refined brief" in p][1]
+    assert "Invented counts" in redraft and "T1, T2" in redraft
+    assert any(w.startswith("invented_count_found_1_attempt_1") for w in result["warnings"])

@@ -349,30 +349,35 @@ async def reconcile_on_startup(*, exclude: Iterable[str] = ()) -> None:
 
     from app.database import async_session
 
+    from app.modules.execution_resume import MID_RUN_STATUSES
+    from app.modules.job_state import sql_status_list
+
     excluded = [str(j) for j in exclude]
+    # §17.1728 — the same "mid-run" as the crash-resume: an idle `executing` plan is not a run to settle.
+    mid_run = sql_status_list(MID_RUN_STATUSES)
     try:
         async with async_session() as db:
             if excluded:
                 rows = (await db.execute(text(
-                    "SELECT id FROM jobs WHERE status IN ('running', 'executing') "
+                    f"SELECT id FROM jobs WHERE status IN ({mid_run}) "
                     "AND NOT (id = ANY(:exclude))"
                 ), {"exclude": excluded})).scalars().all()
             else:
                 rows = (await db.execute(text(
-                    "SELECT id FROM jobs WHERE status IN ('running', 'executing')"
+                    f"SELECT id FROM jobs WHERE status IN ({mid_run})"
                 ))).scalars().all()
             if not rows:
                 return
             job_ids = [str(r) for r in rows]
             await db.execute(
-                text("""
+                text(f"""
                     UPDATE jobs
                        SET status = 'failed',
                            error_summary = COALESCE(error_summary, '')
                                          || 'interrupted by an engine restart mid-run',
                            updated_at = NOW()
                      WHERE id = ANY(:ids)
-                       AND status IN ('running', 'executing')
+                       AND status IN ({mid_run})
                 """),
                 {"ids": job_ids},
             )

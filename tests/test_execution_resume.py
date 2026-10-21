@@ -282,3 +282,47 @@ def test_lifespan_has_one_startup_entry_for_both_sweeps():
     assert joined.count("await settle_interrupted_runs()") == 1
     assert "await reconcile_on_startup(" not in joined
     assert "await resume_orphaned_executions(" not in joined
+
+
+# ── §17.1728 — an idle plan is not a crashed run ─────────────────────────────
+
+async def test_an_idle_executing_plan_is_left_alone_and_a_running_job_is_resumed():
+    """Against the real (test) database: a job approved for planning only sits in `executing` with every node
+    pending — a restart must neither relaunch it (crash-resume) nor fail it (the run reconcile). A job left
+    `running` is still the crash-orphan both sweeps exist for. Live pre-image: job f9ca3ee1, 2026-10-21 —
+    the rebuild relaunched a plan-only job and parked its first hands-on step with Run suggested."""
+    import uuid
+    from sqlalchemy import text
+    from app.database import async_session
+    from app.modules import run_broker
+
+    idle, live = str(uuid.uuid4()), str(uuid.uuid4())
+    async with async_session() as db:
+        for jid, st in ((idle, "executing"), (live, "running")):
+            await db.execute(text("INSERT INTO jobs (id, title, status) VALUES (:id, 'resume test', :st)"),
+                             {"id": jid, "st": st})
+            await db.execute(text("INSERT INTO dag_nodes (job_id, node_key, title) VALUES (:id, 'T1', 'Scan')"),
+                             {"id": jid})
+        await db.commit()
+    try:
+        with patch.object(er.settings, "execution_resume_on_startup_enabled", True):
+            result = await resume_orphaned_executions(spawn=False)
+        assert live in result["resumed"] and idle not in result["resumed"]
+        await run_broker.reconcile_on_startup(exclude=result["resumed"])
+        async with async_session() as db:
+            st = dict((await db.execute(text("SELECT id::text, status FROM jobs WHERE id IN (:a, :b)"),
+                                        {"a": idle, "b": live})).all())
+        assert st[idle] == "executing"                       # untouched by both sweeps
+        assert st[live] == "executing"                       # claimed for relaunch (the drain flips it to running)
+    finally:
+        async with async_session() as db:
+            await db.execute(text("DELETE FROM jobs WHERE id IN (:a, :b)"), {"a": idle, "b": live})
+            await db.commit()
+
+
+def test_the_reaper_uses_the_same_mid_run_vocabulary():
+    """§17.1728 — the third reader of "mid-run": the periodic reaper failed an idle `executing` plan after
+    STALE_THRESHOLD_MINUTES (26 h live) — the operator's unreviewed plan, failed for waiting."""
+    from app.modules import cleanup
+    from app.modules.job_state import sql_status_list
+    assert f"WHERE status IN ({sql_status_list(er.MID_RUN_STATUSES)})" in cleanup._REAP_RUNNING_SQL

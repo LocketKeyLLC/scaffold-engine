@@ -1194,6 +1194,53 @@ def wire_orphan_terminal_nodes(tasks: list[dict]) -> list[str]:
     return rewired
 
 
+_NUM_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine",
+              10: "ten", 11: "eleven", 12: "twelve"}
+_NUMBERED_TITLE = re.compile(r"^(?P<stem>.*?\b(?P<noun>[A-Za-z][A-Za-z-]{2,}))\s*#?(?P<n>\d{1,2})$")
+
+
+def detect_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
+    """§17.1729 — copies of one step numbered 1..N ("Install k3s agent laptop1" … "laptop4") when nothing the
+    operator gave says there are N of them.
+
+    Live (job f9ca3ee1, 2026-10-21): the laptops are found on the LAN and confirmed by the operator in T3; the
+    plan still wrote four install steps and four Ollama steps, one per invented laptop. With three laptops one
+    pair cannot run; with five, one laptop is never set up. Returns ``[{noun, count, ids}]`` per group: titles
+    equal up to a trailing number, numbered exactly 1..N (so "VM 106"/"VM 110" are not a group), N ≥ 2, and the
+    brief never states "N <noun>" (digit or word, up to two words between). Measured over the 18 stored plans
+    (790 steps, 20 numbered titles): f9ca3ee1's two groups and nothing else."""
+    import collections
+    groups: dict[tuple[str, str], list[tuple[int, str]]] = collections.defaultdict(list)
+    for t in tasks or []:
+        m = _NUMBERED_TITLE.match(str(t.get("name") or t.get("title") or "").strip())
+        if m:
+            groups[(m.group("stem").strip().lower(), m.group("noun").lower())].append(
+                (int(m.group("n")), str(t.get("id") or t.get("node_key") or "")))
+    text = (brief_text or "").lower()
+    out: list[dict] = []
+    for (_stem, noun), members in groups.items():
+        nums = sorted(n for n, _ in members)
+        if len(nums) < 2 or nums != list(range(1, len(nums) + 1)):
+            continue
+        k = len(nums)
+        said = rf"\b(?:{k}|{_NUM_WORDS.get(k, k)})\s+(?:[a-z-]+\s+){{0,2}}{re.escape(noun)}"
+        if re.search(said, text):
+            continue
+        out.append({"noun": noun, "count": k, "ids": [i for _, i in sorted(members)]})
+    return out
+
+
+def render_invented_count_corrections(groups: list[dict], next_attempt: int) -> str:
+    lines = [f"## Invented counts (attempt {next_attempt})", ""]
+    for g in groups:
+        lines.append(f"- {', '.join(g['ids'])}: {g['count']} numbered copies of one step, one per {g['noun']} — but "
+                     f"nothing the operator gave says there are {g['count']} {g['noun']}s.")
+    lines += ["", "How many there are is only known when an earlier node finds or confirms them. Replace each group "
+              "with ONE node that does the work for EVERY confirmed item (name the earlier node that lists them), "
+              "and re-point anything that depended on a copy to that one node."]
+    return "\n".join(lines)
+
+
 def render_dead_end_corrections(
     tasks: list[dict], orphans: list[str], next_attempt: int,
 ) -> str:
@@ -1367,7 +1414,10 @@ async def _generate_dag_with_validator(
             if settings.dag_decision_impl_check_enabled else []
         )
 
-        if not outcome.issues and not dead_ends and not unimplemented:
+        # §17.1729 — numbered copies of a step for a count nobody gave. Retry so the model writes ONE node.
+        invented = detect_invented_counts(dag_data.get("tasks", []), json.dumps(brief_data))
+
+        if not outcome.issues and not dead_ends and not unimplemented and not invented:
             if attempt > 1:
                 warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
             return {
@@ -1399,6 +1449,11 @@ async def _generate_dag_with_validator(
                     + ", ".join(unimplemented)
                     + " (decided but never carried out — plan may be incomplete)"
                 )
+            if invented:
+                warnings.append(
+                    "invented_counts: " + "; ".join(
+                        f"{', '.join(g['ids'])} ({g['count']} {g['noun']}s, a count nobody gave)" for g in invented)
+                    + f" after {attempt} attempts")
             return {
                 "dag_data": dag_data, "raw_text": last_text, "model": last_model,
                 "duration_ms": total_duration_ms, "warnings": warnings,
@@ -1409,6 +1464,7 @@ async def _generate_dag_with_validator(
             issue_set_signature(outcome.issues),
             tuple(sorted(dead_ends)),
             tuple(sorted(unimplemented)),
+            tuple(sorted(i for g in invented for i in g["ids"])),
         )
         if sig == last_issue_signature:
             warnings.append(
@@ -1455,6 +1511,12 @@ async def _generate_dag_with_validator(
                     dag_data.get("tasks", []), unimplemented, attempt + 1,
                 )
             )
+        if invented:
+            warnings.append(
+                f"invented_count_found_{len(invented)}_attempt_{attempt}: "
+                + ", ".join("/".join(g["ids"]) for g in invented)
+            )
+            correction_parts.append(render_invented_count_corrections(invented, attempt + 1))
         corrections_block = "\n\n".join(correction_parts)
 
     # Reached only when the loop broke mid-flight after attempt 1 (e.g., a
