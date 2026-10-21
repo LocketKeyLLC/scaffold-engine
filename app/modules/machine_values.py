@@ -1079,3 +1079,48 @@ def present_a_held_login(commands: list[str], verify: list[str], services: Optio
             "password fed to the guest on stdin (never in the command, the approval, or a log) as the "
             "runner-resolved reference (§17.1548).")})
     return out_cmds, out_verify, notes
+
+
+# ── §17.1730: a step that ASKS the operator for a credential the engine can read ──────────────────
+
+_CRED_RE = re.compile(r"\b(?:api[\s_-]?key|admin\s+(?:credential|password|login|token|session)|access\s+token|"
+                      r"credential|(?:admin\s+)?user(?:name)?\s*(?:\+|and|/)\s*password)\b", re.I)
+_ASK_FOR_RE = re.compile(
+    r"\b(?:operator\s+(?:must|should|needs?\s+to|has\s+to)\s+(?:supply|provide|paste|give|enter)|"
+    r"(?:supply|provide|paste|enter)\s+(?:the|an|your)\s+(?:\w+\s+){0,2}(?:credential|key|password|token)|"
+    r"how\s+should\s+the\s+(?:\w+\s+){0,4}(?:credential|key|password|token)\s+(?:\(.*?\)\s+)?be\s+supplied|"
+    r"ask\s+the\s+operator\s+for)\b", re.I)
+
+
+def asks_for_a_readable_credential(node: dict) -> Optional[str]:
+    """§17.1730 — the service whose credential this step asks the operator for, when the engine can read
+    (or create, §17.1385) that credential itself; else None.
+
+    Live (job 7d30fe4f, 2026-10-21, "add three Jellyfin users"): the planner wrote T2 "Resolve admin
+    credential … the operator must supply the admin credential (API key or admin username/password) once" as a
+    `decision` node, and the pause framed it as a question -- although §17.1382/1385 read Jellyfin's key from
+    its own database and create one when it has none. Those run only on a RUN frame's inputs; a decision node
+    never reaches them. The operator: "It should read the admin key itself." Exactly one readable service
+    named, credential words, and words that ask for it. Measured over the 58 stored decision/credential steps:
+    this T2 alone."""
+    t = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_CRED_RE.search(t) and _ASK_FOR_RE.search(t)):
+        return None
+    hits = [s for s in sorted(_SERVICES) if re.search(rf"\b{s}\b", t, re.I)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def read_the_credential_instead(app: str, node: dict) -> dict:
+    """§17.1730 — the step rewritten as WORK: read the key where the service keeps it, create the engine's own
+    one when there is none, and hand it to the later steps as the placeholder `read_on_the_machine` fills."""
+    r = _SERVICES[app]
+    ph = f"<{app.upper()}_API_KEY>"
+    make = (f" If {app} has no such key yet, create the engine's own (it is a change: approved like any "
+            f"other, idempotent).") if create_key_on_the_machine(app) else ""
+    was = str((node or {}).get("title") or "").strip()
+    text_ = (f"Get {app}'s API key ON THE MACHINE -- never ask the operator for an admin key or password. {app} "
+             f"keeps it in {r.where} inside its own guest; read it there.{make} Later steps that call {app}'s API "
+             f"use it as {ph} inside that guest (the engine fills it in where the call runs). Done when the key "
+             f"is known to exist (print only its length, never the key). [Rewritten by the engine, §17.1730: the "
+             f"plan had asked the operator for this credential as {was!r}.]")
+    return {"title": f"Get {app} API key", "description": text_, "prompt_template": text_}

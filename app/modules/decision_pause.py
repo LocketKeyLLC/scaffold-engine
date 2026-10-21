@@ -100,6 +100,21 @@ async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
     )).mappings().all()
     for row in rows:
         node = dict(row)
+        # §17.1730 — a credential the engine can read itself is not a question: the step becomes the read.
+        from app.modules import machine_values as _mv
+        _app = _mv.asks_for_a_readable_credential(node)
+        if _app:
+            _new = _mv.read_the_credential_instead(_app, node)
+            await db.execute(
+                text("UPDATE dag_nodes SET node_type = 'task', tool = 'Shell', title = :t, description = :d, "
+                     "prompt_template = :p, optimized_prompt = NULL, updated_at = NOW() "
+                     "WHERE job_id = :jid AND node_key = :nk AND node_type = 'decision' AND status = 'pending'"),
+                {"jid": job_id, "nk": node["node_key"], "t": _new["title"], "d": _new["description"],
+                 "p": _new["prompt_template"]})
+            await db.commit()
+            logger.warning("decision_asks_for_a_readable_credential job=%s node=%s app=%s — now a task that reads "
+                           "it on the machine (§17.1730)", job_id, node["node_key"], _app)
+            continue
         if asks_the_operator(node):
             return node
         await db.execute(
