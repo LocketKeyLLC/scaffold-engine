@@ -921,6 +921,27 @@ _CONFIRM: dict[str, tuple[str, str]] = {
 }
 
 
+#: §17.1737 — Jellyfin's user list needs no key: `/Users/Public` names every user not hidden from the login screen.
+_USER_LISTED = 'curl -s http://127.0.0.1:8096/Users/Public | grep -E -o "\\"Name\\": *\\"{name}\\""'
+_USERS_NEW_RE = re.compile(r"/Users/New\b")
+_NEW_NAME_RE = re.compile(r'\\?"Name\\?"\s*:\s*\\?"([A-Za-z0-9 ._@+-]{1,64})\\?"')
+
+
+def _jellyfin_users_created(commands: list[str], inventory: Optional[dict]) -> list[tuple[str, str]]:
+    """``[(gid, name)]`` for each Jellyfin user a block creates through `/Users/New` with a literal `"Name"`."""
+    gid = guest_for("jellyfin", inventory)
+    if gid is None:
+        return []
+    out = []
+    for c in commands or []:
+        c = str(c)
+        if _USERS_NEW_RE.search(c) and addresses_guest(c, gid):
+            for name in _NEW_NAME_RE.findall(c):
+                if (gid, name) not in out:
+                    out.append((gid, name))
+    return out
+
+
 def a_check_the_engine_can_write(commands: list[str], inventory: Optional[dict] = None
                                  ) -> list[tuple[str, str]]:
     """§17.1388 — ``[(check, why)]`` the engine can compose for this block.
@@ -939,6 +960,14 @@ def a_check_the_engine_can_write(commands: list[str], inventory: Optional[dict] 
     added, because a silent repair is not a repair (§17.1270).
     """
     out: list[tuple[str, str]] = []
+    # §17.1737 — a check that needs no key comes first: the read channel refuses a program inside a guest, so the
+    # keyed read below is dropped there and the block stays refused (live, job 7d30fe4f T4 "Create user natalie").
+    for gid_, name in _jellyfin_users_created(commands, inventory):
+        out.append((f"pct exec {gid_} -- sh -c {_sq(_USER_LISTED.format(name=name))}",
+                    f"the block creates the Jellyfin user {name!r} and named no check, so the engine wrote one: "
+                    f"Jellyfin's public user list must name {name!r} (a read that needs no key, §17.1737)."))
+    if out:
+        return out
     for app, (payload, shows) in _CONFIRM.items():
         r = _SERVICES.get(app)
         gid = guest_for(app, inventory)

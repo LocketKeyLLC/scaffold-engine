@@ -205,3 +205,21 @@ def test_a_payload_with_its_stdin_is_not_wrapped_again():
     filled, _v, _n = machine_values.read_on_the_machine([cmd], [], {"names": {"101": "jellyfin"}})
     assert filled[0].count("sh -c '") == 1 and filled[0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\"")
     assert "scaffold-engine" in filled[0]
+
+
+def test_a_user_creation_with_no_check_gets_a_keyless_check_that_the_channel_runs():
+    """§17.1737 — live T4 "Create user natalie": no check, and the keyed filler is refused by the read channel."""
+    from app.modules import supervised_runs as sr
+    cmd = (
+        "pct exec 101 -- sh -c 'read -r V; printf \"{\\\"Name\\\":\\\"natalie\\\",\\\"Password\\\":\\\"%s\\\"}\" \"$V\" | "
+        "curl -s --fail-with-body -X POST -H \"Content-Type: application/json\" -H \"X-Emby-Token: <JELLYFIN_API_KEY>\" "
+        "--data-binary @- http://127.0.0.1:8096/Users/New' <<< \"$JELLYFIN_NATALIE_PASSWORD\"")
+    rb = f"## Run this\n\n```bash\n{cmd}\n```\n"
+    node = {"node_key": "T4", "title": "Create user natalie", "description": "Create the Jellyfin user natalie."}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["JELLYFIN_NATALIE_PASSWORD"],
+              "secrets": ["JELLYFIN_NATALIE_PASSWORD"], "can_write_files": True}
+    frame = sr.frame_run(node, rb, spec, policy, env={}, inventory={"names": {"101": "jellyfin"}})
+    assert frame["refused"] == [], [r["why"][:160] for r in frame["refused"]]
+    assert any("/Users/Public" in v and "natalie" in v for v in frame["verify"]), frame["verify"]
+    assert all(sr._channel_would_run(v) for v in frame["verify"])
