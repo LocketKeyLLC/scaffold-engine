@@ -1173,6 +1173,22 @@ def key_step_commands(app: str) -> str:
     return "\n".join(lines)
 
 
+_KEY_TABLE_RE = re.compile(r"\b(?:ApiKeys|AccessToken)\b")
+
+
+def _a_hand_written_read_of_a_key_the_engine_reads(inner: str) -> Optional[str]:
+    """§17.1735 — a `$(…)` that opens a key DATABASE the engine reads itself (Jellyfin's `ApiKeys`), written by the
+    drafter instead of the engine's read. Live (job 7d30fe4f T3, after §17.1734): `SELECT AccessToken FROM ApiKeys
+    ORDER BY rowid LIMIT 1` -- the FIRST key, whichever service owns it; the engine's read takes its own key by name."""
+    for app, r in _SERVICES.items():
+        # the engine's own read selects its own key BY NAME ("scaffold-engine"); once filled it is quote-escaped for
+        # its context, so it is recognised by that name, not by its exact text
+        if r.command and any(p in inner for p in r.paths) and _KEY_TABLE_RE.search(inner) \
+                and "scaffold-engine" not in inner:
+            return app
+    return None
+
+
 def a_key_read_from_the_wrong_place_is_the_placeholder(
         commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
     """§17.1732 — a `$(…)` that reads a readable service's key from a file that does not hold it becomes the
@@ -1196,7 +1212,8 @@ def a_key_read_from_the_wrong_place_is_the_placeholder(
                 return s
             inner = s[j + 2:end]
             bad = reads_a_key_where_the_service_does_not_keep_it([inner])
-            app = next((a for a in _SERVICES if bad and f"{a}'s API key" in bad[0]["why"]), None)
+            app = next((a for a in _SERVICES if bad and f"{a}'s API key" in bad[0]["why"]), None) \
+                or _a_hand_written_read_of_a_key_the_engine_reads(inner)
             if app:
                 ph = f"<{app.upper()}_API_KEY>"
                 notes.append({"why": f"the draft read {app}'s key from a file that does not hold it; the engine put "

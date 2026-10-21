@@ -170,3 +170,21 @@ def test_the_rules_worked_example_passes_every_gate():
     assert frame["inputs"] == []
     assert "<JELLYFIN_API_KEY>" not in " ".join(frame["commands"]), "the engine filled the key"
     assert frame["verify"], "the check survived the read channel"
+
+
+@pytest.mark.smoke
+def test_a_hand_written_read_of_the_first_key_becomes_the_engines_read():
+    """§17.1735 — live T3 after §17.1734: the drafter read `… FROM ApiKeys ORDER BY rowid LIMIT 1` (any service's)."""
+    live = ("pct exec 101 -- sh -c 'read -r V; printf \"{\\\"Name\\\":\\\"mark\\\",\\\"Password\\\":\\\"%s\\\"}\" \"$V\" | "
+            "curl -s --fail-with-body -X POST -H \"Content-Type: application/json\" -H \"X-Emby-Token: $(python3 -c "
+            "'\"'\"'import sqlite3;print(sqlite3.connect(\"file:/var/lib/jellyfin/data/jellyfin.db?mode=ro\",uri=True)"
+            ".execute(\"SELECT AccessToken FROM ApiKeys ORDER BY rowid LIMIT 1\").fetchone()[0])'\"'\"')\" "
+            "--data-binary @- http://127.0.0.1:8096/Users/New' <<< \"$JELLYFIN_MARK_PASSWORD\"")
+    cmds, _v, notes = machine_values.a_key_read_from_the_wrong_place_is_the_placeholder([live], [])
+    assert '-H "X-Emby-Token: <JELLYFIN_API_KEY>"' in cmds[0] and "ORDER BY rowid LIMIT 1" not in cmds[0]
+    assert cmds[0].endswith('<<< "$JELLYFIN_MARK_PASSWORD"')
+    # after the reader fills it, the engine's own read (by name) is what runs -- and it is left alone
+    filled, _v2, _n = machine_values.read_on_the_machine(cmds, [], {"names": {"101": "jellyfin"}})
+    assert 'WHERE Name=?' in filled[0] and "scaffold-engine" in filled[0]
+    again, _v3, notes2 = machine_values.a_key_read_from_the_wrong_place_is_the_placeholder(filled, [])
+    assert again == filled and notes2 == []
