@@ -133,6 +133,25 @@ async def _registered_cloud_tag(model: str, resp: "ModelResponse") -> bool:
 # Core dispatch
 # ---------------------------------------------------------------------------
 
+async def post_to_pool(endpoint: str, payload: dict[str, Any], model: str, timeout: float) -> "httpx.Response":
+    """§17.1727 — POST one Ollama call to the pool member chosen for ``model`` (``ollama_pool``); a member that
+    refuses the connection is set aside and the next holder is tried. With no pool this is one POST to
+    ``ollama_base_url``, as it always was. Raises what the last attempt raised."""
+    from app.modules import ollama_pool
+    client = _get_client()
+    order = await ollama_pool.candidates(model)
+    for i, base in enumerate(order):
+        try:
+            async with ollama_pool.held(base):
+                return await client.post(f"{base}{endpoint}", json=payload, timeout=timeout)
+        except Exception as exc:
+            if i + 1 < len(order) and ollama_pool.is_connect_error(exc):
+                ollama_pool.on_connect_error(base, exc)
+                continue
+            raise
+    raise RuntimeError("ollama pool: no server to call")  # unreachable: candidates() always names the primary
+
+
 async def _call_ollama(
     endpoint: str,
     payload: dict[str, Any],
@@ -140,11 +159,9 @@ async def _call_ollama(
     timeout: int,
 ) -> ModelResponse:
     """Single Ollama API call. Returns ModelResponse regardless of outcome."""
-    url = f"{settings.ollama_base_url}{endpoint}"
     start = time.monotonic()
     try:
-        client = _get_client()
-        resp = await client.post(url, json=payload, timeout=timeout)
+        resp = await post_to_pool(endpoint, payload, model, timeout)
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         if resp.status_code != 200:

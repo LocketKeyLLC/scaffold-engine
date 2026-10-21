@@ -273,9 +273,17 @@ async def build_health_response(app, migration_state) -> dict:
             resp = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=5.0)
             resp.raise_for_status()
             models = [m["name"] for m in resp.json().get("models", [])]
-            return {"status": "up", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": models}
+            out = {"status": "up", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": models}
         except Exception:
-            return {"status": "down", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": []}
+            out = {"status": "down", "latency_ms": round((time.monotonic() - t0) * 1000), "models_loaded": []}
+        # §17.1727 — the extra Ollama servers the engine spreads its calls over (OLLAMA_POOL_URLS).
+        from app.modules import ollama_pool
+        if ollama_pool.enabled():
+            try:
+                out["pool"] = await ollama_pool.status()
+            except Exception as exc:
+                out["pool"] = {"members": [], "up": 0, "total": len(ollama_pool.pool_urls()), "error": str(exc)[:120]}
+        return out
 
     async def _check_milvus():
         t0 = time.monotonic()
@@ -756,6 +764,9 @@ async def build_health_response(app, migration_state) -> dict:
             f"{host_oom_alerts['total']} host OOM event(s) in the last "
             f"{host_oom_alerts.get('window_hours')}h — host-wide memory pressure"
         )
+    for _m in ((ollama.get("pool") or {}).get("members") or []) if isinstance(ollama, dict) else []:
+        if _m.get("status") != "up":
+            warnings.append(f"ollama pool member {_m.get('url')} is down — its calls go to the other servers")
     if ollama_up:
         warnings.extend(_model_role_warnings(set(ollama.get("models_loaded") or [])))
 

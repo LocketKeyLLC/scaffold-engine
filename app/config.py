@@ -245,6 +245,10 @@ class Settings(BaseSettings):
 
     # External services
     ollama_base_url: str = "http://172.18.0.1:11434"
+    # §17.1727 — more Ollama servers beside ollama_base_url, comma-separated (e.g. one per cluster worker:
+    # "http://192.0.2.11:11434,http://192.0.2.12:11434"). A call goes to a member that holds its model,
+    # least busy first; a member that refuses the connection is skipped. Empty = only ollama_base_url.
+    ollama_pool_urls: str = ""
     milvus_uri: str = "http://milvus-standalone:19530"
     milvus_num_partitions: int = Field(default=64, ge=1, le=4096)
     embedding_cache_memory_size: int = Field(default=10_000, ge=0, le=1_000_000)

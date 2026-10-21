@@ -2256,10 +2256,13 @@ async def _unload_ollama_model(model: str) -> None:
     try:
         from app import model_router
         from app.config import settings
+        from app.modules import ollama_pool
         client = model_router._get_client()
-        await asyncio.wait_for(
+        # §17.1727 — the extractor may have run on any pool member; free it wherever it can be loaded.
+        bases = [settings.ollama_base_url.rstrip("/"), *ollama_pool.pool_urls()]
+        results = await asyncio.gather(*(asyncio.wait_for(
             client.post(
-                f"{settings.ollama_base_url}/api/generate",
+                f"{base}/api/generate",
                 json={
                     "model": model,
                     "prompt": "",
@@ -2268,8 +2271,10 @@ async def _unload_ollama_model(model: str) -> None:
                 },
             ),
             timeout=15,
-        )
-        logger.info("ollama_model_unloaded: model=%s", model)
+        ) for base in bases), return_exceptions=True)
+        if isinstance(results[0], BaseException):
+            raise results[0]
+        logger.info("ollama_model_unloaded: model=%s servers=%d", model, len(bases))
     except Exception as exc:
         logger.warning(
             "ollama_model_unload_failed: model=%s err=%s "

@@ -302,7 +302,6 @@ class OllamaProvider(LLMProvider):
         than re-running the whole tool-orchestration plan.
         """
         from app import model_router
-        from app.config import settings
 
         payload: dict[str, Any] = {
             "model": model,
@@ -316,16 +315,15 @@ class OllamaProvider(LLMProvider):
                 continue
             payload[k] = v
 
-        url = f"{settings.ollama_base_url}/api/chat"
         effective_timeout = (
             timeout if timeout != 600 else model_router._timeout_for(model)
         )
-        client = model_router._get_client()
 
         import time as _time
         start = _time.monotonic()
         try:
-            resp = await client.post(url, json=payload, timeout=effective_timeout)
+            # §17.1727 — the same pool choice as every other Ollama call.
+            resp = await model_router.post_to_pool("/api/chat", payload, model, effective_timeout)
             elapsed_ms = int((_time.monotonic() - start) * 1000)
         except Exception as exc:
             elapsed_ms = int((_time.monotonic() - start) * 1000)
@@ -387,7 +385,7 @@ class OllamaProvider(LLMProvider):
         what the caller wants. ``chat_completion`` keeps the retry path.
         """
         from app import model_router
-        from app.config import settings
+        from app.modules import ollama_pool
 
         payload: dict[str, Any] = {
             "model": model,
@@ -395,35 +393,47 @@ class OllamaProvider(LLMProvider):
             "stream": True,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        url = f"{settings.ollama_base_url}/api/chat"
         effective_timeout = (
             timeout if timeout != 600 else model_router._timeout_for(model)
         )
         client = model_router._get_client()
 
-        async with client.stream(
-            "POST", url, json=payload, timeout=effective_timeout,
-        ) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                snippet = body[:200].decode("utf-8", errors="replace")
-                raise ProviderUnavailableError(
-                    f"ollama HTTP {resp.status_code}: {snippet}"
-                )
-            async for line in resp.aiter_lines():
-                line = line.strip()
-                if not line:
+        # §17.1727 — the same pool choice as every other Ollama call; only a connection refused BEFORE the
+        # first chunk moves to the next member (a stream already under way is never re-run).
+        order = await ollama_pool.candidates(model)
+        for i, base in enumerate(order):
+            started = False
+            try:
+                async with ollama_pool.held(base), client.stream(
+                    "POST", f"{base}/api/chat", json=payload, timeout=effective_timeout,
+                ) as resp:
+                    started = True
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        snippet = body[:200].decode("utf-8", errors="replace")
+                        raise ProviderUnavailableError(
+                            f"ollama HTTP {resp.status_code}: {snippet}"
+                        )
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except ValueError:
+                            # Heartbeat or partial frame — skip and keep streaming.
+                            continue
+                        content = (chunk.get("message") or {}).get("content", "") or ""
+                        if content:
+                            yield content
+                        if chunk.get("done"):
+                            return
+                return
+            except Exception as exc:
+                if not started and i + 1 < len(order) and ollama_pool.is_connect_error(exc):
+                    ollama_pool.on_connect_error(base, exc)
                     continue
-                try:
-                    chunk = json.loads(line)
-                except ValueError:
-                    # Heartbeat or partial frame — skip and keep streaming.
-                    continue
-                content = (chunk.get("message") or {}).get("content", "") or ""
-                if content:
-                    yield content
-                if chunk.get("done"):
-                    return
+                raise
 
 
 # Register the singleton at import time. ``app/providers/__init__.py``

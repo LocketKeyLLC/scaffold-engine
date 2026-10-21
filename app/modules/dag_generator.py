@@ -390,6 +390,23 @@ downstream implementation tasks `depends_on` it — so the operator chooses the 
 before the plan commits to one. This is separate from any decisions the plan
 itself needs; add it in addition to those.
 
+§17.1725 — `operator_answers` are the operator's own answers to the brief's
+questions: they are DECIDED. Every node must agree with them — a node that does
+the opposite of an answer (e.g. reserves a machine for one role when the operator
+said the machines work together) is wrong, not optional, so do not emit it and
+do not make it "optional per operator preference". `engine_feasibility` is the
+engine's own technical assessment of this brief (its summary and risks): when it
+names the tool or approach to use or to avoid, the nodes follow it, and every
+listed risk is either designed out by a node or checked by one.
+
+§17.1726 — A machine the brief says to PRESERVE keeps its running services
+running. On such a machine do NOT emit a node that reconfigures, replaces or
+restarts the container runtime, the network or the firewall those services
+already use (e.g. rewriting Docker's containerd config or restarting it to
+install kubeadm on a host whose services run in Docker); choose the variant
+that brings its own (e.g. k3s, which ships its own containerd) and say so in
+the node's notes.
+
 Return ONLY the JSON object. No preamble, no markdown."""
 
 
@@ -1275,6 +1292,10 @@ async def _generate_dag_with_validator(
         if isinstance(brief_data, dict) and brief_data.get("prescribed"):
             from app.modules.engine_setup import PRESCRIBED_BLOCK
             prompt = PRESCRIBED_BLOCK + prompt
+        # §17.1727 — a brief that adds AI compute is told the engine can USE it (the Ollama pool).
+        from app.modules import ollama_pool as _pool
+        if _pool.planner_note_applies(brief_data):
+            prompt = _pool.PLANNER_NOTE + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.
@@ -1539,6 +1560,8 @@ async def generate_dag(
         logger.info("dag_prescriptive_brief: job=%s (no decision node, steps as listed)", job_id)
     else:
         brief_data = _brief_with_operator_decision(brief_data, research_data)
+    # §17.1725 — the operator's answers and the engine's own feasibility reach the planner as their own keys.
+    brief_data = _brief_with_engine_findings(brief_data, research_data)
     current_hash = _compute_dag_input_hash(brief_data, model, model_overrides)
 
     # §17.181: re-entry guard. Three cases when nodes already exist:
@@ -2432,6 +2455,41 @@ def _brief_with_operator_decision(brief_data: dict, research_data) -> dict:
     if isinstance(options, dict) and options.get("options"):
         return {**brief_data, "operator_decision": options}
     return brief_data
+
+
+def _brief_with_engine_findings(brief_data: dict, research_data) -> dict:
+    """§17.1725 — what the planner was never shown: the operator's answers, paired with their questions, and
+    the engine's own Phase-1 feasibility (summary + risks).
+
+    Live (job f9ca3ee1, 2026-10-21): the operator answered "VM 110 and the laptops should work together as one
+    pool" and the plan tainted VM 110 so AI work ran on the laptops only; Phase 1's feasibility said "must use
+    k3s, not full k8s" and the plan installed kubeadm. The answers rode in the prompt only as `user_feedback`, a
+    raw string beside the ambiguities it answered; the feasibility lived in `research_data` and never reached
+    the prompt at all. Adds ``operator_answers`` (answered pairs only — a non-answer stays an open question,
+    §17.1218) and ``engine_feasibility``. Never raises; a key already present is kept."""
+    if not isinstance(brief_data, dict):
+        return brief_data
+    out = dict(brief_data)
+    if "operator_answers" not in out:
+        try:
+            from app.modules.unanswered import answers
+            pairs = [{"question": p["question"], "answer": p["answer"]} for p in answers(out) if p["answered"]]
+        except Exception:
+            pairs = []
+        if pairs:
+            out["operator_answers"] = pairs
+    if "engine_feasibility" not in out:
+        try:
+            rd = research_data if isinstance(research_data, dict) else (
+                json.loads(research_data) if research_data else None)
+        except (ValueError, TypeError):
+            rd = None
+        feas = (rd or {}).get("feasibility") if isinstance(rd, dict) else None
+        if isinstance(feas, dict):
+            kept = {k: feas[k] for k in ("summary", "risks") if feas.get(k)}
+            if kept:
+                out["engine_feasibility"] = kept
+    return out
 
 
 def _map_node_type(task_type: str) -> str:
