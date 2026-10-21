@@ -6878,6 +6878,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
     # safe in a written file too, so files are filled here.
     cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
+    cmds, verify, _net_notes = _mv.read_the_host_network(cmds, verify)          # §17.1740
+    _ea_notes = list(_ea_notes) + list(_net_notes)
     _mv_notes = list(_mv_notes) + _ea_notes
     # §17.1501 — an empty-body POST to an *arr `/{resource}/test` validates the whole
     # resource and fails on its required fields; the standard "test everything

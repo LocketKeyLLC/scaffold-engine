@@ -1246,3 +1246,38 @@ def a_key_read_from_the_wrong_place_is_the_placeholder(
                 i = j + 2
 
     return [fix(c) for c in commands or []], [fix(v) for v in verify or []], notes
+
+
+# ── §17.1740: the LAN a step scans is the host's own network, read off the host ─────────────────────
+
+_SUBNET_NAME_RE = re.compile(r"^(?:[A-Z]+_)?SUBNET(?:_CIDR)?$|^(?:LAN|LOCAL|HOME|HOST)_(?:NETWORK|NET|CIDR|RANGE)$")
+#: the default route's device, then that device's own address with its prefix (`192.168.1.156/24`): nmap and the
+#: like scan the whole network from it. Measured on pve 2026-10-21: `default via 192.168.1.1 dev vmbr0`, and the
+#: second global address is tailscale0's 100.x/32 -- so "the first global address" would be the wrong read.
+HOST_LAN_READ = ("$(ip -4 -o addr show dev \"$(ip -4 route show default | awk '{print $5; exit}')\" scope global "
+                 "| awk '{print $4; exit}')")
+
+
+def read_the_host_network(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1740 — `<LAN_SUBNET>` (and its spellings) in a HOST command is the host's own network, read where it runs.
+
+    Live (job f9ca3ee1 T1 "Scan LAN for devices", 2026-10-21): the frame asked the operator to type `LAN_SUBNET`,
+    with a hint that "the brief assumes 192.168.1.0/24; confirm" -- a value the machine the step runs on holds in its
+    routing table. Only host commands are filled (a guest's `sh -c` payload has its own quoting and its own network)."""
+    notes: list[dict] = []
+
+    def fill(c: str) -> str:
+        if _GUEST_EXEC_HEAD.match(str(c)):
+            return c
+
+        def repl(m: "re.Match") -> str:
+            if not _SUBNET_NAME_RE.match(m.group(1)):
+                return m.group(0)
+            if not notes:
+                notes.append({"why": f"<{m.group(1)}> is the host's own network: the engine reads it off the host's "
+                                     f"default route instead of asking (§17.1740)"})
+            return HOST_LAN_READ
+
+        return re.sub(r"<([A-Z][A-Z0-9_]{2,40})>", repl, str(c))
+
+    return [fill(c) for c in commands or []], [fill(v) for v in verify or []], notes
