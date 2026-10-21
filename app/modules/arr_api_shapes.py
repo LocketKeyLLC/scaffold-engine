@@ -163,6 +163,33 @@ def drafter_block(node: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+_DEF_RE = re.compile(r"^(?P<ind>[ \t]*)def\s+(?P<name>\w+)\s*\(", re.M)
+
+
+def _paging_helpers(text: str) -> set[str]:
+    """§17.1719 — the functions this program defines whose own body sets `pageSize`: a call through one is paged.
+
+    Live (job e5e22b92 MA1, 2026-10-21, a read of every missing episode): `get_paged('/wanted/missing?includeSeries=true')`
+    -- the helper appends `page={page}&pageSize={page_size}` and reads until `totalRecords` -- was refused as unpaged."""
+    out: set[str] = set()
+    for m in _DEF_RE.finditer(text):
+        ind, body = len(m.group("ind").expandtabs()), []
+        for ln in text[m.end():].splitlines()[1:]:
+            if ln.strip() and len(ln) - len(ln.lstrip()) <= ind:
+                break
+            body.append(ln)
+        if re.search(r"page[Ss]ize|page_size", "\n".join(body)):
+            out.add(m.group("name"))
+    return out
+
+
+def _through(line: str, at: int, helpers: set[str]) -> bool:
+    """The endpoint literal at `at` is the first argument of a call to one of `helpers` (`get_paged('/queue')`,
+    `get_paged(base + '/queue')`, `get_paged(f'/queue?…')`)."""
+    return bool(helpers) and bool(re.search(r"\b(?:%s)\(\s*(?:\w+\s*\+\s*)?[fr]?$" % "|".join(map(re.escape, helpers)),
+                                         line[:at]))
+
+
 def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]:
     """``[{command, why}]`` for a draft that reads a field the shape of the endpoint it calls rules out."""
     texts = [str(c) for c in commands or []] + [str((f or {}).get("content") or "") for f in files or []]
@@ -175,8 +202,13 @@ def wrong_fields(commands: list[str], files: Optional[list[dict]]) -> list[dict]
                     or (s.endpoint == "/api/v1/indexer" and "capabilities" in t):
                 continue
             m = s.wrong.search(t)
-            if m:
+            if m and s.endpoint == "/api/v3/queue":                            # §17.1719 — one call per line
+                paged = _paging_helpers(t)
+                line = next((ln for ln in t.splitlines()
+                             if any(not _through(ln, w.start(), paged) for w in s.wrong.finditer(ln))), None)
+            elif m:
                 line = next((ln for ln in t.splitlines() if s.wrong.search(ln)), m.group(0))
+            if m and line is not None:
                 out.append({"command": line.strip()[:200],
                             "why": f"this reads a field this endpoint's objects do not have: {s.why} (§17.1694). {s.text}"})
                 break
