@@ -313,7 +313,7 @@ def test_every_recipe_carries_plan_steps_that_carry_the_facts():
         for _, what in r.steps:
             assert "Done when" in what, (r.id, what[:60])      # every step says what finishes it
     lr = " ".join(w for _, w in es.BY_ID["local_runner"].steps)
-    for fact in ("{runner_port}", "{runner_name}", "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py",
+    for fact in ("{runner_port}", "{runner_name}", "{fetch_runner} && python3 /tmp/local_runner_mcp.py",
                  "--install --port {runner_port} --token {token}", "{target_ip}", "Verify state", "[local-runner]",
                  es.PROBE_MARK):
         assert fact in lr, fact

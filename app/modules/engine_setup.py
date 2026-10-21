@@ -497,7 +497,7 @@ RECIPES: tuple[Recipe, ...] = (
              "installs python3-venv first if the box lacks it). The token {token} is the one the engine registered "
              "under the name {runner_name} for {target_ip}:{runner_port}; the line below already carries it.\n"
              "```bash\n"
-             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "{fetch_runner} && python3 /tmp/local_runner_mcp.py --install "
              "--port {runner_port} --token {token}\n"
              "```\n"
              "Done when the last line printed starts with OK: local runner active. If it starts with FAILED:, paste "
@@ -555,7 +555,7 @@ RECIPES: tuple[Recipe, ...] = (
              "same token, the installer replaces the running service and writes /etc/sudoers.d/scaffold-runner-writes for "
              "exactly those commands (validated with visudo):\n"
              "```bash\n"
-             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "{fetch_runner} && python3 /tmp/local_runner_mcp.py --install "
              "--port {runner_port} --token {token} --write-allow \"apt-get install\" \"pct set\" \"tee -a /etc/\"\n"
              "```\n"
              "Done when the last line printed starts with OK: and ends with 'supervised writes for N approved prefix(es)'."),
@@ -607,7 +607,7 @@ RECIPES: tuple[Recipe, ...] = (
              "On {target_host}, paste the install line again with your write list AND the secrets file appended — "
              "same token; the installer replaces the running service:\n"
              "```bash\n"
-             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "{fetch_runner} && python3 /tmp/local_runner_mcp.py --install "
              "--port {runner_port} --token {token} --write-allow \"<your prefixes>\" "
              "--secrets-file /etc/scaffold-runner/secrets.env\n"
              "```\n"
@@ -870,8 +870,8 @@ async def known_facts_block(db, recipe: "Recipe") -> str:
                              + ", ".join(f"`{p}`" for p in prefixes)
                              + ". Propose exactly these and ask the operator to confirm or trim them; "
                                "do not ask them to produce the list.")
-            lines.append(f"- The one-paste install line is: `curl -fsSL {ctx.get('script_url')} "
-                         f"-o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+            lines.append(f"- The one-paste install line is: `{fetch_runner(ctx.get('script_url'))} "
+                         f"&& python3 /tmp/local_runner_mcp.py --install "
                          f"--port {RUNNER_PORT} --token {ctx.get('token')} "
                          + ("--write-allow \"<the prefixes above>\"" if recipe.id == "runner_writes"
                             else "--write-allow \"<the prefixes above>\" --secrets-file /etc/scaffold-runner/secrets.env")
@@ -1039,8 +1039,8 @@ def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,
     # the engine is not looking. `diagnose_runner_path`'s checks spell it
     # `port`, `recipe_context` spells it `runner_port`.
     port = ctx.get("port") or ctx.get("runner_port") or RUNNER_PORT
-    return (f"curl -fsSL {ctx.get('script_url') or RUNNER_SCRIPT_FALLBACK_URL} -o /tmp/local_runner_mcp.py"
-            f" && python3 /tmp/local_runner_mcp.py --install"
+    return (fetch_runner(ctx.get('script_url'))                                # §17.1721 — and refused unless it is ours
+            + f" && python3 /tmp/local_runner_mcp.py --install"
             f" --port {port} --token {ctx.get('token') or '<the token the engine registered>'}"
             + (f" --write-allow {allow}" if allow else "")
             # §17.1198 — reads that need root are a SEPARATE grant: the write
@@ -1252,11 +1252,32 @@ _UNKNOWN = {
     "engine_url": "http://<the engine host's IP>:8000", "token": "<the token the engine generated>",
     "runner_name": RUNNER_NAME, "runner_port": str(RUNNER_PORT), "runner_user": RUNNER_USER,
     "script_url": "",   # filled by recipe_context: the engine's own route when it is LAN-reachable, else the public repo
+    "fetch_runner": "",  # §17.1721 — `fetch_runner(script_url)`, filled beside it
 }
 # Where the target fetches the helper when the engine is not reachable from it (this
 # host binds the API to 127.0.0.1 — the browser's requests arrive as localhost, so the
 # engine's own URL is unknown to the target). The repo is public; `main` carries the script.
-RUNNER_SCRIPT_FALLBACK_URL = "https://raw.githubusercontent.com/LocketKeyLLC/scaffold-engine/main/scripts/local_runner_mcp.py"
+# §17.1721 — through GitHub's contents API, not raw.githubusercontent.com: live (2026-10-21, after #988 merged helper
+# 24), the raw `main` URL kept serving helper 23 from its CDN for over 20 minutes -- a query string did not get past
+# it -- and the operator's paste reinstalled the old runner; the API answered the new file at once.
+RUNNER_SCRIPT_FALLBACK_URL = ("https://api.github.com/repos/LocketKeyLLC/scaffold-engine/contents/"
+                              "scripts/local_runner_mcp.py?ref=main")
+
+
+def fetch_runner(url: Optional[str] = None) -> str:
+    """§17.1721 — the download half of every install line: fetch the helper, then refuse it unless it is the
+    version this engine ships. A cached or older copy prints FAILED and installs nothing, instead of quietly
+    replacing the service with the runner the operator meant to leave behind."""
+    url = url or RUNNER_SCRIPT_FALLBACK_URL
+    hdr = " -H 'Accept: application/vnd.github.raw'" if "api.github.com/" in url else ""
+    import shlex as _shlex
+    line = f"curl -fsSL{hdr} {_shlex.quote(url)} -o /tmp/local_runner_mcp.py"
+    v = expected_helper_version()
+    if v:   # parentheses, not braces: a rendered step holding `{` reads as an unfilled placeholder
+        line += (f" && (grep -q '^HELPER_VERSION = \"{v}\"' /tmp/local_runner_mcp.py || (echo 'FAILED: the "
+                 f"downloaded runner is not helper {v} (an older or cached copy) -- nothing installed; paste this "
+                 f"line again in a few minutes'; false))")
+    return line
 
 
 def _url_is_local(url: str) -> bool:
@@ -1377,6 +1398,7 @@ async def recipe_context(db, session_id: Optional[str] = None) -> dict:
         logger.warning("recipe_context_failed sid=%s err=%r", session_id, exc)
     ctx["script_url"] = (f"{ctx['engine_url']}/setup/runner/local_runner_mcp.py" if known(ctx, "engine_url")
                          else RUNNER_SCRIPT_FALLBACK_URL)
+    ctx["fetch_runner"] = fetch_runner(ctx["script_url"])
     return ctx
 
 
@@ -1419,6 +1441,8 @@ def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True, ctx: Option
     if not values.get("script_url"):
         values["script_url"] = (f"{values['engine_url']}/setup/runner/local_runner_mcp.py"
                                 if known(values, "engine_url") else RUNNER_SCRIPT_FALLBACK_URL)
+    if not values.get("fetch_runner"):
+        values["fetch_runner"] = fetch_runner(values["script_url"])
     chain = list(recipe.requires) if with_prerequisites else []
     for rid in chain + [recipe.id]:
         r = BY_ID[rid]
