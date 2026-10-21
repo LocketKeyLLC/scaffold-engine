@@ -139,7 +139,7 @@ def test_the_frame_takes_the_secret_form_and_the_runner_fills_it():
 
     from app.modules import supervised_runs as sr
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": HELD, "held_logins": []}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": HELD, "held_logins": []}
     draft = ("## Run this\n\n```bash\npct exec 109 -- bash -c 'tee /root/airvpn-bitmagnet.conf <<EOF\nEOF\n"
              "chmod 600 /root/airvpn-bitmagnet.conf'\n```\n")                       # T6's second draft, live
     frame = sr.frame_run(T6S, draft, spec, policy, services=[],
