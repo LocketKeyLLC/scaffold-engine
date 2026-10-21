@@ -12,6 +12,7 @@ LIVE = {
     "T8": "Step-by-step walkthrough for operator to install chosen OS on laptop 1. Operator performs physical install; engine provides instructions only.",
     "T10": "Repeat walkthrough for each remaining laptop. One node covers the pattern; operator executes per laptop.",
     "T11": "Walkthrough: connect each laptop to LAN, enable SSH, set static IP or DHCP reservation. Operator confirms each laptop's address.",
+    "T1b": "Ask the operator how many old laptops exist and their model, RAM, core count, and disk size. Produce a structured inventory list.",
     "T12": "Walkthrough: operator adds engine's public SSH key to each laptop's authorized_keys. Engine pins each laptop address before use.",
 }
 

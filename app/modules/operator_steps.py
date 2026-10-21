@@ -47,7 +47,7 @@ _OPERATORS_RE = re.compile(
     # provides instructions only", "Walkthrough: connect each laptop to LAN…" -- every one ran as an LLM text and would
     # have been recorded done with nothing installed. "Ask … operator" only as an instruction opening a sentence (the
     # stored corpus says "never ask the operator for …" four times). Measured over 797 stored steps: those 5, no other.
-    r"(?:^\s*|[.;:!?]\s+)ask\s+(?:the\s+)?operator\s+(?:to|for)\b|\boperator\s+(?:performs|executes|physically)\b|"
+    r"(?:^\s*|[.;:!?]\s+)ask\s+(?:the\s+)?operator\s+(?:to|for|how|what|which|whether|about)\b|\boperator\s+(?:performs|executes|physically)\b|"
     r"\bengine\s+provides\s+instructions\s+only\b|\bwalkthrough\s*(?::|for\s+(?:the\s+)?operator\b)",
     re.I)
 # §17.1468 — a sentence ends at punctuation followed by a space or the end; the dots inside `192.168.1.44`,
