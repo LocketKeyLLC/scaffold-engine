@@ -98,3 +98,36 @@ def test_it_is_wired_into_the_frame_and_registered():
     assert "the_reply_is_read_before_it_is_parsed(cmds, shape_files)" in src
     assert "the reply is read before it is parsed" in sr._SHAPE_REFUSALS
     assert sr._WHOSE_GAP.get("the reply is read before it is parsed") == "drafter"
+
+
+# ------------------------------------------------------------ §17.1723b — a file pushed into a guest runs there
+
+from app.modules.service_truth import ServiceTruth, loopback_on_the_host, pushed_and_run_in  # noqa: E402
+
+SONARR = ServiceTruth(guest="104", unit="sonarr.service", name="sonarr", state="active",
+                      ports=("8989",), address="192.168.1.23")
+RADARR = ServiceTruth(guest="103", unit="radarr.service", name="radarr", state="active",
+                      ports=("7878",), address="192.168.1.22")
+# live, SG1's redraft (the parts that matter)
+PUSHED = ["pct push 104 /tmp/grab_s3.py /tmp/grab_s3.py", "pct exec 104 -- python3 /tmp/grab_s3.py"]
+GRAB_PY = {"path": "/tmp/grab_s3.py",
+           "content": 'BASE = "http://127.0.0.1:8989/api/v3"\nreq = urllib.request.Request(BASE + "/release")\n'}
+
+
+def test_the_live_redraft_is_not_read_as_the_hosts():
+    assert pushed_and_run_in(PUSHED) == {"/tmp/grab_s3.py": "104"}
+    assert loopback_on_the_host(PUSHED, [GRAB_PY], [SONARR, RADARR]) == []
+
+
+def test_a_pushed_file_reaching_another_guests_port_is_refused():
+    other = dict(GRAB_PY, content=GRAB_PY["content"].replace("8989", "7878"))
+    hit = loopback_on_the_host(PUSHED, [other], [SONARR, RADARR])
+    assert len(hit) == 1 and "runs inside guest 104" in hit[0]["why"] and "guest 103" in hit[0]["why"]
+
+
+def test_a_file_pushed_but_run_on_the_host_or_elsewhere_is_still_the_hosts():
+    # pushed into 104 but the host runs its own copy: the host's loopback has no Sonarr
+    host_run = ["pct push 104 /tmp/grab_s3.py /tmp/grab_s3.py", "python3 /tmp/grab_s3.py"]
+    assert pushed_and_run_in(host_run) == {}
+    assert loopback_on_the_host(host_run, [GRAB_PY], [SONARR, RADARR])
+    assert pushed_and_run_in(["pct push 104 /tmp/a.py /tmp/b.py", "pct exec 104 -- python3 /tmp/b.pyc"]) == {}
