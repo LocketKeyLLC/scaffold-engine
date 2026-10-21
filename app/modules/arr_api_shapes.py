@@ -88,8 +88,11 @@ SHAPES: tuple[Shape, ...] = (
           "`tags`; `categories` and `animeCategories` are in `fields` by name, and `fields` also hold `apiKey` and "
           "`baseUrl`: print only the category fields."),
     Shape("sonarr", re.compile(r"\bqueue\b|\bmissing\b|\bwanted\b", re.I), "/api/v3/queue",
-          "Sonarr's lists are PAGED: `GET /api/v3/queue` and `GET /api/v3/wanted/missing` take `page` and `pageSize` and "
-          "answer `{page, pageSize, totalRecords, records}` -- read every page until `totalRecords`. A queue record: "
+          "Sonarr's `GET /api/v3/queue` and `GET /api/v3/wanted/missing` are PAGED (not every list is: `/history/series` "
+          "is a plain list): they take `page` and `pageSize` and "
+          "answer `{page, pageSize, totalRecords, records}` -- read every page until `totalRecords`. `/wanted/missing` "
+          "does NOT filter by series (a `seriesId` parameter is ignored): it answers every series' missing episodes, so "
+          "keep the records whose `seriesId` is the series. A queue record: "
           "`seriesId`, `episodeId`, `seasonNumber`, `title`, `status`, `trackedDownloadState`, `sizeleft`, `indexer`. "
           "A missing record is an episode: `seriesId`, `seasonNumber`, `episodeNumber`, `airDateUtc`, `monitored` "
           "(`includeSeries=true` adds the series).",
@@ -100,6 +103,20 @@ SHAPES: tuple[Shape, ...] = (
               "`pageSize`, so it sees the first page only and misses (or acts on the wrong) item; pass `pageSize=1000` "
               "or read every page until `totalRecords`",
           endpoint_re=re.compile(r"/(?:api/v3/)?(?:queue|wanted/missing)\b")),
+    # §17.1716 — live (job e5e22b92 HI1, a read of the HIMYM S6 import): `get('/history/series?…&pageSize=1000')` then
+    # `history.get('records', [])` -- the queue's "PAGED" taught it; Sonarr answers a list, and the read crashed
+    Shape("sonarr", re.compile(r"\bhistory\b|\bimport(?:ed|s)?\b", re.I), "/api/v3/history",
+          "Sonarr `GET /api/v3/history/series?seriesId=N&seasonNumber=S` (add `includeEpisode=true` for "
+          "`episode.episodeNumber`) answers a plain LIST of events, newest first -- not paged, no `records`, no "
+          "`pageSize`; per event: `date`, `eventType` (`grabbed`, `downloadFolderImported`, `seriesFolderImported`, "
+          "`downloadFailed`, `downloadIgnored`, `episodeFileDeleted`, `episodeFileRenamed`), `episodeId`, `sourceTitle`, "
+          "`downloadId`, `quality.quality.name`. (`GET /api/v3/history`, without `/series`, is the paged one.)",
+          wrong=re.compile(r"(?m)^[ \t]*(\w+)[ \t]*=[^\n]*/history/series[^\n]*\n(?:[^\n]*\n){0,20}?[^\n]*\b\1[ \t]*"
+                           r"(?:\.get\([ \t]*|\[[ \t]*)['\"]records['\"]"
+                           r"|/history/series[^\n]*\)[ \t]*(?:\.get\([ \t]*|\[[ \t]*)['\"]records['\"]"),
+          why="Sonarr's `/history/series` answers a plain LIST of events, not `{records}`: reading `records` off it "
+              "crashes (`'list' object has no attribute 'get'`) or finds nothing; iterate the list itself",
+          endpoint_re=re.compile(r"/history/series\b")),
 )
 
 
