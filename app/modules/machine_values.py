@@ -279,6 +279,14 @@ def read_on_the_machine(commands: list[str], verify: list[str],
 _GUEST_EXEC_HEAD = re.compile(r"^(\s*)(pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\s+--\s+(.*)$", re.S)
 
 
+#: §17.1736 — a guest command that is ONE `sh -c '…'` payload, optionally followed by the value it reads on stdin
+#: (`<<< "$NAME"`, §17.1495/§17.1734). Group 1 is the payload, group 2 the stdin tail, kept OUTSIDE the payload on
+#: rebuild. Live (job 7d30fe4f T3): the matcher required the line to END at the payload's closing quote, so §17.1500
+#: "promoted" the whole line -- here-string included -- into a new `sh -c '…'`, where the guest expanded the
+#: password to nothing.
+_SH_PAYLOAD_RE = re.compile(r"""^sh\s+-c\s+'(.*)'(\s*<<<\s*(?:"[^"']*"|\S+))?\s*$""", re.S)
+
+
 def _close_paren(s: str, open_at: int) -> int:
     """Index of the `)` that closes the `$(` whose `(` is at ``open_at``,
     counting nested parens and skipping quoted spans the way a shell does.
@@ -365,11 +373,11 @@ def fold_redundant_nested_guest_exec(commands: list[str], verify: list[str]) -> 
             indent, tool, gid, rest = m.groups()
             # Already an `sh -c '…'` payload: unwrap in place; the substitution
             # is already guest-evaluated, so no re-wrap is needed.
-            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            sh = _SH_PAYLOAD_RE.match(rest)
             if sh:
                 payload, changed = _unwrap_same_guest_subs(sh.group(1), gid)
                 if changed:
-                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}{sh.group(2) or ''}")
                     n += 1
                 else:
                     out.append(c)
@@ -460,11 +468,11 @@ def read_a_readable_key_written_as_a_var(
                 out.append(c)
                 continue
             indent, tool, gid, rest = m.groups()
-            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            sh = _SH_PAYLOAD_RE.match(rest)
             if sh:                              # a guest-shell payload: read ANY readable key here
                 payload, changed = _normalise(sh.group(1), _wanted_in_guest)
                 if changed:
-                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}{sh.group(2) or ''}")
                     n += 1
                 else:
                     out.append(c)

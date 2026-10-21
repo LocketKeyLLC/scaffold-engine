@@ -169,6 +169,9 @@ def test_the_rules_worked_example_passes_every_gate():
     assert frame["refused"] == [], [r["why"][:200] for r in frame["refused"]]
     assert frame["inputs"] == []
     assert "<JELLYFIN_API_KEY>" not in " ".join(frame["commands"]), "the engine filled the key"
+    # §17.1736 — one guest shell, and the password stays OUTSIDE it, on the host's here-string
+    assert frame["commands"][0].count("sh -c '") == 1, frame["commands"][0]
+    assert frame["commands"][0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\""), frame["commands"][0]
     assert frame["verify"], "the check survived the read channel"
 
 
@@ -188,3 +191,17 @@ def test_a_hand_written_read_of_the_first_key_becomes_the_engines_read():
     assert 'WHERE Name=?' in filled[0] and "scaffold-engine" in filled[0]
     again, _v3, notes2 = machine_values.a_key_read_from_the_wrong_place_is_the_placeholder(filled, [])
     assert again == filled and notes2 == []
+
+
+@pytest.mark.smoke
+def test_a_payload_with_its_stdin_is_not_wrapped_again():
+    """§17.1736 — live T3: the here-string was folded INTO a second `sh -c`, where the guest expands it to nothing."""
+    cmd = ("pct exec 101 -- sh -c 'read -r V; printf \"%s\" \"$V\" | curl -s --data-binary @- "
+           "-H \"X-Emby-Token: <JELLYFIN_API_KEY>\" http://127.0.0.1:8096/Users/New' <<< \"$JELLYFIN_MARK_PASSWORD\"")
+    for out, _v, _n in (machine_values.read_a_readable_key_written_as_a_var([cmd], [], {"JELLYFIN_MARK_PASSWORD"}),
+                        machine_values.fold_redundant_nested_guest_exec([cmd], [])):
+        assert out[0].count("sh -c") == 1, out[0]
+        assert out[0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\""), out[0]
+    filled, _v, _n = machine_values.read_on_the_machine([cmd], [], {"names": {"101": "jellyfin"}})
+    assert filled[0].count("sh -c '") == 1 and filled[0].endswith("' <<< \"$JELLYFIN_MARK_PASSWORD\"")
+    assert "scaffold-engine" in filled[0]
