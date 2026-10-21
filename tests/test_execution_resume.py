@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import app.modules.execution_resume as er
 from app.modules.execution_resume import (
     CRASH_RESUME_BUDGET_SUMMARY,
@@ -286,6 +288,7 @@ def test_lifespan_has_one_startup_entry_for_both_sweeps():
 
 # ── §17.1728 — an idle plan is not a crashed run ─────────────────────────────
 
+@pytest.mark.integration
 async def test_an_idle_executing_plan_is_left_alone_and_a_running_job_is_resumed():
     """Against the real (test) database: a job approved for planning only sits in `executing` with every node
     pending — a restart must neither relaunch it (crash-resume) nor fail it (the run reconcile). A job left
@@ -326,3 +329,30 @@ def test_the_reaper_uses_the_same_mid_run_vocabulary():
     from app.modules import cleanup
     from app.modules.job_state import sql_status_list
     assert f"WHERE status IN ({sql_status_list(er.MID_RUN_STATUSES)})" in cleanup._REAP_RUNNING_SQL
+
+
+async def test_both_startup_sweeps_select_only_jobs_a_run_owns():
+    """§17.1728, no database: the SQL each startup sweep selects with names `running` and never `executing`."""
+    from app.modules import run_broker
+    cm, db = _mock_session([_result_candidates([])])
+    with patch.object(er.settings, "execution_resume_on_startup_enabled", True), \
+         patch("app.modules.execution_resume.async_session", return_value=cm):
+        await resume_orphaned_executions(spawn=False)
+    resume_sql = db.execute.await_args_list[0].args[0].text
+    assert "IN ('running')" in resume_sql and "executing" not in resume_sql.split("WHERE", 1)[1].split("AND")[0]
+
+    seen: list[str] = []
+    rdb = MagicMock()
+
+    async def _ex(stmt, params=None):
+        seen.append(str(stmt))
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        return r
+    rdb.execute = _ex
+    rcm = MagicMock()
+    rcm.__aenter__ = AsyncMock(return_value=rdb)
+    rcm.__aexit__ = AsyncMock(return_value=None)
+    with patch("app.database.async_session", return_value=rcm):
+        await run_broker.reconcile_on_startup()
+    assert seen and "status IN ('running')" in seen[0] and "'executing'" not in seen[0]
