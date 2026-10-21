@@ -36,6 +36,9 @@ async def test_a_step_with_no_check_is_told_no_os_and_that_the_answer_is_the_rec
     assert "NEVER assume an operating system" in system and "BIOS/UEFI" in system
     assert "type what they found into the note" in system and "read the machine to confirm" not in system
     assert frame["verify"] == []
+    assert "offer branches for operating systems nobody named" in system
+    assert "Speak to the reader as" in system
+    assert frame["options"][0]["label"] == "I've done it"
 
 
 @pytest.mark.asyncio

@@ -279,7 +279,10 @@ async def _walkthrough(node: dict, part: str, upstream: str = "", facts: Optiona
         "the machine may have none, or it is unknown, use what works on any machine: the label or sticker on the "
         "case (model, sometimes the serial to look the specs up), and the firmware setup screen at power-on "
         "(BIOS/UEFI; the key differs by maker -- F2, F10, F12, Del or Esc -- so say to watch the first screen for "
-        "it), which lists the CPU, the memory and the disks. Where a step needs one OS, say which and why.")
+        "it), which lists the CPU, the memory and the disks. Where a step needs one OS, say which and why. Do not "
+        "offer branches for operating systems nobody named (no \"if it has Windows…\", no \"on a Mac…\"): the "
+        "method that works on any machine IS the walkthrough. Speak to the reader as \"you\" -- they are the "
+        "operator; never write \"ask the operator\" or \"the operator should\".")
     prompt = (f"Step {node.get('node_key')}: {node.get('title')}\n\nThe operator's part:\n{part}\n\n"
               f"The whole step, for context:\n{_text(node)[:3000]}\n\n"
               + (f"What earlier steps produced:\n{upstream[:2000]}\n\n" if upstream else "")
@@ -319,7 +322,7 @@ async def frame_operator(node: dict, *, upstream: str = "", last_check: str = ""
                   "verify": checks(o)} for o in also],
         "last_check": last_check,
         "options": [
-            {"id": "done", "label": "I've done it — check",
+            {"id": "done", "label": "I've done it — check" if chk else "I've done it",   # §17.1743 — no check, no promise
              "fit": ("the engine reads the machine with this step's own checks and records the step done "
                      "only when they confirm it") if chk else "the engine records it done on your word"},
             {"id": "skip", "label": "Skip this step", "fit": "not needed", "tradeoff": "steps after it may not make sense"},
