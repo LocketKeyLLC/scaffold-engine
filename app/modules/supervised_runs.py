@@ -188,6 +188,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
                    "is spliced into `pct exec`'s command line",      # §17.1733
+                   "has not been confirmed as one of this lab's machines",   # §17.1741
                    "is a value the engine READS",                   # §17.1384
                    "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
@@ -330,6 +331,7 @@ _WHOSE_GAP: dict[str, str] = {
     "is a value the engine READS": "engine",      # §17.1384
     "which does not hold one": "engine",          # §17.1383
     "is spliced into `pct exec`'s command line": "drafter",   # §17.1733 — only a redraft moves it to stdin
+    "has not been confirmed as one of this lab's machines": "drafter",   # §17.1741 — identify without logging in
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
@@ -5163,6 +5165,56 @@ def secret_in_a_guest_exec_command_line(commands: list[str], policy: Optional[di
     return out
 
 
+_TARGET_IP_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+
+
+def known_machine_addresses(env: Optional[dict], services: Optional[list] = None,
+                            inventory: Optional[dict] = None) -> set[str]:
+    """§17.1741 — the addresses of machines this lab is KNOWN to have: the engine's ledger (facts, pins, system map),
+    the services the pause measured, the inventory's pinned guest addresses. NOT an earlier step's output: a scan
+    lists what answered on the LAN, which is exactly what has not been confirmed."""
+    e = env or {}
+    led = json.dumps({k: e.get(k) for k in ("facts", "substitutions", "system_state")}, default=str)
+    out = set(_TARGET_IP_RE.findall(led))
+    out |= {str(getattr(sv, "address", "") or (sv.get("address") if isinstance(sv, dict) else "") or "")
+            for sv in services or []}
+    out |= {a for v in ((inventory or {}).get("addresses") or {}).values() for a in v}
+    return {a for a in out if a}
+
+
+def a_secret_sent_to_an_unconfirmed_machine(commands: list[str], policy: Optional[dict], env: Optional[dict],
+                                            services: Optional[list] = None,
+                                            inventory: Optional[dict] = None) -> list[dict]:
+    """§17.1741 — a stored secret goes only to a machine the engine knows.
+
+    Live (job f9ca3ee1 T2 "Identify laptop candidates", 2026-10-21): the step after a LAN scan, and BEFORE the
+    operator confirms which devices are the laptops (T3), drafted `SSHPASS="$MASS_PASSWORD" sshpass -e ssh … @<ip>` to
+    four addresses taken from the scan -- one of them 192.168.1.43, the operator's own workstation running the engine.
+    Every device answering on port 22 would have been handed the operator's password. A line that carries a held or
+    secret-named value and names an IPv4 address outside `known_machine_addresses` is refused; loopback is local."""
+    from app.modules.runbook_inputs import secret_name
+    held = {str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])}
+    known = known_machine_addresses(env, services, inventory)
+    out: list[dict] = []
+    for cmd in commands or []:
+        for line in str(cmd or "").splitlines():
+            names = [n for n in _ENV_REF_RE.findall(line) if n in held or secret_name(n)]
+            if not names:
+                continue
+            unknown = [ip for ip in dict.fromkeys(_TARGET_IP_RE.findall(line))
+                       if not ip.startswith("127.") and ip not in ("0.0.0.0",) and ip not in known]
+            if not unknown:
+                continue
+            out.append({"command": line.strip()[:200], "why": (
+                f"`${names[0]}` would be sent to {', '.join(unknown[:4])}, which has not been confirmed as one of this "
+                f"lab's machines: no fact, pin or measured service names it, only an earlier step's output (a scan lists "
+                f"whatever answered). A stored secret goes only to a machine the engine knows (§17.1741). Identify a "
+                f"device WITHOUT logging in -- `nmap -p 22 --open -sV <ip>`, its hostname, its MAC vendor -- and let "
+                f"the operator confirm it; once confirmed it is pinned, and then it may be logged into.")})
+            break
+    return out
+
+
 _NEIGH_READ_RE = re.compile(r"\bip\s+(?:-4\s+|-6\s+)?(?:neigh|neighbour|neighbor|n)\b|\barp\s+-[an]\b")
 _SWEEP_RE = re.compile(r"\bnmap\s+-sn\b|\barp-scan\b|\bfping\b|\bping\b[^\n]*\$\(seq\b|\bseq\b[^\n]*\n?[^\n]*\bping\b|\{1\.\.25[0-4]\}[^\n]*\bping\b|\bping\b[^\n]*\{1\.\.25[0-4]\}")
 
@@ -7064,6 +7116,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + secret_in_a_guest_exec_command_line(cmds, policy)       # §17.1733
+    refused = refused + a_secret_sent_to_an_unconfirmed_machine(cmds, policy, env, services, inventory)   # §17.1741
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
     from app.modules.arr_api_shapes import wrong_fields as _wrong_fields
