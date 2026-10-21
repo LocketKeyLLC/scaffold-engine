@@ -8,7 +8,7 @@ from app.modules import machine_truth as mt
 from app.modules import runbook_templates as rt
 from app.modules import supervised_runs as sr
 
-POLICY = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+POLICY = {"allow": ["ANY"], "sudo": True, "helper": "24", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
 ENV = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
                                                 "106": {"kind": "vm", "attrs": {"name": "palworld-server"}},
                                                 "111": {"kind": "ct", "attrs": {"hostname": "control-panel"}}}}

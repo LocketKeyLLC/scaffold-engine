@@ -488,7 +488,8 @@ async def write_files_on(spec, files: list[dict]) -> list[dict]:
 #: §17.1429 — `NAME="$NAME" cmd`: a leading self-assignment of a secret. The runner elevates with
 #: `sudo -n --preserve-env=NAME …`, and sudo LOGS every `NAME=value` it is handed on the command line:
 #: live, 2026-10-08, the host's journal recorded `ENV=PANEL_PASSWORD=<the value>` for ADD127's delivery.
-#: `--preserve-env` already carries the name; the prefix only added the log line.
+#: The value reaches the root shell out of band (helper 24 writes it to the shell's stdin, §17.1720: sudo logs what
+#: `--preserve-env` keeps, too); the prefix only added the log line.
 _SELF_PREFIX_RE = re.compile(r"""^\s*([A-Z][A-Z0-9_]{0,63})=(["']?)\$\{?\1\}?\2\s+""")
 
 

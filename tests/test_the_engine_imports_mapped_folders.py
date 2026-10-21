@@ -116,7 +116,7 @@ def test_the_command_carries_the_program_key_and_plan_through_the_shell():
 
 def test_the_live_step_is_claimed_with_no_refusal():
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["SONARR_API_KEY"], "held_logins": [], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["SONARR_API_KEY"], "held_logins": [], "can_write_files": True}
     son = ServiceTruth(guest="104", unit="sonarr.service", name="sonarr", state="active", ports=("8989",),
                        data_dir="/var/lib/sonarr", configs=("/var/lib/sonarr/config.xml",))
     f = sr.frame_run(PI2, "## Run this\n\n```bash\necho draft\n```\n", spec, policy, services=[son],

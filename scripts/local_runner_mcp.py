@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "23"
+HELPER_VERSION = "24"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -716,29 +716,41 @@ def has_shell_operator(command: str) -> bool:
     return False
 
 
-def elevate(command: str, keep: str = "") -> str:
+def elevate(command: str, secrets: tuple[str, ...] | list[str] = ()) -> str:
     """§17.1283 (helper 19) — the elevated form of an approved command.
 
     `sudo -n` prefixed to a compound line elevates ONLY its first simple
     command: live, `qm status 110 | grep -q running || qm start 110` -- the
     idempotent guard the engine itself recommends -- ran its check as root and
     its `qm start` unprivileged, and died on pmxcfs. A line the shell would
-    split is handed to one root shell whole; `--preserve-env` still carries the
-    secret names, which the inner shell expands, so no value enters argv.
+    split is handed to one root shell whole.
+
+    §17.1720 (helper 24) — a line that needs `secrets` (their NAMES) reads their values from its stdin, before
+    anything else, NUL-terminated and in this order (`stdin_for`), and exports them. `--preserve-env=NAME` was not
+    enough: sudo LOGS every variable it preserves -- live, 2026-10-21, the host's journal held
+    `ENV=MASS_PASSWORD=<the value>` on every engine qBittorrent block. sudo never logs stdin.
     """
     body = _SUDO_RE.sub("", command or "", count=1).strip()
     # §17.1429 — `NAME="$NAME" cmd`: sudo would LOG `NAME=<value>` (live: the host's journal held a panel
-    # password). `--preserve-env` (keep) already carries the name, so the prefix is dropped here.
+    # password). The value reaches the root shell on stdin (§17.1720), so the prefix is dropped here.
     while True:
         m = re.match(r"""([A-Z][A-Z0-9_]{0,63})=(["']?)\$\{?\1\}?\2\s+""", body)
         if not m:
             break
         body = body[m.end():]
-    # §17.1430 — a line that carries secrets (keep) is handed to the root shell whole, so `$NAME` is expanded
-    # AFTER sudo has logged the command: expanded before it, the value lands in the host's journal.
-    if has_shell_operator(body) or (keep and "$" in body and not re.match(r"bash\s+-c\s", body)):
-        return f"sudo -n {keep}bash -c {shlex.quote(body)}"
-    return f"sudo -n {keep}{body}"
+    names = [n for n in secrets if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", n or "")]
+    if names:
+        # §17.1430 — `$NAME` is expanded by the root shell, after sudo has logged the command
+        prelude = "".join(f"IFS= read -r -d '' {n}; " for n in names) + "export " + " ".join(names) + "; "
+        return f"sudo -n bash -c {shlex.quote(prelude + body)}"
+    if has_shell_operator(body):
+        return f"sudo -n bash -c {shlex.quote(body)}"
+    return f"sudo -n {body}"
+
+
+def stdin_for(secrets: tuple[str, ...] | list[str], values: dict) -> bytes:
+    """§17.1720 — what an `elevate(…, secrets)` line reads first: each value NUL-terminated, in `secrets` order."""
+    return b"".join(str(values.get(n) or "").encode() + b"\0" for n in secrets)
 
 # ---------------------------------------------------------------------------
 # §17.1185 — supervised writes. THE SAME helpers live in
@@ -1249,21 +1261,22 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
                         + ", ".join(f"${n}" for n in unknown)
                         + ", which neither the engine sent nor this runner's secrets file holds)")
             run_env = {**os.environ, **resolved}
-        run_cmd = command
+        run_cmd, feed = command, None
         # §17.1199 — with ANY, a READ in the block gets the grant too. That
         # split is what made `qm start 106` succeed as root and `qm agent 106
         # ping` fail unprivileged two commands later, inside one approved block.
         if write_sudo and (ANY in writes or not read_only(command)[0]):
-            # `sudo -n` drops the environment; the names this command needs are
-            # passed through explicitly so the value still never enters argv.
-            keep = ("--preserve-env=" + ",".join(refs) + " ") if refs else ""
-            run_cmd = elevate(command, keep)       # §17.1283 — the WHOLE line, not its first word
+            # `sudo -n` drops the environment, and sudo LOGS what `--preserve-env` keeps: the values this
+            # command needs reach the root shell on its stdin (§17.1720), never sudo's argv or log.
+            run_cmd = elevate(command, refs)       # §17.1283 — the WHOLE line, not its first word
+            feed = stdin_for(refs, resolved) if refs else None
         aid = str(approval.get("id", "?"))
         log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)   # `$NAME`, never its value
         proc = await asyncio.create_subprocess_shell(
-            run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=run_env)
+            run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=run_env,
+            stdin=asyncio.subprocess.PIPE if feed is not None else None)
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            out, _ = await asyncio.wait_for(proc.communicate(feed), timeout=timeout_s)
         except asyncio.TimeoutError:
             proc.kill()
             return f"[exit timeout] (timed out after {timeout_s}s)"

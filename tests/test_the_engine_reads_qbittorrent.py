@@ -25,7 +25,7 @@ DRAFT = ("## Run this\n\n```bash\npct exec 105 -- sh -c 'curl -s -b /tmp/c \"htt
 
 def _frame(node):
     spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "t"}
-    policy = {"allow": ["ANY"], "sudo": True, "helper": "23", "held": ["MASS_PASSWORD"], "held_logins": [], "can_write_files": True}
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "24", "held": ["MASS_PASSWORD"], "held_logins": [], "can_write_files": True}
     return sr.frame_run(node, DRAFT, spec, policy, services=[QBT],
                         inventory={"vms": {}, "cts": {"105": "running"}, "names": {"105": "qbittorrent"}})
 
