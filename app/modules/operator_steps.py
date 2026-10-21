@@ -246,7 +246,7 @@ async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]
 
 
 async def _walkthrough(node: dict, part: str, upstream: str = "", facts: Optional[list[str]] = None,
-                       also: Optional[list[dict]] = None) -> str:
+                       also: Optional[list[dict]] = None, has_checks: bool = True) -> str:
     """The operator's part as a walkthrough, grounded on a fresh search; '' when no model answers."""
     from app.config import settings
     from app import model_router
@@ -259,15 +259,27 @@ async def _walkthrough(node: dict, part: str, upstream: str = "", facts: Optiona
     except Exception as exc:
         logger.warning("operator_step_research_failed node=%s err=%r", node.get("node_key"), exc)
     src = "\n\n".join(f"[{i}] {s.get('url', '')}\n{str(s.get('text') or '')[:1800]}" for i, s in enumerate(sources, 1))
-    system = (
-        "You write the OPERATOR's part of one home-lab step as a walkthrough they follow on their own "
+    system = (("You write the OPERATOR's part of one home-lab step as a walkthrough they follow on their own "
         "phone, browser or account — the engine cannot do this part and has already done the rest. "
         "Start with `## 👉 Do this next` carrying the whole first action (for a click path, every screen in "
-        "order joined by →). Then `## Steps`, numbered, one action each, with the exact labels to look for. "
-        "Then `## ✅ Done when` saying what they will see, and that pressing \"I've done it — check\" makes "
-        "the engine read the machine to confirm it. Use the SOURCES for menu paths and labels; where they "
+        "order joined by →). Then `## Steps`, numbered, one action each, with the exact labels to look for. ")
+        + ("Then `## ✅ Done when` saying what they will see, and that pressing \"I've done it — check\" makes "
+           "the engine read the machine to confirm it. " if has_checks else
+           # §17.1743 — no check exists: the engine reads nothing, and what they FOUND is the record
+           "Then `## ✅ Done when` saying what they will have, and that they type what they found into the note "
+           "with \"I've done it\" -- the engine has no machine to read for this part, so their answer is the "
+           "record the next steps use. ")
+        + "Use the SOURCES for menu paths and labels; where they "
         "do not cover something, say it is unconfirmed rather than inventing it. Never ask them to run a "
-        "command on the server, never paste a secret, and never describe work outside their part.")
+        "command on the server, never paste a secret, and never describe work outside their part. "
+        # §17.1743 — live (job f9ca3ee1 T1, laptops with NO operating system yet): the inventory walkthrough sent the
+        # operator to Task Manager and File Explorer. Nothing said the laptops ran Windows; the brief said they ran
+        # nothing.
+        "NEVER assume an operating system, desktop or app on a machine unless the step or the facts name it. If "
+        "the machine may have none, or it is unknown, use what works on any machine: the label or sticker on the "
+        "case (model, sometimes the serial to look the specs up), and the firmware setup screen at power-on "
+        "(BIOS/UEFI; the key differs by maker -- F2, F10, F12, Del or Esc -- so say to watch the first screen for "
+        "it), which lists the CPU, the memory and the disks. Where a step needs one OS, say which and why.")
     prompt = (f"Step {node.get('node_key')}: {node.get('title')}\n\nThe operator's part:\n{part}\n\n"
               f"The whole step, for context:\n{_text(node)[:3000]}\n\n"
               + (f"What earlier steps produced:\n{upstream[:2000]}\n\n" if upstream else "")
@@ -293,7 +305,7 @@ async def frame_operator(node: dict, *, upstream: str = "", last_check: str = ""
                          facts: Optional[list] = None, also: Optional[list[dict]] = None) -> dict:
     part = operators_part(node) or _text(node)
     also = list(also or [])
-    walk = await _walkthrough(node, part, upstream, relevant_facts(node, facts), also)
+    walk = await _walkthrough(node, part, upstream, relevant_facts(node, facts), also, has_checks=bool(checks(node)))
     if not walk:
         walk = f"## 👉 Do this next\n{part}\n\n(The engine could not write a fuller walkthrough this time.)"
     chk = checks(node)
@@ -317,7 +329,8 @@ async def frame_operator(node: dict, *, upstream: str = "", last_check: str = ""
     }
 
 
-async def resolve_operator(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict) -> dict:
+async def resolve_operator(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
+                           note: str = "") -> dict:
     """`done` → run the step's checks; done only if they confirm. `skip` → skipped."""
     c = (choice or "").strip().lower()
     if c in ("skip", "skip this step"):
@@ -347,6 +360,9 @@ async def resolve_operator(db: AsyncSession, job_id: str, node_key: str, choice:
                     "verdicts": verdicts}
     also_done = await _resolve_also(db, job_id, waiting)
     out = ("## Done by the operator\n\n" + str(waiting.get("part") or "")
+           # §17.1743 — what they report IS the step's result: live (f9ca3ee1 T1), the laptop inventory the next steps
+           # need would have been dropped and the step recorded "done" with nothing in it
+           + (f"\n\n## What the operator reported\n\n{note.strip()}" if (note or "").strip() else "")
            + (f"\n\n## Checked on the machine\n```\n{evidence}\n```" if evidence else
               "\n\n(No machine check exists for this part; recorded on the operator's word.)"))
     upd = await db.execute(text(

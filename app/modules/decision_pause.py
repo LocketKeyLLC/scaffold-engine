@@ -350,7 +350,8 @@ async def resolve_decision(
     elif waiting.get("kind") == "yours":
         # §17.1458 — the operator's part: "I've done it — check" reads the machine; done only on its word
         from app.modules import operator_steps
-        res = await operator_steps.resolve_operator(db, job_id, node_key, ("skip" if delegate else (choice or "")), waiting)
+        res = await operator_steps.resolve_operator(db, job_id, node_key, ("skip" if delegate else (choice or "")), waiting,
+                                                    note=note or "")     # §17.1743 — what they report is the record
         if res["outcome"] in ("bad_choice", "no_channel", "node_gone", "not_yet"):
             await db.rollback()
             return {"outcome": res["outcome"], "current_status": job["status"], "waiting_on": node_key,
