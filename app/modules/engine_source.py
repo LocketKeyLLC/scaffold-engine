@@ -198,7 +198,8 @@ def _sibling(module: str, siblings: set[str]) -> bool:
 
 def _close_fields(attr: str, fields: dict[str, str]) -> list[str]:
     """The real fields a wrong name was reaching for: `SEARXNG_BASE_URL` → `searxng_url` (shared words, most first)."""
-    want = {w for w in attr.lower().split("_") if len(w) > 2}
+    # §17.1753 — five letters or more: on "edgar_user_agent" the word "user" offered `multi_user_enabled`
+    want = {w for w in attr.lower().split("_") if len(w) >= 5}
     scored = sorted((-len(want & set(f.split("_"))), len(f), f) for f in fields if want & set(f.split("_")))
     return [f for _, _, f in scored[:3]]
 
@@ -266,7 +267,9 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
             if attr and attr not in fields and attr not in sibling_names:
                 close = _close_fields(attr, fields)
                 note(f"`settings.{attr}`: the engine has no such setting"
-                     + (f" (it has {', '.join('`' + c + '`' for c in close)})" if close else ""))
+                     + (f" (it has {', '.join('`' + c + '`' for c in close)})" if close else "")
+                     + " -- a value the lab needs and the engine does not hold is a module constant, or a field "
+                       "a step of this job adds to `app.config.Settings`; never `getattr(settings, …, default)`")
     return found
 
 
