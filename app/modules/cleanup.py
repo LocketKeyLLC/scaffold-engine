@@ -3,7 +3,7 @@ cleanup.py — Periodic stale-job reaper.
 
 Runs every `settings.cleanup_interval_seconds`, marks stuck jobs terminal.
 State-aware thresholds:
-  - executing / running                       -> settings.stale_threshold_minutes (default 30)  -> failed
+  - running (a run owns it; §17.1728)         -> settings.stale_threshold_minutes (default 30)  -> failed
   - researching / refining (jobs)             -> settings.long_phase_stale_minutes (default 45)  -> failed
   - planning (jobs)                           -> settings.planning_stale_minutes (default 60)    -> cancelled
   - research_sessions pending/running         -> settings.stale_threshold_minutes               -> failed
@@ -52,12 +52,15 @@ _REFRESH_PARENT_JOBS_SQL = """
     RETURNING id
 """
 
+# §17.1728 — only a job a run OWNS (`running`) can be stuck in one; `executing` is a plan waiting for the
+# operator (a plan-only approval, a finished decision step) and failing it after the threshold failed the
+# operator's own unreviewed plan. Same vocabulary as the startup sweeps (execution_resume.MID_RUN_STATUSES).
 _REAP_RUNNING_SQL = """
     UPDATE jobs
     SET status = 'failed',
         error_summary = :msg,
         updated_at = NOW()
-    WHERE status IN ('running', 'executing')
+    WHERE status IN ('running')
       AND updated_at < NOW() - make_interval(mins => :threshold_min)
       AND NOT EXISTS (
           SELECT 1 FROM dag_nodes

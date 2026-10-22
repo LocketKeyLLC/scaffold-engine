@@ -373,6 +373,8 @@ services:
       # the default ai-network bridge gateway, correct on Pop!_OS native
       # Docker where host.docker.internal isn't available.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://172.18.0.1:11434}
+      # §17.1727 — extra Ollama servers (cluster workers), comma-separated; empty = only OLLAMA_BASE_URL.
+      OLLAMA_POOL_URLS: ${OLLAMA_POOL_URLS:-}
       MILVUS_URI: http://milvus-standalone:19530
       SEARXNG_URL: http://searxng:8080
       LOG_LEVEL: ${LOG_LEVEL:-info}

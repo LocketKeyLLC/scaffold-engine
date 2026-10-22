@@ -279,6 +279,14 @@ def read_on_the_machine(commands: list[str], verify: list[str],
 _GUEST_EXEC_HEAD = re.compile(r"^(\s*)(pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\s+--\s+(.*)$", re.S)
 
 
+#: §17.1736 — a guest command that is ONE `sh -c '…'` payload, optionally followed by the value it reads on stdin
+#: (`<<< "$NAME"`, §17.1495/§17.1734). Group 1 is the payload, group 2 the stdin tail, kept OUTSIDE the payload on
+#: rebuild. Live (job 7d30fe4f T3): the matcher required the line to END at the payload's closing quote, so §17.1500
+#: "promoted" the whole line -- here-string included -- into a new `sh -c '…'`, where the guest expanded the
+#: password to nothing.
+_SH_PAYLOAD_RE = re.compile(r"""^sh\s+-c\s+'(.*)'(\s*<<<\s*(?:"[^"']*"|\S+))?\s*$""", re.S)
+
+
 def _close_paren(s: str, open_at: int) -> int:
     """Index of the `)` that closes the `$(` whose `(` is at ``open_at``,
     counting nested parens and skipping quoted spans the way a shell does.
@@ -365,11 +373,11 @@ def fold_redundant_nested_guest_exec(commands: list[str], verify: list[str]) -> 
             indent, tool, gid, rest = m.groups()
             # Already an `sh -c '…'` payload: unwrap in place; the substitution
             # is already guest-evaluated, so no re-wrap is needed.
-            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            sh = _SH_PAYLOAD_RE.match(rest)
             if sh:
                 payload, changed = _unwrap_same_guest_subs(sh.group(1), gid)
                 if changed:
-                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}{sh.group(2) or ''}")
                     n += 1
                 else:
                     out.append(c)
@@ -460,11 +468,11 @@ def read_a_readable_key_written_as_a_var(
                 out.append(c)
                 continue
             indent, tool, gid, rest = m.groups()
-            sh = re.match(r"^sh\s+-c\s+'(.*)'\s*$", rest, re.S)
+            sh = _SH_PAYLOAD_RE.match(rest)
             if sh:                              # a guest-shell payload: read ANY readable key here
                 payload, changed = _normalise(sh.group(1), _wanted_in_guest)
                 if changed:
-                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}")
+                    out.append(f"{indent}{tool} {gid} -- sh -c {_sq(payload)}{sh.group(2) or ''}")
                     n += 1
                 else:
                     out.append(c)
@@ -716,6 +724,18 @@ _AUTH_ENDPOINTS: dict[str, tuple[str, ...]] = {
 }
 
 
+_OWN_PASSWORD_ON_STDIN_RE = re.compile(r'<<<\s*"\$\{?([A-Z][A-Z0-9_]*_PASSWORD)\}?"')
+
+
+def _logs_in_as_its_own_user(text: str) -> bool:
+    """§17.1739 — the login is the thing being tested: a user's OWN stored password (a held `<USER>_PASSWORD`, never the
+    operator's MASS_PASSWORD) handed on stdin. Live (job 7d30fe4f T7–T9, "Verify mark/natalie/julie may
+    authentication"): the step's whole point is that each new user can log in; §17.1384 -- written against a draft that
+    guessed an ADMIN login with MASS_PASSWORD to fetch a token -- refused every form of it."""
+    names = _OWN_PASSWORD_ON_STDIN_RE.findall(text or "")
+    return bool(names) and all(n != "MASS_PASSWORD" for n in names)
+
+
 def authenticates_instead_of_reading_the_key(
         commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     r"""§17.1384 — the block logs in to a service whose key the engine can read.
@@ -747,6 +767,8 @@ def authenticates_instead_of_reading_the_key(
     seen: set[str] = set()
     for t in texts:
         low = t.lower()
+        if _logs_in_as_its_own_user(t):
+            continue                           # §17.1739 — a login TEST, not a key hunt
         for app, endpoints in _AUTH_ENDPOINTS.items():
             r = _SERVICES.get(app)
             if r is None or app in seen:
@@ -827,6 +849,17 @@ _AUTH_HEADERS: dict[str, tuple[str, ...]] = {
 }
 
 
+_GUEST_PAYLOAD_RE = re.compile(r"<<'REMOTE'\n.*?\nREMOTE\n", re.S)
+
+
+def _host_part(body: str) -> str:
+    """The text of a written file that runs on the HOST: a template's `<<'REMOTE'` payload is removed when the
+    file sends it into a guest (`pct push` / the agent's `--pass-stdin`), because that payload runs there."""
+    if "pct push" in body or "--pass-stdin" in body:
+        return _GUEST_PAYLOAD_RE.sub("", body)
+    return body
+
+
 def a_host_program_needs_a_key_only_the_guest_can_read(
         commands: list[str], files: Optional[list[dict]] = None,
         policy: Optional[dict] = None) -> list[dict]:
@@ -860,7 +893,10 @@ def a_host_program_needs_a_key_only_the_guest_can_read(
             continue                           # not a file this block runs
         if "pct exec" in run_text.split(path)[0].rsplit("\n", 1)[-1]:
             continue                           # the program itself runs in a guest
-        low = body.lower()
+        # §17.1731 — a guest template's file carries the guest's own script as a `<<'REMOTE'` heredoc that it pushes
+        # INTO the guest and runs there; only what is left runs on the host. Live: the engine's own Jellyfin key
+        # step (read and prove it inside CT 101) was refused as "a host program calling jellyfin's API".
+        low = _host_part(body).lower()
         for app, headers in _AUTH_HEADERS.items():
             r = _SERVICES.get(app)
             if r is None or not any(h in low for h in headers):
@@ -1079,3 +1115,169 @@ def present_a_held_login(commands: list[str], verify: list[str], services: Optio
             "password fed to the guest on stdin (never in the command, the approval, or a log) as the "
             "runner-resolved reference (§17.1548).")})
     return out_cmds, out_verify, notes
+
+
+# ── §17.1730: a step that ASKS the operator for a credential the engine can read ──────────────────
+
+_CRED_RE = re.compile(r"\b(?:api[\s_-]?key|admin\s+(?:credential|password|login|token|session)|access\s+token|"
+                      r"credential|(?:admin\s+)?user(?:name)?\s*(?:\+|and|/)\s*password)\b", re.I)
+_ASK_FOR_RE = re.compile(
+    r"\b(?:operator\s+(?:must|should|needs?\s+to|has\s+to)\s+(?:supply|provide|paste|give|enter)|"
+    r"(?:supply|provide|paste|enter)\s+(?:the|an|your)\s+(?:\w+\s+){0,2}(?:credential|key|password|token)|"
+    r"how\s+should\s+the\s+(?:\w+\s+){0,4}(?:credential|key|password|token)\s+(?:\(.*?\)\s+)?be\s+supplied|"
+    r"ask\s+the\s+operator\s+for)\b", re.I)
+
+
+def asks_for_a_readable_credential(node: dict) -> Optional[str]:
+    """§17.1730 — the service whose credential this step asks the operator for, when the engine can read
+    (or create, §17.1385) that credential itself; else None.
+
+    Live (job 7d30fe4f, 2026-10-21, "add three Jellyfin users"): the planner wrote T2 "Resolve admin
+    credential … the operator must supply the admin credential (API key or admin username/password) once" as a
+    `decision` node, and the pause framed it as a question -- although §17.1382/1385 read Jellyfin's key from
+    its own database and create one when it has none. Those run only on a RUN frame's inputs; a decision node
+    never reaches them. The operator: "It should read the admin key itself." Exactly one readable service
+    named, credential words, and words that ask for it. Measured over the 58 stored decision/credential steps:
+    this T2 alone."""
+    t = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not (_CRED_RE.search(t) and _ASK_FOR_RE.search(t)):
+        return None
+    hits = [s for s in sorted(_SERVICES) if re.search(rf"\b{s}\b", t, re.I)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def read_the_credential_instead(app: str, node: dict) -> dict:
+    """§17.1730 — the step rewritten as WORK: read the key where the service keeps it, create the engine's own
+    one when there is none, and hand it to the later steps as the placeholder `read_on_the_machine` fills."""
+    r = _SERVICES[app]
+    ph = f"<{app.upper()}_API_KEY>"
+    make = (f" If {app} has no such key yet, create the engine's own (it is a change: approved like any "
+            f"other, idempotent).") if create_key_on_the_machine(app) else ""
+    was = str((node or {}).get("title") or "").strip()
+    text_ = (f"Get {app}'s API key ON THE MACHINE -- never ask the operator for an admin key or password. {app} "
+             f"keeps it in {r.where} inside its own guest; read it there.{make} Later steps that call {app}'s API "
+             f"use it as {ph} inside that guest (the engine fills it in where the call runs). Done when the key "
+             f"is known to exist (print only its length, never the key). [Rewritten by the engine, §17.1730: the "
+             f"plan had asked the operator for this credential as {was!r}.]")
+    return {"title": f"Get {app} API key", "description": text_, "prompt_template": text_}
+
+
+_KEY_STEP_RE = re.compile(r"Get (?P<app>[a-z]+)'s API key ON THE MACHINE")
+
+#: §17.1731 — after the key exists, prove it opens the service's API from inside its own guest.
+_KEY_WORKS: dict[str, str] = {
+    "jellyfin": ('code=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Emby-Token: $K" http://127.0.0.1:8096/Users); '
+                 'echo "jellyfin key works: $code"; [ "$code" = "200" ]'),
+}
+
+
+def key_step_app(node: dict) -> Optional[str]:
+    """§17.1731 — the service whose key this step gets, when the step is the one §17.1730 wrote; else None."""
+    t = " ".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    m = _KEY_STEP_RE.search(t)
+    return m.group("app") if m and m.group("app") in _SERVICES and "§17.1730" in t else None
+
+
+def key_step_commands(app: str) -> str:
+    """§17.1731 — the commands, inside the service's own guest, that make sure the engine's key exists and works:
+    the engine's own idempotent create (§17.1385) where it has one, the engine's own read (§17.1382), then a call
+    with it. Never the key itself on the output -- only its length and the API's answer."""
+    r = _SERVICES[app]
+    lines = []
+    make = create_key_on_the_machine(app)
+    if make:
+        lines.append(make)
+    lines += [f"K=\"$({r.read(None)})\"",
+              f'[ -n "$K" ] || {{ echo "FAILED: no {app} key could be read from {r.where}"; exit 1; }}',
+              f'echo "{app} key found (length ${{#K}})"']
+    if app in _KEY_WORKS:
+        lines.append(_KEY_WORKS[app])
+    return "\n".join(lines)
+
+
+_KEY_TABLE_RE = re.compile(r"\b(?:ApiKeys|AccessToken)\b")
+
+
+def _a_hand_written_read_of_a_key_the_engine_reads(inner: str) -> Optional[str]:
+    """§17.1735 — a `$(…)` that opens a key DATABASE the engine reads itself (Jellyfin's `ApiKeys`), written by the
+    drafter instead of the engine's read. Live (job 7d30fe4f T3, after §17.1734): `SELECT AccessToken FROM ApiKeys
+    ORDER BY rowid LIMIT 1` -- the FIRST key, whichever service owns it; the engine's read takes its own key by name."""
+    for app, r in _SERVICES.items():
+        # the engine's own read selects its own key BY NAME ("scaffold-engine"); once filled it is quote-escaped for
+        # its context, so it is recognised by that name, not by its exact text
+        if r.command and any(p in inner for p in r.paths) and _KEY_TABLE_RE.search(inner) \
+                and "scaffold-engine" not in inner:
+            return app
+    return None
+
+
+def a_key_read_from_the_wrong_place_is_the_placeholder(
+        commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1732 — a `$(…)` that reads a readable service's key from a file that does not hold it becomes the
+    `<APP_API_KEY>` placeholder, which `read_on_the_machine` (next) fills with the read that works.
+
+    Live (job 7d30fe4f T3, 2026-10-21): three drafts of "Create user mark" read Jellyfin's key with
+    `$(sed -n "s:.*<ApiKey>…" /var/lib/jellyfin/config.xml | head -1)`; §17.1383's gate refused each ("which does
+    not hold one") and the step parked with Run greyed. The gap is registered as the ENGINE's (`_WHOSE_GAP`), and the
+    engine holds the right read -- so it puts it there instead of asking the drafter a fourth time. Only a
+    substitution `reads_a_key_where_the_service_does_not_keep_it` would refuse is touched."""
+    notes: list[dict] = []
+
+    def fix(text: str) -> str:
+        s, i = str(text), 0
+        while True:
+            j = s.find("$(", i)
+            if j < 0:
+                return s
+            end = _close_paren(s, j + 1)
+            if end < 0:
+                return s
+            inner = s[j + 2:end]
+            bad = reads_a_key_where_the_service_does_not_keep_it([inner])
+            app = next((a for a in _SERVICES if bad and f"{a}'s API key" in bad[0]["why"]), None) \
+                or _a_hand_written_read_of_a_key_the_engine_reads(inner)
+            if app:
+                ph = f"<{app.upper()}_API_KEY>"
+                notes.append({"why": f"the draft read {app}'s key from a file that does not hold it; the engine put "
+                                     f"{ph} there, which it fills with the read from {_SERVICES[app].where} (§17.1732)"})
+                s = s[:j] + ph + s[end + 1:]
+                i = j + len(ph)
+            else:
+                i = j + 2
+
+    return [fix(c) for c in commands or []], [fix(v) for v in verify or []], notes
+
+
+# ── §17.1740: the LAN a step scans is the host's own network, read off the host ─────────────────────
+
+_SUBNET_NAME_RE = re.compile(r"^(?:[A-Z]+_)?SUBNET(?:_CIDR)?$|^(?:LAN|LOCAL|HOME|HOST)_(?:NETWORK|NET|CIDR|RANGE)$")
+#: the default route's device, then that device's own address with its prefix (`192.168.1.156/24`): nmap and the
+#: like scan the whole network from it. Measured on pve 2026-10-21: `default via 192.168.1.1 dev vmbr0`, and the
+#: second global address is tailscale0's 100.x/32 -- so "the first global address" would be the wrong read.
+HOST_LAN_READ = ("$(ip -4 -o addr show dev \"$(ip -4 route show default | awk '{print $5; exit}')\" scope global "
+                 "| awk '{print $4; exit}')")
+
+
+def read_the_host_network(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1740 — `<LAN_SUBNET>` (and its spellings) in a HOST command is the host's own network, read where it runs.
+
+    Live (job f9ca3ee1 T1 "Scan LAN for devices", 2026-10-21): the frame asked the operator to type `LAN_SUBNET`,
+    with a hint that "the brief assumes 192.168.1.0/24; confirm" -- a value the machine the step runs on holds in its
+    routing table. Only host commands are filled (a guest's `sh -c` payload has its own quoting and its own network)."""
+    notes: list[dict] = []
+
+    def fill(c: str) -> str:
+        if _GUEST_EXEC_HEAD.match(str(c)):
+            return c
+
+        def repl(m: "re.Match") -> str:
+            if not _SUBNET_NAME_RE.match(m.group(1)):
+                return m.group(0)
+            if not notes:
+                notes.append({"why": f"<{m.group(1)}> is the host's own network: the engine reads it off the host's "
+                                     f"default route instead of asking (§17.1740)"})
+            return HOST_LAN_READ
+
+        return re.sub(r"<([A-Z][A-Z0-9_]{2,40})>", repl, str(c))
+
+    return [fill(c) for c in commands or []], [fill(v) for v in verify or []], notes

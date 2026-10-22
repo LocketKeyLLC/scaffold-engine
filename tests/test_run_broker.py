@@ -245,7 +245,7 @@ async def test_reconcile_on_startup_settles_jobs_left_mid_run(monkeypatch):
     await run_broker.reconcile_on_startup()
 
     sql = " ".join(s for s, _ in executed)
-    assert "status IN ('running', 'executing')" in sql, "must look for interrupted rows"
+    assert "status IN ('running')" in sql, "must look for interrupted rows"
     assert "status = 'failed'" in sql, "an interrupted run is not a completed one"
     assert "restart" in sql, "the row must say WHY it failed"
     assert "COMMIT" in [s for s, _ in executed]
@@ -285,7 +285,7 @@ async def test_reconcile_on_startup_excludes_crash_resumed_jobs(monkeypatch):
     await run_broker.reconcile_on_startup(exclude=["job-a"])
 
     select_sql, select_params = executed[0]
-    assert "status IN ('running', 'executing')" in select_sql
+    assert "status IN ('running')" in select_sql
     assert "NOT (id = ANY(:exclude))" in select_sql, "resumed ids must be excluded in SQL"
     assert select_params == {"exclude": ["job-a"]}
     ids = [p.get("ids") for _, p in executed if p.get("ids")]

@@ -187,6 +187,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is run as a READ, unprivileged",                # §17.1462
                    "identifies nothing",                            # §17.1382b
                    "which does not hold one",                       # §17.1383
+                   "is spliced into `pct exec`'s command line",      # §17.1733
+                   "has not been confirmed as one of this lab's machines",   # §17.1741
                    "is a value the engine READS",                   # §17.1384
                    "nothing can give it the key",                   # §17.1385
                    "type-checked this program before offering it",  # §17.1380
@@ -328,6 +330,8 @@ _WHOSE_GAP: dict[str, str] = {
     "nothing can give it the key": "engine",      # §17.1385 — read it, or mint it
     "is a value the engine READS": "engine",      # §17.1384
     "which does not hold one": "engine",          # §17.1383
+    "is spliced into `pct exec`'s command line": "drafter",   # §17.1733 — only a redraft moves it to stdin
+    "has not been confirmed as one of this lab's machines": "drafter",   # §17.1741 — identify without logging in
     "the verify channel will refuse this check": "drafter",   # §17.1390 — write a read the channel takes
     "a credential into the block as a literal value": "drafter",   # §17.1391 — write the read
     "is fed input here without `--pass-stdin 1`": "drafter",       # §17.1397
@@ -1123,6 +1127,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it as a trailing comment: `python3 /tmp/x.py # $NAME` (never a `NAME="$NAME"` prefix — sudo logs it). A password a CALL needs (a login) is fed to that call on stdin from the host instead: `pct exec <id> -- sh -c 'tr -d "\\n" | curl … --data-urlencode password@- …' <<< "$NAME"`.
+- A KEY THE ENGINE READS AND A PASSWORD THE STORE HOLDS, IN ONE CALL (§17.1734). A service whose key lives in its own database (Jellyfin) is reached INSIDE its guest with the placeholder `<JELLYFIN_API_KEY>` written where the key goes, inside the single-quoted `pct exec <id> -- sh -c '…'` payload -- the engine fills it there; never read a key yourself, never take the first row of a key table (it may be another service's). A held password that call needs goes to the guest on STDIN and the guest's own shell puts it in the JSON body (an API reads a password from its body, never from the URL): `pct exec 101 -- sh -c 'read -r V; printf "{\\"Name\\":\\"mark\\",\\"Password\\":\\"%s\\"}" "$V" | curl -s --fail-with-body -X POST -H "Content-Type: application/json" -H "X-Emby-Token: <JELLYFIN_API_KEY>" --data-binary @- http://127.0.0.1:8096/Users/New' <<< "$JELLYFIN_MARK_PASSWORD"`. A step that CHECKS a user exists or can log in does not create it again: it logs in AS that user, with that user's own stored password on stdin, and prints only the HTTP status (never the token) -- `pct exec 101 -- sh -c 'read -r V; printf "{\\"Username\\":\\"mark\\",\\"Pw\\":\\"%s\\"}" "$V" | curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -H "X-Emby-Authorization: MediaBrowser Client=\\"scaffold\\", Device=\\"engine\\", DeviceId=\\"scaffold-engine\\", Version=\\"1\\"" --data-binary @- http://127.0.0.1:8096/Users/AuthenticateByName' <<< "$JELLYFIN_MARK_PASSWORD"` -- and its Done when is that it prints `200`. (This Jellyfin hides users from its login screen: `/Users/Public` answers `[]`, so it proves nothing.)
 - ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
@@ -1926,7 +1931,8 @@ def changes_an_api_without_reading_it(commands: list[str], verify: list[str],
     # a change to read back -- exempt by identity, not by `--fail`: ADD132's `curl --fail-with-body -X PUT`
     # fails on a 400 yet proves nothing about the value the PUT left, which is this gate's case.
     accepted = {str(a).strip() for a in acceptance or []}
-    cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted]
+    cmd_texts = [str(c) for c in commands or [] if str(c).strip() not in accepted
+                 and not a_login_test(str(c))]                     # §17.1739 — a login test changes nothing
     from app.modules.runbook_preconditions import files_the_block_runs     # §17.1420 — one definition
     ran = [str((f or {}).get("content") or "") for f in files_the_block_runs(cmd_texts, files)]
     changed = api_ports_changed(cmd_texts + ran)
@@ -3744,6 +3750,8 @@ def curl_writes_without_fail(commands: list[str]) -> list[dict]:
     out: list[dict] = []
     for c in commands or []:
         cmd = str(c)
+        if a_login_test(cmd):
+            continue          # §17.1739 — it reports the status itself (`-w %{http_code}`) and is judged on `200`
         if _CURL_WRITE.search(cmd) and not _CURL_FAILS.search(cmd):
             out.append({"command": cmd, "why": (
                 "this `curl` sends a change but cannot report an HTTP error: `curl -s` exits 0 "
@@ -4776,9 +4784,22 @@ def verify_commands(text_out: str) -> list[str]:
         # the shape with a dummy value, keep the raw command for the operator.
         shape = _PLACEHOLDER_RE.sub("x", c)
         # §17.1666 — a check runs through the RUNNER's read channel: judged as the runner judges it
-        if c not in out and not c.startswith("/") and read_only_command(shape, runner_side=True):
+        if c not in out and not c.startswith("/") and (read_only_command(shape, runner_side=True)
+                                                        or a_login_test(c)):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
+
+
+def a_login_test(check: str) -> bool:
+    """§17.1739 — a check that logs in AS the user under test, with that user's own stored password on stdin, and prints
+    only the HTTP status. It is not a read the read-only channel takes (a POST, a `read`), and it need not be: a check
+    that names a stored secret runs on the supervised path with the block's own values (`run_verify`, §17.1281). Live
+    (job 7d30fe4f): "Create user mark" had no keyless check on a Jellyfin whose `/Users/Public` answers `[]`; the login
+    is the one thing that proves the user and the password both landed."""
+    from app.modules.machine_values import _logs_in_as_its_own_user
+    c = str(check or "")
+    return ("/Users/AuthenticateByName" in c and "-o /dev/null" in c and "%{http_code}" in c
+            and _logs_in_as_its_own_user(c))
 
 
 def dropped_checks(text_out: str) -> list[tuple[str, str]]:
@@ -5064,6 +5085,132 @@ def secret_in_an_ssh_command_line(commands: list[str], files: Optional[list[dict
                 + f". A secret goes to the remote on ssh's STDIN, which `sudo -S` reads: "
                   f"`ssh -o BatchMode=yes user@host \"sudo -S -p '' bash -c '<the commands, && between them>'\" "
                   f"<<< \"${names[0]}\"` -- one ssh, one sudo, the value in no command line.")})
+            break
+    return out
+
+
+_GUEST_EXEC_LINE_RE = re.compile(r"^\s*(?:pct\s+exec|qm\s+guest\s+exec)\s+(\d{3,5})\b")
+
+
+_GUEST_SHELL_RE = re.compile(r"\b(?:ba|da)?sh\s+-c\s")
+
+
+def _host_expanded_refs(line: str) -> list[str]:
+    """The `$NAME`s the HOST shell expands INTO a guest shell script on this line (`… sh -c '…'`): outside single
+    quotes, after the `sh -c`, and not the here-string after `<<<` (that is the value going on stdin -- the remedy).
+    A value handed over as `env NAME="$S" prog` is not judged here (the engine's own qBittorrent reads use it; its
+    process-list exposure is a separate item)."""
+    g = _GUEST_SHELL_RE.search(line)
+    if not g:
+        return []
+    after = g.end()
+    out: list[str] = []
+    in_sq = in_dq = False
+    i = 0
+    stdin_from = line.find("<<<")
+    while i < len(line):
+        ch = line[i]
+        if stdin_from >= 0 and i >= stdin_from and not in_sq and not in_dq:
+            break
+        if in_sq:
+            in_sq = ch != "'"
+        elif ch == "\\":
+            i += 1
+        elif ch == "'" and not in_dq:
+            in_sq = True
+        elif ch == '"':
+            in_dq = not in_dq
+        elif ch == "$":
+            m = _ENV_REF_RE.match(line, i)
+            if m:
+                if i > after:
+                    out.append(m.group(1))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def secret_in_a_guest_exec_command_line(commands: list[str], policy: Optional[dict] = None) -> list[dict]:
+    """§17.1733 — a secret the host expands into `pct exec` / `qm guest exec`'s own arguments.
+
+    Live (job 7d30fe4f T3, 2026-10-21): "Create user mark" ran
+    `pct exec 101 -- sh -c 'curl … "http://127.0.0.1:8096/Users/New?Name=mark&Password='"$JELLYFIN_MARK_PASSWORD"'" …'`
+    -- the quotes closed around the name so the HOST expanded it: the password rides `pct exec`'s argv on the host
+    (any process list, the runner's record) and the guest shell's command line, and as a URL parameter Jellyfin's
+    /Users/New ignores it (the password is a JSON body field), so `mark` would have been made with none. The
+    §17.1288b ssh rule covered ssh only. The value goes on STDIN, which the guest's own shell reads."""
+    from app.modules.runbook_inputs import secret_name
+    held = {str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])}
+    out: list[dict] = []
+    for cmd in commands or []:
+        for line in str(cmd or "").splitlines():
+            m = _GUEST_EXEC_LINE_RE.match(line)
+            if not m:
+                continue
+            names = [n for n in _host_expanded_refs(line) if n in held or secret_name(n)]
+            if not names:
+                continue
+            n, gid = names[0], m.group(1)
+            example = ("pct exec " + gid + " -- sh -c 'read -r V; printf \"{\\\"Name\\\":\\\"…\\\",\\\"Password\\\":\\\"%s\\\"}\" "
+                       "\"$V\" | curl -s --data-binary @- -H \"Content-Type: application/json\" …' <<< \"$" + n + "\"")
+            out.append({"command": line.strip()[:200], "why": (
+                f"`${n}` is spliced into `pct exec`'s command line: the host expands it, so the value rides the "
+                f"arguments of `pct exec {gid}` on the host (any process list, the runner's record) and the guest "
+                f"shell's command line -- and a password in a URL is not where an API reads it. Give the value to "
+                f"the guest on STDIN and let the guest's shell put it where it belongs: `{example}` -- the "
+                f"here-string is the only place the name appears (a value that may hold `\"` or `\\\\` is put into the JSON by "
+                f"`python3 -c 'import json,sys; …json.dumps(…)'` reading stdin, where the guest has python3).")})
+            break
+    return out
+
+
+_TARGET_IP_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+
+
+def known_machine_addresses(env: Optional[dict], services: Optional[list] = None,
+                            inventory: Optional[dict] = None) -> set[str]:
+    """§17.1741 — the addresses of machines this lab is KNOWN to have: the engine's ledger (facts, pins, system map),
+    the services the pause measured, the inventory's pinned guest addresses. NOT an earlier step's output: a scan
+    lists what answered on the LAN, which is exactly what has not been confirmed."""
+    e = env or {}
+    led = json.dumps({k: e.get(k) for k in ("facts", "substitutions", "system_state")}, default=str)
+    out = set(_TARGET_IP_RE.findall(led))
+    out |= {str(getattr(sv, "address", "") or (sv.get("address") if isinstance(sv, dict) else "") or "")
+            for sv in services or []}
+    out |= {a for v in ((inventory or {}).get("addresses") or {}).values() for a in v}
+    return {a for a in out if a}
+
+
+def a_secret_sent_to_an_unconfirmed_machine(commands: list[str], policy: Optional[dict], env: Optional[dict],
+                                            services: Optional[list] = None,
+                                            inventory: Optional[dict] = None) -> list[dict]:
+    """§17.1741 — a stored secret goes only to a machine the engine knows.
+
+    Live (job f9ca3ee1 T2 "Identify laptop candidates", 2026-10-21): the step after a LAN scan, and BEFORE the
+    operator confirms which devices are the laptops (T3), drafted `SSHPASS="$MASS_PASSWORD" sshpass -e ssh … @<ip>` to
+    four addresses taken from the scan -- one of them 192.168.1.43, the operator's own workstation running the engine.
+    Every device answering on port 22 would have been handed the operator's password. A line that carries a held or
+    secret-named value and names an IPv4 address outside `known_machine_addresses` is refused; loopback is local."""
+    from app.modules.runbook_inputs import secret_name
+    held = {str(x) for x in ((policy or {}).get("secrets") or [])} | {str(x) for x in ((policy or {}).get("held") or [])}
+    known = known_machine_addresses(env, services, inventory)
+    out: list[dict] = []
+    for cmd in commands or []:
+        for line in str(cmd or "").splitlines():
+            names = [n for n in _ENV_REF_RE.findall(line) if n in held or secret_name(n)]
+            if not names:
+                continue
+            unknown = [ip for ip in dict.fromkeys(_TARGET_IP_RE.findall(line))
+                       if not ip.startswith("127.") and ip not in ("0.0.0.0",) and ip not in known]
+            if not unknown:
+                continue
+            out.append({"command": line.strip()[:200], "why": (
+                f"`${names[0]}` would be sent to {', '.join(unknown[:4])}, which has not been confirmed as one of this "
+                f"lab's machines: no fact, pin or measured service names it, only an earlier step's output (a scan lists "
+                f"whatever answered). A stored secret goes only to a machine the engine knows (§17.1741). Identify a "
+                f"device WITHOUT logging in -- `nmap -p 22 --open -sV <ip>`, its hostname, its MAC vendor -- and let "
+                f"the operator confirm it; once confirmed it is pinned, and then it may be logged into.")})
             break
     return out
 
@@ -6773,13 +6920,18 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # fills it. A stored secret's `$NAME` is left for the runner to inject.
     _stored_names = {str(x) for x in ((policy or {}).get("secrets") or [])} \
         | {str(x) for x in ((policy or {}).get("held") or [])}
+    # §17.1732 — a key read from a file that does not hold it becomes the placeholder the reader below fills.
+    cmds, verify, _wp_notes = _mv.a_key_read_from_the_wrong_place_is_the_placeholder(cmds, verify)
     cmds, verify, _var_notes = _mv.read_a_readable_key_written_as_a_var(cmds, verify, _stored_names)
+    _var_notes = list(_wp_notes) + list(_var_notes)
     cmds, verify, _mv_notes = _mv.read_on_the_machine(cmds, verify, inventory)
     _mv_notes = list(_mv_notes) + _ak_notes
     _mv_notes = list(_fold_notes) + list(_var_notes) + list(_mv_notes)
     # §17.1333 — and a value the ENGINE holds about ITSELF. A literal address is
     # safe in a written file too, so files are filled here.
     cmds, verify, files, _ea_notes = _mv.read_from_the_engine(cmds, verify, files, engine_address)
+    cmds, verify, _net_notes = _mv.read_the_host_network(cmds, verify)          # §17.1740
+    _ea_notes = list(_ea_notes) + list(_net_notes)
     _mv_notes = list(_mv_notes) + _ea_notes
     # §17.1501 — an empty-body POST to an *arr `/{resource}/test` validates the whole
     # resource and fails on its required fields; the standard "test everything
@@ -6963,6 +7115,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1367 — a value read from a machine, pasted into a shell word.
     refused = refused + a_machine_value_in_a_shell_word(cmds, shape_files)
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
+    refused = refused + secret_in_a_guest_exec_command_line(cmds, policy)       # §17.1733
+    refused = refused + a_secret_sent_to_an_unconfirmed_machine(cmds, policy, env, services, inventory)   # §17.1741
     refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
     from app.modules.arr_api_shapes import wrong_fields as _wrong_fields
@@ -7543,6 +7697,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 _against = contradicted(await _verify_verdicts(
                     goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted,
                     expects={str(k): str(v) for k, v in (waiting.get("expects") or {}).items()}))
+                # §17.1738 — a check that printed NOTHING is evidence too: a filter that found nothing found the
+                # thing missing, and checks that all came back blank confirmed nothing.
+                _against = list(_against) + blank_checks(pasted, ran)
                 if _against:
                     ok = False
                     refuted = _against
@@ -8032,7 +8189,7 @@ def a_check_the_channel_will_refuse(verify: list[str]) -> list[dict]:
         # `ssh … "systemctl is-active …"` is fine, the same line with
         # `<PALWORLD_USER>@<GUEST_IP>` is not).
         shape = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(v))   # `<IP>` is two chars
-        if read_only_command(shape):
+        if read_only_command(shape) or a_login_test(str(v)):        # §17.1739 — a login test runs supervised
             continue
         out.append({"command": str(v)[:120], "why": (
             "the verify channel will refuse this check, so it would prove nothing and the step "
@@ -8581,6 +8738,38 @@ def contradicted(verdicts: list[dict]) -> list[dict]:
 
 #: §17.1239 — how long to let a dropped channel settle before re-reading.
 _RECHECK_DELAY_S = 4
+
+
+_FILTER_TAIL_RE = re.compile(r"\|\s*(?:grep|egrep|fgrep|awk|jq|sed\s+-n)\b[^|]*['\"]?\s*$")
+_MARKER_RE = re.compile(r"^== (V\d+) ==\n(.*?)(?=^== V\d+ ==\n|\Z)", re.M | re.S)
+_SILENT_BY_DESIGN_RE = re.compile(r"\bgrep\s+(?:-\w*\s+)*-\w*q|\s--quiet\b|\s--silent\b|(?:^|[\s;&|(])(?:test|\[)\s|\bis-active\s+-q\b")
+
+
+def blank_checks(pasted: str, ran: list[dict]) -> list[dict]:
+    """§17.1738 — the checks that RAN and printed nothing, judged.
+
+    Live (job 7d30fe4f T3/T4/T5, 2026-10-21): "Create user mark/natalie/julie may" each checked
+    `curl -s …/Users/Public | grep -E -o '"Name": *"mark"'`. This Jellyfin hides users from its login screen, so
+    `/Users/Public` answers `[]` (measured in §17.1384 already) and every check printed NOTHING -- and every step was
+    recorded done, "1 command(s) ran, all exited 0". The judge grades a blank answer `unknown`, and only
+    `contradicted` downgrades (§17.1233). But a filter that printed nothing is not ambiguous: the thing it filters
+    for is not there. So: a ran check whose command ends in a filter (`| grep …`, `| awk …`, `| jq …`, `| sed -n …`)
+    and printed nothing is contradicted; and when EVERY ran check printed nothing, nothing confirmed the step."""
+    outs = {m.group(1): m.group(2).strip() for m in _MARKER_RE.finditer(pasted or "")}
+    # a check that is silent by design (`grep -q`, `test -f`, `--quiet`) says nothing by printing nothing
+    done = [r for r in (ran or []) if r.get("ran") is not False and r.get("id") in outs
+            and not _SILENT_BY_DESIGN_RE.search(str(r.get("command") or ""))]
+    out: list[dict] = []
+    for r in done:
+        cmd = str(r.get("command") or "").rstrip().rstrip("'\"").rstrip()
+        if not outs[r["id"]] and _FILTER_TAIL_RE.search(cmd + " "):
+            out.append({"verdict": "contradicted", "id": r["id"], "reason": (
+                f"`{str(r.get('command'))[:120]}` filters for what the step should have left, and printed NOTHING: "
+                f"what it looks for is not there (§17.1738)")})
+    if done and not out and all(not outs[r["id"]] for r in done):
+        out.append({"verdict": "contradicted", "id": done[0]["id"], "reason": (
+            f"all {len(done)} check(s) ran and printed nothing, so nothing confirmed the work (§17.1738)")})
+    return out
 
 
 async def run_verify(spec, verify_cmds: list[str], env: Optional[dict[str, str]]) -> tuple[str, list[dict]]:
@@ -11350,7 +11539,7 @@ def _status_only_probe(check: str) -> bool:
 def _reads_only(cmd: str) -> bool:
     from app.modules.assist_state_check import read_only_command
     c = re.sub(r"<[A-Z][A-Z0-9_]{1,40}>", "x", str(cmd or ""))     # a placeholder is a value, not a verb
-    return read_only_command(c)
+    return read_only_command(c) or a_login_test(str(cmd or ""))      # §17.1739 — a login test reads, it sets nothing
 
 
 #: §17.1625 — the engine's in-guest templates: their block runs INSIDE guest N through the host's script

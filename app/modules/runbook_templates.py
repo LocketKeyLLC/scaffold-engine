@@ -534,6 +534,41 @@ RUN_IN_CONTAINER = Template(
 )
 
 
+#: §17.1731 — the step §17.1730 writes ("Get <app>'s API key ON THE MACHINE") runs the engine's OWN read-or-create,
+#: not a model draft. Live (job 7d30fe4f T2): drawn by the model, it read a `Tokens` table the engine's tested read
+#: does not use, and INSERTed into Jellyfin's live database without stopping the service -- while §17.1382/1385 sat
+#: unused one module away.
+GET_SERVICE_KEY = Template(
+    name="get_service_key",
+    title="Make sure the engine's API key for the service in container {GID} exists and works",
+    applies=lambda node, truth: _subject_kind(node, truth) == "ct" and bool(_service_key_app(node)),
+    params=[Param("GID", "subject"), Param("STEP", "node_key"),
+            Param("REMOTE_COMMANDS", "default", "the engine's own read-or-create (§17.1731)", ""),
+            Param("VERIFY_INSIDE", "default", "the service is up after it", ""),
+            Param("SECRET_FILES", "default", "", "")],
+    files=dict(RUN_IN_CONTAINER.files),
+    run=list(RUN_IN_CONTAINER.run),
+    verify=list(RUN_IN_CONTAINER.verify),
+    risk="Reads the engine's API key from the service's own database inside container {GID}; when there is none it "
+         "creates one (stopping and starting the service around the write). The key is never printed.",
+)
+
+
+def _service_key_app(node: dict) -> Optional[str]:
+    from app.modules.machine_values import key_step_app
+    return key_step_app(node)
+
+
+def _service_key_default(name: str, node: dict) -> str:
+    from app.modules.machine_values import key_step_commands
+    app = _service_key_app(node) or ""
+    if name == "REMOTE_COMMANDS":
+        return key_step_commands(app) if app else ""
+    if name == "VERIFY_INSIDE":
+        return f"systemctl is-active {app}" if app else ""
+    return ""
+
+
 READ_GUEST_CONSOLE = Template(
     name="read_guest_console",
     title="Read VM {GID}'s serial console",
@@ -585,7 +620,7 @@ tr -d '\r' < "$LOG" | grep -vE '^\s*$' | tail -n 120
 )
 
 
-TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, DEPLOY_SCAFFOLD_ENGINE, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, RUN_IN_CONTAINER]   # §17.1618
+TEMPLATES: list[Template] = [INSTALL_OS_CLOUDINIT, WATCH_GUEST_BOOT, READ_GUEST_CONSOLE, INSTALL_STEAM_SERVER, DEPLOY_SCAFFOLD_ENGINE, RUN_IN_VM_VIA_AGENT, REACH_VM_SSH_AND_RUN, GET_SERVICE_KEY, RUN_IN_CONTAINER]   # §17.1618, §17.1731
 
 
 def _text(node: dict) -> str:
@@ -848,7 +883,8 @@ def values_for(template: Template, node: dict, truth, env: Optional[dict], model
         elif p.source == "default":
             vals[p.name] = (secret_files_from_text(node) if p.name == "SECRET_FILES"
                             else deploy_engine_commands(node) if (template is DEPLOY_SCAFFOLD_ENGINE and p.name == "REMOTE_COMMANDS")
-                            else p.default)   # §17.1489, §17.1618
+                            else _service_key_default(p.name, node) if template is GET_SERVICE_KEY
+                            else p.default)   # §17.1489, §17.1618, §17.1731
         elif p.source == "node_key":
             vals[p.name] = re.sub(r"[^A-Za-z0-9]", "", str((node or {}).get("node_key") or "step")) or "step"   # §17.1317 — the unit name
         elif p.source == "derived":

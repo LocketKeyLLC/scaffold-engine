@@ -390,6 +390,23 @@ downstream implementation tasks `depends_on` it — so the operator chooses the 
 before the plan commits to one. This is separate from any decisions the plan
 itself needs; add it in addition to those.
 
+§17.1725 — `operator_answers` are the operator's own answers to the brief's
+questions: they are DECIDED. Every node must agree with them — a node that does
+the opposite of an answer (e.g. reserves a machine for one role when the operator
+said the machines work together) is wrong, not optional, so do not emit it and
+do not make it "optional per operator preference". `engine_feasibility` is the
+engine's own technical assessment of this brief (its summary and risks): when it
+names the tool or approach to use or to avoid, the nodes follow it, and every
+listed risk is either designed out by a node or checked by one.
+
+§17.1726 — A machine the brief says to PRESERVE keeps its running services
+running. On such a machine do NOT emit a node that reconfigures, replaces or
+restarts the container runtime, the network or the firewall those services
+already use (e.g. rewriting Docker's containerd config or restarting it to
+install kubeadm on a host whose services run in Docker); choose the variant
+that brings its own (e.g. k3s, which ships its own containerd) and say so in
+the node's notes.
+
 Return ONLY the JSON object. No preamble, no markdown."""
 
 
@@ -1177,6 +1194,148 @@ def wire_orphan_terminal_nodes(tasks: list[dict]) -> list[str]:
     return rewired
 
 
+_NUM_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine",
+              10: "ten", 11: "eleven", 12: "twelve"}
+_NUMBERED_TITLE = re.compile(r"^(?P<stem>.*?\b(?P<noun>[A-Za-z][A-Za-z-]{2,}))\s*#?(?P<n>\d{1,2})$")
+#: §17.1742 — the number in the MIDDLE ("Join laptop 1 as worker"), and the planner's own "N" for the rest
+#: ("Join laptop N as worker"). Live (job f9ca3ee1, the corrected re-plan): "laptop 1", "laptop 2", "laptop N".
+_NUMBERED_ANYWHERE = re.compile(r"^(?P<pre>.*?\b(?P<noun>[A-Za-z][A-Za-z-]{2,}))\s*#?(?P<n>\d{1,2}|N)\b(?P<post>.*)$")
+
+
+def detect_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
+    """§17.1729 — copies of one step numbered 1..N ("Install k3s agent laptop1" … "laptop4") when nothing the
+    operator gave says there are N of them.
+
+    Live (job f9ca3ee1, 2026-10-21): the laptops are found on the LAN and confirmed by the operator in T3; the
+    plan still wrote four install steps and four Ollama steps, one per invented laptop. With three laptops one
+    pair cannot run; with five, one laptop is never set up. Returns ``[{noun, count, ids}]`` per group: titles
+    equal up to a trailing number, numbered exactly 1..N (so "VM 106"/"VM 110" are not a group), N ≥ 2, and the
+    brief never states "N <noun>" (digit or word, up to two words between). Measured over the 18 stored plans
+    (790 steps, 20 numbered titles): f9ca3ee1's two groups and nothing else."""
+    import collections
+    groups: dict[tuple[str, str, str], list[tuple[int, str]]] = collections.defaultdict(list)
+    for t in tasks or []:
+        m = _NUMBERED_ANYWHERE.match(str(t.get("name") or t.get("title") or "").strip())
+        if m:
+            n = 99 if m.group("n") == "N" else int(m.group("n"))          # §17.1742 — "N" is the rest of the series
+            groups[(m.group("pre").strip().lower(), m.group("noun").lower(), m.group("post").strip().lower())].append(
+                (n, str(t.get("id") or t.get("node_key") or "")))
+    text = (brief_text or "").lower()
+    out: list[dict] = []
+    for (_pre, noun, _post), members in groups.items():
+        nums = sorted(n for n, _ in members)
+        digits = [n for n in nums if n != 99]
+        if len(nums) < 2 or digits != list(range(1, len(digits) + 1)) or nums.count(99) > 1:
+            continue
+        k = len(nums)
+        said = rf"\b(?:{k}|{_NUM_WORDS.get(k, k)})\s+(?:[a-z-]+\s+){{0,2}}{re.escape(noun)}"
+        if re.search(said, text):
+            continue
+        out.append({"noun": noun, "count": k, "ids": [i for _, i in sorted(members)]})
+    return out
+
+
+def collapse_invented_counts(tasks: list[dict], brief_text: str) -> list[dict]:
+    """§17.1729 — the deterministic last resort when the redrafts still carry numbered copies: each group becomes
+    its FIRST node, renamed to work over every confirmed item, depending on everything any copy depended on, and
+    everything that depended on any copy now depends on it. Live (job f9ca3ee1, 2026-10-21): three drafts, the
+    Ollama copies were merged by the model, the four "Install k3s agent laptop N" copies came back every time.
+    Mutates ``tasks`` in place; returns the groups merged."""
+    groups = detect_invented_counts(tasks, brief_text)
+    for g in groups:
+        by_id = {t.get("id"): t for t in tasks}
+        keep_id, drop = g["ids"][0], set(g["ids"][1:])
+        keep = by_id.get(keep_id)
+        if keep is None:
+            continue
+        noun = g["noun"]
+        m = _NUMBERED_ANYWHERE.match(str(keep.get("name") or "").strip())
+        prefix = (m.group("pre")[: -len(m.group("noun"))] if m else str(keep.get("name") or "")).rstrip()
+        # Names are cut to five words by _normalize_tasks; the full meaning rides in the notes.
+        joined = re.search(r"\b(?:on|to|for|into|onto)$", prefix, re.I)
+        post = (m.group("post").strip() if m else "")
+        if post:                                   # §17.1742 — "Join laptop 1 as worker" → "Join every laptop as worker"
+            keep["name"] = " ".join((prefix.split() + ["every", noun] + post.split())[:5])
+        else:
+            tail = ["every", noun] if joined else [",", "every", noun]
+            words = prefix.split()[: 5 - 2]
+            keep["name"] = (" ".join(words) + (" " if joined else "") + " ".join(tail)).replace(" ,", ",")
+        keep["notes"] = (f"Do this for EVERY {noun} confirmed earlier in the plan, one after another — how many there "
+                         f"are is what that step found, not a fixed number (§17.1729 merged {', '.join(g['ids'])}). "
+                         f"As drafted for one {noun}: {keep.get('notes') or ''}").strip()
+        deps: list[str] = []
+        for i in g["ids"]:
+            for d in (by_id.get(i) or {}).get("depends_on") or []:
+                if d not in g["ids"] and d not in deps:
+                    deps.append(d)
+        keep["depends_on"] = deps
+        if any((by_id.get(i) or {}).get("is_deliverable") for i in g["ids"]):
+            keep["is_deliverable"] = True
+        tasks[:] = [t for t in tasks if t.get("id") not in drop]
+        for t in tasks:
+            if t is keep:
+                continue
+            dl = t.get("depends_on") or []
+            if any(d in drop or d == keep_id for d in dl):
+                new: list[str] = []
+                for d in dl:
+                    d2 = keep_id if d in drop else d
+                    if d2 not in new:
+                        new.append(d2)
+                t["depends_on"] = new
+    groups += _merge_a_lone_n_into_its_every(tasks)
+    return groups
+
+
+def _repoint(tasks: list[dict], drop: str, keep_id: str) -> None:
+    for t in tasks:
+        dl = t.get("depends_on") or []
+        if drop in dl:
+            new: list[str] = []
+            for d in dl:
+                d2 = keep_id if d == drop else d
+                if d2 not in new and d2 != t.get("id"):
+                    new.append(d2)
+            t["depends_on"] = new
+
+
+def _merge_a_lone_n_into_its_every(tasks: list[dict]) -> list[dict]:
+    """§17.1742 — a lone "… laptop N" step beside an "… every laptop" step with the same opening is the same work:
+    merged into the "every" one. Live (job f9ca3ee1): T8 "Guide OS install, every laptop" (merged by §17.1729) and
+    T10 "Guide OS install laptop N — repeat walkthrough for each remaining laptop"."""
+    merged: list[dict] = []
+    for t in list(tasks):
+        m = _NUMBERED_ANYWHERE.match(str(t.get("name") or "").strip())
+        if not m or m.group("n") != "N":
+            continue
+        noun = m.group("noun").lower()
+        head = re.sub(r"[^a-z0-9 ]", "", m.group("pre")[: -len(m.group("noun"))].lower()).split()[:2]
+        every = next((o for o in tasks if o is not t and f"every {noun}" in str(o.get("name") or "").lower()
+                      and re.sub(r"[^a-z0-9 ]", "", str(o.get("name") or "").lower()).split()[:2] == head), None)
+        if every is None or not head:
+            continue
+        deps = list(every.get("depends_on") or [])
+        for d in t.get("depends_on") or []:
+            if d not in deps and d != every.get("id"):
+                deps.append(d)
+        every["depends_on"] = deps
+        tasks[:] = [x for x in tasks if x is not t]
+        _repoint(tasks, str(t.get("id")), str(every.get("id")))
+        merged.append({"noun": noun, "count": 0, "ids": [str(every.get("id")), str(t.get("id"))]})
+    return merged
+
+
+def render_invented_count_corrections(groups: list[dict], next_attempt: int) -> str:
+    lines = [f"## Invented counts (attempt {next_attempt})", ""]
+    for g in groups:
+        lines.append(f"- {', '.join(g['ids'])}: {g['count']} numbered copies of one step, one per {g['noun']} — but "
+                     f"nothing the operator gave says there are {g['count']} {g['noun']}s.")
+    lines += ["", "How many there are is only known when an earlier node finds or confirms them. Replace each group "
+              "with ONE node that does the work for EVERY confirmed item (name the earlier node that lists them), "
+              "and re-point anything that depended on a copy to that one node."]
+    return "\n".join(lines)
+
+
 def render_dead_end_corrections(
     tasks: list[dict], orphans: list[str], next_attempt: int,
 ) -> str:
@@ -1275,6 +1434,10 @@ async def _generate_dag_with_validator(
         if isinstance(brief_data, dict) and brief_data.get("prescribed"):
             from app.modules.engine_setup import PRESCRIBED_BLOCK
             prompt = PRESCRIBED_BLOCK + prompt
+        # §17.1727 — a brief that adds AI compute is told the engine can USE it (the Ollama pool).
+        from app.modules import ollama_pool as _pool
+        if _pool.planner_note_applies(brief_data):
+            prompt = _pool.PLANNER_NOTE + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.
@@ -1346,7 +1509,10 @@ async def _generate_dag_with_validator(
             if settings.dag_decision_impl_check_enabled else []
         )
 
-        if not outcome.issues and not dead_ends and not unimplemented:
+        # §17.1729 — numbered copies of a step for a count nobody gave. Retry so the model writes ONE node.
+        invented = detect_invented_counts(dag_data.get("tasks", []), json.dumps(brief_data))
+
+        if not outcome.issues and not dead_ends and not unimplemented and not invented:
             if attempt > 1:
                 warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
             return {
@@ -1378,6 +1544,11 @@ async def _generate_dag_with_validator(
                     + ", ".join(unimplemented)
                     + " (decided but never carried out — plan may be incomplete)"
                 )
+            if invented:
+                warnings.append(
+                    "invented_counts: " + "; ".join(
+                        f"{', '.join(g['ids'])} ({g['count']} {g['noun']}s, a count nobody gave)" for g in invented)
+                    + f" after {attempt} attempts")
             return {
                 "dag_data": dag_data, "raw_text": last_text, "model": last_model,
                 "duration_ms": total_duration_ms, "warnings": warnings,
@@ -1388,6 +1559,7 @@ async def _generate_dag_with_validator(
             issue_set_signature(outcome.issues),
             tuple(sorted(dead_ends)),
             tuple(sorted(unimplemented)),
+            tuple(sorted(i for g in invented for i in g["ids"])),
         )
         if sig == last_issue_signature:
             warnings.append(
@@ -1434,6 +1606,12 @@ async def _generate_dag_with_validator(
                     dag_data.get("tasks", []), unimplemented, attempt + 1,
                 )
             )
+        if invented:
+            warnings.append(
+                f"invented_count_found_{len(invented)}_attempt_{attempt}: "
+                + ", ".join("/".join(g["ids"]) for g in invented)
+            )
+            correction_parts.append(render_invented_count_corrections(invented, attempt + 1))
         corrections_block = "\n\n".join(correction_parts)
 
     # Reached only when the loop broke mid-flight after attempt 1 (e.g., a
@@ -1539,6 +1717,8 @@ async def generate_dag(
         logger.info("dag_prescriptive_brief: job=%s (no decision node, steps as listed)", job_id)
     else:
         brief_data = _brief_with_operator_decision(brief_data, research_data)
+    # §17.1725 — the operator's answers and the engine's own feasibility reach the planner as their own keys.
+    brief_data = _brief_with_engine_findings(brief_data, research_data)
     current_hash = _compute_dag_input_hash(brief_data, model, model_overrides)
 
     # §17.181: re-entry guard. Three cases when nodes already exist:
@@ -1669,6 +1849,14 @@ async def generate_dag(
                     "dag_dead_end_auto_linked: job=%s orphans=%s primary=%s",
                     job_id, orphans, primary,
                 )
+
+    # §17.1729 — numbered copies the redrafts did not merge are merged here, before nodes are normalized.
+    _merged = collapse_invented_counts(tasks, json.dumps(brief_data))
+    if _merged:
+        validator_warnings.append(
+            "invented_counts_merged: " + "; ".join(
+                f"{', '.join(g['ids'])} → {g['ids'][0]} (one step for every confirmed {g['noun']})" for g in _merged))
+        logger.warning("dag_invented_counts_merged: job=%s groups=%s", job_id, [g["ids"] for g in _merged])
 
     # 3b-4b. Node-count enforcement + normalize + semantic validation
     # (single try/except so any ValueError from these steps fails the job cleanly)
@@ -2432,6 +2620,41 @@ def _brief_with_operator_decision(brief_data: dict, research_data) -> dict:
     if isinstance(options, dict) and options.get("options"):
         return {**brief_data, "operator_decision": options}
     return brief_data
+
+
+def _brief_with_engine_findings(brief_data: dict, research_data) -> dict:
+    """§17.1725 — what the planner was never shown: the operator's answers, paired with their questions, and
+    the engine's own Phase-1 feasibility (summary + risks).
+
+    Live (job f9ca3ee1, 2026-10-21): the operator answered "VM 110 and the laptops should work together as one
+    pool" and the plan tainted VM 110 so AI work ran on the laptops only; Phase 1's feasibility said "must use
+    k3s, not full k8s" and the plan installed kubeadm. The answers rode in the prompt only as `user_feedback`, a
+    raw string beside the ambiguities it answered; the feasibility lived in `research_data` and never reached
+    the prompt at all. Adds ``operator_answers`` (answered pairs only — a non-answer stays an open question,
+    §17.1218) and ``engine_feasibility``. Never raises; a key already present is kept."""
+    if not isinstance(brief_data, dict):
+        return brief_data
+    out = dict(brief_data)
+    if "operator_answers" not in out:
+        try:
+            from app.modules.unanswered import answers
+            pairs = [{"question": p["question"], "answer": p["answer"]} for p in answers(out) if p["answered"]]
+        except Exception:
+            pairs = []
+        if pairs:
+            out["operator_answers"] = pairs
+    if "engine_feasibility" not in out:
+        try:
+            rd = research_data if isinstance(research_data, dict) else (
+                json.loads(research_data) if research_data else None)
+        except (ValueError, TypeError):
+            rd = None
+        feas = (rd or {}).get("feasibility") if isinstance(rd, dict) else None
+        if isinstance(feas, dict):
+            kept = {k: feas[k] for k in ("summary", "risks") if feas.get(k)}
+            if kept:
+                out["engine_feasibility"] = kept
+    return out
 
 
 def _map_node_type(task_type: str) -> str:

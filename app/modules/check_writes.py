@@ -14,7 +14,9 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-_EXEMPT_URL_RE = re.compile(r"/(?:test|testall|auth/login|login)\b|/api/v\d+/command\b", re.I)
+# §17.1739 — Jellyfin's `/Users/AuthenticateByName` opens a session like `/login`: a login test POSTs it and changes
+# no setting (live, job 7d30fe4f T7 "Verify mark authentication").
+_EXEMPT_URL_RE = re.compile(r"/(?:test|testall|auth/login|login|Users/AuthenticateByName)\b|/api/v\d+/command\b", re.I)
 
 
 def a_check_that_writes(commands: list[str], node: Optional[dict]) -> list[dict]:
