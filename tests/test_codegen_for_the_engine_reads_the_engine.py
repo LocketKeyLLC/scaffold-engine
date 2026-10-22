@@ -121,6 +121,15 @@ def test_the_live_news_client_is_refused_for_each_guess():
     assert len(found) == 4, found
 
 
+def test_a_missing_setting_is_told_what_to_do_and_not_offered_a_stranger():
+    """§17.1753 — live (T3's redraft): `getattr(settings, "edgar_user_agent", None) or DEFAULT` was refused, and the
+    hint offered `multi_user_enabled` because both contain "user"."""
+    found = es.unresolved_refs('```python\nfrom app.config import settings\nua = getattr(settings, "edgar_user_agent", None)\n```')
+    assert len(found) == 1 and "`settings.edgar_user_agent`: the engine has no such setting" in found[0]
+    assert "multi_user_enabled" not in found[0]
+    assert "module constant" in found[0] and "app.config.Settings" in found[0]
+
+
 def test_an_invented_package_is_refused():
     found = es.unresolved_refs(PAPER_CLIENT, SIBLINGS, SIBLING_NAMES)
     assert found == ["`from engine.secrets_store import …`: `engine` is not installed in the engine"]

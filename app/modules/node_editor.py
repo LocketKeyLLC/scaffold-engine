@@ -300,7 +300,7 @@ async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
         return
     rows = (await db.execute(
         text("SELECT node_key, status, output_text, started_at, completed_at, "
-             "       last_verification_reason "
+             "       last_verification_reason, retry_count "
              "  FROM dag_nodes WHERE job_id = :j AND node_key = ANY(:keys) "
              "   AND status <> 'pending'"),
         {"j": job_id, "keys": keys},
@@ -311,14 +311,15 @@ async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
             {"status": r["status"], "output_text": r["output_text"],
              "started_at": r["started_at"].isoformat() if r["started_at"] else None,
              "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
-             "last_verification_reason": r["last_verification_reason"]},
+             "last_verification_reason": r["last_verification_reason"],
+             "retry_count": r["retry_count"]},
             {"status": "pending"}, "node_editor:reset",
         )
     await db.execute(
         text(
             "UPDATE dag_nodes SET status = 'pending', output_text = NULL, "
             "started_at = NULL, completed_at = NULL, "
-            "last_verification_reason = NULL, updated_at = now() "
+            "last_verification_reason = NULL, retry_count = 0, updated_at = now() "
             "WHERE job_id = :j AND node_key = ANY(:keys)"
         ),
         {"j": job_id, "keys": keys},
@@ -724,7 +725,13 @@ async def reset_node(
 ) -> dict:
     """Reset ANY-status node to pending; with ``cascade=True`` also its
     transitive downstream. Generalizes retry_failed_node beyond FAILED; does
-    NOT bump retry_count.
+    NOT bump retry_count -- it gives the step its retries back (§17.1752).
+
+    §17.1752 — it used to leave retry_count where it was. Live (job 2772acae
+    T3, 2026-10-22): a step that had spent 3/3 on a starved verifier was reset,
+    its one new attempt was refused (§17.1749) for a fixable reason, and with
+    retry_count still 3 the run stopped there -- a reset was worth exactly one
+    attempt. The old count is kept in the reset's pre-image.
 
     §17.1284 — the cascade is OPT-IN. Resetting ADD26 (failed, to retry it)
     reset sixteen nodes behind it, un-doing one `done` and twelve `skipped`
