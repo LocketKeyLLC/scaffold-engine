@@ -163,6 +163,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "this step says it is READ ONLY",                # §17.1637
                    "a field this endpoint's objects do not have",   # §17.1694
+                   "lines for every item",                          # §17.1745
                    "inside single quotes is left alone by the shell",   # §17.1638
                    "and nothing sets it",                           # §17.1348
                    "but set in a DIFFERENT command",               # §17.1398
@@ -344,6 +345,7 @@ _WHOSE_GAP: dict[str, str] = {
     "sed rejects this program": "drafter",                        # §17.1617 — a program sed can compile
     "this step says it is READ ONLY": "drafter",                  # §17.1637 — reads only, with what the machine has
     "a field this endpoint's objects do not have": "drafter",     # §17.1694 — the shape names the real field
+    "lines for every item": "drafter",                             # §17.1745 — a cut read redrafted to one line an item
     "inside single quotes is left alone by the shell": "drafter",   # §17.1638 — no `$` before an uppercase letter
     "points a PUBLIC DNS name at a private address": "drafter",    # §17.1453 — leave ip= empty (the caller's address)
     "is the only field this rewrite of net0 may change": "drafter",   # §17.1457 — keep the live net0, flip firewall
@@ -3401,6 +3403,65 @@ def a_heredoc_program_will_not_compile(commands: list[str], files: Optional[list
                   "character (`get('title')` inside an f\"…\" string) or a plain variable.")})
         except (ValueError, RecursionError):
             continue
+    return out
+
+
+#: §17.1745 — the words both of `a_read_was_cut`'s reasons carry, so a redraft knows its last run was cut
+READ_CUT_REMEDY = "Print what the step needs, not the raw response"
+
+
+def _lines_per_pass(stmts: list) -> int:
+    """How many lines one pass through ``stmts`` prints at most: a ``print`` is one, a branch the larger of its arms,
+    a loop inside the pass two when it prints at all (it prints once per element, so more than one line)."""
+    n = 0
+    for st in stmts:
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) and isinstance(st.value.func, ast.Name) \
+                and st.value.func.id == "print":
+            n += 1
+        elif isinstance(st, ast.If):
+            n += max(_lines_per_pass(st.body), _lines_per_pass(st.orelse))
+        elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+            n += 2 if _lines_per_pass(st.body) else 0
+        elif isinstance(st, ast.Try):
+            n += _lines_per_pass(st.body) + max([_lines_per_pass(h.body) for h in st.handlers] or [0])
+        elif isinstance(st, (ast.With, ast.AsyncWith)):
+            n += _lines_per_pass(st.body)
+    return n
+
+
+def a_cut_read_still_prints_a_block_per_item(node: Optional[dict], commands: list[str],
+                                             files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1745 — a read whose last run was CUT, redrafted to print several lines for every item again.
+
+    §17.1691 fails a read-only step whose output overflowed the record and tells the next draft to print "one short
+    line per item"; §17.1260/1366 carry that reason into the redraft. The model read it and wrote the same shape. Live
+    (job e5e22b92 PR6, 2026-10-22): the first run printed 471 lines (a season pack is one Sonarr queue record per
+    episode, 43 for S3 alone) and the redraft printed nine lines for each `Mighty Morphin` record -- ~390 lines into a
+    300-line record, the same cut, offered as runnable. Judged only when the step's own last failure was that cut, so
+    an ordinary report that prints a block per item is never refused."""
+    if READ_CUT_REMEDY not in str((node or {}).get("last_verification_reason") or ""):
+        return []
+    out: list[dict] = []
+    progs = _quoted_heredoc_programs(commands, files) + [(w, s, l) for w, s, l in _py_sources(commands, files) if s]
+    for what, src, where in progs:
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        for loop in ast.walk(tree):
+            if not isinstance(loop, (ast.For, ast.AsyncFor)):
+                continue
+            n = _lines_per_pass(loop.body)
+            if n < 2:
+                continue
+            head = (ast.get_source_segment(src, loop) or "").splitlines()[:1]
+            out.append({"command": (head[0].strip() if head else where)[:200], "why": (
+                f"{what} in {where[:80]} prints {n} lines for every item of `{(head[0].strip() if head else 'its loop')[:80]}`, "
+                "and this step's LAST run was failed because its output was cut -- a read that prints a block per "
+                "item is cut again the same way. Print ONE line per item (its fields joined on that line), and when "
+                "items repeat -- a season pack is one queue record per EPISODE -- group them first and print one line "
+                "per group with its count.")})
+            break
     return out
 
 
@@ -7056,6 +7117,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + payload_will_not_compile(cmds)
     refused = refused + a_heredoc_program_will_not_compile(cmds, shape_files)           # §17.1723
     refused = refused + the_reply_is_read_before_it_is_parsed(cmds, shape_files)        # §17.1723
+    refused = refused + a_cut_read_still_prints_a_block_per_item(node, cmds, shape_files)   # §17.1745
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds, shape_files)
     # §17.1355 — the block mistook the engine's own scaffolding for the work:
