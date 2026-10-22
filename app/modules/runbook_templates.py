@@ -235,6 +235,16 @@ esac
 #: answers the first at once.
 _BOOT_PHASES = 3
 
+
+def _reach_phase(phase: str) -> str:
+    return f'MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{{GUEST_USER_NAME}}>" bash /tmp/in_vm_{{GID}}.sh {phase}'
+
+
+def _reach_run(waits: int) -> list[str]:
+    """The ssh template's phases: boots, start, `waits` waits, last (§17.1613, §17.1744)."""
+    return ([_reach_phase("boot")] * _BOOT_PHASES + [_reach_phase("start")] + [_reach_phase("wait")] * waits
+            + [_reach_phase("last")])
+
 REACH_VM_SSH_AND_RUN = Template(
     name="reach_vm_ssh_and_run",
     title="Run commands inside VM {GID} over ssh",
@@ -353,10 +363,7 @@ $(cat /tmp/in_vm_{GID}_remote.sh)" || { echo "FAILED: could not write the step's
   *) echo "unknown phase: $1"; exit 2;;
 esac
 """},
-    run=['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh boot'] * _BOOT_PHASES
-        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh start']
-        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh wait'] * 7
-        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh last'],
+    run=_reach_run(7),
     verify=["qm status {GID}"],
     risk="Runs this step's commands as root inside VM {GID} (detached, waited on); copies this host's key into the guest first.",
 )
@@ -420,9 +427,7 @@ DEPLOY_SCAFFOLD_ENGINE = Template(
            + [Param("REMOTE_COMMANDS", "default", "the engine's own deploy (§17.1618)", "")],
     files=dict(REACH_VM_SSH_AND_RUN.files),
     # a first build (the engine image, OWUI, Milvus pulls) outlasts the usual seven waits: thirty, ~75 min
-    # §17.1744 — the boots and the start, then thirty waits, then the last
-    run=REACH_VM_SSH_AND_RUN.run[:_BOOT_PHASES + 1] + [REACH_VM_SSH_AND_RUN.run[_BOOT_PHASES + 1]] * 30
-        + [REACH_VM_SSH_AND_RUN.run[-1]],
+    run=_reach_run(30),          # §17.1744 — the boots and the start, then thirty waits, then the last
     verify=["qm status {GID}"],
     risk="Clones this engine's repository into VM {GID} (/opt/scaffold-engine), generates its secrets there, builds and "
          "starts its stack; a second run keeps the secrets and re-applies the settings.",
