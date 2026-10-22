@@ -3009,7 +3009,7 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     # §17.1683 — the template's frame is trusted only while its commands ARE the template's (`bash /tmp/in_ct_N.sh
     # start|wait|last`): live, a capability replaced T2's template commands with SeriesSearch POSTs, and this gate --
     # seeing the template's runbook -- stood aside for them
-    if template_of(runbook or "") and all(re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:start|wait|last)\b",
+    if template_of(runbook or "") and all(re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:boot|start|wait|last)\b",
                                                     str(c)) for c in commands):
         return []
     # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
@@ -11545,7 +11545,7 @@ def _reads_only(cmd: str) -> bool:
 #: §17.1625 — the engine's in-guest templates: their block runs INSIDE guest N through the host's script
 #: (`bash /tmp/in_vm_N.sh start` over ssh, `…/in_vm_N_agent.sh` through the guest agent, `…/in_ct_N.sh` in an LXC).
 _IN_GUEST_RUN_RE = re.compile(
-    r"^(?P<prefix>.*?)bash\s+/tmp/in_(?P<kind>vm|ct)_(?P<gid>\d+)(?P<agent>_agent)?\.sh\s+(?:start|wait|last)\b")
+    r"^(?P<prefix>.*?)bash\s+/tmp/in_(?P<kind>vm|ct)_(?P<gid>\d+)(?P<agent>_agent)?\.sh\s+(?:boot|start|wait|last)\b")  # §17.1744 boot
 #: a check that names the hypervisor itself is a host check whatever the step's subject
 _HOST_CHECK_RE = re.compile(r"^\s*(?:qm|pct|pvesh|pvesm|pvecm|pveversion|ha-manager|lxc-\w+)\b")
 

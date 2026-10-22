@@ -231,6 +231,20 @@ esac
 )
 
 
+#: §17.1744 — boot phases before `start`: a cold VM gets three runner budgets (~7 min) to answer ssh; a running one
+#: answers the first at once.
+_BOOT_PHASES = 3
+
+
+def _reach_phase(phase: str) -> str:
+    return f'MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{{GUEST_USER_NAME}}>" bash /tmp/in_vm_{{GID}}.sh {phase}'
+
+
+def _reach_run(waits: int) -> list[str]:
+    """The ssh template's phases: boots, start, `waits` waits, last (§17.1613, §17.1744)."""
+    return ([_reach_phase("boot")] * _BOOT_PHASES + [_reach_phase("start")] + [_reach_phase("wait")] * waits
+            + [_reach_phase("last")])
+
 REACH_VM_SSH_AND_RUN = Template(
     name="reach_vm_ssh_and_run",
     title="Run commands inside VM {GID} over ssh",
@@ -267,6 +281,21 @@ if [ "${1:-}" = check ]; then
     [ -n "$IP" ] || { echo "FAILED: no address recorded for VM $GID yet (no step has reached it over ssh)"; exit 1; }
     ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "${2:-true}")" <<< "$MASS_PASSWORD"
     exit $?
+fi
+# §17.1744 -- `boot`: start the VM and wait for it to answer, in its OWN phases, each inside the runner's 180 s. Live
+# (job 0fb4ea7f RD28, 2026-10-22, after a host crash): VM 110 was stopped, and `start` had to boot it, sweep for its
+# address and reach it before it could launch anything -- the runner killed it at 180 s and the step failed with
+# nothing started. A boot that is not finished is not a failure: it says so and the next `boot` keeps waiting.
+if [ "${1:-}" = boot ]; then
+    qm status "$GID" | grep -q running || { qm start "$GID" && echo "started VM $GID"; }
+    IP="$(cat "$IPFILE" 2>/dev/null || true)"
+    if [ -z "$IP" ]; then echo "VM $GID is running; its address is found by the start phase"; exit 0; fi
+    deadline=$(( SECONDS + ${BOOT_WAIT:-150} ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then echo "VM $GID answers ssh at $IP"; exit 0; fi
+        sleep 5
+    done
+    echo "STILL BOOTING: VM $GID does not answer ssh at $IP yet (the next phase keeps waiting)"; exit 0
 fi
 qm status "$GID" | grep -q running || qm start "$GID"
 IP="$(cat "$IPFILE" 2>/dev/null || true)"
@@ -334,9 +363,7 @@ $(cat /tmp/in_vm_{GID}_remote.sh)" || { echo "FAILED: could not write the step's
   *) echo "unknown phase: $1"; exit 2;;
 esac
 """},
-    run=['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh start']
-        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh wait'] * 7
-        + ['MASS_PASSWORD="$MASS_PASSWORD" GUEST_USER="<{GUEST_USER_NAME}>" bash /tmp/in_vm_{GID}.sh last'],
+    run=_reach_run(7),
     verify=["qm status {GID}"],
     risk="Runs this step's commands as root inside VM {GID} (detached, waited on); copies this host's key into the guest first.",
 )
@@ -400,7 +427,7 @@ DEPLOY_SCAFFOLD_ENGINE = Template(
            + [Param("REMOTE_COMMANDS", "default", "the engine's own deploy (§17.1618)", "")],
     files=dict(REACH_VM_SSH_AND_RUN.files),
     # a first build (the engine image, OWUI, Milvus pulls) outlasts the usual seven waits: thirty, ~75 min
-    run=[REACH_VM_SSH_AND_RUN.run[0]] + [REACH_VM_SSH_AND_RUN.run[1]] * 30 + [REACH_VM_SSH_AND_RUN.run[-1]],
+    run=_reach_run(30),          # §17.1744 — the boots and the start, then thirty waits, then the last
     verify=["qm status {GID}"],
     risk="Clones this engine's repository into VM {GID} (/opt/scaffold-engine), generates its secrets there, builds and "
          "starts its stack; a second run keeps the secrets and re-applies the settings.",
