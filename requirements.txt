@@ -71,12 +71,13 @@ prometheus-client==0.26.0
 # request when otel_enabled. API/SDK/exporter (1.43.0) + instrumentation
 # (0.64b0) must move together. Importing at process start stays cheap; the SDK
 # only initializes when init_tracing() actually runs.
-opentelemetry-api==1.45.0
-opentelemetry-sdk==1.45.0
-opentelemetry-exporter-otlp-proto-http==1.45.0
-opentelemetry-instrumentation-fastapi==0.66b0
-opentelemetry-instrumentation-httpx==0.66b0
-opentelemetry-instrumentation-asyncpg==0.66b0
+# §17.1750 — 1.45.0/0.66b0 → 1.45.1/0.66b1 for CVE-2026-114603 (opentelemetry-api; pip-audit).
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation-httpx==0.66b1
+opentelemetry-instrumentation-asyncpg==0.66b1
 
 # §17.900 — Fernet symmetric encryption for provider API keys at rest
 # (`provider_connections.api_key_enc`). Already present transitively; pinned

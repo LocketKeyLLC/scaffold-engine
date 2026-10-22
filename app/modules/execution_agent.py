@@ -1982,6 +1982,18 @@ async def execute_next_node(
         except Exception as exc:
             logger.warning("stored_values_block_failed job=%s node=%s err=%r",
                            job_id, node_key, exc)
+        # §17.1749 — a step writing code for the engine itself is shown the engine (conventions, the modules every
+        # change uses with their real signatures, the package layout); live, job 2772acae's steps guessed
+        # `app.clients.searxng` and `engine.secrets_store`. Attached after the optimizer like every grounding block.
+        if tool_lower == "codegen":
+            try:
+                from app.modules import engine_source as _es
+                if _es.targets_the_engine(brief):
+                    async with async_session() as _esdb:
+                        _own_mods, _ = await _es.job_code(_esdb, job_id, except_node=node_key)
+                    _grounding_blocks.append(_es.block_for(node_snapshot, _own_mods))
+            except Exception as exc:
+                logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
@@ -2366,6 +2378,21 @@ async def execute_next_node(
                 logger.warning(
                     "codegen_syntax_gate_error: node='%s' error=%s", title, exc,
                 )
+        # §17.1749 — code for the engine itself may reach only for what the engine has: its modules and their
+        # names, its settings fields, its installed packages, or what this job's own steps write. The sandbox
+        # cannot see this (the engine's package is not in it, so a missing `app.*` import is a skip, §17.434).
+        engine_reason: str | None = None
+        if syntax_reason is None and (tool or "").lower() == "codegen":
+            try:
+                from app.modules import engine_source as _es
+                if _es.targets_the_engine(brief):
+                    async with async_session() as _esdb:
+                        _own_mods, _own_names = await _es.job_code(_esdb, job_id, except_node=node_key)
+                    _refs = _es.unresolved_refs(output, _own_mods, _own_names)
+                    if _refs:
+                        engine_reason = _es.unresolved_reason(_refs)
+            except Exception as exc:
+                logger.warning("engine_source_gate_error: node='%s' error=%r", title, exc)
         # §17.434 — sandbox exec-smoke, AFTER the syntax gate, BEFORE the LLM
         # verifier. Executes the node's own Python module top-level to catch
         # runtime/module-level errors the ast.parse gate + LLM verifier miss.
@@ -2377,6 +2404,7 @@ async def execute_next_node(
         exec_reason: str | None = None
         if (
             syntax_reason is None
+            and engine_reason is None
             and settings.codegen_execution_check_enabled
             and (settings.coderunner_url or "").strip()
             and (tool or "").lower() == "codegen"
@@ -2396,6 +2424,10 @@ async def execute_next_node(
             verify_status = "fail"
             reason, confidence = syntax_reason, 0.0
             logger.warning("codegen_syntax_gate_fail: node='%s'", title)
+        elif engine_reason is not None:
+            verify_status = "fail"
+            reason, confidence = engine_reason, 0.0
+            logger.warning("engine_source_gate_fail: node='%s'", title)
         elif exec_reason is not None:
             verify_status = "fail"
             reason, confidence = exec_reason, 0.0
