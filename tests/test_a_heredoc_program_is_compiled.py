@@ -87,7 +87,9 @@ def test_an_unquoted_tag_is_not_judged():
 
 def test_the_engines_own_programs_pass():
     own = [qr.command("105", ["power"]), qr.status_command("105"), qt.command("105", ["new", "stuck"])]
-    assert len(sr._quoted_heredoc_programs(own)) == 3
+    # §17.1746 — the programs ride `python3 -c '…'` (the password is on stdin), so the `-c` reader must see each whole
+    assert [s for _, s, _ in sr._py_sources(own)] == [qr.READ_PY, qr.STATUS_PY, qt.TRACKERS_PY]
+    assert sr.payload_will_not_compile(own) == []
     assert sr.a_heredoc_program_will_not_compile(own) == []
     assert sr.the_reply_is_read_before_it_is_parsed(own) == []
 

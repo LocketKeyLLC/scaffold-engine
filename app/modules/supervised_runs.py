@@ -5159,8 +5159,8 @@ _GUEST_SHELL_RE = re.compile(r"\b(?:ba|da)?sh\s+-c\s")
 def _host_expanded_refs(line: str) -> list[str]:
     """The `$NAME`s the HOST shell expands INTO a guest shell script on this line (`… sh -c '…'`): outside single
     quotes, after the `sh -c`, and not the here-string after `<<<` (that is the value going on stdin -- the remedy).
-    A value handed over as `env NAME="$S" prog` is not judged here (the engine's own qBittorrent reads use it; its
-    process-list exposure is a separate item)."""
+    A value handed over as `env NAME="$S" prog` is not judged here (§17.1746 moved the engine's own qBittorrent reads,
+    which used it, to a here-string)."""
     g = _GUEST_SHELL_RE.search(line)
     if not g:
         return []
@@ -5192,6 +5192,27 @@ def _host_expanded_refs(line: str) -> list[str]:
     return out
 
 
+#: §17.1746 — `pct exec N -- env A=x B="$S" prog`: the assignments `env` sets, each value as the host shell sees it
+_GUEST_ENV_ASSIGNS_RE = re.compile(r"""\s--\s+env\s+((?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s'"]+)+\s+)+)""")
+_ASSIGN_RE = re.compile(r"""[A-Za-z_]\w*=((?:"[^"]*"|'[^']*'|[^\s'"]+)+)""")
+
+
+def _env_assigned_refs(line: str) -> list[str]:
+    """§17.1746 — the `$NAME`s the host expands into an `env NAME=VALUE` argument of `pct exec`: the value becomes an
+    argument of `pct exec` on the host and of `env` in the guest -- every process list on both. Live: the engine's own
+    qBittorrent reads (`env QBT_PASS="$MASS_PASSWORD" python3 - <<'PY'`) until §17.1746. A single-quoted value is
+    literal and names nothing."""
+    m = _GUEST_ENV_ASSIGNS_RE.search(line.split("<<<", 1)[0])
+    if not m:
+        return []
+    out: list[str] = []
+    for a in _ASSIGN_RE.finditer(m.group(1)):
+        for part in re.findall(r"""("[^"]*"|'[^']*'|[^'"]+)""", a.group(1)):
+            if not part.startswith("'"):
+                out += re.findall(r"\$\{?([A-Za-z_]\w*)", part)
+    return out
+
+
 def secret_in_a_guest_exec_command_line(commands: list[str], policy: Optional[dict] = None) -> list[dict]:
     """§17.1733 — a secret the host expands into `pct exec` / `qm guest exec`'s own arguments.
 
@@ -5209,7 +5230,7 @@ def secret_in_a_guest_exec_command_line(commands: list[str], policy: Optional[di
             m = _GUEST_EXEC_LINE_RE.match(line)
             if not m:
                 continue
-            names = [n for n in _host_expanded_refs(line) if n in held or secret_name(n)]
+            names = [n for n in _host_expanded_refs(line) + _env_assigned_refs(line) if n in held or secret_name(n)]
             if not names:
                 continue
             n, gid = names[0], m.group(1)

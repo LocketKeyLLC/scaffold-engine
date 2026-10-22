@@ -21,13 +21,14 @@ from typing import Callable, Optional
 _PORT = "8080"
 _USER = "admin"
 
-#: runs inside qBittorrent's guest as `python3 -` with QBT_PASS and QBT_FILTER in its environment
+#: runs inside qBittorrent's guest as `python3 -c` with QBT_FILTER in its environment and the password on its stdin
+#: (§17.1746: a value in `env NAME=…` is in the host's process list for as long as the program runs)
 READ_PY = (
     "import os, sys, json, urllib.request, urllib.parse, http.cookiejar\n"
     "base = 'http://127.0.0.1:" + _PORT + "'\n"
     "jar = http.cookiejar.CookieJar()\n"
     "op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))\n"
-    "body = urllib.parse.urlencode({'username': '" + _USER + "', 'password': os.environ.get('QBT_PASS', '')}).encode()\n"
+    "body = urllib.parse.urlencode({'username': '" + _USER + "', 'password': sys.stdin.readline().rstrip('\\n')}).encode()\n"
     "req = urllib.request.Request(base + '/api/v2/auth/login', data=body, headers={'Referer': base})\n"
     "ans = op.open(req, timeout=30).read().decode(errors='replace').strip()\n"
     "if ans != 'Ok.':\n"
@@ -62,7 +63,7 @@ STATUS_PY = (
     "base = 'http://127.0.0.1:" + _PORT + "'\n"
     "jar = http.cookiejar.CookieJar()\n"
     "op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))\n"
-    "body = urllib.parse.urlencode({'username': '" + _USER + "', 'password': os.environ.get('QBT_PASS', '')}).encode()\n"
+    "body = urllib.parse.urlencode({'username': '" + _USER + "', 'password': sys.stdin.readline().rstrip('\\n')}).encode()\n"
     "ans = op.open(urllib.request.Request(base + '/api/v2/auth/login', data=body, headers={'Referer': base}), timeout=30).read().decode(errors='replace').strip()\n"
     "if ans != 'Ok.':\n"
     "    print('FAILED: qBittorrent refused the login: ' + ans[:80]); sys.exit(1)\n"
@@ -118,21 +119,45 @@ def name_filter(node: Optional[dict]) -> list[str]:
     return []
 
 
+def guest_python(gid: str, env: dict[str, str], prog: str) -> str:
+    """§17.1746 — run ``prog`` in guest ``gid`` with the qBittorrent password on its STDIN.
+
+    The reads were `pct exec N -- env QBT_PASS="$MASS_PASSWORD" … python3 - <<'PY'`: the host shell expands the value into
+    pct's argument list, and every user on the Proxmox host can read it in `ps` for as long as the program runs (inside
+    the guest it is `env`'s argv and then python's environment). A here-string is in no process's arguments: the
+    program goes on the command line, where nothing is secret, and the value goes on stdin, as every engine template
+    that hands a guest a password already does."""
+    envs = "".join(f"{k}={shlex.quote(v)} " for k, v in env.items())
+    return f'pct exec {gid} -- env {envs}python3 -c {shlex.quote(prog)} <<< "$MASS_PASSWORD"'
+
+
 def command(gid: str, words: list[str]) -> str:
     import json
-    return (f'pct exec {gid} -- env QBT_PASS="$MASS_PASSWORD" QBT_FILTER={shlex.quote(json.dumps(words))} '
-            f"python3 - <<'PY'\n{READ_PY}PY")
+    return guest_python(gid, {"QBT_FILTER": json.dumps(words)}, READ_PY)
 
 
 def status_command(gid: str) -> str:
-    return f'pct exec {gid} -- env QBT_PASS="$MASS_PASSWORD" QBT_FILTER=\'[]\' python3 - <<\'PY\'\n{STATUS_PY}PY'
+    return guest_python(gid, {"QBT_FILTER": "[]"}, STATUS_PY)
 
 
 def is_engine_read(cmd: str) -> bool:
     """The engine's own qBittorrent read (torrents or connection), exactly as `command`/`status_command` write it."""
+    import json
     c = str(cmd or "")
-    return ((READ_PY in c or STATUS_PY in c)
-            and bool(re.match(r"\s*pct\s+exec\s+\d{3,5}\s+--\s+env\s+QBT_PASS=\"\$MASS_PASSWORD\"\s+QBT_FILTER=", c)))
+    head = c.split(" python3 -c ", 1)[0]
+    try:
+        argv = shlex.split(head)
+    except ValueError:
+        return False
+    if len(argv) != 6 or argv[:2] != ["pct", "exec"] or argv[3:5] != ["--", "env"] or not argv[5].startswith("QBT_FILTER="):
+        return False
+    if c == status_command(argv[2]):
+        return True
+    try:
+        words = json.loads(argv[5].split("=", 1)[1])
+    except ValueError:
+        return False
+    return isinstance(words, list) and c == command(argv[2], words)
 
 
 def block(node: Optional[dict], qbt_guest: Callable[[], Optional[str]]) -> Optional[tuple[list[str], list[str], str]]:

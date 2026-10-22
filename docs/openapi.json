@@ -10262,6 +10262,56 @@
         ]
       }
     },
+    "/jobs/{job_id}/replan": {
+      "post": {
+        "description": "§17.1747 — plan a job again from its brief, while no step of its plan has run and no question is answered.\n\nThe old plan is kept in the node edit log (op `replan`). 409 when the plan has started (`started`/`answered` say\nwhat) or the job is running. Returns the new plan, as `POST /dag` does.",
+        "operationId": "replan_endpoint_jobs__job_id__replan_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Replan Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/resume": {
       "post": {
         "description": "Resume a cancelled job and stream its execution.\n\nAtomically flips the job from ``cancelled`` back to ``executing`` and\nre-fires ``/execute/all``-equivalent execution. Replaces the manual\nSQL-then-curl recipe in debugging.md. ``execute_all_nodes`` is\nidempotent over completed nodes — execution picks up from the last\npending node, with done-node outputs serving as upstream context.\n\nStatus codes:\n  - 200 + SSE stream on successful resume\n  - 404 if no job with that ID exists\n  - 409 if the job exists but isn't in ``cancelled`` (current status\n    returned in detail for client-side dispatch)\n  - 400 on malformed UUID",

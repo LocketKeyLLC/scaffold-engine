@@ -1,6 +1,7 @@
-"""§17.1708 — the engine reads qBittorrent itself: a login then a GET, inside its guest, the password via the environment."""
+"""§17.1708 — the engine reads qBittorrent itself: a login then a GET, inside its guest; §17.1746 — the password on stdin."""
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -33,7 +34,8 @@ def _frame(node):
 def test_the_live_step_becomes_the_engines_read_with_no_refusal():
     f = _frame(T1)
     assert len(f["commands"]) == 1 and qr.is_engine_read(f["commands"][0]), f["commands"]
-    assert f["commands"][0].startswith('pct exec 105 -- env QBT_PASS="$MASS_PASSWORD"')
+    assert f["commands"][0].startswith("pct exec 105 -- env QBT_FILTER=")
+    assert f["commands"][0].endswith('<<< "$MASS_PASSWORD"') and f["commands"][0].count("$MASS_PASSWORD") == 1
     assert not f["refused"], [r["why"][:160] for r in f["refused"]]
 
 
@@ -75,9 +77,10 @@ def _run(password, words):
     srv = HTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     prog = qr.READ_PY.replace("127.0.0.1:" + qr._PORT, "127.0.0.1:%d" % srv.server_address[1])
-    env = {**os.environ, "QBT_PASS": password, "QBT_FILTER": json.dumps(words)}
+    env = {**os.environ, "QBT_FILTER": json.dumps(words)}
     try:
-        return subprocess.run([sys.executable, "-"], input=prog, capture_output=True, text=True, env=env, timeout=30)
+        return subprocess.run([sys.executable, "-c", prog], input=password + "\n", capture_output=True, text=True,
+                              env=env, timeout=30)
     finally:
         srv.shutdown()
 
@@ -127,8 +130,7 @@ def test_the_connection_read_reports_status_and_never_a_password_field():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     prog = qr.STATUS_PY.replace("127.0.0.1:" + qr._PORT, "127.0.0.1:%d" % srv.server_address[1])
     try:
-        r = subprocess.run([sys.executable, "-"], input=prog, capture_output=True, text=True, timeout=30,
-                           env={**os.environ, "QBT_PASS": "s3cret"})
+        r = subprocess.run([sys.executable, "-c", prog], input="s3cret\n", capture_output=True, text=True, timeout=30)
     finally:
         srv.shutdown()
     assert r.returncode == 0, r.stderr
@@ -144,6 +146,35 @@ def test_a_connection_step_gets_the_status_read_with_no_refusal():
     qs["prompt_template"] = qs["description"]
     assert qr.wants_status(qs) and not qr.wants_status(T1)
     f = _frame(qs)
-    assert qr.is_engine_read(f["commands"][0]) and qr.STATUS_PY in f["commands"][0]
+    assert qr.is_engine_read(f["commands"][0]) and shlex.quote(qr.STATUS_PY) in f["commands"][0]
     assert f["commands"][1:] == ["pct exec 105 -- ss -tlnu", "pct exec 105 -- ip -4 -brief addr"]
     assert not f["refused"], [r["why"][:160] for r in f["refused"]]
+
+
+def test_the_password_is_in_no_process_arguments(tmp_path):
+    """§17.1746 — live shape was `pct exec N -- env QBT_PASS="$MASS_PASSWORD" …`: the value sat in pct's argv (`ps` on the
+    host). Run the real command line through bash with a `pct` that records its arguments and hands its stdin on."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    (b / "pct").write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$SEEN"\ncat\n')
+    (b / "pct").chmod(0o755)
+    for cmd in (qr.command("105", ["mighty", "morphin"]), qr.status_command("105")):
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=True,
+                             env={**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "SEEN": str(tmp_path / "seen"),
+                                  "MASS_PASSWORD": "s3cr3t!!"}).stdout
+        assert out == "s3cr3t!!\n"                                          # it reaches the program on stdin
+        argv = (tmp_path / "seen").read_text()
+        assert "s3cr3t!!" not in argv and "QBT_PASS" not in argv
+        assert qr.is_engine_read(cmd)
+
+
+def test_a_drafted_env_assignment_of_a_held_secret_is_refused():
+    """§17.1746 — the same shape from a model draft: refused by §17.1733's gate, which now reads `env NAME=…` too."""
+    policy = {"held": ["MASS_PASSWORD"]}
+    old = 'pct exec 105 -- env QBT_PASS="$MASS_PASSWORD" QBT_FILTER=\'[]\' python3 - <<\'PY\'\nprint(1)\nPY'
+    hit = sr.secret_in_a_guest_exec_command_line([old], policy)
+    assert len(hit) == 1 and "`$MASS_PASSWORD` is spliced into `pct exec`'s command line" in hit[0]["why"]
+    assert sr.secret_in_a_guest_exec_command_line(['pct exec 105 -- env A=${MASS_PASSWORD}x python3 -c "print(1)"'], policy)
+    assert sr.secret_in_a_guest_exec_command_line([qr.command("105", []), qr.status_command("105")], policy) == []
+    assert sr.secret_in_a_guest_exec_command_line(["pct exec 105 -- env A='$MASS_PASSWORD' B=$HOME python3 -c 'print(1)'"],
+                                                  policy) == []

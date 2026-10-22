@@ -1,9 +1,9 @@
 {
-  "version": "1.2",
+  "version": "2.0",
   "created_at": "2026-04-18",
-  "updated_at": "2026-05-23",
-  "kb_snapshot_entries": 501,
-  "kb_snapshot_note": "Post batch ingestion push (191 -> 501 across 31 runs)",
+  "updated_at": "2026-10-22",
+  "kb_snapshot_entries": 5466,
+  "kb_snapshot_note": "\u00a717.1748 \u2014 the v1.x pairs (Kahn, Keycloak, OAuth2, cache invalidation, \u2026) named documents that are no longer in the corpus (lost before \u00a717.855 pinned Milvus' etcd); the 2026-Q4 run scored 0/20 on them. v2.0 asks about what the corpus holds now; every expected_titles_contain matches at least one live title.",
   "rebaseline": [
     {
       "kb_size": 1093,
@@ -22,316 +22,267 @@
       "ts": "2026-05-23T19:30:00Z",
       "harness": "scripts/score_retrieval.py (\u00a717.230 \u2014 title-substring matching)",
       "note": "\u00a717.230 \u2014 primary scoring metric switched from expected_entry_ids exact-match (brittle to topic-mode hash drift, see \u00a717.211 + \u00a717.229) to expected_titles_contain (case-insensitive AND-of-substrings against retrieved titles). expected_entry_ids retained per pair as archival exact-id metric. First post-\u00a717.230 score landed against the \u00a717.229 Tier A regrown corpus (565 \u2192 685 entries). See OVERVIEW.md \u00a717.230."
+    },
+    {
+      "kb_size": 5466,
+      "ts": "2026-10-22T11:30:00Z",
+      "harness": "scripts/score_retrieval.py (\u00a717.230 title-substring) inside scaffold-orchestrator, golden_set v2.0",
+      "metrics": {
+        "coverage": 0.85,
+        "coverage_at_5": 0.8,
+        "mean_recall_at_5": 0.8,
+        "mean_recall_at_10": 0.85,
+        "mean_mrr": 0.717,
+        "context_precision": 0.707,
+        "context_recall": 0.85
+      },
+      "note": "2026-Q4 calibration (\u00a717.1748; the 2026-10-01 cron slot was missed). The v1.2 pairs scored 0/20 -- their documents are no longer in the corpus -- so this is the FIRST row on v2.0 and is not comparable to earlier rows. Misses @10: g005 TLS fingerprint (Cloudflare-bypass neighbours retrieved), g012 Ollama generate endpoint (PEFT docs retrieved -- a real miss), g020 markdown to PDF (other converter entries retrieved)."
     }
   ],
   "pairs": [
     {
       "id": "g001",
-      "query": "parallel implementation of Kahn topological sort",
-      "expected_entry_ids": [
-        "scaffold-parallel-implementation-of-kahn's-algorithm-054cfbad",
-        "scaffold-kahn's-algorithm-implementation-2b2d3d06"
-      ],
+      "query": "why does my sqlite database file format version change when I leave write-ahead logging",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "Kahn",
-        "algorithm"
+        "WAL"
       ],
       "domain": "eng",
       "difficulty": "medium",
-      "tier": "direct_lookup",
-      "notes": "Target ranked #2; generic topological-sort entry ranked #1 (arguably also valid)"
+      "tier": "troubleshooting",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
       "id": "g002",
-      "query": "how does topological sorting work step by step",
-      "expected_entry_ids": [
-        "scaffold-topological-sorting-process-079a7191"
-      ],
+      "query": "does sqlite check foreign key constraints unless I turn it on",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "topological",
-        "sorting"
+        "SQLite",
+        "foreign key"
       ],
-      "domain": "rag",
-      "difficulty": "medium",
+      "domain": "eng",
+      "difficulty": "easy",
       "tier": "direct_lookup",
-      "notes": "Target at rank 5; multiple Kahn variants ranked above"
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
       "id": "g003",
-      "query": "how do I secure my web application against common attacks",
-      "expected_entry_ids": [
-        "scaffold-web-security-implementation-guides-dfe09110",
-        "scaffold-content-security-policy-(csp)-4bad0089"
-      ],
+      "query": "get a free https certificate for nginx on ubuntu",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "security"
+        "certbot"
       ],
-      "domain": "rag",
+      "domain": "eng",
       "difficulty": "easy",
-      "tier": "troubleshooting",
-      "notes": "Target rank 1; CSP entry also legitimately relevant"
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
       "id": "g004",
-      "query": "when should I truncate versus round numbers",
-      "expected_entry_ids": [
-        "scaffold-truncation-in-mathematics-and-computer-science-ef2f0d67",
-        "scaffold-truncation-definition-4e224245"
-      ],
+      "query": "how long does a captcha service take to solve a cloudflare turnstile challenge",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "truncation"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "parameter_tuning",
-      "notes": "Target rank 1; only 2 results returned (too_strict threshold may have filtered)"
-    },
-    {
-      "id": "g005",
-      "query": "how to route telemetry data with Vector",
-      "expected_entry_ids": [
-        "scaffold-vector-telemetry-data-router-91e23a2a"
-      ],
-      "expected_titles_contain": [
-        "Vector",
-        "telemetry"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "code_adjacent",
-      "notes": "Target rank 1; only 1 result returned"
-    },
-    {
-      "id": "g006",
-      "query": "Kahn algorithm vs DFS for topological sort",
-      "expected_entry_ids": [
-        "scaffold-kahn's-algorithm-implementation-37c0f092",
-        "scaffold-kahn's-algorithm-for-topological-sorting-aca1c3a8"
-      ],
-      "expected_titles_contain": [
-        "Kahn",
-        "algorithm"
-      ],
-      "domain": "rag",
-      "difficulty": "medium",
-      "tier": "comparative",
-      "notes": "DFS not covered in KB; Kahn variants returned as closest match"
-    },
-    {
-      "id": "g007",
-      "query": "how do I handle cache invalidation correctly",
-      "expected_entry_ids": [
-        "scaffold-cache-invalidation-d0152326",
-        "scaffold-redis-cache-invalidation-patterns-61f6cf5a"
-      ],
-      "expected_titles_contain": [
-        "cache",
-        "invalidation"
-      ],
-      "domain": "eng",
-      "difficulty": "easy",
-      "tier": "troubleshooting",
-      "notes": "Target rank 1; only 2 results returned (too_strict threshold)"
-    },
-    {
-      "id": "g008",
-      "query": "when to use write-through versus write-back caching",
-      "expected_entry_ids": [
-        "scaffold-write-through-pattern-43f8c68a",
-        "scaffold-write-behind-caching-3e943468"
-      ],
-      "expected_titles_contain": [
-        "write",
-        "caching"
-      ],
-      "domain": "eng",
-      "difficulty": "easy",
-      "tier": "parameter_tuning",
-      "notes": "Target rank 1; write-behind complementary match at rank 2"
-    },
-    {
-      "id": "g009",
-      "query": "cache data between pipeline runs",
-      "expected_entry_ids": [
-        "scaffold-caching-data-between-runs-fce6caca"
-      ],
-      "expected_titles_contain": [
-        "caching",
-        "runs"
+        "Turnstile"
       ],
       "domain": "eng",
       "difficulty": "medium",
       "tier": "direct_lookup",
-      "notes": "Target rank 2; Python subdirectory entry ranked above (less specific)"
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
-      "id": "g010",
-      "query": "gRPC versus REST API performance tradeoffs",
-      "expected_entry_ids": [
-        "scaffold-grpc-vs-rest-performance-eadb4807",
-        "scaffold-grpc-vs-rest-performance-benchmark-5b7b8ac4"
-      ],
+      "id": "g005",
+      "query": "cloudflare blocks my scraper because the TLS handshake does not match the browser it claims to be",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "gRPC",
-        "REST"
+        "TLS fingerprint"
+      ],
+      "domain": "eng",
+      "difficulty": "hard",
+      "tier": "troubleshooting",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g006",
+      "query": "self-hosted torrent indexer that crawls the DHT",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "Bitmagnet"
       ],
       "domain": "eng",
       "difficulty": "easy",
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g007",
+      "query": "which usenet providers share the same backbone",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "backbone"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
       "tier": "comparative",
-      "notes": "Target rank 1; duplicate benchmark entries at ranks 2-4 suggest dedup gap"
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g008",
+      "query": "authentication bypass vulnerability in sonarr",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "sonarr",
+        "auth"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g009",
+      "query": "cpu needed to host a dedicated palworld server",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "palworld"
+      ],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "parameter_tuning",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g010",
+      "query": "combine several LoRA adapters into one model with PEFT",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "model_merging"
+      ],
+      "domain": "llm",
+      "difficulty": "medium",
+      "tier": "code_adjacent",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
       "id": "g011",
-      "query": "configuring storage quotas and eviction policies",
-      "expected_entry_ids": [
-        "scaffold-storage-quotas-and-eviction-38e530dc"
-      ],
+      "query": "httpx decodes the response body with the wrong charset",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "storage",
-        "quotas"
+        "text-encodings"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "troubleshooting",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g012",
+      "query": "ollama REST endpoint to generate a completion",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "ollama",
+        "api.md"
+      ],
+      "domain": "llm",
+      "difficulty": "easy",
+      "tier": "code_adjacent",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g013",
+      "query": "jellyfin keeps showing items whose folder I already deleted",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "phantom"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "troubleshooting",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g014",
+      "query": "replacement for FlareSolverr to get past cloudflare",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "FlareSolverr"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "comparative",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g015",
+      "query": "set up a wireguard tunnel through a VPN provider on proxmox",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "wireguard"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g016",
+      "query": "add a private tracker to prowlarr",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "Prowlarr definition"
+      ],
+      "domain": "eng",
+      "difficulty": "easy",
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g017",
+      "query": "stop the host from accepting IPv6 router advertisements",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "ipv6"
       ],
       "domain": "eng",
       "difficulty": "hard",
       "tier": "parameter_tuning",
-      "notes": "Target missed entirely; only Redis Memory Management returned (semantically adjacent but not target). Genuine recall failure."
-    },
-    {
-      "id": "g012",
-      "query": "parallelizing Kahn algorithm for large graphs",
-      "expected_entry_ids": [
-        "scaffold-parallel-kahn's-algorithm-60db8c02"
-      ],
-      "expected_titles_contain": [
-        "parallel",
-        "Kahn"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "comparative",
-      "notes": "Target rank 1; sequential variant and complexity entry as neighbors"
-    },
-    {
-      "id": "g013",
-      "query": "running Keycloak in a container for auth",
-      "expected_entry_ids": [
-        "scaffold-keycloak-docker-image-57117089",
-        "scaffold-keycloak-d2a361b2"
-      ],
-      "expected_titles_contain": [
-        "Keycloak"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "code_adjacent",
-      "notes": "Target rank 1; 3 Keycloak variants returned"
-    },
-    {
-      "id": "g014",
-      "query": "setting up OAuth2 proxy in front of a service",
-      "expected_entry_ids": [
-        "scaffold-oauth2-proxy-06302d54"
-      ],
-      "expected_titles_contain": [
-        "OAuth2",
-        "proxy"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "troubleshooting",
-      "notes": "Target rank 1; only 1 result returned"
-    },
-    {
-      "id": "g015",
-      "query": "serving Qwen3 reranker via vLLM",
-      "expected_entry_ids": [
-        "scaffold-docker-image-qwen3-reranker-vllm-0b827d85"
-      ],
-      "expected_titles_contain": [
-        "qwen3",
-        "reranker"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "code_adjacent",
-      "notes": "Target rank 1; cross-encoder entry as neighbor"
-    },
-    {
-      "id": "g016",
-      "query": "deploying Milvus with Bitnami Helm chart",
-      "expected_entry_ids": [
-        "scaffold-bitnamicharts/milvus-eae7290c",
-        "scaffold-bitnami-helm-chart-for-milvus-b8603f4c",
-        "scaffold-bitnami/milvus-0edbc48d"
-      ],
-      "expected_titles_contain": [
-        "bitnami",
-        "milvus"
-      ],
-      "domain": "rag",
-      "difficulty": "easy",
-      "tier": "code_adjacent",
-      "notes": "Target rank 1; 3 near-duplicate Bitnami Milvus entries suggest dedup gap"
-    },
-    {
-      "id": "g017",
-      "query": "HTTP compression dictionary transport feature",
-      "expected_entry_ids": [
-        "scaffold-compression-dictionary-transport-a3f299a4"
-      ],
-      "expected_titles_contain": [
-        "compression",
-        "dictionary"
-      ],
-      "domain": "eng",
-      "difficulty": "easy",
-      "tier": "direct_lookup",
-      "notes": "Target rank 1; only 1 result returned (niche topic)"
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     },
     {
       "id": "g018",
-      "query": "reduce FastAPI Docker image size",
-      "expected_entry_ids": [
-        "scaffold-fastapi-docker-image-size-906ddba5",
-        "scaffold-fastapi-docker-image-5fa90e31"
-      ],
+      "query": "hardware transcoding for jellyfin running in a proxmox container",
+      "expected_entry_ids": [],
       "expected_titles_contain": [
-        "FastAPI",
-        "Docker"
+        "Jellyfin",
+        "LXC"
+      ],
+      "domain": "eng",
+      "difficulty": "medium",
+      "tier": "parameter_tuning",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g019",
+      "query": "python testbench framework for verilog simulation",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "cocotb"
+      ],
+      "domain": "eng_design",
+      "difficulty": "easy",
+      "tier": "direct_lookup",
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
+    },
+    {
+      "id": "g020",
+      "query": "turn markdown into a PDF with CSS styling",
+      "expected_entry_ids": [],
+      "expected_titles_contain": [
+        "weasyprint"
       ],
       "domain": "eng",
       "difficulty": "easy",
       "tier": "code_adjacent",
-      "notes": "Target rank 1; 3 FastAPI Docker variants returned"
-    },
-    {
-      "id": "g019",
-      "query": "how does lossless compression work",
-      "expected_entry_ids": [
-        "scaffold-lossless-compression-28cb4801"
-      ],
-      "expected_titles_contain": [
-        "lossless",
-        "compression"
-      ],
-      "domain": "eng",
-      "difficulty": "easy",
-      "tier": "direct_lookup",
-      "notes": "Target rank 1; Brotli and Zstandard as related algorithm neighbors"
-    },
-    {
-      "id": "g020",
-      "query": "reducing eventual consistency delays in distributed systems",
-      "expected_entry_ids": [
-        "scaffold-minimizing-eventual-consistency-3bf7caae"
-      ],
-      "expected_titles_contain": [
-        "eventual",
-        "consistency"
-      ],
-      "domain": "eng",
-      "difficulty": "easy",
-      "tier": "parameter_tuning",
-      "notes": "Target rank 1; only 1 result returned"
+      "notes": "v2.0 (2026-10-22, \u00a717.1748): written against the live corpus; the v1.x targets are no longer in it"
     }
   ]
 }

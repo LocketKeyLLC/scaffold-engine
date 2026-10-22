@@ -295,8 +295,8 @@ async def test_an_idle_executing_plan_is_left_alone_and_a_running_job_is_resumed
     `running` is still the crash-orphan both sweeps exist for. Live pre-image: job f9ca3ee1, 2026-10-21 —
     the rebuild relaunched a plan-only job and parked its first hands-on step with Run suggested."""
     import uuid
-    from sqlalchemy import text
     from app.database import async_session
+    text = er.text            # the engine module's own copy (another test file may leave a second sqlalchemy loaded)
     from app.modules import run_broker
 
     idle, live = str(uuid.uuid4()), str(uuid.uuid4())

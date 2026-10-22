@@ -16,9 +16,10 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "scripts"))
 import local_runner_mcp as r  # noqa: E402
 
-# live, the engine's qBittorrent read (its shape): a heredoc program that reads its own stdin
-QBT = ("pct exec 105 -- env QBT_PASS=\"$MASS_PASSWORD\" QBT_FILTER='[]' python3 - <<'PY'\n"
-       "import os, sys\nprint('PASS=' + os.environ['QBT_PASS'])\nprint('STDIN=' + repr(sys.stdin.read()))\nPY")
+# live, the engine's qBittorrent read (its shape since §17.1746): the program on the command line, the value on stdin
+QBT = ("pct exec 105 -- env QBT_FILTER='[]' python3 -c "
+       "'import sys; print(\"PASS=\" + sys.stdin.readline().rstrip(\"\\n\")); print(\"REST=\" + repr(sys.stdin.read()))' "
+       '<<< "$MASS_PASSWORD"')
 
 
 def _stub_bin(tmp_path):
@@ -42,7 +43,7 @@ def test_sudo_sees_neither_the_value_nor_preserve_env_and_the_program_gets_it(tm
     out = subprocess.run(["sh", "-c", line], env=env, input=r.stdin_for(["MASS_PASSWORD"], {"MASS_PASSWORD": "s3cr3t!!"}),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True).stdout.decode()
     assert "PASS=s3cr3t!!" in out                      # the program got the value
-    assert "STDIN=''" in out                           # the heredoc is still the program's own stdin
+    assert "REST=''" in out                            # the here-string carried the value and nothing else
     assert "s3cr3t!!" not in (tmp_path / "seen").read_text()          # sudo's argv
     assert "s3cr3t!!" not in (tmp_path / "seen.env").read_text()      # sudo's environment
 
