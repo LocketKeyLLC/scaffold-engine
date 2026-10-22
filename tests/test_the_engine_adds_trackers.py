@@ -76,9 +76,10 @@ def _run(list_body, password="s3cret", modes="new,stuck"):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     port = srv.server_address[1]
     prog = qt.TRACKERS_PY.replace("127.0.0.1:" + qt._PORT, "127.0.0.1:%d" % port).replace("time.sleep(8)", "time.sleep(0)").replace("time.sleep(3)", "time.sleep(0)")
-    env = {**os.environ, "QBT_PASS": password, "QBT_MODES": modes, "QBT_LIST": "http://127.0.0.1:%d/list.txt" % port}
+    env = {**os.environ, "QBT_MODES": modes, "QBT_LIST": "http://127.0.0.1:%d/list.txt" % port}
     try:
-        return subprocess.run([sys.executable, "-"], input=prog, capture_output=True, text=True, env=env, timeout=60)
+        return subprocess.run([sys.executable, "-c", prog], input=password + "\n", capture_output=True, text=True,
+                              env=env, timeout=60)
     finally:
         srv.shutdown()
 
@@ -108,7 +109,7 @@ def test_the_step_is_claimed_with_its_check_and_no_refusal_and_others_are_not():
                        ports=("61661", "8080"), data_dir="/var/lib/qbittorrent-nox", configs=())
     f = sr.frame_run(TR1, "## Run this\n\n```bash\necho draft\n```\n", spec, policy, services=[qbt],
                      inventory={"vms": {}, "cts": {"105": "running"}, "names": {"105": "qbittorrent"}})
-    assert len(f["commands"]) == 1 and qt.TRACKERS_PY in f["commands"][0] and "QBT_MODES=new,stuck" in f["commands"][0]
+    assert len(f["commands"]) == 1 and __import__('shlex').quote(qt.TRACKERS_PY) in f["commands"][0] and "QBT_MODES=new,stuck" in f["commands"][0]
     assert f["verify"] == [f"pct exec 105 -- grep -c -i 'AddTrackersEnabled=true' {qt.CONF}"]
     assert not f["refused"], [r["why"][:200] for r in f["refused"]]
     assert qt.modes({"title": "List the Power Rangers torrents in qBittorrent", "description": "Read-only."}) == []

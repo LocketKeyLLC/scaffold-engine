@@ -25,7 +25,8 @@ _USER = "admin"
 LIST_URL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
 CONF = "/var/lib/qbittorrent-nox/.config/qBittorrent/qBittorrent.conf"
 
-#: runs inside qBittorrent's guest as `python3 -` with QBT_PASS, QBT_MODES and QBT_LIST in its environment
+#: runs inside qBittorrent's guest as `python3 -c` with QBT_MODES and QBT_LIST in its environment and the password on its
+#: stdin (§17.1746)
 TRACKERS_PY = (
     "import os, sys, json, time, urllib.request, urllib.parse, urllib.error, http.cookiejar\n"
     "base = 'http://127.0.0.1:" + _PORT + "'\n"
@@ -44,7 +45,7 @@ TRACKERS_PY = (
     "def call(p, form=None):\n"
     "    data = urllib.parse.urlencode(form).encode() if form is not None else None\n"
     "    return op.open(urllib.request.Request(base + p, data=data, headers={'Referer': base}), timeout=60).read()\n"
-    "if call('/api/v2/auth/login', {'username': '" + _USER + "', 'password': os.environ.get('QBT_PASS', '')}).decode().strip() != 'Ok.':\n"
+    "if call('/api/v2/auth/login', {'username': '" + _USER + "', 'password': sys.stdin.readline().rstrip('\\n')}).decode().strip() != 'Ok.':\n"
     "    print('FAILED: qBittorrent refused the login -- nothing changed'); sys.exit(1)\n"
     "if 'new' in modes:\n"
     "    call('/api/v2/app/setPreferences', {'json': json.dumps({'add_trackers_enabled': True, 'add_trackers': '\\n'.join(tr)})})\n"
@@ -91,8 +92,8 @@ def modes(node: Optional[dict]) -> list[str]:
 
 
 def command(gid: str, ms: list[str]) -> str:
-    return (f'pct exec {gid} -- env QBT_PASS="$MASS_PASSWORD" QBT_MODES={shlex.quote(",".join(ms))} '
-            f"QBT_LIST={shlex.quote(LIST_URL)} python3 - <<'PY'\n{TRACKERS_PY}PY")
+    from app.modules.qbittorrent_read import guest_python
+    return guest_python(gid, {"QBT_MODES": ",".join(ms), "QBT_LIST": LIST_URL}, TRACKERS_PY)
 
 
 def block(node: Optional[dict], qbt_guest: Callable[[], Optional[str]]) -> Optional[tuple[list[str], list[str], str]]:

@@ -8,12 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-# Undo sqlalchemy MagicMock pollution from test_domain_filtering.py
-# (which runs earlier in alphabetical order and never cleans up sys.modules)
-import importlib
-for _mod in list(sys.modules):
-    if _mod == "sqlalchemy" or _mod.startswith("sqlalchemy."):
-        del sys.modules[_mod]
+# Undo a sqlalchemy MagicMock a bare-host run of test_domain_filtering.py / test_validate_dag.py can leave.
+# Only a MOCK is purged: purging the REAL module made a second copy, and later `from sqlalchemy import text`
+# built clauses the engine's copy refused ("Executable SQL or text() construct expected").
+if isinstance(sys.modules.get("sqlalchemy"), MagicMock):
+    for _mod in list(sys.modules):
+        if _mod == "sqlalchemy" or _mod.startswith("sqlalchemy."):
+            del sys.modules[_mod]
 import sqlalchemy  # force real import
 import sqlalchemy.exc  # noqa: F401
 import sqlalchemy.ext.asyncio  # noqa: F401

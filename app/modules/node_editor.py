@@ -820,3 +820,48 @@ async def revise_decision(
     logger.info("decision_revised job=%s node=%s cascade=%d", job_id, node_key, len(downstream))
     return {"status": "ok", "node_key": node_key, "decision": record,
             "rebuilt": downstream}
+
+
+#: §17.1747 — the statuses a plan nobody has started can sit in; `running` is a live run and is never touched
+REPLAN_FROM = ("planning", "executing", "awaiting_decision", "blocked", "failed")
+
+
+async def clear_an_unstarted_plan(db: AsyncSession, job_id: str, *, edited_by: str | None = None) -> dict:
+    """§17.1747 — drop a plan no step of which has run, so it can be planned again from the same brief.
+
+    `generate_dag` re-plans by itself only when the brief CHANGED (§17.181's input hash). After a fix to the planner the
+    brief is the same and the answer was "DAG already exists"; live (job f9ca3ee1, 2026-10-21), the Kubernetes plan was
+    re-planned four times by a script that deleted its nodes and nulled the hash by hand. Refused when any step has
+    left `pending` or any question has been answered: that plan has work or answers in it, and `reset`/`revise` are
+    the tools for it. The whole plan is written to `dag_node_edits` (op `replan`) before it goes.
+    """
+    from app.modules import job_state
+    row = (await db.execute(
+        text("SELECT status, COALESCE(metadata->'decisions', '{}'::jsonb) AS decisions FROM jobs WHERE id = :j FOR UPDATE"),
+        {"j": job_id})).mappings().first()
+    if not row:
+        await db.rollback()
+        return {"error": f"job {job_id} not found", "http_status": 404}
+    if row["status"] not in REPLAN_FROM:
+        await db.rollback()
+        return {"error": f"a job that is {row['status']} cannot be re-planned (only {', '.join(REPLAN_FROM)})",
+                "http_status": 409}
+    nodes = (await db.execute(
+        text("SELECT node_key, title, description, status, depends_on, tool, node_type, execution_order "
+             "  FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
+    started = [n["node_key"] for n in nodes if n["status"] != "pending"]
+    if started or row["decisions"]:
+        await db.rollback()
+        return {"error": "this plan has already started -- re-planning would throw away work or answers; reset or "
+                         "revise the steps instead",
+                "started": started, "answered": sorted(row["decisions"]), "http_status": 409}
+    await _audit(db, job_id, "*", "replan", {"nodes": [{**dict(n), "depends_on": list(n["depends_on"] or [])} for n in nodes]},
+                 {"nodes": []}, edited_by)
+    await db.execute(text("DELETE FROM dag_nodes WHERE job_id = :j"), {"j": job_id})
+    await db.execute(text("UPDATE jobs SET dag_input_hash = NULL, metadata = COALESCE(metadata, '{}'::jsonb) "
+                          "- 'awaiting_decision' WHERE id = :j"), {"j": job_id})
+    if row["status"] != "planning":
+        await job_state.transition(db, job_id, to="planning", expected_from=[row["status"]], reason="replan")
+    await db.commit()
+    logger.warning("plan_cleared_for_replan job=%s nodes=%d by=%s", job_id, len(nodes), edited_by)
+    return {"cleared": len(nodes), "previous_status": row["status"]}

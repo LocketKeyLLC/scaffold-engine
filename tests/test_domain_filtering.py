@@ -27,9 +27,15 @@ app_stub = ModuleType("app")
 app_stub.model_router = model_router_stub
 sys.modules.setdefault("app", app_stub)
 sys.modules.setdefault("app.model_router", model_router_stub)
-sys.modules.setdefault("sqlalchemy", MagicMock())
-sys.modules.setdefault("sqlalchemy.ext", MagicMock())
-sys.modules.setdefault("sqlalchemy.ext.asyncio", MagicMock())
+try:
+    # The real sqlalchemy whenever it is installed (the dev image): a fake left in sys.modules is every later test's
+    # sqlalchemy, and the engine modules they import build clauses no session accepts.
+    import sqlalchemy  # noqa: F401
+    import sqlalchemy.ext.asyncio  # noqa: F401
+except ImportError:  # a bare host python
+    sys.modules.setdefault("sqlalchemy", MagicMock())
+    sys.modules.setdefault("sqlalchemy.ext", MagicMock())
+    sys.modules.setdefault("sqlalchemy.ext.asyncio", MagicMock())
 
 # Now import via importlib (matches test_validate_dag.py pattern)
 from importlib import util as importutil

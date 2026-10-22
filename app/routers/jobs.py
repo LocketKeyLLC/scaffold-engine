@@ -176,6 +176,30 @@ async def reask_endpoint(
     return {**out, "run_started": started}
 
 
+@router.post("/jobs/{job_id}/replan", tags=["Management"])
+async def replan_endpoint(
+    job_id: UuidPath,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1747 — plan a job again from its brief, while no step of its plan has run and no question is answered.
+
+    The old plan is kept in the node edit log (op `replan`). 409 when the plan has started (`started`/`answered` say
+    what) or the job is running. Returns the new plan, as `POST /dag` does."""
+    from app.modules import node_editor
+    from app.modules.dag_generator import generate_dag
+    await assert_visible(db, principal, str(job_id), detail=f"Job {job_id} not found")
+    cleared = await node_editor.clear_an_unstarted_plan(db, str(job_id), edited_by=principal.identity)
+    if "error" in cleared:
+        raise HTTPException(status_code=cleared.pop("http_status", 409), detail=cleared)
+    overrides = await resolve_job_overrides(str(job_id), None)
+    result = await generate_dag(str(job_id), db, model_overrides=overrides)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=result.get("http_status", 500),
+                            detail={**result, "cleared": cleared["cleared"]})
+    return {**result, "replanned_from": cleared}
+
+
 @router.post("/jobs/{job_id}/decide", response_model=DecideResult, tags=["Management"])
 async def decide_endpoint(
     job_id: UuidPath,
