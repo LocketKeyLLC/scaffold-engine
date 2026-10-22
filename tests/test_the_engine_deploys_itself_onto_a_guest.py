@@ -50,7 +50,9 @@ def test_the_rendered_runbook_clones_at_the_ref_runs_the_script_and_parses(monke
     script = re.search(r"### /tmp/in_vm_110.sh\n```bash\n(.*?)\n```", body, re.S).group(1)
     assert subprocess.run(["bash", "-n"], input=script, text=True).returncode == 0
     runs = [ln for ln in body.splitlines() if "bash /tmp/in_vm_110.sh" in ln and ln.startswith("MASS_PASSWORD")]
-    assert runs[0].endswith(" start") and runs[-1].endswith(" last") and len(runs) == 32
+    # §17.1744 — three boot phases, then start, thirty waits, last
+    assert [r.rsplit(" ", 1)[1] for r in runs[:4]] == ["boot", "boot", "boot", "start"]
+    assert runs[-1].endswith(" last") and len(runs) == 35
 
 
 def _fake(bindir: Path, name: str, body: str) -> None:

@@ -19,7 +19,8 @@ def _body():
 
 def test_the_run_is_start_waits_last():
     runs = [ln for ln in _body().splitlines() if "bash /tmp/in_vm_110.sh" in ln and ln.startswith("MASS_PASSWORD")]
-    assert [r.rsplit(" ", 1)[1] for r in runs] == ["start"] + ["wait"] * 7 + ["last"]
+    # §17.1744 — a cold VM is booted in its own phases first
+    assert [r.rsplit(" ", 1)[1] for r in runs] == ["boot"] * 3 + ["start"] + ["wait"] * 7 + ["last"]
 
 
 def test_the_script_parses_and_runs_the_work_as_a_unit():
