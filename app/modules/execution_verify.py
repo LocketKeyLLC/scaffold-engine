@@ -108,6 +108,7 @@ async def _run_verification(
                 messages=messages, tools=[VERIFY_TOOL],
                 role=role, overrides=overrides,
                 temperature=0.0,
+                max_tokens=settings.verifier_max_tokens,   # §17.1751 — room for the verdict
             )
         except Exception as e:
             logger.warning("verify_tool_call_failed: %s", e)

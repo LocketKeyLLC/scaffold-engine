@@ -641,6 +641,12 @@ class Settings(BaseSettings):
     cloud_timeout: int = Field(default=3600, ge=1, le=86400)
     local_timeout: int = Field(default=1800, ge=1, le=86400)
     verify_timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    # §17.1751 — the verifier's own completion budget. The router default (4096) starved it: live 2026-10-22 (job
+    # 2772acae T3), glm-5.3-flash spent all 4096 tokens deliberating in all six draws and returned no verdict, so the step
+    # failed on "verifier produced no tool call" without its output ever being judged (18 such failures in 30 days).
+    # Replayed with 12k it answered in 4030 and 5831 tokens (a correct FAIL). Think-off does not help this model -- it
+    # reasons in visible content instead and starves the same.
+    verifier_max_tokens: int = Field(default=12288, ge=512, le=65536)
     max_retries: int = Field(default=3, ge=0, le=20)
     # §17.428 — deterministic Python-syntax gate for CodeGen node output.
     # Runs before the (lenient) LLM verifier; a fenced ```python block that
