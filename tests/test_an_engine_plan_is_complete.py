@@ -311,3 +311,22 @@ def test_an_llm_step_doing_the_labs_work_is_code_and_presenting_for_approval_ask
     assert "operator_ask" in by["T17"]["notes"]
     assert any(c.startswith("llm_work_made_code: T14") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1773 nothing promises to block; a step that requests and acts is split (live job 918b6274's seventh plan) ──
+
+def test_no_step_blocks_on_an_answer_and_acting_on_it_is_the_handlers():
+    tasks = [
+        {"id": "T8", "name": "Implement supervised approval flow", "tool": "CodeGen", "type": "action", "depends_on": [],
+         "notes": "Python module `approval_flow.py` exporting `ApprovalFlow` class. Method `request_approval(proposal)` "
+                  "displays symbol and side. Blocks until operator approves or rejects. Records decision to audit trail."},
+        {"id": "T26", "name": "Implement daily trading orchestrator", "tool": "CodeGen", "type": "action",
+         "depends_on": ["T8"], "notes": "Python module `daily_orchestrator.py` exporting `run_daily_batch()`. Runs "
+                                        "before market open: aggregate, risk check, request approval, execute approved orders."},
+    ]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert "Blocks until" not in by["T8"]["notes"] and "Records decision to audit trail." in by["T8"]["notes"]
+    assert "operator_ask" in by["T8"]["notes"] and "@answer_handler" in by["T26"]["notes"]
+    assert {c.split(":")[0] for c in changes} >= {"approval_made_asynchronous", "approval_flow_split"}
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
