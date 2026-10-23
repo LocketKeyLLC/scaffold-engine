@@ -127,7 +127,7 @@ def test_a_missing_setting_is_told_what_to_do_and_not_offered_a_stranger():
     found = es.unresolved_refs('```python\nfrom app.config import settings\nua = getattr(settings, "edgar_user_agent", None)\n```')
     assert len(found) == 1 and "`settings.edgar_user_agent`: the engine has no such setting" in found[0]
     assert "multi_user_enabled" not in found[0]
-    assert "module constant" in found[0] and "app.config.Settings" in found[0]
+    assert "module constant" in found[0] and "values_for" in found[0]  # §17.1776
 
 
 def test_an_invented_package_is_refused():

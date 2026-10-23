@@ -538,7 +538,11 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                         have = ", ".join(sorted(x for x in d["defined"] if not x.startswith("_")
                                                 and x not in ("logger", "__all__"))[:16])
                         msg = (f"`from {n.module} import {al.name}`: `{leaf}` (step {d['node']}) has no `{al.name}`"
-                               + (f" (it has {have})" if have else ""))
+                               + (f" (it has {have})" if have else "")
+                               # §17.1776 — live (f00ea97f T7/T8/T12): every ingestion step invented T4's
+                               # `write_ingested_item`; what a sibling does not have, this step writes itself
+                               + " -- use what it has, or write what this step needs in this step's own module "
+                                 "(a table the job's migration creates is written with `async_session` + `text`)")
                         if msg not in found:
                             found.append(msg)
                     elif al.name in d["funcs"]:
@@ -751,8 +755,10 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                 close = _close_fields(attr, fields)
                 note(f"`settings.{attr}`: the engine has no such setting"
                      + (f" (it has {', '.join('`' + c + '`' for c in close)})" if close else "")
-                     + " -- a value the lab needs and the engine does not hold is a module constant, or a field "
-                       "a step of this job adds to `app.config.Settings`; never `getattr(settings, …, default)`")
+                     + " -- a value the lab needs and the engine does not hold is a module constant (a fixed URL, a "
+                       "limit); a value only the operator has (a contact address, an account) is read when the code "
+                       "runs with `await values_for(db, [\"UPPER_SNAKE_NAME\"])` and the code refuses to run without it "
+                       "(§17.1776); never `getattr(settings, …, default)`")
     return found
 
 
@@ -870,14 +876,17 @@ def placeholder_refs(output: str) -> list[str]:
         if m:
             line = m.string.strip().splitlines()[0] if m.string.strip() else m.group(0)
             found.append(f"`{line[:120]}`: `{m.group(0)}` is a sample, not a value. A value only the operator has "
-                         "(a contact address, an account) is a field a step of this job adds to "
-                         "`app.config.Settings` with no usable default, and the code refuses to run while it is unset")
+                         "(a contact address, an account) is read when the code runs with "
+                         "`await values_for(db, [\"UPPER_SNAKE_NAME\"])` (app.modules.runner_secrets -- the operator "
+                         "stores it on the Machines page → Secrets), and the code refuses to run while it is missing "
+                         "(§17.1776); a test mocks `values_for`")
     said = _prose_and_comments(output)
     for m in _HANDOFF_RE.finditer(said):
         line = said[said.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
         found.append(f"`{line[:140]}`: the step hands its own unfinished work to the reader. What it lacked the engine "
                      "holds (its newest revision, its database user, its settings) and is shown above; what only the "
-                     "operator has is a Settings field the code refuses to run without")
+                     "operator has is read with `values_for(db, [\"UPPER_SNAKE_NAME\"])` and the code refuses to run "
+                     "without it (§17.1776)")
         break
     return found
 
@@ -940,6 +949,9 @@ CONVENTIONS = (
     "- Secrets: held by the engine, read with `app.modules.runner_secrets.values_for(db, [NAMES])`; never logged, "
     "never put in a prompt, never read from the environment.\n"
     "- A value the code must not change (a fixed URL) is a module constant, not an environment lookup.\n"
+    "- A value only the operator has (a contact e-mail an API requires, an account id) is read when the code runs "
+    "with `await values_for(db, [\"UPPER_SNAKE_NAME\"])`; the operator stores it on the Machines page → Secrets; the "
+    "code refuses to run while it is missing, and never ships a sample (`…@example.com`).\n"
     "- A new module never takes the name of an engine module listed in the layout below; name it for what it is.\n"
     "- The step is RUN before it passes (§17.1765): its tests, or an import of its module, against the engine with "
     "this job's finished modules, in a sandbox with no network, no database and no secrets -- tests mock "
