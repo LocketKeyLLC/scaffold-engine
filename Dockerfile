@@ -21,7 +21,7 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN pip install --no-cache-dir "setuptools==84.0.0"  # §17.585 — was 71.1.0 (PYSEC-2025-49)
+RUN pip install --no-cache-dir "setuptools==84.1.0"  # §17.585 — was 71.1.0 (PYSEC-2025-49)
 
 COPY requirements.txt requirements-dev.txt ./
 # hadolint DL3059 (info): the three pip installs stay separate RUNs on purpose — torch (~200 MB) gets
