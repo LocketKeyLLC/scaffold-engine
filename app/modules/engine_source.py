@@ -75,6 +75,115 @@ def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return f"{'async ' if isinstance(fn, ast.AsyncFunctionDef) else ''}def {fn.name}({', '.join(names)})"
 
 
+def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
+    """§17.1756 — what a call to this function must look like."""
+    a = fn.args
+    pos = [x.arg for x in a.posonlyargs + a.args]
+    n_def = len(a.defaults)
+    required_pos = pos[:len(pos) - n_def] if n_def else pos
+    kwonly = [x.arg for x in a.kwonlyargs]
+    kw_required = [x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d is None]
+    # an `async def` that yields is an async generator (iterated, or entered as an async context manager) -- never awaited
+    agen = isinstance(fn, ast.AsyncFunctionDef) and any(
+        isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(fn)
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) or n is fn)
+    return {"async": isinstance(fn, ast.AsyncFunctionDef) and not agen, "pos": pos, "required_pos": required_pos,
+            "posonly": [x.arg for x in a.posonlyargs], "kwonly": kwonly, "kw_required": kw_required,
+            "varargs": a.vararg is not None, "varkw": a.kwarg is not None}
+
+
+def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool) -> list[str]:
+    """§17.1756 — a call to an engine function that cannot work as written."""
+    out: list[str] = []
+    label = f"`{name}(…)`"
+    if shape["async"] and coroutine_misused:
+        out.append(f"{label} is `async def` in the engine: `await` it (called bare, it returns a coroutine, not a result)")
+    if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+        return out                                       # *args / **kwargs at the call site: shapes unknowable
+    n_pos = len(call.args)
+    if n_pos > len(shape["pos"]) and not shape["varargs"]:
+        out.append(f"{label} takes at most {len(shape['pos'])} positional argument(s) ({', '.join(shape['pos']) or 'none'}); "
+                   f"it was given {n_pos}")
+    given_kw = [k.arg for k in call.keywords if k.arg]
+    allowed = set(shape["pos"]) - set(shape["posonly"]) | set(shape["kwonly"])
+    unknown = [k for k in given_kw if k not in allowed]
+    if unknown and not shape["varkw"]:
+        out.append(f"{label} has no parameter {', '.join('`' + k + '`' for k in unknown)} "
+                   f"(it takes {', '.join(shape['pos'] + ['*'] * bool(shape['kwonly']) + shape['kwonly'])})")
+    filled = set(shape["pos"][:n_pos]) | set(given_kw)
+    missing = [p for p in shape["required_pos"] + shape["kw_required"] if p not in filled]
+    if missing:
+        out.append(f"{label} is missing required argument(s) {', '.join('`' + m + '`' for m in missing)}")
+    return out
+
+
+def _engine_target(call: ast.Call, engine_funcs: dict, engine_mods: dict, index: dict) -> tuple[str, str] | None:
+    if isinstance(call.func, ast.Name) and call.func.id in engine_funcs:
+        return engine_funcs[call.func.id]
+    if (isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in engine_mods and call.func.attr in index[engine_mods[call.func.value.id]].get("funcs", {})):
+        return engine_mods[call.func.value.id], call.func.attr
+    return None
+
+
+def _coroutines_used_as_values(tree: ast.AST, engine_funcs: dict, engine_mods: dict, index: dict) -> set[int]:
+    """§17.1756 — the bare calls to an engine coroutine function whose coroutine is used as if it were the result.
+
+    Live (T14): `frame = frame_decision(…)` then `park_awaiting_decision(db, job_id, KEY, frame)` -- never awaited.
+    NOT flagged (measured on the engine's own source, 50 such calls, all correct): a coroutine handed to another
+    function (`wait_for(f())`, `gather(f(), g())`, a heartbeat wrapper), returned, put in a collection, or assigned to a
+    name that is later awaited or handed to a non-engine function. Flagged: a discarded call; an assignment whose
+    name is never awaited and only reaches engine functions (which want values) or nothing; a direct argument to an
+    engine function."""
+    parent: dict[int, ast.AST] = {}
+    for p in ast.walk(tree):
+        for c in ast.iter_child_nodes(p):
+            parent[id(c)] = p
+    awaited_names = {n.value.id for n in ast.walk(tree) if isinstance(n, ast.Await) and isinstance(n.value, ast.Name)}
+
+    def is_engine_coroutine(call: ast.AST) -> bool:
+        if not isinstance(call, ast.Call):
+            return False
+        t = _engine_target(call, engine_funcs, engine_mods, index)
+        return bool(t and index[t[0]]["funcs"][t[1]]["async"])
+
+    def receiver(node: ast.AST) -> ast.Call | None:
+        """The call this node is an argument (or keyword value) of."""
+        p = parent.get(id(node))
+        if isinstance(p, ast.keyword):
+            p = parent.get(id(p))
+        return p if isinstance(p, ast.Call) and node is not p.func else None
+
+    out: set[int] = set()
+    for call in ast.walk(tree):
+        if not is_engine_coroutine(call):
+            continue
+        p = parent.get(id(call))
+        if isinstance(p, ast.Await):
+            continue
+        if isinstance(p, ast.Expr):
+            out.add(id(call))                                        # discarded
+            continue
+        r = receiver(call)
+        if r is not None:
+            if _engine_target(r, engine_funcs, engine_mods, index):
+                out.add(id(call))                                    # an engine function wants the value
+            continue
+        if isinstance(p, (ast.Assign, ast.AnnAssign)):
+            targets = p.targets if isinstance(p, ast.Assign) else [p.target]
+            if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                continue
+            name = targets[0].id
+            if name in awaited_names:
+                continue
+            uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
+            handed_on = [u for u in uses if (rc := receiver(u)) is not None
+                         and not _engine_target(rc, engine_funcs, engine_mods, index)]
+            if not handed_on:
+                out.add(id(call))                                    # never awaited, never handed to a consumer
+    return out
+
+
 @lru_cache(maxsize=1)
 def module_index() -> dict[str, dict]:
     """``{"app.modules.x": {"doc": first docstring line, "names": every top-level name, "public": [signatures]}}``."""
@@ -89,9 +198,11 @@ def module_index() -> dict[str, dict]:
         names: set[str] = set()
         public: list[str] = []
         values: list[str] = []
+        funcs: dict[str, dict] = {}
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(node.name)
+                funcs[node.name] = _call_shape(node)
                 if not node.name.startswith("_"):
                     public.append(_signature(node))
             elif isinstance(node, ast.ClassDef):
@@ -117,7 +228,8 @@ def module_index() -> dict[str, dict]:
                     elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                         names.add(n.id)
         doc = (ast.get_docstring(tree) or "").strip().splitlines()
-        out[_dotted(path)] = {"doc": doc[0][:160] if doc else "", "names": names, "public": public, "values": values}
+        out[_dotted(path)] = {"doc": doc[0][:160] if doc else "", "names": names, "public": public, "values": values,
+                              "funcs": funcs}
     return out
 
 
@@ -142,8 +254,15 @@ NOT_IN_THE_ENGINE = {
 }
 
 
+#: §17.1757 — the engine's test tooling (requirements-dev.txt), by import name. Not installed in the production image
+#: this check runs in, and not readable there (no requirements files ship); live (job 2772acae T22 "Write integration
+#: tests") was refused for `import pytest`. tests/test_codegen_for_the_engine_reads_the_engine.py keeps it equal to the
+#: pinned test tools in requirements-dev.txt.
+TEST_TOOLING = frozenset({"pytest", "pytest_asyncio", "pytest_timeout", "pytest_cov", "hypothesis", "mutmut"})
+
+
 def _installed(top: str) -> bool:
-    if top in sys.stdlib_module_names or top in sys.builtin_module_names:
+    if top in sys.stdlib_module_names or top in sys.builtin_module_names or top in TEST_TOOLING:
         return True
     try:
         return importlib.util.find_spec(top) is not None
@@ -263,6 +382,37 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                     note(f"`from {mod} import …`: {NOT_IN_THE_ENGINE[mod.split('.')[0]]}")
                 elif not _installed(mod.split(".")[0]) and not _sibling(mod, siblings):
                     note(f"`from {mod} import …`: `{mod.split('.')[0]}` is not installed in the engine")
+        # §17.1756 — calls to engine functions, by the name they were imported under
+        engine_funcs: dict[str, tuple[str, str]] = {}
+        engine_mods: dict[str, str] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module in index:
+                for al in n.names:
+                    if al.name in index[n.module].get("funcs", {}):
+                        engine_funcs[al.asname or al.name] = (n.module, al.name)
+                    elif f"{n.module}.{al.name}" in index:
+                        engine_mods[al.asname or al.name] = f"{n.module}.{al.name}"
+            elif isinstance(n, ast.Import):
+                for al in n.names:
+                    if al.asname and al.name in index:
+                        engine_mods[al.asname] = al.name
+        if engine_funcs or engine_mods:
+            misused = _coroutines_used_as_values(tree, engine_funcs, engine_mods, index)
+            for n in ast.walk(tree):
+                if not isinstance(n, ast.Call):
+                    continue
+                target = None
+                if isinstance(n.func, ast.Name) and n.func.id in engine_funcs:
+                    target = engine_funcs[n.func.id]
+                elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id in engine_mods):
+                    mod = engine_mods[n.func.value.id]
+                    if n.func.attr in index[mod].get("funcs", {}):
+                        target = (mod, n.func.attr)
+                if target:
+                    mod, fname = target
+                    for m in _call_mismatches(n, fname, index[mod]["funcs"][fname], id(n) in misused):
+                        note(m)
         if not settings_aliases:
             continue
         for n in ast.walk(tree):
