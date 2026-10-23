@@ -41,6 +41,10 @@ def _module_of(t: dict) -> str | None:
 
 _VERB_RE = re.compile(r"^\s*(?:implement|configure|ingest|store|acquire|build|determine|create|add|write|define|"
                       r"design|make|set\s*up|compute|fetch|track|generate|record|run|load)\s+", re.I)
+_MIGRATION_STEP_RE = re.compile(r"\bmigration\b", re.I)
+_RUN_TESTS_RE = re.compile(r"\b(?:run|execute|runs|executes)\b.{0,30}\b(?:tests?|test suite|pytest)\b|\bpytest\b", re.I)
+_STORE_SECRET_RE = re.compile(r"\b(?:store|save|add|put|integrate|set)\b.{0,60}\b(?:keys?|secrets?|credentials?|tokens?)\b",
+                              re.I)
 _DDL_RE = re.compile(r"\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b|\bcreate\s+(?:the\s+)?(?:\w+\s+){0,3}tables?\b", re.I)
 _TESTS_STEP_RE = re.compile(r"\b(?:write|add|implement|build)\b.{0,40}\btests?\b|\btest suite\b", re.I)
 _TESTS_WORD_RE = re.compile(r"\b(?:tests?|suite)\b", re.I)
@@ -84,6 +88,43 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
                           "no SQL is run by hand. " + str(t.get("notes") or "").strip())
             changes.append(f"ddl_made_a_migration: {t.get('id')} is the Alembic revision {rev} (it was a Shell step "
                            "running CREATE TABLE)")
+
+    # 0c. §17.1769 — a code step that writes "a migration" writes an Alembic revision (live 918b6274 T3 "Executable SQL
+    #     migration implementing T2's schema")
+    for t in tasks:
+        if (str(t.get("tool") or "").lower() == "codegen" and _MIGRATION_STEP_RE.search(_text(t))
+                and "alembic/versions/" not in _text(t) and not _module_of(t)):
+            rev = f"{nxt}_{pre}_{_slug(str(t.get('name') or 'migration').replace('migration', ''))}"
+            t["notes"] = (f"An Alembic revision `alembic/versions/{rev}.py` (revision = \"{rev}\", down_revision = the "
+                          "engine's newest revision); the engine applies it when it starts. " + str(t.get("notes") or "").strip())
+            changes.append(f"migration_named: {t.get('id')} is the Alembic revision {rev}")
+
+    # 0d. §17.1769 — a Shell step that runs this job's tests is the sandbox's work already (§17.1765 runs a test step's
+    #     tests before it passes); live 918b6274 T29 [Shell] "Run integration tests: Execute test suite" would have run
+    #     on the Proxmox host. It is dropped; what stood on it stands on what it stood on.
+    for t in [t for t in tasks if str(t.get("tool") or "").lower() == "shell" and _RUN_TESTS_RE.search(_text(t))]:
+        _drop(tasks, t)
+        changes.append(f"test_run_dropped: {t.get('id')} (the engine-test sandbox runs the tests when their step passes)")
+
+    # 0e. §17.1769 — a key only the operator holds is theirs to give, through the engine's secrets, once the code that
+    #     reads it exists; live 918b6274 T4 [Shell] "Store paper-trading key in existing secrets store", first in the
+    #     plan, would have blocked every step behind the runner. It becomes a question at the end.
+    secret_steps = [t for t in tasks if str(t.get("tool") or "").lower() == "shell" and _STORE_SECRET_RE.search(_text(t))]
+    for t in secret_steps:
+        for u in tasks:
+            if t["id"] in (u.get("depends_on") or []):
+                u["depends_on"] = [d for d in u["depends_on"] if d != t["id"]] + [
+                    d for d in (t.get("depends_on") or []) if d not in u["depends_on"]]
+        t["tool"], t["type"] = "LLM", "decision"
+        subject = re.sub(r"\b(?:integrate|store|save|add|set|put|the|paper-trading|credentials?|keys?|secrets?|in|into|"
+                         r"existing|store)\b", " ", _VERB_RE.sub("", str(t.get("name") or "")), flags=re.I)
+        subject = " ".join(subject.split()) or "this lab"
+        t["name"] = f"Are the {subject} keys stored in the engine's secrets?"
+        t["notes"] = ("The operator stores the keys only they hold on the engine's Machines page → Secrets, under the "
+                      "UPPER_SNAKE names this job's code reads (`values_for(db, [...])` in its client step); the "
+                      "engine never asks for a value in a step and never logs one. Answer when they are stored. "
+                      + str(t.get("notes") or "").strip())
+        changes.append(f"secret_step_made_the_operators: {t.get('id')} asks the operator, after the code exists")
 
     # 0b. §17.1768 — a step that writes tests writes a test module, not a module with tests of its own
     for t in tasks:
@@ -175,4 +216,18 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
         })
         changes.append(f"wiring_step_added: {new_id} joins {len(modules)} modules (none of the plan's steps "
                        "registered, mounted or called them)")
+    # the operator's credentials come after the code that reads them, wired (0e)
+    wires = [str(t["id"]) for t in tasks if str(t.get("id", "")).startswith("WIRE")]
+    for t in secret_steps:
+        want = wires or [str(m["id"]) for m in modules]
+        t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *want]))
     return changes
+
+
+def _drop(tasks: list[dict], gone: dict) -> None:
+    """Remove ``gone``; each task that depended on it depends on what it depended on."""
+    tasks.remove(gone)
+    for u in tasks:
+        if gone["id"] in (u.get("depends_on") or []):
+            u["depends_on"] = list(dict.fromkeys(
+                [d for d in u["depends_on"] if d != gone["id"]] + list(gone.get("depends_on") or [])))

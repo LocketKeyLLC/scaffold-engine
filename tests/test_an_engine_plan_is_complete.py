@@ -200,3 +200,35 @@ def test_a_step_that_writes_tests_writes_a_test_module():
     assert by["T31"]["notes"].startswith("Python test module `tests/test_paper_integration.py`")
     assert "test_test_" not in by["T31"]["notes"] and engine_plan._module_of(by["T31"]) is None
     assert "T31" not in by["WIRE"]["depends_on"]                                 # tests are not wired in
+
+
+# ── §17.1769 a migration step, a shell test run, and the operator's keys (live job 918b6274's third plan) ──
+
+PLAN_3 = [
+    {"id": "T3", "name": "Write audit trail migration", "tool": "CodeGen", "type": "action", "depends_on": ["T2"],
+     "notes": "Executable SQL migration implementing T2's schema. Creates tables only; no data writes."},
+    {"id": "T4", "name": "Integrate Alpaca paper credentials", "tool": "Shell", "type": "action", "depends_on": [],
+     "notes": "Store paper-trading key in existing secrets store. Verify retrieval works."},
+    {"id": "T5", "name": "Write Alpaca client module", "tool": "CodeGen", "type": "action", "depends_on": ["T4"],
+     "notes": "Exports place_order()."},
+    {"id": "T6", "name": "Write risk control module", "tool": "CodeGen", "type": "action", "depends_on": []},
+    {"id": "T28", "name": "Write integration tests", "tool": "CodeGen", "type": "action", "depends_on": ["T5", "T6"]},
+    {"id": "T29", "name": "Run integration tests", "tool": "Shell", "type": "validation", "depends_on": ["T28"],
+     "notes": "Execute test suite. Verify secrets redaction, risk controls."},
+    {"id": "T30", "name": "Final integration validation", "tool": "LLM", "type": "validation", "depends_on": ["T29"]},
+]
+
+
+def test_the_third_live_plan_is_completed():
+    from app.modules.engine_source import _latest_migration
+    tasks = copy.deepcopy(PLAN_3)
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    nxt = f"{int(_latest_migration()[:4]) + 1:04d}"
+    assert f"alembic/versions/{nxt}_paper_audit_trail.py" in by["T3"]["notes"] and engine_plan._module_of(by["T3"]) is None
+    assert "T29" not in by and by["T30"]["depends_on"] == ["T28"]                 # the sandbox runs T28's tests
+    assert by["T4"]["type"] == "decision" and by["T4"]["tool"] == "LLM"
+    assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
+    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == []    # asked at the end, blocks no build
+    assert {c.split(":")[0] for c in changes} >= {"migration_named", "test_run_dropped", "secret_step_made_the_operators"}
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
