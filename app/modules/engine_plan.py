@@ -281,12 +281,42 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
         })
         changes.append(f"wiring_step_added: {new_id} joins {len(modules)} modules (none of the plan's steps "
                        "registered, mounted or called them)")
+    # 5. §17.1774 — the job's tables exist before any of its code runs against them. Live (job 918b6274's eighth
+    #     plan): T5 "Implement risk controls" had no edge to T3 (the revision), ran first, read `paper_positions` /
+    #     `paper_orders` and was refused three times (§17.1759) for tables nobody had written yet. Every other code step
+    #     stands on the job's revisions (never one the revision itself stands on).
+    #    Last, so the steps the passes above made code (and WIRE) stand on it too.
+    revisions = [str(t["id"]) for t in tasks if str(t.get("notes") or "").startswith("An Alembic revision `alembic/versions/")]
+    if revisions:
+        for t in tasks:
+            if (str(t.get("tool") or "").lower() != "codegen" or str(t["id"]) in revisions
+                    or "alembic/versions/" in _text(t)):
+                continue
+            missing = [r for r in revisions if r not in (t.get("depends_on") or [])
+                       and str(t["id"]) not in _upstream_of(tasks, r)]
+            if missing:
+                t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *missing]))
+                changes.append(f"schema_first: {t.get('id')} stands on {', '.join(missing)}")
+
     # the operator's credentials come after the code that reads them, wired (0e)
     wires = [str(t["id"]) for t in tasks if str(t.get("id", "")).startswith("WIRE")]
     for t in secret_steps:
         want = wires or [str(m["id"]) for m in modules]
         t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *want]))
     return changes
+
+
+def _upstream_of(tasks: list[dict], key: str) -> set[str]:
+    """Every task ``key`` stands on, transitively."""
+    deps = {str(t["id"]): [str(d) for d in (t.get("depends_on") or [])] for t in tasks}
+    seen: set[str] = set()
+    todo = list(deps.get(key, []))
+    while todo:
+        k = todo.pop()
+        if k not in seen:
+            seen.add(k)
+            todo.extend(deps.get(k, []))
+    return seen
 
 
 def _drop(tasks: list[dict], gone: dict) -> None:
