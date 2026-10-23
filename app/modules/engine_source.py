@@ -457,7 +457,7 @@ def step_module(row: dict) -> str:
     """The module a step writes: its code's `# app/modules/x.py` header, else the first `x.py` its own text names."""
     for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
         m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
-        if m:
+        if m and not re.match(r"(?:test_\w+|\w+_test|conftest)$", m.group(2)):     # a step's tests are not its module
             return m.group(2)
     m = _SIBLING_FILE_RE.search(" ".join(str(row.get(k) or "") for k in ("prompt_template", "title", "description")))
     return m.group(1) if m else ""
@@ -923,7 +923,10 @@ CONVENTIONS = (
     "- Secrets: held by the engine, read with `app.modules.runner_secrets.values_for(db, [NAMES])`; never logged, "
     "never put in a prompt, never read from the environment.\n"
     "- A value the code must not change (a fixed URL) is a module constant, not an environment lookup.\n"
-    "- A new module never takes the name of an engine module listed in the layout below; name it for what it is.")
+    "- A new module never takes the name of an engine module listed in the layout below; name it for what it is.\n"
+    "- The step is RUN before it passes (§17.1765): its tests, or an import of its module, against the engine with "
+    "this job's finished modules, in a sandbox with no network, no database and no secrets -- tests mock "
+    "`async_session`, HTTP clients and model calls, and must pass there.")
 
 
 def _words(text: str) -> set[str]:

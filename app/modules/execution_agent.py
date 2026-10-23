@@ -2415,6 +2415,27 @@ async def execute_next_node(
                         engine_reason = _es.unresolved_reason(_refs)
             except Exception as exc:
                 logger.warning("engine_source_gate_error: node='%s' error=%r", title, exc)
+        # §17.1765 — and it is RUN: its tests, or an import of its module, in the engine-test sandbox with this job's
+        # finished modules written in. A skip (sandbox off / unreachable / another engine) is logged, never a pass.
+        engine_test_reason: str | None = None
+        if syntax_reason is None and engine_reason is None and (tool or "").lower() == "codegen":
+            try:
+                from app.modules import engine_source as _es
+                if _es.targets_the_engine(brief):
+                    from app.sandbox import engine_tests as _et
+                    async with async_session() as _etdb:
+                        _rows = [dict(r) for r in (await _etdb.execute(text(
+                            "SELECT node_key, title, description, prompt_template, output_text, status "
+                            "FROM dag_nodes WHERE job_id = :j"), {"j": job_id})).mappings().all()]
+                    _me = next((r for r in _rows if r["node_key"] == node_key), {"node_key": node_key})
+                    _et_res = await _et.check(output, _me, _rows)
+                    (logger.warning if _et_res.verdict == "skip" else logger.info)(
+                        "engine_test_check: node='%s' verdict=%s ran=%s reason=%s", title, _et_res.verdict,
+                        _et_res.ran, _et_res.reason[:200])
+                    if _et_res.verdict == "fail":
+                        engine_test_reason = _et_res.reason
+            except Exception as exc:
+                logger.warning("engine_test_check_error: node='%s' error=%r", title, exc)
         # §17.434 — sandbox exec-smoke, AFTER the syntax gate, BEFORE the LLM
         # verifier. Executes the node's own Python module top-level to catch
         # runtime/module-level errors the ast.parse gate + LLM verifier miss.
@@ -2450,6 +2471,10 @@ async def execute_next_node(
             verify_status = "fail"
             reason, confidence = engine_reason, 0.0
             logger.warning("engine_source_gate_fail: node='%s'", title)
+        elif engine_test_reason is not None:
+            verify_status = "fail"
+            reason, confidence = engine_test_reason, 0.0
+            logger.warning("engine_test_check_fail: node='%s'", title)
         elif exec_reason is not None:
             verify_status = "fail"
             reason, confidence = exec_reason, 0.0

@@ -936,6 +936,41 @@ services:
       retries: 3
       start_period: 10s
 
+  # §17.1765 — the engine-test sandbox. A CodeGen step that writes code for the engine itself has its tests (and an
+  # import of its module) run here, against a copy of the engine with this job's other modules written in, before
+  # the step can pass. Built from the engine's own Dockerfile (stage `enginetest` = the dev image + a runner), so it
+  # holds the engine's packages and test tooling; on the INTERNAL rehearsal network, so nothing in it reaches out --
+  # no database, no secrets, no broker. `make build` brings it up with the orchestrator.
+  scaffold-enginetest:
+    image: scaffold-enginetest:${SCAFFOLD_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: enginetest
+    container_name: scaffold-enginetest
+    init: true
+    logging: *default-logging
+    mem_limit: 2g
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=512m
+    environment:
+      - HOME=/tmp
+    restart: always
+    networks:
+      - rehearsal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8020/health\",timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   # §17.435 — LLM observability backend (Arize Phoenix). Ingests the
   # orchestrator's OTLP traces (incl. the gen_ai.* LLM spans) and renders
   # per-job/node model/token/latency views. NON-DEFAULT profile "observability"
