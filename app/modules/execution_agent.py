@@ -48,6 +48,7 @@ from app.modules.execution_verify import (
     collect_upstream_code,
     _is_validation_llm_node,
     check_validation_citation_coverage,
+    upstream_codegen_keys,
 )
 from app.modules.execution_codegen_gate import (
     check_python_syntax,
@@ -2472,13 +2473,14 @@ async def execute_next_node(
             async with async_session() as _cite_db:
                 _cite_rows = await _cite_db.execute(
                     text(
-                        "SELECT node_key FROM dag_nodes "
-                        "WHERE job_id = :jid AND tool = 'CodeGen' "
-                        "  AND status = 'done' ORDER BY execution_order"
+                        "SELECT node_key, depends_on, tool, status FROM dag_nodes "
+                        "WHERE job_id = :jid ORDER BY execution_order"
                     ),
                     {"jid": job_id},
                 )
-                codegen_keys = [r[0] for r in _cite_rows.fetchall()]
+                # §17.1755 — the code this validator checks (its upstream), not every CodeGen step in the job
+                codegen_keys = upstream_codegen_keys(
+                    node_key, [dict(r) for r in _cite_rows.mappings().all()])
             # §17.377 — per-claim coverage check supersedes §17.376's
             # substring-presence check. The fifth mdsplit retry showed
             # the model gaming substring-presence by adding "decision

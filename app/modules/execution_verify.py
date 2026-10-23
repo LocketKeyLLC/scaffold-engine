@@ -365,6 +365,38 @@ def _is_claim_line(line: str) -> bool:
     return any(marker in s for marker in _CLAIM_MARKERS)
 
 
+def upstream_codegen_keys(node_key: str, rows: list[dict]) -> list[str]:
+    """§17.1755 — the finished CodeGen steps a validation step CHECKS: those in its transitive upstream.
+
+    The §17.376/377 guard asked a validator to cite every done CodeGen node in the JOB. In the mdsplit job it was
+    built on, the validator depended on all of them, so job-wide and upstream were the same set. Live (job 2772acae
+    T27 "Validate secrets handling", depends on T9/T10/T15): told to cite T10–T19 -- the backtester, the metrics --
+    in MET/NOT MET claims about secrets, it failed every attempt. A validator with no edges at all keeps the
+    job-wide set (nothing says which steps it checks). ``rows``: ``{node_key, depends_on, tool, status}`` in
+    execution order."""
+    by_key = {r["node_key"]: r for r in rows}
+    me = by_key.get(node_key)
+    deps = list((me or {}).get("depends_on") or [])
+    if not deps:
+        return [r["node_key"] for r in rows if r.get("tool") == "CodeGen" and r.get("status") == "done"]
+    # the NEAREST code upstream: a CodeGen step ends the walk (what it builds on is its own concern -- T27 checks the
+    # order executor's handling of secrets, not the risk controls the executor imports); anything else is walked
+    # through (a decision or a pending step between the validator and the code it checks)
+    seen: set[str] = set()
+    hit: set[str] = set()
+    stack = list(deps)
+    while stack:
+        k = stack.pop()
+        if k in seen or k not in by_key:
+            continue
+        seen.add(k)
+        if by_key[k].get("tool") == "CodeGen":
+            hit.add(k)
+            continue
+        stack.extend(by_key[k].get("depends_on") or [])
+    return [r["node_key"] for r in rows if r["node_key"] in hit and r.get("status") == "done"]
+
+
 def check_validation_citation_coverage(
     output: str,
     expected_codegen_keys: list[str],
