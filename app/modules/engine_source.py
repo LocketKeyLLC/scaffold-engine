@@ -200,7 +200,12 @@ def _close_fields(attr: str, fields: dict[str, str]) -> list[str]:
     """The real fields a wrong name was reaching for: `SEARXNG_BASE_URL` → `searxng_url` (shared words, most first)."""
     # §17.1753 — five letters or more: on "edgar_user_agent" the word "user" offered `multi_user_enabled`
     want = {w for w in attr.lower().split("_") if len(w) >= 5}
-    scored = sorted((-len(want & set(f.split("_"))), len(f), f) for f in fields if want & set(f.split("_")))
+    # §17.1754 — fields only: `settings_fields` also holds the class's own attributes, so `backtest_model_name` was
+    # offered pydantic's `model_copy` and `model_dump` (job 2772acae T17)
+    from app.config import settings
+    real = type(settings).model_fields
+    scored = sorted((-len(want & set(f.split("_"))), len(f), f) for f in fields
+                    if f in real and want & set(f.split("_")))
     return [f for _, _, f in scored[:3]]
 
 
@@ -223,6 +228,10 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
             continue                                       # §17.428's gate owns a block that does not parse
         settings_aliases: set[str] = set()
         for n in ast.walk(tree):
+            # §17.1754 — live (T14): approval drafted as `input("enter 'y' to approve")`; the engine is a server
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "input":
+                note("`input(…)`: the engine is a server process with no terminal -- an operator answer comes through "
+                     "the decision pause (`app.modules.decision_pause`), never a prompt that waits")
             if isinstance(n, ast.Import):
                 for al in n.names:
                     mod = al.name
@@ -322,6 +331,105 @@ def _render_module(mod: str, max_defs: int = 14) -> str:
             + (f"    … {more} more\n" if more > 0 else ""))
 
 
+# ── §17.1754 the engine's capabilities, named ────────────────────────────────
+#
+# Live (job 2772acae T14 "Implement approve-before-run step", brief: "reusing the engine's existing approve-before-run
+# pattern"): refused (§17.1749) for guessing `app.modules.runner_approve`, the next draft fell back to
+# `input("enter 'y' to approve")` -- a terminal prompt in a server process -- and passed. Nothing told it where approval
+# lives, and ranking modules by shared words had shown the VPN `kill_switch` (dropped, §17.1749). So: a curated list.
+# A step whose text names a capability is shown what implements it, with signatures read from the source; a name here
+# that stops existing fails tests/test_codegen_for_the_engine_reads_the_engine.py, so the list cannot rot silently.
+
+CAPABILITIES: tuple[dict, ...] = (
+    {"name": "operator approval (approve-before-run)",
+     "when": r"approv|approve-before-run|sign[- ]?off|operator (?:decides|decision|confirms)|human[- ]in[- ]the[- ]loop",
+     "how": "The operator approves through the engine's decision pause -- never input(), a terminal prompt, or a loop "
+            "that waits. What needs approval becomes a `decision` node in a job the lab owns, parked with "
+            "`park_awaiting_decision` (job must be running/executing; it moves to awaiting_decision); the operator "
+            "answers in the UI or `POST /jobs/{job_id}/decide`, which calls `resolve_decision` and resumes the run; "
+            "the answer is the node's output. Code reads it later; nothing blocks.",
+     "names": {"app.modules.decision_pause": ["park_awaiting_decision", "resolve_decision", "pending_decision",
+                                              "frame_decision", "decision_record"]}},
+    {"name": "secrets the engine holds",
+     "when": r"secret|api[ _-]?key|credential|broker key|password|token",
+     "how": "Keys are held encrypted by the engine; `values_for(db, [NAMES])` is the only plaintext path. Never log a "
+            "value, put it in a prompt or an output, or read it from the environment. Names are UPPER_SNAKE.",
+     "names": {"app.modules.runner_secrets": ["values_for", "set_secret", "names"]}},
+    {"name": "web search and news (SearXNG)",
+     "when": r"searxng|\bnews\b|web search|search the web|headlines",
+     "how": "`search_searxng(query)` runs one query through the engine's SearXNG with its relevance gate and returns "
+            "result dicts; `get_searxng_client()` is the shared async client for anything else.",
+     "names": {"app.modules.gt_extractor": ["search_searxng", "quick_research"],
+               "app.utils.http_clients": ["get_searxng_client"]}},
+    {"name": "model calls",
+     "when": r"\bllm\b|language model|model_router|propos(?:e|al)|rationale|summari[sz]",
+     "how": "Call by ROLE (`role=\"model_general\"`, `\"model_coder\"`, …), never a model name; `role` and `model` "
+            "cannot both be passed. `generate_json` gives grammar-constrained JSON.",
+     "names": {"app.model_router": ["generate", "generate_json", "tool_call"]}},
+    {"name": "alerts to the operator",
+     "when": r"alert|notif|kill[- ]?switch|\bhalt|warn the operator",
+     "how": "`emit(kind=…, severity=…, message=…)` reaches every alert sink, honours a per-kind cooldown and never "
+            "raises; omit `db` (a passed session is committed).",
+     "names": {"app.observability.alerts": ["emit"]}},
+    {"name": "recurring work (a schedule)",
+     "when": r"schedul|\bcron\b|daily|every day|before (?:the )?market open|recurring|periodic",
+     "how": "`get_scheduler()` is the engine's APScheduler (None when scheduling is off). Register with "
+            "`add_job(fn, trigger=CronTrigger.from_crontab(...), id=\"<lab_…>\", jobstore=\"memory\", "
+            "replace_existing=True, misfire_grace_time=settings.scheduler_misfire_grace_time)`; never an id starting "
+            "`schedule_` (reconciled away). There is no general cron API; the hook is added where the engine starts.",
+     "names": {"app.scheduler": ["get_scheduler"]}},
+    {"name": "tables (a migration)",
+     "when": r"schema|\btable|migration|alembic|audit (?:trail|log)",
+     "how": "A new table is an Alembic revision in `alembic/versions/NNNN_snake_name.py` (revision = the file stem), "
+            "using `op.execute(\"… IF NOT EXISTS …\")`; code reads and writes with `async_session` + `text`.",
+     "names": {"app.database": []}},
+    {"name": "an API route or operator page",
+     "when": r"dashboard|operator view|\bui\b|\bpage\b|endpoint|api route|\brouter\b",
+     "how": "A route is `router = APIRouter()` in `app/routers/<name>.py`, imported and `include_router`-ed in "
+            "app/main.py, guarded by `principal = Depends(get_principal)` + `assert_visible`. A page is a vanilla ES "
+            "module `app/ui/static/views/<name>.js` exporting `default function name(container, params, opts)`, "
+            "routed in app/ui/static/app.js and listed in nav.js. Run `make openapi-snapshot` after a route change.",
+     "names": {"app.authz": ["get_principal", "assert_visible"]}},
+)
+
+
+def _latest_migration() -> str:
+    versions = ENGINE_PKG.parent / "alembic" / "versions"
+    try:
+        files = sorted(p.stem for p in versions.glob("[0-9][0-9][0-9][0-9]_*.py"))
+    except OSError:
+        return ""
+    return files[-1] if files else ""
+
+
+def capabilities_for(node: dict) -> list[dict]:
+    """The capabilities this step's own text names."""
+    step = " ".join(str(node.get(k) or "") for k in ("title", "description", "prompt_template"))
+    return [c for c in CAPABILITIES if re.search(c["when"], step, re.I)]
+
+
+def _signature_of(mod: str, name: str) -> str:
+    info = module_index().get(mod) or {}
+    for sig in info.get("public", []):
+        if sig.split("(")[0].split()[-1] == name:
+            return sig
+    return name if name in info.get("names", ()) else ""
+
+
+def _render_capability(cap: dict) -> str:
+    lines = [f"**{cap['name']}** -- {cap['how']}"]
+    if cap["name"].startswith("tables"):
+        last = _latest_migration()
+        if last:
+            lines.append(f"    newest revision: `{last}` (the next one's down_revision)")
+    for mod, names in cap["names"].items():
+        for n in names:
+            sig = _signature_of(mod, n)
+            if sig:
+                lines.append(f"    `{mod}`: {sig}")
+    return "\n".join(lines) + "\n"
+
+
 def matching_settings(want: set[str], rare: int = 3) -> list[str]:
     """The settings fields a step's TITLE names: a word of six letters or more that at most `rare` fields have
     ("reddit" → `reddit_max_posts` …). Matched on the whole step text, or on common words ("order", "stats", "check"),
@@ -354,6 +462,9 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000) 
         "### Conventions\n" + CONVENTIONS + "\n",
         "### Modules every change uses\n" + "".join(_render_module(m) for m in _CORE),
     ]
+    caps = capabilities_for(node)
+    if caps:
+        parts.append("### The engine's own way to do what this step names\n" + "".join(_render_capability(c) for c in caps))
     if hit_fields:
         parts.append("### Settings fields this step may read (`settings.<name>`)\n"
                      + "".join(f"    {f}" + (f" = {settings_fields()[f]}" if settings_fields()[f] not in ("", "PydanticUndefined") else "") + "\n"

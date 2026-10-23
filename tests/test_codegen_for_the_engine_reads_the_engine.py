@@ -164,6 +164,43 @@ def test_non_python_and_unparsable_blocks_are_not_its_business():
     assert es.unresolved_refs("```sql\nSELECT 1;\n```\n```python\ndef broken(:\n```") == []
 
 
+# ── §17.1754 the engine's capabilities, named ────────────────────────────────
+
+def test_every_name_the_capability_list_promises_exists_in_the_engine():
+    """The list is hand-written: when code moves, this fails instead of the list going blind (a gate goes blind when
+    code moves)."""
+    gone = [(m, n) for c in es.CAPABILITIES for m, names in c["names"].items() for n in names
+            if not es._signature_of(m, n)]
+    assert gone == []
+    assert all(m in es.module_index() for c in es.CAPABILITIES for m in c["names"])
+
+
+def test_the_live_approval_step_is_shown_the_decision_pause():
+    t14 = {"title": "Implement approve-before-run step",
+           "prompt_template": "Python module `approval_step.py` with `request_approval(proposal) -> bool`. Reuses the "
+                              "engine's existing approve-before-run runner-step pattern."}
+    assert [c["name"] for c in es.capabilities_for(t14)][0] == "operator approval (approve-before-run)"
+    b = es.block_for(t14)
+    assert "async def park_awaiting_decision(db, job_id, node, frame)" in b
+    assert "never input()" in b
+
+
+def test_a_step_that_names_no_capability_is_shown_none():
+    assert es.capabilities_for({"title": "Implement FINRA data client",
+                                "prompt_template": "Fetch short interest files and parse them."}) == []
+
+
+def test_input_in_engine_code_is_refused():
+    found = es.unresolved_refs("```python\ndef request_approval(p):\n    return input('approve? ') == 'y'\n```")
+    assert len(found) == 1 and "decision pause" in found[0]
+
+
+def test_a_missing_setting_is_never_offered_a_pydantic_method():
+    """§17.1754 — live (T17): `backtest_model_name` was offered `model_copy`, `model_dump`."""
+    found = es.unresolved_refs("```python\nfrom app.config import settings\nm = settings.backtest_model_name\n```")
+    assert len(found) == 1 and "model_copy" not in found[0] and "model_dump" not in found[0]
+
+
 # ── what the step is shown ───────────────────────────────────────────────────
 
 def test_the_block_shows_the_real_engine():
