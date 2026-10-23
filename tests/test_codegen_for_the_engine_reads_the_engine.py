@@ -316,7 +316,7 @@ def _session(db):
     return f
 
 
-async def _run(output: str, brief: dict):
+async def _run(output: str, brief: dict, *, exec_check: bool = False):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
@@ -339,7 +339,8 @@ async def _run(output: str, brief: dict):
     with patch.object(xa.settings, "execution_optimize_enabled", False), \
          patch.object(xa.settings, "best_of_n_enabled", False), \
          patch.object(xa.settings, "node_token_streaming_enabled", False), \
-         patch.object(xa.settings, "codegen_execution_check_enabled", False), \
+         patch.object(xa.settings, "codegen_execution_check_enabled", exec_check), \
+         patch.object(xa.settings, "coderunner_url", "http://coderunner:8010" if exec_check else xa.settings.coderunner_url), \
          patch("app.modules.execution_agent.async_session", _session(db)), \
          patch("app.modules.execution_agent._get_job", job), \
          patch("app.modules.execution_agent._get_next_node", node), \

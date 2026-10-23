@@ -101,3 +101,34 @@ async def test_non_argparse_exit_2_still_fails(monkeypatch):
     ))
     r = await codegen_check.codegen_exec_smoke("```python\nraise ValueError('bad config')\n```")
     assert r.verdict == "fail"
+
+
+@pytest.mark.asyncio
+async def test_a_module_and_its_tests_join_into_one_file_that_parses(monkeypatch):
+    """§17.1777 — live (job f00ea97f T18): module + test blocks, each with `from __future__ import annotations`,
+    joined into one solution.py; the second import landed mid-file and Python refused it, twice."""
+    import ast
+    run = AsyncMock(return_value=CodeRunResult(ok=True, exit_code=0, stdout=""))
+    monkeypatch.setattr(codegen_check, "run_code", run)
+    out = ("```python\nfrom __future__ import annotations\nX: int = 1\n```\n\n"
+           "```python\nfrom __future__ import annotations\ndef test_x() -> None:\n    assert X == 1\n```")
+    await codegen_check.codegen_exec_smoke(out)
+    src = run.await_args.args[0]["solution.py"]
+    ast.parse(src)                                                   # would raise before the fix
+    assert src.startswith("from __future__ import annotations\n") and src.count("from __future__") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_executor_leaves_engine_code_to_the_engine_test_sandbox():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    from types import SimpleNamespace
+    smoke = AsyncMock()
+    with patch("app.modules.execution_agent.codegen_exec_smoke", new=smoke), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])), \
+         patch("app.sandbox.engine_tests.check", new=AsyncMock(return_value=SimpleNamespace(verdict="pass", reason="ok", ran=[]))):
+        await _run(GROUNDED, LIVE_BRIEF, exec_check=True)
+    smoke.assert_not_awaited()
+    # and another job's code still gets the smoke (the skip is for engine code only)
+    with patch("app.modules.execution_agent.codegen_exec_smoke", new=smoke):
+        await _run(GROUNDED, {"description": "Write a news CLI.", "goals": ["A CLI."]}, exec_check=True)
+    smoke.assert_awaited()

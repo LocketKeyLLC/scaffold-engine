@@ -2445,9 +2445,18 @@ async def execute_next_node(
         # being configured + opted in, so this is inert by default. Computed
         # only when syntax is clean (no point running code that doesn't parse).
         exec_reason: str | None = None
+        # §17.1777 — code written for the engine is run by the engine-test sandbox (§17.1765), with the engine and its
+        # siblings present; the coderunner (no engine) has nothing to add there but false failures.
+        _engine_step = False
+        try:
+            from app.modules import engine_source as _es2
+            _engine_step = _es2.targets_the_engine(brief)
+        except Exception:
+            _engine_step = False
         if (
             syntax_reason is None
             and engine_reason is None
+            and not _engine_step
             and settings.codegen_execution_check_enabled
             and (settings.coderunner_url or "").strip()
             and (tool or "").lower() == "codegen"
