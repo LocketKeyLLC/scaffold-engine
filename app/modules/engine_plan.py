@@ -46,6 +46,8 @@ _LLM_WORK_RE = re.compile(r"^\s*(?:document|write\s+(?:the\s+)?(?:docs|readme|do
                           r"decide|research|review|summari[sz]e|choose|plan|outline|draft\s+the\s+(?:docs|readme))\b", re.I)
 _RUNTIME_VERB_RE = re.compile(r"^\s*(?:generate|produce|compute|calculate|score|rank|propose|run|send|place|fetch|"
                               r"ingest|record|store|reconcile|track|monitor|execute|classify|extract)\b", re.I)
+_BLOCKS_RE = re.compile(r"[^.]*\b(?:blocks?|waits?|polls?)\b(?:\s+\w+){0,3}\s+(?:until|for)\b[^.]*\b(?:approv|reject|answer|decision)\w*[^.]*\.?",
+                        re.I)
 _CHECK_STEP_RE = re.compile(r"^\s*(?:verify|validate|check|ensure|confirm|assert|prove)\b\s*", re.I)
 _MIGRATION_STEP_RE = re.compile(r"\bmigration\b", re.I)
 _RUN_TESTS_RE = re.compile(r"\b(?:run|execute|runs|executes)\b.{0,30}\b(?:tests?|test suite|pytest)\b|\bpytest\b", re.I)
@@ -231,11 +233,27 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
         asks = (_ASKS_APPROVAL_RE.search(str(t.get("name") or ""))
                 or re.search(r"\b(?:request|ask_for|get)_approval\b", _text(t)))
         if _module_of(t) and asks and "operator_ask" not in _text(t):
+            # §17.1773 — and the sentence promising the opposite goes (live 918b6274 T8: "Blocks until operator
+            # approves or rejects" beside this very note)
+            t["notes"] = _BLOCKS_RE.sub(" ", str(t.get("notes") or "")).strip()
             t["notes"] = str(t.get("notes") or "").rstrip() + (
                 " The operator's answer arrives later, through `app.modules.operator_ask`: this step opens the "
                 "decisions (`open_decision_job`) and acts in an `@answer_handler` when each answer is recorded; no "
                 "function can return the answer when it asks, so nothing here returns or waits for one.")
             changes.append(f"approval_made_asynchronous: {t.get('id')} asks through operator_ask")
+
+    # 3b. §17.1773 — a step that requests approval and acts on it in one pass cannot be written either (live 918b6274
+    #     T26 "Runs before market open: … request approval, execute approved orders"): it opens the decisions and
+    #     returns; what the operator approves is acted on in the answer handler.
+    for t in tasks:
+        txt = _text(t)
+        if (_module_of(t) and "operator_ask" not in txt
+                and re.search(r"\brequests?\s+(?:operator\s+)?approval\b|\bexecutes?\s+(?:the\s+)?approved\b", txt, re.I)):
+            t["notes"] = _BLOCKS_RE.sub(" ", str(t.get("notes") or "")).strip() + (
+                " Approval is asynchronous (`app.modules.operator_ask`): this step opens the decisions and returns; "
+                "an approved order is acted on in the `@answer_handler` when the operator's answer is recorded, "
+                "never after a wait in the same call.")
+            changes.append(f"approval_flow_split: {t.get('id')} acts on approvals in the answer handler")
 
     # 4. one step joins the parts into the engine
     modules = [t for t in tasks if _module_of(t)]
