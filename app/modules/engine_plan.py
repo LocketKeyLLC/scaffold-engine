@@ -20,7 +20,8 @@ _WIRING_RE = re.compile(r"\bapp/main\.py\b|\binclude_router\b|\bget_scheduler\b|
                         r"\bwire[sd]?\b.{0,40}\b(?:engine|lab|modules?|together)\b|\bentry (?:point|function)\b", re.I)
 #: the step that ASKS (not the ones that act on, record or show an approval)
 _ASKS_APPROVAL_RE = re.compile(r"approve-before-run|\b(?:request|ask(?:s|ing)?\s+for|seek|get)\w*\s+(?:\w+\s+){0,3}"
-                               r"(?:operator\s+)?approv|\bapproval (?:step|gate|request|prompt|flow)\b|\b(?:request|ask_for|get)_approval\b",
+                               r"(?:operator\s+)?approv|\bapproval (?:step|gate|request|prompt|flow)\b|\b(?:request|ask_for|get)_approval\b"
+                               r"|\bfor (?:the )?(?:operator(?:'s)? )?approval\b",
                                re.I)
 _STOP = {"implement", "build", "create", "add", "write", "the", "a", "an", "lab", "engine", "scaffold", "research"}
 
@@ -41,6 +42,10 @@ def _module_of(t: dict) -> str | None:
 
 _VERB_RE = re.compile(r"^\s*(?:implement|configure|ingest|store|acquire|build|determine|create|add|write|define|"
                       r"design|make|set\s*up|compute|fetch|track|generate|record|run|load)\s+", re.I)
+_LLM_WORK_RE = re.compile(r"^\s*(?:document|write\s+(?:the\s+)?(?:docs|readme|documentation|lab documentation)|design|"
+                          r"decide|research|review|summari[sz]e|choose|plan|outline|draft\s+the\s+(?:docs|readme))\b", re.I)
+_RUNTIME_VERB_RE = re.compile(r"^\s*(?:generate|produce|compute|calculate|score|rank|propose|run|send|place|fetch|"
+                              r"ingest|record|store|reconcile|track|monitor|execute|classify|extract)\b", re.I)
 _CHECK_STEP_RE = re.compile(r"^\s*(?:verify|validate|check|ensure|confirm|assert|prove)\b\s*", re.I)
 _MIGRATION_STEP_RE = re.compile(r"\bmigration\b", re.I)
 _RUN_TESTS_RE = re.compile(r"\b(?:run|execute|runs|executes)\b.{0,30}\b(?:tests?|test suite|pytest)\b|\bpytest\b", re.I)
@@ -156,6 +161,17 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
             changes.append(f"check_made_a_test: {t.get('id')} writes tests/{test}.py (it was a Shell check)")
         else:
             changes.append(f"shell_made_code: {t.get('id')} writes the code that does it (it was a Shell step)")
+
+    # 0g. §17.1772 — an LLM step that DOES the lab's work at build time is the code that does it every day (live
+    #     918b6274's sixth plan: T14 [LLM] "Generate trade proposals" between the signal store and the risk checks --
+    #     a model making proposals once, now, instead of the module that makes them each morning). Reading, deciding,
+    #     designing, reviewing and documenting stay LLM steps.
+    for t in tasks:
+        if (str(t.get("tool") or "").lower() == "llm" and str(t.get("type") or "action") == "action"
+                and not _LLM_WORK_RE.match(str(t.get("name") or "")) and _RUNTIME_VERB_RE.match(str(t.get("name") or ""))):
+            t["tool"] = "CodeGen"
+            changes.append(f"llm_work_made_code: {t.get('id')} writes the code that does it (it was an LLM step doing "
+                           "the lab's work once, at build time)")
 
     # 0b. §17.1768 — a step that writes tests writes a test module, not a module with tests of its own
     for t in tasks:
