@@ -51,6 +51,7 @@ def test_the_live_plan_is_completed():
                    ("T15", "order_executor")):
         assert f"tests/test_{mod}.py" in by[k]["notes"], k
     assert "tests/test_test_integration" not in json.dumps(tasks)               # a test step is not a module
+    assert "Python module" not in by["T2"]["notes"]                              # a schema step is a revision
     assert "operator_ask" in by["T14"]["notes"] and "operator_ask" not in by["T15"]["notes"]
     wire = by["WIRE"]
     assert wire["tool"] == "CodeGen" and set(wire["depends_on"]) == {"T9", "T12", "T14", "T15"}
@@ -127,3 +128,47 @@ async def test_generate_dag_leaves_another_jobs_plan_alone():
     keys = {p["node_key"]: p for p in inserted}
     assert keys and "WIRE" not in keys
     assert "tests/test_" not in keys["T12"]["prompt_template"]
+
+
+# ── §17.1767 a code step that names no file (live job 918b6274, 2026-10-23) ──
+
+PLAN_2 = [
+    {"id": "T3", "name": "Implement audit trail writes", "tool": "CodeGen", "depends_on": [],
+     "notes": "Exports append_signal(), append_proposal(). Uses existing Postgres connection."},
+    {"id": "T6", "name": "Implement kill switch", "tool": "CodeGen", "depends_on": [],
+     "notes": "Exports activate_kill_switch(). Consumed by approval flow and operator dashboard."},
+    {"id": "T7", "name": "Implement supervised approval flow", "tool": "CodeGen", "depends_on": ["T3", "T6"],
+     "notes": "Exports request_approval(proposal) and execute_approved(proposal)."},
+    {"id": "T24", "name": "Store broker order ids", "tool": "CodeGen", "depends_on": ["T7"],
+     "notes": "Exports store_broker_order_id(order_id, proposal_id). Called by approval flow after execution."},
+    {"id": "T27", "name": "Validate risk controls", "tool": "LLM", "depends_on": ["T6", "T7"], "notes": "Check."},
+]
+
+
+def test_a_step_that_names_no_file_gets_one_from_its_title():
+    tasks = copy.deepcopy(PLAN_2)
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert by["T3"]["notes"].startswith("Python module `paper_audit_trail_writes.py`.")
+    assert by["T6"]["notes"].startswith("Python module `paper_kill_switch.py`.")        # never the engine's own name
+    assert "tests/test_paper_audit_trail_writes.py" in by["T3"]["notes"]
+    assert "Python module" not in by["T27"]["notes"]                                   # not a code step
+    assert set(by["WIRE"]["depends_on"]) == {"T3", "T6", "T7", "T24"}
+    assert sum(c.startswith("module_named") for c in changes) == 4
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+def test_only_the_step_that_asks_is_made_asynchronous():
+    tasks = copy.deepcopy(PLAN_2)
+    engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert "operator_ask" in by["T7"]["notes"]                                         # exports request_approval
+    assert "operator_ask" not in by["T6"]["notes"] and "operator_ask" not in by["T24"]["notes"]   # only mention it
+
+
+def test_names_are_unique_and_short():
+    tasks = [{"id": f"A{i}", "name": "Implement the point-in-time price data loader", "tool": "CodeGen",
+              "depends_on": []} for i in range(3)]
+    engine_plan.complete_engine_plan(tasks, BRIEF)
+    names = [engine_plan._module_of(t) for t in tasks[:3]]
+    assert names == ["paper_point_time_price_data", "paper_point_time_price_data_2", "paper_point_time_price_data_3"]
