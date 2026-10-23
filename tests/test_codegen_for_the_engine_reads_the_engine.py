@@ -272,6 +272,23 @@ def test_the_engines_own_source_passes_its_own_call_check():
     assert bad == []
 
 
+def test_test_code_may_import_the_engines_test_tooling():
+    """§17.1757 — live (T22 "Write integration tests"): refused for `import pytest`."""
+    src = "```python\nimport pytest\nimport pytest_asyncio\nfrom hypothesis import given\n```"
+    assert es.unresolved_refs(src) == []
+
+
+def test_the_test_tooling_list_matches_requirements_dev():
+    from pathlib import Path
+    req = es.ENGINE_PKG.parent / "requirements-dev.txt"
+    if not req.exists():
+        pytest.skip("requirements-dev.txt is not in this image")
+    pinned = {line.split("==")[0].strip().lower().replace("-", "_") for line in req.read_text().splitlines()
+              if "==" in line and not line.lstrip().startswith("#")}
+    tools = {p for p in pinned if p.startswith("pytest") or p in {"hypothesis", "mutmut"}}
+    assert tools == set(es.TEST_TOOLING), (tools ^ set(es.TEST_TOOLING))
+
+
 # ── what the step is shown ───────────────────────────────────────────────────
 
 def test_the_block_shows_the_real_engine():

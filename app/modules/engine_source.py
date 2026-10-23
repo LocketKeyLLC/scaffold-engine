@@ -254,8 +254,15 @@ NOT_IN_THE_ENGINE = {
 }
 
 
+#: §17.1757 — the engine's test tooling (requirements-dev.txt), by import name. Not installed in the production image
+#: this check runs in, and not readable there (no requirements files ship); live (job 2772acae T22 "Write integration
+#: tests") was refused for `import pytest`. tests/test_codegen_for_the_engine_reads_the_engine.py keeps it equal to the
+#: pinned test tools in requirements-dev.txt.
+TEST_TOOLING = frozenset({"pytest", "pytest_asyncio", "pytest_timeout", "pytest_cov", "hypothesis", "mutmut"})
+
+
 def _installed(top: str) -> bool:
-    if top in sys.stdlib_module_names or top in sys.builtin_module_names:
+    if top in sys.stdlib_module_names or top in sys.builtin_module_names or top in TEST_TOOLING:
         return True
     try:
         return importlib.util.find_spec(top) is not None
