@@ -127,7 +127,7 @@ def test_a_missing_setting_is_told_what_to_do_and_not_offered_a_stranger():
     found = es.unresolved_refs('```python\nfrom app.config import settings\nua = getattr(settings, "edgar_user_agent", None)\n```')
     assert len(found) == 1 and "`settings.edgar_user_agent`: the engine has no such setting" in found[0]
     assert "multi_user_enabled" not in found[0]
-    assert "module constant" in found[0] and "app.config.Settings" in found[0]
+    assert "module constant" in found[0] and "values_for" in found[0]  # §17.1776
 
 
 def test_an_invented_package_is_refused():
@@ -316,7 +316,7 @@ def _session(db):
     return f
 
 
-async def _run(output: str, brief: dict):
+async def _run(output: str, brief: dict, *, exec_check: bool = False):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
@@ -339,7 +339,8 @@ async def _run(output: str, brief: dict):
     with patch.object(xa.settings, "execution_optimize_enabled", False), \
          patch.object(xa.settings, "best_of_n_enabled", False), \
          patch.object(xa.settings, "node_token_streaming_enabled", False), \
-         patch.object(xa.settings, "codegen_execution_check_enabled", False), \
+         patch.object(xa.settings, "codegen_execution_check_enabled", exec_check), \
+         patch.object(xa.settings, "coderunner_url", "http://coderunner:8010" if exec_check else xa.settings.coderunner_url), \
          patch("app.modules.execution_agent.async_session", _session(db)), \
          patch("app.modules.execution_agent._get_job", job), \
          patch("app.modules.execution_agent._get_next_node", node), \

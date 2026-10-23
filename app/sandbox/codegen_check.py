@@ -64,7 +64,12 @@ async def codegen_exec_smoke(output: str, *, timeout_s: float = 20.0) -> ExecChe
     if not blocks:
         return ExecCheckResult("skip", "no python block to execute")
 
-    src = "\n\n".join(blocks)
+    # §17.1777 — a step's module and its tests are separate blocks, each with `from __future__ import annotations`;
+    # joined, the second one lands mid-file and Python refuses the whole thing (live, job f00ea97f T18, twice). The
+    # joined file carries each __future__ import once, at the top.
+    futures = sorted({ln.strip() for b in blocks for ln in b.splitlines() if ln.strip().startswith("from __future__ import")})
+    bodies = ["\n".join(ln for ln in b.splitlines() if not ln.strip().startswith("from __future__ import")) for b in blocks]
+    src = "\n".join(futures) + ("\n\n" if futures else "") + "\n\n".join(bodies)
     res = await run_code(
         {"solution.py": src},
         ["python", "solution.py"],

@@ -34,7 +34,7 @@ requests==2.34.2
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==6.1.0
-setuptools==84.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
+setuptools==84.1.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
 sqlalchemy[asyncio]==2.1.3
 structlog==26.1.0
 trafilatura==2.1.0  # HELD: 2.2.0 drops <h1> headings from extraction (audit M12) — see .github/dependabot.yml ignore
@@ -48,7 +48,7 @@ psycopg2-binary==2.9.13
 # + forum_ingest.py), unaffected by the 6.0 removals.
 # §17.724 — 6.14.2→6.15.0 (GHSA-fwg2-594c-jp42 + GHSA-fp3f-mc75-235c).
 # §17.1723 — 6.19.0→6.20.1 (CVE-2026-113792..113795).
-pypdf==6.21.1
+pypdf==6.21.2
 pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 python-multipart==0.0.32  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.

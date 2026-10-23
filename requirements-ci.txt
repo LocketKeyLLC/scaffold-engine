@@ -22,14 +22,14 @@ httpcore2==2.13.1
 PyJWT==2.15.1
 truststore==0.10.4
 pymilvus==3.0.2
-setuptools==84.0.0  # §17.585
+setuptools==84.1.0  # §17.585
 json_repair==0.63.5
 requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
 redis==8.1.0
 trafilatura==2.1.0  # HELD at 2.1.x (mirror requirements.txt) — 2.2.0 heading-loss regression, audit M12
-pypdf==6.21.1  # §17.585, §17.724 GHSA bump; §17.1723 CVE-2026-113792..113795; §17.1739 CVE-2026-113786
+pypdf==6.21.2  # §17.585, §17.724 GHSA bump; §17.1723 CVE-2026-113792..113795; §17.1739 CVE-2026-113786; §17.1778 CVE-2026-115572/115580/115585
 pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
 tzlocal==5.4.4

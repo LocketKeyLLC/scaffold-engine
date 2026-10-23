@@ -419,3 +419,16 @@ async def test_engine_findings_refuses_a_siblings_file():
     out = "```python\n# app/modules/paper_audit_trail_writer.py\nasync def write_signal(**kw):\n    ...\n```"
     found = "\n".join(await es.engine_findings(db, "job-1", "T6", out))
     assert "that module is step T4's" in found
+
+
+def test_a_value_only_the_operator_has_is_read_from_the_engines_secrets():
+    """§17.1776 — live (job f00ea97f T7/T8): told "a Settings field a step of this job adds", every attempt either
+    shipped `contact@example.com` or read `settings.sec_user_agent_contact` (refused: no step adds settings) -- both
+    steps failed 3/3. The way that can pass: read it with values_for when the code runs."""
+    found = es.placeholder_refs('```python\nUA = "ScaffoldEngine contact@example.com"\n```')
+    assert found and 'values_for(db, ["UPPER_SNAKE_NAME"])' in found[0] and "Machines page" in found[0]
+    assert "app.config.Settings" not in found[0]
+    s = [f for f in es.unresolved_refs('```python\nfrom app.config import settings\nX = settings.sec_user_agent_contact\n```')
+         if "sec_user_agent_contact" in f]
+    assert s and "values_for" in s[0] and "a step of this job adds" not in s[0]
+    assert "values_for(db, [\\\"UPPER_SNAKE_NAME\\\"])" in es.CONVENTIONS or 'values_for(db, ["UPPER_SNAKE_NAME"])' in es.CONVENTIONS
