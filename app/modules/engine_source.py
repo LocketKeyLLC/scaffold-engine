@@ -620,6 +620,11 @@ def _close_fields(attr: str, fields: dict[str, str]) -> list[str]:
     return [f for _, _, f in scored[:3]]
 
 
+#: §17.1764 — what only the executor calls: code that parks or resolves a decision itself reads an answer nobody gave
+_EXECUTOR_ONLY = frozenset({("app.modules.decision_pause", n)
+                            for n in ("park_awaiting_decision", "resolve_decision", "pending_decision")})
+
+
 def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names: set[str] = frozenset()) -> list[str]:
     """Every engine module, name, settings field or package the output reaches for that does not exist."""
     index = module_index()
@@ -668,6 +673,10 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                             real = ", ".join(p.split("(")[0].split()[-1] for p in index[mod]["public"][:12])
                             note(f"`from {mod} import {al.name}`: `{mod}` has no `{al.name}`"
                                  + (f" (it has {real})" if real else ""))
+                        if (mod, al.name) in _EXECUTOR_ONLY:
+                            note(f"`from {mod} import {al.name}`: the executor's own half of the decision pause -- "
+                                 "code asks the operator with `app.modules.operator_ask` (open_decision_job, "
+                                 "answer_handler, answer_of)")
                         if mod == "app.config" and al.name == "settings":
                             settings_aliases.add(al.asname or "settings")
                 elif mod.split(".")[0] in NOT_IN_THE_ENGINE:
@@ -946,13 +955,17 @@ def _render_module(mod: str, max_defs: int = 14) -> str:
 CAPABILITIES: tuple[dict, ...] = (
     {"name": "operator approval (approve-before-run)",
      "when": r"approv|approve-before-run|sign[- ]?off|operator (?:decides|decision|confirms)|human[- ]in[- ]the[- ]loop",
-     "how": "The operator approves through the engine's decision pause -- never input(), a terminal prompt, or a loop "
-            "that waits. What needs approval becomes a `decision` node in a job the lab owns, parked with "
-            "`park_awaiting_decision` (job must be running/executing; it moves to awaiting_decision); the operator "
-            "answers in the UI or `POST /jobs/{job_id}/decide`, which calls `resolve_decision` and resumes the run; "
-            "the answer is the node's output. Code reads it later; nothing blocks.",
-     "names": {"app.modules.decision_pause": ["park_awaiting_decision", "resolve_decision", "pending_decision",
-                                              "frame_decision", "decision_record"]}},
+     # §17.1764 — live (T14): the code parked the decision itself and read the answer on the next line, before
+     # anyone could give one; code asks through `operator_ask`, which opens a job the executor parks on
+     "how": "Code asks the operator through `app.modules.operator_ask` -- never input(), a loop that waits, or "
+            "decision_pause directly (that is the executor's). Build one `decision(key, question, detail, "
+            "payload={...})` per item (options default to Approve / Reject), then `job_id = await "
+            "open_decision_job(db, title=…, decisions=[…], on_answer=\"app.modules.<module>:<fn>\")`; it returns at "
+            "once. The operator answers each in the UI. `fn` is `@answer_handler async def fn(job_id, node_key, "
+            "answer, payload)`, called as each answer is recorded, with `answer = {\"choice\", \"note\", "
+            "\"approved\"}`; act only when `answer[\"approved\"]` is True. `await answer_of(db, job_id, key)` reads "
+            "an answer later (None while open). Nothing the code does is approved until that answer exists.",
+     "names": {"app.modules.operator_ask": ["decision", "open_decision_job", "answer_handler", "answer_of"]}},
     {"name": "secrets the engine holds",
      "when": r"secret|api[ _-]?key|credential|broker key|password|token",
      "how": "Keys are held encrypted by the engine; `values_for(db, [NAMES])` is the only plaintext path. Never log a "

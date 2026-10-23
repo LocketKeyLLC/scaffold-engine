@@ -181,7 +181,7 @@ def test_the_live_approval_step_is_shown_the_decision_pause():
                               "engine's existing approve-before-run runner-step pattern."}
     assert [c["name"] for c in es.capabilities_for(t14)][0] == "operator approval (approve-before-run)"
     b = es.block_for(t14)
-    assert "async def park_awaiting_decision(db, job_id, node, frame)" in b
+    assert "async def open_decision_job(db, *, title, decisions, owner, on_answer, start)" in b     # §17.1764
     assert "never input()" in b
 
 
@@ -218,7 +218,7 @@ async def request_approval(proposal, *, job_id=None):
 
 
 def test_the_live_unawaited_coroutine_is_refused():
-    found = [f for f in es.unresolved_refs(LIVE_T14) if "given a" not in f]       # kinds: §17.1761's own test
+    found = [f for f in es.unresolved_refs(LIVE_T14) if "given a" not in f and "executor's own half" not in f]
     assert found == ["`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a "
                      "coroutine, not a result)"]
 

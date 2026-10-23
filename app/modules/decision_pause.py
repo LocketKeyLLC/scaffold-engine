@@ -81,7 +81,8 @@ async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
     delegated = await delegated_decisions(db, job_id)
     rows = (await db.execute(
         text("""
-            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.execution_order
+            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.execution_order,
+                   n.tool_config
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending' AND n.node_type = 'decision'
               AND NOT (n.node_key = ANY(:delegated))
@@ -188,8 +189,12 @@ async def frame_decision(node: dict, *, brief: str = "", upstream: str = "") -> 
     """``{question, detail, options[{label,fit,tradeoff}], suggested, why, framed}``.
     Fail-soft to ``fallback_frame`` — the pause happens either way."""
     from app import model_router
+    from app.modules import operator_ask
     from app.utils.tool_call_args import read_tool_args
 
+    # §17.1764 — a question engine code asked: its own words and options, nothing for the model to frame or suggest
+    if operator_ask.fixed_options(node):
+        return operator_ask.fixed_frame(node)
     fb = fallback_frame(node)
     prompt = (
         f"Step: {node.get('title') or ''}\n"
@@ -399,11 +404,20 @@ async def resolve_decision(
         # carried detail, successes did not. The commands and their output are
         # already masked by `resolve_run` (§17.1193), so this leaks nothing.
         run_detail = {k: v for k, v in res.items() if k not in ("outcome", "node_key", "record")}
+    elif waiting.get("fixed") and (delegate or not _fixed_choice(choice, waiting)):
+        # §17.1764 — a question engine code asked takes one of its own options, and is never the engine's to answer
+        await db.rollback()
+        labels = [o.get("label") for o in waiting.get("options") or []]
+        return {"outcome": "bad_choice", "choices": labels, "current_status": job["status"], "waiting_on": node_key,
+                "detail": ("this decision is the operator's; choose one of " if delegate else "choose one of ")
+                          + ", ".join(labels)}
     elif delegate:
         entry = {"by": "engine", "at": now}
         outcome = "delegated"
         run_detail = {}
     else:
+        if waiting.get("fixed"):
+            choice = _fixed_choice(choice, waiting)
         rec = decision_record(choice or "", note, waiting)
         upd = await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), "
@@ -426,7 +440,15 @@ async def resolve_decision(
     await transition(db, job_id, to="executing", expected_from=(STATUS,), reason=f"decided:{node_key}")
     await db.commit()
     logger.info("decision_pause_%s job=%s node=%s", outcome, job_id, node_key)
+    if outcome == "resolved" and waiting.get("fixed"):
+        from app.modules import operator_ask
+        await operator_ask.answered(db, job_id, node_key)      # §17.1764 — the code that asked acts on it now
     return {"outcome": outcome, "node_key": node_key, "record": entry, **run_detail}
+
+
+def _fixed_choice(choice: str | None, waiting: dict) -> str | None:
+    from app.modules import operator_ask
+    return operator_ask.match_choice(choice or "", [str(o.get("label")) for o in waiting.get("options") or []])
 
 
 REVIEW_HEAD = "Operator review"
