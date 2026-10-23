@@ -1168,6 +1168,23 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
 _system_for_tool = system_for_tool
 
 
+async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[str]:
+    """§17.1779 — the distinct reasons this step's earlier attempts were refused, oldest first (from the run log)."""
+    rows = (await db.execute(text(
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n "
+        "AND message LIKE :failed AND details->>'reason' IS NOT NULL ORDER BY created_at"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
+    seen: list[str] = []
+    keys: set[str] = set()
+    for r in rows:
+        r = (r or "").strip()
+        k = " ".join(r.split())[:240]
+        if r and k not in keys:
+            keys.add(k)
+            seen.append(r)
+    return seen[-limit:]
+
+
 def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
     """Build execution prompt from node template + brief context.
 
@@ -1906,6 +1923,14 @@ async def execute_next_node(
             "retry_count": node.get("retry_count") or 0,
             "last_verification_reason": node.get("last_verification_reason"),
         }
+        # §17.1779 — and every earlier refusal of this step, not only the last: live (job f00ea97f T7/T8, six attempts
+        # each) one attempt fixed the sample contact and re-invented `write_ingested_item`, the next fixed that and
+        # brought the sample back. A retry that sees one reason trades one defect for another.
+        if node_snapshot["retry_count"]:
+            try:
+                node_snapshot["prior_refusals"] = await prior_refusals(db, job_id, str(node_id))
+            except Exception as exc:
+                logger.warning("prior_refusals_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router

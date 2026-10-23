@@ -68,13 +68,21 @@ def _format_reviewer_feedback(node: dict) -> str:
     reason = (node.get("last_verification_reason") or "").strip()
     if retry_count <= 0 or not reason:
         return ""
+    # §17.1779 — the earlier refusals too: each one must stay fixed, not only the last
+    norm = " ".join(reason.split())[:240]
+    earlier = [r for r in (node.get("prior_refusals") or []) if " ".join(str(r).split())[:240] != norm]
+    history = ""
+    if earlier:
+        history = ("Earlier attempts of this step were refused for these too -- every one must stay fixed:\n"
+                   + "".join(f"  {i}. {str(r).strip()[:900]}\n" for i, r in enumerate(earlier, 1)) + "\n")
     return (
         f"## Reviewer feedback (attempt {retry_count + 1})\n"
         f"The previous attempt was rejected by the verifier. Reason:\n"
         f"  {reason}\n\n"
-        f"Address that specifically in your next output. Do not repeat the\n"
-        f"prior failure mode.\n\n"
-        f"---\n\n"
+        + history +
+        "Address that specifically in your next output. Do not repeat the\n"
+        "prior failure mode.\n\n"
+        "---\n\n"
     )
 
 

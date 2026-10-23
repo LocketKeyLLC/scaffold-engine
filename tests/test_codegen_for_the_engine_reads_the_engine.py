@@ -316,7 +316,7 @@ def _session(db):
     return f
 
 
-async def _run(output: str, brief: dict, *, exec_check: bool = False):
+async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra: dict | None = None):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
@@ -327,7 +327,8 @@ async def _run(output: str, brief: dict, *, exec_check: bool = False):
     node = AsyncMock(return_value={
         "id": "node-7", "node_key": "T7", "title": "Implement news signal client", "tool": "CodeGen",
         "prompt_template": "Python module `news_client.py`: fetch news via the engine's SearXNG.", "domain": None,
-        "depends_on": [], "assigned_model": None, "retry_count": 0, "last_verification_reason": None})
+        "depends_on": [], "assigned_model": None, "retry_count": 0, "last_verification_reason": None,
+        **(node_extra or {})})
     captured: dict = {}
 
     async def chat(messages, **kw):
