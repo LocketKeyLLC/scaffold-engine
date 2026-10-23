@@ -958,7 +958,8 @@ def fair_shares(sizes: dict, budget: int, weights: dict | None = None) -> dict:
 
 
 def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished: dict | None = None,
-                           labels: dict | None = None, budget: int | None = None, primary: list | None = None) -> str:
+                           labels: dict | None = None, budget: int | None = None, primary: list | None = None,
+                           code_interfaces: bool = False) -> str:
     """§17.477 — render the MANDATORY-CONTEXT upstream block from
     ``{node_key: (text, confidence)}`` items.
 
@@ -1000,6 +1001,23 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
         _w = {nk: (_conf_or_default(confs[nk]) if settings.upstream_confidence_ranking_enabled else 1.0)
                   * (4.0 if nk in _prim else 1.0) for nk in texts}
         shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget, _w)
+        interfaced: list[str] = []
+        if code_interfaces:
+            # §17.1758 — a code step reading code gets each over-share module's INTERFACE (every name and signature,
+            # exact) instead of its head and tail; a module that fits its share stays whole. Then, only if still over,
+            # the fair-share cut runs on what is left. Live (job 2772acae T22): 14 modules, 147k chars, each cut in the
+            # middle; the tests guessed `result.orders` and an import T14 no longer has. As interfaces: 24.6k.
+            from app.modules.code_interface import shrink_code
+            for nk in texts:
+                if len(texts[nk]) > max(settings.compile_output_min_chunk, shares[nk]):
+                    small, used = shrink_code(texts[nk], len(texts[nk]), _truncate_output)
+                    if used and len(small) < len(texts[nk]):
+                        texts[nk] = small
+                        interfaced.append(nk)
+            if sum(len(v) for v in texts.values()) > _budget:
+                shares = fair_shares({nk: len(t) for nk, t in texts.items()}, _budget, _w)
+            else:
+                shares = {nk: len(t) for nk, t in texts.items()}
         for nk in texts:
             share = max(settings.compile_output_min_chunk, shares[nk])
             if len(texts[nk]) > share:
@@ -1013,6 +1031,7 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "", finished:
                 original_chars=total_chars,
                 truncated_chars=sum(len(v) for v in texts.values()),
                 upstream_nodes=truncated_keys,
+                interfaced=interfaced,
                 confidence_weighted=settings.upstream_confidence_ranking_enabled,
             ),
         )
@@ -2001,7 +2020,8 @@ async def execute_next_node(
         _upstream_block = _format_upstream_block(upstream_outputs, node_key, finished=_upstream_finished,
                                                  labels=_upstream_labels,
                                                  budget=settings.max_report_upstream_chars if _reports else None,
-                                                 primary=list(depends_on) if _reports else None)   # §17.1688
+                                                 primary=list(depends_on) if _reports else None,   # §17.1688
+                                                 code_interfaces=tool_lower == "codegen")          # §17.1758
         if _upstream_block:
             raw_prompt = _upstream_block + raw_prompt
 
