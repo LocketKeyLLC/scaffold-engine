@@ -201,6 +201,77 @@ def test_a_missing_setting_is_never_offered_a_pydantic_method():
     assert len(found) == 1 and "model_copy" not in found[0] and "model_dump" not in found[0]
 
 
+# ── §17.1756 a call to an engine function matches its signature ──────────────
+
+# the live T14 (third draft): the decision pause, used -- but its coroutine never awaited
+LIVE_T14 = """```python
+from app.database import async_session
+from app.modules.decision_pause import frame_decision, park_awaiting_decision
+
+async def request_approval(proposal, *, job_id=None):
+    brief = str(proposal)
+    frame = frame_decision({"key": "paper_trade_approval"}, brief=brief, upstream={"proposal": proposal})
+    async with async_session() as db:
+        await park_awaiting_decision(db, job_id, "paper_trade_approval", frame)
+    return False
+```"""
+
+
+def test_the_live_unawaited_coroutine_is_refused():
+    found = es.unresolved_refs(LIVE_T14)
+    assert found == ["`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a "
+                     "coroutine, not a result)"]
+
+
+@pytest.mark.parametrize("ok", [
+    "frame = await frame_decision({}, brief='b')",
+    "t = frame_decision({}, brief='b')\nresult = await t",
+    "import asyncio\nres = await asyncio.gather(frame_decision({}), frame_decision({}))",
+    "import asyncio\ntask = asyncio.create_task(frame_decision({}))",
+    "async def f():\n    return frame_decision({})",
+])
+def test_a_coroutine_that_is_awaited_or_handed_on_passes(ok):
+    src = "```python\nfrom app.modules.decision_pause import frame_decision\n" + ok + "\n```"
+    assert es.unresolved_refs(src) == [], ok
+
+
+def test_a_discarded_coroutine_and_one_passed_as_a_value_are_refused():
+    for bad in ("frame_decision({})",
+                "await park_awaiting_decision(db, 'j', {'node_key': 'A'}, frame_decision({}))"):
+        src = ("```python\nfrom app.modules.decision_pause import frame_decision, park_awaiting_decision\n"
+               + bad + "\n```")
+        assert any("frame_decision(…)` is `async def`" in f for f in es.unresolved_refs(src)), bad
+
+
+def test_argument_shapes_are_checked_against_the_real_signature():
+    src = ("```python\nfrom app.modules.runner_secrets import values_for\n"
+           "async def keys(db):\n"
+           "    a = await values_for(db, ['A'], 'extra')\n"
+           "    b = await values_for(db, names=['A'])\n"
+           "    c = await values_for(db)\n```")
+    found = "\n".join(es.unresolved_refs(src))
+    assert "takes at most 2 positional argument(s) (db, wanted); it was given 3" in found
+    assert "has no parameter `names`" in found
+    assert "missing required argument(s) `wanted`" in found
+
+
+def test_async_generators_and_context_managers_are_not_awaitables():
+    shape = es.module_index()["app.database"]["funcs"]["get_db"]
+    assert shape["async"] is False                                       # `async def … yield`: iterated, not awaited
+
+
+def test_the_engines_own_source_passes_its_own_call_check():
+    """The engine calls these functions correctly: 50 bare-coroutine calls in it (gather, wait_for, heartbeat wrappers,
+    async generators) are the false positives the first version of this check produced."""
+    from pathlib import Path
+    bad = []
+    for p in sorted(es.ENGINE_PKG.rglob("*.py")):
+        for f in es.unresolved_refs("```python\n" + Path(p).read_text() + "\n```"):
+            if "async def` in the engine" in f or "positional" in f or "has no parameter" in f or "missing required" in f:
+                bad.append((p.name, f[:100]))
+    assert bad == []
+
+
 # ── what the step is shown ───────────────────────────────────────────────────
 
 def test_the_block_shows_the_real_engine():
