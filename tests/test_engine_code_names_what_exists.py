@@ -385,3 +385,37 @@ async def test_engine_findings_checks_the_migration():
     db.execute = AsyncMock(side_effect=[nodes, cols])
     found = "\n".join(await es.engine_findings(db, "job-1", "T2", T2_MIGRATION))
     assert "down_revision = None" in found                            # §17.1760 migration
+
+
+# ── §17.1775 a step is told its own file and may not write a sibling's (live job f00ea97f T6, T9) ──
+
+T4_ROW = {"node_key": "T4", "title": "Implement audit trail writer", "description": "",
+          "prompt_template": "Python module `paper_audit_trail_writer.py`. Exports write_signal().", "output_text":
+          "```python\n# app/modules/paper_audit_trail_writer.py\nasync def write_signal(**kw):\n    ...\n```"}
+T6_ROW = {"node_key": "T6", "title": "Implement risk control module", "description": "",
+          "prompt_template": "Python module `paper_risk_control_module.py`. Max position 5% equity.", "output_text": ""}
+
+
+def test_the_step_is_told_which_module_is_its_own():
+    b = es.block_for(T6_ROW, {"paper_audit_trail_writer", "paper_risk_control_module", "paper_alpaca_paper_client"})
+    assert "**This step writes `app/modules/paper_risk_control_module.py`**" in b
+    assert "`paper_alpaca_paper_client.py`, `paper_audit_trail_writer.py` -- belong to other steps" in b
+
+
+def test_writing_a_siblings_module_is_refused():
+    live = "```python\n# app/modules/paper_audit_trail_writer.py\nasync def write_signal(**kw):\n    ...\n```"
+    found = es.writes_a_siblings_module(live, T6_ROW, [T4_ROW])
+    assert found and "step T4's" in found[0] and "`paper_risk_control_module.py`" in found[0]
+    own = "```python\n# app/modules/paper_risk_control_module.py\nMAX = 0.05\n```\n```python\n# tests/test_paper_risk_control_module.py\ndef test_x():\n    assert True\n```"
+    assert es.writes_a_siblings_module(own, T6_ROW, [T4_ROW]) == []
+
+
+@pytest.mark.asyncio
+async def test_engine_findings_refuses_a_siblings_file():
+    db = AsyncMock()
+    nodes = MagicMock(); nodes.mappings.return_value.all.return_value = [T4_ROW, T6_ROW]
+    cols = MagicMock(); cols.all.return_value = []
+    db.execute = AsyncMock(side_effect=[nodes, cols])
+    out = "```python\n# app/modules/paper_audit_trail_writer.py\nasync def write_signal(**kw):\n    ...\n```"
+    found = "\n".join(await es.engine_findings(db, "job-1", "T6", out))
+    assert "that module is step T4's" in found
