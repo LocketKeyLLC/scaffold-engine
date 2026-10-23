@@ -54,7 +54,7 @@ def test_the_live_plan_is_completed():
     assert "Python module" not in by["T2"]["notes"]                              # a schema step is a revision
     assert "operator_ask" in by["T14"]["notes"] and "operator_ask" not in by["T15"]["notes"]
     wire = by["WIRE"]
-    assert wire["tool"] == "CodeGen" and set(wire["depends_on"]) == {"T9", "T12", "T14", "T15"}
+    assert wire["tool"] == "CodeGen" and set(wire["depends_on"]) == {"T9", "T12", "T14", "T15", "T2"}   # + schema (§17.1774)
     assert "`paper_wiring.py`" in wire["notes"] and "def install(app)" in wire["notes"]
     assert any(c.startswith("wiring_step_added") for c in changes)
 
@@ -230,7 +230,7 @@ def test_the_third_live_plan_is_completed():
     assert "T29" not in by and by["T30"]["depends_on"] == ["T28"]                 # the sandbox runs T28's tests
     assert by["T4"]["type"] == "decision" and by["T4"]["tool"] == "LLM"
     assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
-    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == []    # asked at the end, blocks no build
+    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == ["T3"]  # asked at the end; T5 on the schema
     assert {c.split(":")[0] for c in changes} >= {"ddl_made_a_migration", "test_run_dropped", "secret_step_made_the_operators"}
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
 
@@ -329,4 +329,25 @@ def test_no_step_blocks_on_an_answer_and_acting_on_it_is_the_handlers():
     assert "Blocks until" not in by["T8"]["notes"] and "Records decision to audit trail." in by["T8"]["notes"]
     assert "operator_ask" in by["T8"]["notes"] and "@answer_handler" in by["T26"]["notes"]
     assert {c.split(":")[0] for c in changes} >= {"approval_made_asynchronous", "approval_flow_split"}
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1774 the job's tables exist before its code runs against them (live job 918b6274's eighth plan) ──
+
+def test_every_code_step_stands_on_the_jobs_revision():
+    tasks = [
+        {"id": "T2", "name": "Design audit trail schema", "tool": "LLM", "type": "decision", "depends_on": []},
+        {"id": "T3", "name": "Implement audit trail schema", "tool": "CodeGen", "type": "action", "depends_on": ["T2"],
+         "notes": "Create migration SQL for append-only tables."},
+        {"id": "T4", "name": "Configure Alpaca paper client", "tool": "CodeGen", "type": "action", "depends_on": []},
+        {"id": "T5", "name": "Implement risk controls", "tool": "CodeGen", "type": "action", "depends_on": [],
+         "notes": "Max position 5% equity, max daily loss 3% halts new orders."},
+        {"id": "T24", "name": "Validate risk controls", "tool": "LLM", "type": "validation", "depends_on": ["T5"]},
+    ]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert "T3" in by["T5"]["depends_on"] and "T3" in by["T4"]["depends_on"] and "T3" in by["WIRE"]["depends_on"]
+    assert by["T3"]["depends_on"] == ["T2"]                                       # the revision stands on no code
+    assert by["T24"]["depends_on"] == ["T5"]                                      # an LLM review is not code
+    assert any(c.startswith("schema_first: T5") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
