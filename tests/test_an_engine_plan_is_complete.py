@@ -172,3 +172,31 @@ def test_names_are_unique_and_short():
     engine_plan.complete_engine_plan(tasks, BRIEF)
     names = [engine_plan._module_of(t) for t in tasks[:3]]
     assert names == ["paper_point_time_price_data", "paper_point_time_price_data_2", "paper_point_time_price_data_3"]
+
+
+# ── §17.1768 tables are a migration; a test step writes a test module (live job 918b6274's re-plan) ──
+
+def test_a_shell_step_running_ddl_becomes_an_alembic_revision():
+    from app.modules.engine_source import _latest_migration
+    tasks = [{"id": "T3", "name": "Create audit trail tables", "tool": "Shell", "depends_on": ["T2"],
+              "notes": "Starts from T2's schema design. Runs CREATE TABLE statements in the existing Postgres database."},
+             {"id": "T9", "name": "Check the VPN", "tool": "Shell", "depends_on": [], "notes": "ip a"}]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    nxt = f"{int(_latest_migration()[:4]) + 1:04d}"
+    assert tasks[0]["tool"] == "CodeGen"
+    assert f"alembic/versions/{nxt}_paper_audit_trail_tables.py" in tasks[0]["notes"]
+    assert "Python module" not in tasks[0]["notes"]                              # a revision, not an app module
+    assert tasks[1]["tool"] == "Shell"                                           # a shell step that runs no DDL
+    assert any(c.startswith("ddl_made_a_migration: T3") for c in changes)
+
+
+def test_a_step_that_writes_tests_writes_a_test_module():
+    tasks = [{"id": "A", "name": "Implement order executor", "tool": "CodeGen", "depends_on": []},
+             {"id": "B", "name": "Implement risk limits", "tool": "CodeGen", "depends_on": []},
+             {"id": "T31", "name": "Write integration tests", "tool": "CodeGen", "depends_on": ["A", "B"],
+              "notes": "Python test files that import from all upstream modules."}]
+    engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert by["T31"]["notes"].startswith("Python test module `tests/test_paper_integration.py`")
+    assert "test_test_" not in by["T31"]["notes"] and engine_plan._module_of(by["T31"]) is None
+    assert "T31" not in by["WIRE"]["depends_on"]                                 # tests are not wired in
