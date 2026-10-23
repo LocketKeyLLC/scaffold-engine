@@ -87,15 +87,155 @@ def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
     agen = isinstance(fn, ast.AsyncFunctionDef) and any(
         isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(fn)
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) or n is fn)
+    kinds = {x.arg: k for x in a.posonlyargs + a.args + a.kwonlyargs if (k := _kinds(x.annotation))}
     return {"async": isinstance(fn, ast.AsyncFunctionDef) and not agen, "pos": pos, "required_pos": required_pos,
             "posonly": [x.arg for x in a.posonlyargs], "kwonly": kwonly, "kw_required": kw_required,
-            "varargs": a.vararg is not None, "varkw": a.kwarg is not None}
+            "varargs": a.vararg is not None, "varkw": a.kwarg is not None, "kinds": kinds,
+            "returns_tuple": _is_tuple_annotation(fn.returns)}
 
 
-def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool) -> list[str]:
+def _is_tuple_annotation(ann: ast.AST | None) -> bool:
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return False
+    return (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id in ("tuple", "Tuple"))
+
+
+#: §17.1763 — parameters whose values are a closed set the engine defines. Live (T13): `generate_json(…,
+#: role="research")` (no such role -- get_model raises) with `model=` too (refused: one or the other); T9 asked
+#: `values_for` for `"alpaca_paper_api_key"`, a name `set_secret` refuses, so the keys could never be stored.
+def _role_ok(v: str) -> bool:
+    from app.config import ROLE_FIELDS
+    return v in ROLE_FIELDS
+
+
+def _secret_name_ok(v: str) -> bool:
+    return bool(re.match(r"^[A-Z][A-Z0-9_]{0,63}$", v))
+
+
+_DOMAINS: dict[tuple[str, str], tuple] = {
+    ("app.model_router", "role"): (_role_ok, "a model ROLE (`model_general`, `model_coder`, … from "
+                                             "`app.config.ROLE_FIELDS`)"),
+    ("app.modules.runner_secrets", "name"): (_secret_name_ok, "an UPPER_SNAKE secret name (`set_secret` refuses "
+                                                              "any other)"),
+    ("app.modules.runner_secrets", "wanted"): (_secret_name_ok, "UPPER_SNAKE secret names (`set_secret` refuses "
+                                                                "any other)"),
+}
+
+
+def _domain_mismatches(call: ast.Call, mod: str, name: str, shape: dict, consts: dict | None) -> list[str]:
+    out: list[str] = []
+    given = {shape["pos"][i]: a for i, a in enumerate(call.args) if i < len(shape["pos"])}
+    given.update({k.arg: k.value for k in call.keywords if k.arg})
+    if mod == "app.model_router" and "role" in given and "model" in given:
+        out.append(f"`{name}(…)`: pass `role=` or `model=`, never both (the router refuses the pair)")
+    for param, val in given.items():
+        rule = _DOMAINS.get((mod, param))
+        if not rule:
+            continue
+        if isinstance(val, ast.Name) and consts and val.id in consts:
+            val = consts[val.id]
+        literals = ([e for e in val.elts] if isinstance(val, (ast.List, ast.Tuple, ast.Set)) else [val])
+        literals = [consts[e.id] if isinstance(e, ast.Name) and consts and e.id in consts else e for e in literals]
+        bad = [e.value for e in literals if isinstance(e, ast.Constant) and isinstance(e.value, str) and not rule[0](e.value)]
+        if bad:
+            out.append(f"`{name}(…)`: `{param}` takes {rule[1]}; {', '.join(repr(b) for b in bad)} is not one")
+    return out
+
+
+def _tuples_used_whole(tree: ast.AST, engine_funcs: dict, engine_mods: dict, index: dict) -> list[str]:
+    """§17.1763 — a result the engine returns as a tuple, kept whole and never unpacked. Live (T13):
+    `llm_output = await generate_json(…)` then `isinstance(llm_output, list)` -- always False (it is `(parsed,
+    response)`), so every batch came back empty."""
+    out: list[str] = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)):
+            continue
+        call = n.value.value if isinstance(n.value, ast.Await) else n.value
+        if not isinstance(call, ast.Call):
+            continue
+        t = _engine_target(call, engine_funcs, engine_mods, index)
+        if not t or not index[t[0]]["funcs"][t[1]].get("returns_tuple"):
+            continue
+        var = n.targets[0].id
+        unpacked = any(
+            (isinstance(m, ast.Assign) and isinstance(m.value, ast.Name) and m.value.id == var
+             and isinstance(m.targets[0], (ast.Tuple, ast.List)))
+            or (isinstance(m, ast.Subscript) and isinstance(m.value, ast.Name) and m.value.id == var
+                and isinstance(m.slice, ast.Constant) and isinstance(m.slice.value, int))
+            or (isinstance(m, ast.Return) and isinstance(m.value, ast.Name) and m.value.id == var)
+            for m in ast.walk(tree))
+        if not unpacked:
+            sig = _signature_of(t[0], t[1]) or t[1]
+            out.append(f"`{var} = {'await ' if isinstance(n.value, ast.Await) else ''}{t[1]}(…)`: `{t[1]}` returns a "
+                       f"tuple ({sig.split(')')[0]}) -> tuple); unpack it (`parsed, resp = …`) before using it")
+    return out
+
+
+#: §17.1761 — the builtin kinds an annotation admits; only plain ones are read (anything else admits everything)
+_KIND_NAMES = {"str": "str", "dict": "dict", "list": "list", "int": "int", "float": "float", "bool": "bool",
+               "Dict": "dict", "List": "list", "None": "None"}
+
+
+def _kinds(ann: ast.AST | None) -> frozenset[str] | None:
+    if ann is None:
+        return None
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):       # a string annotation (`from __future__`)
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return None
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        left, right = _kinds(ann.left), _kinds(ann.right)
+        return left | right if left is not None and right is not None else None
+    if isinstance(ann, ast.Subscript):
+        base = ann.value.id if isinstance(ann.value, ast.Name) else getattr(ann.value, "attr", "")
+        if base == "Optional":
+            inner = _kinds(ann.slice)
+            return inner | {"None"} if inner is not None else None
+        return frozenset({_KIND_NAMES[base]}) if base in _KIND_NAMES else None
+    if isinstance(ann, ast.Constant) and ann.value is None:
+        return frozenset({"None"})
+    if isinstance(ann, ast.Name) and ann.id in _KIND_NAMES:
+        k = {_KIND_NAMES[ann.id]}
+        if ann.id == "float":
+            k.add("int")                                    # an int is a float to a type checker
+        return frozenset(k)
+    return None
+
+
+def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
+    """The builtin kind of a literal argument (or of a module constant bound to one)."""
+    if isinstance(v, ast.Name) and consts and v.id in consts:
+        v = consts[v.id]
+    if isinstance(v, (ast.Dict, ast.DictComp)):
+        return "dict"
+    if isinstance(v, (ast.List, ast.ListComp)):
+        return "list"
+    if isinstance(v, ast.JoinedStr):
+        return "str"
+    if isinstance(v, ast.Constant):
+        return {str: "str", bool: "bool", int: "int", float: "float", type(None): "None"}.get(type(v.value))
+    return None
+
+
+def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
+                     consts: dict | None = None) -> list[str]:
     """§17.1756 — a call to an engine function that cannot work as written."""
     out: list[str] = []
     label = f"`{name}(…)`"
+    # §17.1761 — live (T14): `frame_decision(node, brief=…, upstream={"proposal": …})` (upstream: str) and
+    # `park_awaiting_decision(db, job_id, APPROVAL_NODE_KEY, frame)` (node: dict, given the string "paper_trade_approval")
+    kinds = shape.get("kinds") or {}
+    given = [(shape["pos"][i], a) for i, a in enumerate(call.args) if i < len(shape["pos"]) and not isinstance(a, ast.Starred)]
+    given += [(k.arg, k.value) for k in call.keywords if k.arg]
+    for param, val in given:
+        want, got = kinds.get(param), _literal_kind(val, consts)
+        if want and got and got not in want:
+            out.append(f"{label}: `{param}` is `{' | '.join(sorted(want))}`; it was given a `{got}`"
+                       + (f" (`{val.id}`)" if isinstance(val, ast.Name) else ""))
     if shape["async"] and coroutine_misused:
         out.append(f"{label} is `async def` in the engine: `await` it (called bare, it returns a coroutine, not a result)")
     if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
@@ -299,6 +439,158 @@ def job_own_code(texts: list[str]) -> tuple[set[str], set[str]]:
     return modules, names
 
 
+_MODULE_OF_STEP_RE = re.compile(r"^\s*#\s*((?:[\w.-]+/)*)([A-Za-z_]\w*)\.py\b")
+
+
+def step_module_path(row: dict) -> str:
+    """The dotted module a step writes (`app.modules.x` unless its header names another folder)."""
+    for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
+        m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
+        if m:
+            folder = m.group(1).strip("/").replace("/", ".")
+            return f"{folder}.{m.group(2)}" if folder else f"app.modules.{m.group(2)}"
+    leaf = step_module(row)
+    return f"app.modules.{leaf}" if leaf else ""
+
+
+def step_module(row: dict) -> str:
+    """The module a step writes: its code's `# app/modules/x.py` header, else the first `x.py` its own text names."""
+    for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
+        m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
+        if m:
+            return m.group(2)
+    m = _SIBLING_FILE_RE.search(" ".join(str(row.get(k) or "") for k in ("prompt_template", "title", "description")))
+    return m.group(1) if m else ""
+
+
+def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
+    """§17.1762 — what each module this job's steps have already written defines: its top-level names and the call
+    shape of each function, ``{"alpaca_stream": {"node": "T10", "names": {...}, "funcs": {...}}}``. A step not yet
+    written is absent (nothing to check against)."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        mod = step_module(r)
+        names: set[str] = set()
+        defined: set[str] = set()
+        funcs: dict[str, dict] = {}
+        seen = False
+        for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
+            if lang not in PYTHON_LANGS:
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue
+            seen = True
+            for n in tree.body:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.add(n.name)
+                    defined.add(n.name)
+                    funcs[n.name] = _call_shape(n)
+                elif isinstance(n, ast.ClassDef):
+                    names.add(n.name)
+                    defined.add(n.name)
+                elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                    for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                        ids = {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
+                        names.update(ids)
+                        defined.update(ids)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    names.update((al.asname or al.name).split(".")[0] for al in n.names)
+                elif isinstance(n, (ast.If, ast.Try)):
+                    for x in ast.walk(n):
+                        if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            names.add(x.name)
+                        elif isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store):
+                            names.add(x.id)
+        if mod and seen:
+            out[mod] = {"node": r.get("node_key"), "names": names, "defined": defined, "funcs": funcs}
+    return out
+
+
+def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
+    """§17.1762 — an import of a name a sibling module does not define, or a call that does not fit its signature.
+
+    Live (job 2772acae): T12 imported six names from T10's `alpaca_stream` that T10 never wrote and called T16's
+    `append_audit_event(…, runner_id=…)` (no such parameter); T17 imported `ProposalGenerator` and
+    `SimulatedOrderExecutor`, which neither T13 nor T15 defines. §17.1749 let any name through once some sibling
+    defined it anywhere."""
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        imported: dict[str, tuple[str, str]] = {}
+        mods: dict[str, str] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                leaf = n.module.split(".")[-1]
+                if leaf not in defs or (n.module.startswith("app.") and n.module in module_index()):
+                    continue
+                d = defs[leaf]
+                for al in n.names:
+                    if al.name == "*":
+                        continue
+                    if al.name not in d["names"]:
+                        have = ", ".join(sorted(x for x in d["defined"] if not x.startswith("_")
+                                                and x not in ("logger", "__all__"))[:16])
+                        msg = (f"`from {n.module} import {al.name}`: `{leaf}` (step {d['node']}) has no `{al.name}`"
+                               + (f" (it has {have})" if have else ""))
+                        if msg not in found:
+                            found.append(msg)
+                    elif al.name in d["funcs"]:
+                        imported[al.asname or al.name] = (leaf, al.name)
+            elif isinstance(n, ast.Import):
+                for al in n.names:
+                    leaf = al.name.split(".")[-1]
+                    if leaf in defs and not al.name in module_index():
+                        mods[al.asname or leaf] = leaf
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            target = None
+            if isinstance(n.func, ast.Name) and n.func.id in imported:
+                target = imported[n.func.id]
+            elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id in mods):
+                leaf = mods[n.func.value.id]
+                if n.func.attr in defs[leaf]["funcs"]:
+                    target = (leaf, n.func.attr)
+                elif n.func.attr not in defs[leaf]["names"]:
+                    found.append(f"`{n.func.value.id}.{n.func.attr}(…)`: `{leaf}` (step {defs[leaf]['node']}) has no "
+                                 f"`{n.func.attr}`")
+            if target:
+                leaf, fname = target
+                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], False):
+                    m = m.replace("in the engine", f"in `{leaf}`")
+                    if m not in found:
+                        found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
+    return found
+
+
+def replaces_an_engine_module(output: str, row: dict) -> list[str]:
+    """§17.1762 — a step whose module has the name of an engine module it does not keep. Live: T12 wrote
+    `kill_switch.py`; `app/modules/kill_switch.py` is the engine's VPN kill switch (§17.1670), imported by
+    supervised_runs -- the lab's file would have replaced it."""
+    path = step_module_path({**row, "output_text": output})
+    index = module_index()
+    if not path or path not in index:
+        return []
+    mod, hits = path.split(".")[-1], [path]
+    existing = index[path]
+    pub = {sig.split("(")[0].split()[-1] for sig in existing["public"]}
+    if not pub:
+        return []
+    _, names = job_own_code([output])
+    if len(pub & names) * 2 >= len(pub):
+        return []                                       # the step extends the engine's module, keeping what it has
+    return [f"`{mod}.py`: the engine already has `{hits[0]}` ({existing['doc'][:90] or 'in use'}); this step's file "
+            f"would replace it. Name the new module for what it is (for example `paper_{mod}.py`), and import it "
+            "under that name everywhere"]
+
+
 async def job_code(db, job_id: str, *, except_node: str | None = None) -> tuple[set[str], set[str]]:
     """`job_own_code` over this job's steps, read from `dag_nodes`; a step's own last output is not its sibling."""
     from sqlalchemy import text
@@ -398,6 +690,9 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                         engine_mods[al.asname] = al.name
         if engine_funcs or engine_mods:
             misused = _coroutines_used_as_values(tree, engine_funcs, engine_mods, index)
+            consts = {n.targets[0].id: n.value for n in tree.body
+                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                      and isinstance(n.value, (ast.Constant, ast.Dict, ast.List, ast.JoinedStr))}
             for n in ast.walk(tree):
                 if not isinstance(n, ast.Call):
                     continue
@@ -411,8 +706,12 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                         target = (mod, n.func.attr)
                 if target:
                     mod, fname = target
-                    for m in _call_mismatches(n, fname, index[mod]["funcs"][fname], id(n) in misused):
+                    for m in _call_mismatches(n, fname, index[mod]["funcs"][fname], id(n) in misused, consts):
                         note(m)
+                    for m in _domain_mismatches(n, mod, fname, index[mod]["funcs"][fname], consts):
+                        note(m)
+            for m in _tuples_used_whole(tree, engine_funcs, engine_mods, index):
+                note(m)
         if not settings_aliases:
             continue
         for n in ast.walk(tree):
@@ -429,6 +728,158 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                      + (f" (it has {', '.join('`' + c + '`' for c in close)})" if close else "")
                      + " -- a value the lab needs and the engine does not hold is a module constant, or a field "
                        "a step of this job adds to `app.config.Settings`; never `getattr(settings, …, default)`")
+    return found
+
+
+# ── §17.1760 a migration joins the engine's history; a value the step lacks is not a sample ─────────────────────
+#
+# Live (job 2772acae T2 "Define Postgres audit schema", 2026-10-22): the revision came back as `revision =
+# "202410080001"`, `down_revision = None` and `APP_DB_ROLE = "scaffold_app"  # Replace with the actual role if it
+# differs`, closing with "Set `down_revision` to your current Alembic head and `APP_DB_ROLE` to the engine's Postgres
+# role before running". A second root makes `alembic upgrade head` fail on the engine's next start (two heads); the
+# role does not exist; and both were handed to whoever reads the step. T3 shipped `research@example.com` as the SEC
+# contact. Everything the step lacked the engine holds (its newest revision, its own database user), or only the
+# operator has (a contact address) -- never a sample.
+
+_REVISION_RE = re.compile(r"^\d{4}_[a-z0-9_]+$")
+#: a step handing its own unfinished work to the reader: "replace with the actual role", "set X to your current head"
+_HANDOFF_RE = re.compile(
+    r"(?<!not )(?<!never )\b(?:replace|set|change|update|fill in)\b(?:\s+(?:this|it|`[^`\n]+`|[A-Za-z_][\w.]*)){0,2}"
+    r"\s+(?:with|to)\s+(?:the\s+)?(?:actual|real|your)\b", re.I)
+
+
+def revisions_in_code(texts: list[str]) -> set[str]:
+    """The Alembic revision ids this job's own steps add."""
+    out: set[str] = set()
+    for t in texts:
+        for lang, code in extract_code_blocks(t or ""):
+            if lang not in PYTHON_LANGS:
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue
+            for n in tree.body:
+                if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                        and n.targets[0].id == "revision" and isinstance(n.value, ast.Constant)):
+                    out.add(str(n.value.value))
+    return out
+
+
+def _database_role() -> str:
+    from app.config import settings
+    m = re.match(r"^[a-z+]+://([^:@/]+)", str(getattr(settings, "database_url", "") or ""))
+    return m.group(1) if m else ""
+
+
+def migration_refs(output: str, sibling_revisions: set[str] = frozenset()) -> list[str]:
+    """An Alembic revision that does not chain onto the engine's newest one (or one this job adds), or is not named
+    the way the engine names its revisions."""
+    head = _latest_migration()
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        top = {n.targets[0].id: n.value for n in tree.body
+               if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+        if "revision" not in top or "down_revision" not in top:
+            continue
+        rev = top["revision"].value if isinstance(top["revision"], ast.Constant) else None
+        if rev and (ENGINE_PKG.parent / "alembic" / "versions" / f"{rev}.py").exists():
+            continue                                       # a revision already in the engine's history, shown again
+        down = top["down_revision"].value if isinstance(top["down_revision"], ast.Constant) else ...
+        allowed = ({head} if head else set()) | (set(sibling_revisions) - {rev})
+        if down is ... or down not in allowed:
+            found.append(f"`down_revision = {down if down is ... else repr(down)}`: the engine's Alembic history ends at "
+                         f"`{head}`; a new revision chains onto it (`down_revision = \"{head}\"`), or onto the revision "
+                         "another step of this job adds -- a second root gives the engine two heads and "
+                         "`alembic upgrade head` fails on its next start")
+        if not (isinstance(rev, str) and _REVISION_RE.match(rev)):
+            nxt = f"{int(head[:4]) + 1:04d}_<snake_name>" if head[:4].isdigit() else "NNNN_<snake_name>"
+            found.append(f"`revision = {rev!r}`: the engine's revisions are named for their file, `{nxt}` "
+                         f"(the file `alembic/versions/{nxt}.py`)")
+        role = _database_role()
+        for s_ in _string_literals(tree):
+            m = re.search(r"\b(?:GRANT|REVOKE)\b[^;]*?\bON\b[^;]*?\b(?:TO|FROM)\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?(?![{\w])",
+                          s_, re.I)
+            if m and role and m.group(1).lower() not in (role.lower(), "public"):
+                found.append(f"`{m.group(0)[:80]}`: the engine connects to its database as `{role}`; there is no role "
+                             f"`{m.group(1)}`")
+                break
+    return found
+
+
+def _string_literals(tree: ast.AST) -> list[str]:
+    return [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+
+def _prose_and_comments(output: str) -> str:
+    """What the step says to its reader: the text around its code, and its code's comments."""
+    parts: list[str] = [re.sub(r"```[\s\S]*?```", "\n", output or "")]
+    for lang, code in extract_code_blocks(output or ""):
+        if lang in PYTHON_LANGS:
+            parts.extend(m.group(1) for m in re.finditer(r"#\s?(.*)$", code, re.M))
+    return "\n".join(parts)
+
+
+def placeholder_refs(output: str) -> list[str]:
+    """A sample value, or a note handing the step's unfinished work to its reader, in code written for the engine.
+    Test code may use sample data."""
+    from app.modules.supervised_runs import _PLACEHOLDER_VALUE_RE
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        first = code.lstrip().splitlines()[0] if code.strip() else ""
+        if re.search(r"\btests?/|\btest_\w+\.py|conftest\.py", first) or re.search(r"^\s*def test_\w+", code, re.M):
+            continue
+        try:
+            values = _string_literals(ast.parse(code))
+        except SyntaxError:
+            continue
+        m = next((x for x in (_PLACEHOLDER_VALUE_RE.search(v) for v in values) if x), None)
+        if m:
+            line = m.string.strip().splitlines()[0] if m.string.strip() else m.group(0)
+            found.append(f"`{line[:120]}`: `{m.group(0)}` is a sample, not a value. A value only the operator has "
+                         "(a contact address, an account) is a field a step of this job adds to "
+                         "`app.config.Settings` with no usable default, and the code refuses to run while it is unset")
+    said = _prose_and_comments(output)
+    for m in _HANDOFF_RE.finditer(said):
+        line = said[said.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+        found.append(f"`{line[:140]}`: the step hands its own unfinished work to the reader. What it lacked the engine "
+                     "holds (its newest revision, its database user, its settings) and is shown above; what only the "
+                     "operator has is a Settings field the code refuses to run without")
+        break
+    return found
+
+
+async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[str]:
+    """Every §17.1749–1760 refusal for one CodeGen output written for the engine."""
+    from sqlalchemy import text
+
+    from app.modules import engine_schema
+    rows = (await db.execute(text(
+        "SELECT node_key, title, description, prompt_template, output_text FROM dag_nodes WHERE job_id = :j"),
+        {"j": job_id})).mappings().all()
+    others = [str(r["output_text"] or "") for r in rows if r["node_key"] != node_key]
+    texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
+                      + (() if r["node_key"] == node_key else ("output_text",)))
+             for r in rows]
+    mods, names = job_own_code(texts)
+    found = unresolved_refs(output, mods, names)
+    me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
+    found += sibling_refs(output, sibling_definitions([dict(r) for r in rows if r["node_key"] != node_key]))
+    found += replaces_an_engine_module(output, me)
+    tables = dict(await engine_schema.live_tables(db))
+    for k, v in engine_schema.tables_in_code(others).items():
+        tables[k] = v if k not in tables or tables[k] is None or v is None else tables[k] | v
+    found += engine_schema.unknown_schema_refs(output, tables)
+    found += migration_refs(output, revisions_in_code(others))
+    found += placeholder_refs(output)
     return found
 
 
@@ -461,7 +912,8 @@ CONVENTIONS = (
     "- Logging: `logger = logging.getLogger(\"scaffold\")` (stdlib logging, not print, not structlog).\n"
     "- Secrets: held by the engine, read with `app.modules.runner_secrets.values_for(db, [NAMES])`; never logged, "
     "never put in a prompt, never read from the environment.\n"
-    "- A value the code must not change (a fixed URL) is a module constant, not an environment lookup.")
+    "- A value the code must not change (a fixed URL) is a module constant, not an environment lookup.\n"
+    "- A new module never takes the name of an engine module listed in the layout below; name it for what it is.")
 
 
 def _words(text: str) -> set[str]:
@@ -514,7 +966,9 @@ CAPABILITIES: tuple[dict, ...] = (
     {"name": "model calls",
      "when": r"\bllm\b|language model|model_router|propos(?:e|al)|rationale|summari[sz]",
      "how": "Call by ROLE (`role=\"model_general\"`, `\"model_coder\"`, …), never a model name; `role` and `model` "
-            "cannot both be passed. `generate_json` gives grammar-constrained JSON.",
+            "cannot both be passed. `generate_json` gives grammar-constrained JSON and returns a tuple: "
+            "`parsed, resp = await generate_json(prompt, schema, role=…)` (`parsed` is None on failure); a JSON "
+            "array needs `as_array=True`.",
      "names": {"app.model_router": ["generate", "generate_json", "tool_call"]}},
     {"name": "alerts to the operator",
      "when": r"alert|notif|kill[- ]?switch|\bhalt|warn the operator",
@@ -530,8 +984,12 @@ CAPABILITIES: tuple[dict, ...] = (
      "names": {"app.scheduler": ["get_scheduler"]}},
     {"name": "tables (a migration)",
      "when": r"schema|\btable|migration|alembic|audit (?:trail|log)",
-     "how": "A new table is an Alembic revision in `alembic/versions/NNNN_snake_name.py` (revision = the file stem), "
-            "using `op.execute(\"… IF NOT EXISTS …\")`; code reads and writes with `async_session` + `text`.",
+     "how": "A new table is an Alembic revision in `alembic/versions/NNNN_snake_name.py` (revision = the file stem, "
+            "down_revision = the newest revision below), using `op.execute(\"… IF NOT EXISTS …\")`; code reads and "
+            "writes with `async_session` + `text`, naming only the columns the migration creates. The engine "
+            "connects as the tables' owner, so GRANT/REVOKE cannot make a table append-only: a trigger that raises "
+            "on UPDATE and DELETE does. An `sa.Column` object belongs to one table (build shared columns in a "
+            "function, never a shared list).",
      "names": {"app.database": []}},
     {"name": "an API route or operator page",
      "when": r"dashboard|operator view|\bui\b|\bpage\b|endpoint|api route|\brouter\b",

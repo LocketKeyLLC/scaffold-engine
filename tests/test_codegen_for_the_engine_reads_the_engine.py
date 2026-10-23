@@ -218,7 +218,7 @@ async def request_approval(proposal, *, job_id=None):
 
 
 def test_the_live_unawaited_coroutine_is_refused():
-    found = es.unresolved_refs(LIVE_T14)
+    found = [f for f in es.unresolved_refs(LIVE_T14) if "given a" not in f]       # kinds: §17.1761's own test
     assert found == ["`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a "
                      "coroutine, not a result)"]
 
