@@ -41,6 +41,9 @@ def _module_of(t: dict) -> str | None:
 
 _VERB_RE = re.compile(r"^\s*(?:implement|configure|ingest|store|acquire|build|determine|create|add|write|define|"
                       r"design|make|set\s*up|compute|fetch|track|generate|record|run|load)\s+", re.I)
+_DDL_RE = re.compile(r"\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b|\bcreate\s+(?:the\s+)?(?:\w+\s+){0,3}tables?\b", re.I)
+_TESTS_STEP_RE = re.compile(r"\b(?:write|add|implement|build)\b.{0,40}\btests?\b|\btest suite\b", re.I)
+_TESTS_WORD_RE = re.compile(r"\b(?:tests?|suite)\b", re.I)
 _MIGRATION_RE = re.compile(r"\b(?:alembic|migration|(?:postgres|database|db|audit)\s+schema|create\s+tables?)\b", re.I)
 _ARTICLES = {"a", "an", "the", "of", "for", "and", "to", "with", "via", "from", "into", "on", "in"}
 
@@ -65,6 +68,31 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     changes: list[str] = []
     engine_leaves = {m.rsplit(".", 1)[-1] for m in module_index() if m.startswith("app.modules.")}
     pre = prefix_for(brief)
+
+    # 0a. §17.1768 — the engine's own tables are an Alembic revision, never DDL a shell step runs by hand (live
+    #     918b6274 T3 [Shell] "Create audit trail tables: Runs CREATE TABLE statements in the existing Postgres
+    #     database" -- on whichever machine the runner is, outside the engine's history)
+    from app.modules.engine_source import _latest_migration
+    head = _latest_migration()
+    nxt = f"{int(head[:4]) + 1:04d}" if head[:4].isdigit() else "NNNN"
+    for t in tasks:
+        if str(t.get("tool") or "").lower() == "shell" and _DDL_RE.search(_text(t)):
+            rev = f"{nxt}_{pre}_{_slug(str(t.get('name') or 'tables'))}"
+            t["tool"] = "CodeGen"
+            t["notes"] = (f"An Alembic revision `alembic/versions/{rev}.py` (revision = \"{rev}\", down_revision = the "
+                          "engine's newest revision) creating these tables; the engine applies it when it starts -- "
+                          "no SQL is run by hand. " + str(t.get("notes") or "").strip())
+            changes.append(f"ddl_made_a_migration: {t.get('id')} is the Alembic revision {rev} (it was a Shell step "
+                           "running CREATE TABLE)")
+
+    # 0b. §17.1768 — a step that writes tests writes a test module, not a module with tests of its own
+    for t in tasks:
+        if (str(t.get("tool") or "").lower() == "codegen" and _TESTS_STEP_RE.search(str(t.get("name") or ""))
+                and not _MODULE_RE.search(_text(t))):
+            name = f"test_{pre}_{_slug(_TESTS_WORD_RE.sub('', str(t.get('name') or '')))}"
+            t["notes"] = (f"Python test module `tests/{name}.py` (pytest; mock `async_session`, HTTP clients and model "
+                          "calls; it runs before the step passes)." + (" " + str(t["notes"]).strip() if t.get("notes") else ""))
+            changes.append(f"test_module_named: {t.get('id')} writes tests/{name}.py")
 
     # 0. a code step that names no module is given one, from its title (live, job 918b6274 2026-10-23: the planner
     #    wrote "Exports append_signal(), …" for every step and named no file -- nothing below could see a module, so
