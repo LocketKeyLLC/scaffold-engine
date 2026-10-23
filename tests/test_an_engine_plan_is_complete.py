@@ -186,7 +186,8 @@ def test_a_shell_step_running_ddl_becomes_an_alembic_revision():
     assert tasks[0]["tool"] == "CodeGen"
     assert f"alembic/versions/{nxt}_paper_audit_trail_tables.py" in tasks[0]["notes"]
     assert "Python module" not in tasks[0]["notes"]                              # a revision, not an app module
-    assert tasks[1]["tool"] == "Shell"                                           # a shell step that runs no DDL
+    assert "alembic" not in tasks[1]["notes"]                                    # a shell step that runs no DDL
+    assert tasks[1]["notes"].startswith("Python test module")                    # is a check (§17.1770)
     assert any(c.startswith("ddl_made_a_migration: T3") for c in changes)
 
 
@@ -231,4 +232,34 @@ def test_the_third_live_plan_is_completed():
     assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
     assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == []    # asked at the end, blocks no build
     assert {c.split(":")[0] for c in changes} >= {"migration_named", "test_run_dropped", "secret_step_made_the_operators"}
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1770 no Shell step in a plan for engine code (live job 918b6274's fourth plan) ──
+
+PLAN_4 = [
+    {"id": "T5", "name": "Implement Alpaca REST client", "tool": "CodeGen", "type": "action", "depends_on": []},
+    {"id": "T16", "name": "Implement proposal generator", "tool": "CodeGen", "type": "action", "depends_on": ["T5"]},
+    {"id": "T17", "name": "Run daily proposal batch", "tool": "Shell", "type": "action", "depends_on": ["T16"],
+     "notes": "Run the batch before the open."},
+    {"id": "T21", "name": "Execute approved orders", "tool": "Shell", "type": "action", "depends_on": ["T5"]},
+    {"id": "T28", "name": "Verify no live trading keys stored in the engine", "tool": "Shell", "type": "validation",
+     "depends_on": ["T5"], "notes": "Check the secrets store holds only paper keys."},
+    {"id": "T30", "name": "Verify point-in-time integrity", "tool": "Shell", "type": "validation", "depends_on": ["T16"]},
+]
+
+
+def test_no_shell_step_is_left_in_a_plan_for_engine_code():
+    tasks = copy.deepcopy(PLAN_4)
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert [t["id"] for t in tasks if t["tool"] == "Shell"] == []
+    assert by["T17"]["notes"].startswith("Python module `paper_daily_proposal_batch.py`.")
+    assert "tests/test_paper_daily_proposal_batch.py" in by["T17"]["notes"]
+    assert {"T17", "T21"} <= set(by["WIRE"]["depends_on"])                        # the work they did is wired in
+    assert by["T30"]["notes"].startswith("Python test module `tests/test_paper_point_time_integrity.py`")
+    assert by["T30"]["type"] == "action" and "T30" not in by["WIRE"]["depends_on"]
+    # a check about keys is a check, not the operator's keys to store (it was made a question by §17.1769)
+    assert by["T28"]["type"] != "decision" and "tests/test_paper_no_live_trading_keys" in by["T28"]["notes"]
+    assert not any(c.startswith("secret_step_made_the_operators") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []

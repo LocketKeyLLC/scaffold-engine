@@ -41,6 +41,7 @@ def _module_of(t: dict) -> str | None:
 
 _VERB_RE = re.compile(r"^\s*(?:implement|configure|ingest|store|acquire|build|determine|create|add|write|define|"
                       r"design|make|set\s*up|compute|fetch|track|generate|record|run|load)\s+", re.I)
+_CHECK_STEP_RE = re.compile(r"^\s*(?:verify|validate|check|ensure|confirm|assert|prove)\b\s*", re.I)
 _MIGRATION_STEP_RE = re.compile(r"\bmigration\b", re.I)
 _RUN_TESTS_RE = re.compile(r"\b(?:run|execute|runs|executes)\b.{0,30}\b(?:tests?|test suite|pytest)\b|\bpytest\b", re.I)
 _STORE_SECRET_RE = re.compile(r"\b(?:store|save|add|put|integrate|set)\b.{0,60}\b(?:keys?|secrets?|credentials?|tokens?)\b",
@@ -109,7 +110,8 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     # 0e. §17.1769 — a key only the operator holds is theirs to give, through the engine's secrets, once the code that
     #     reads it exists; live 918b6274 T4 [Shell] "Store paper-trading key in existing secrets store", first in the
     #     plan, would have blocked every step behind the runner. It becomes a question at the end.
-    secret_steps = [t for t in tasks if str(t.get("tool") or "").lower() == "shell" and _STORE_SECRET_RE.search(_text(t))]
+    secret_steps = [t for t in tasks if str(t.get("tool") or "").lower() == "shell" and _STORE_SECRET_RE.search(_text(t))
+                    and not _CHECK_STEP_RE.match(str(t.get("name") or ""))]
     for t in secret_steps:
         for u in tasks:
             if t["id"] in (u.get("depends_on") or []):
@@ -125,6 +127,27 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
                       "engine never asks for a value in a step and never logs one. Answer when they are stored. "
                       + str(t.get("notes") or "").strip())
         changes.append(f"secret_step_made_the_operators: {t.get('id')} asks the operator, after the code exists")
+
+    # 0f. §17.1770 — what is left as Shell in a plan for engine code is code the job must write. Live (918b6274's
+    #     fourth plan): "Run daily proposal batch", "Execute approved orders", "Acquire point-in-time data", "Run
+    #     backtest validation" and three "Verify …" checkpoints were Shell steps -- operating the lab on the Proxmox
+    #     host before its code was wired, and checking it by hand. Building the engine is writing its code: a check
+    #     becomes a test module the sandbox runs (§17.1765); anything else becomes the module that does it, which
+    #     WIRE calls.
+    for t in tasks:
+        if str(t.get("tool") or "").lower() != "shell":
+            continue
+        name = str(t.get("name") or "")
+        t["tool"] = "CodeGen"
+        if _CHECK_STEP_RE.match(name) or str(t.get("type") or "") == "validation":
+            t["type"] = "action"
+            test = f"test_{pre}_{_slug(_CHECK_STEP_RE.sub('', name))}"
+            t["notes"] = (f"Python test module `tests/{test}.py`: pytest tests that prove it -- " + name.rstrip(".") + "."
+                          " Mock `async_session`, HTTP clients and model calls; the tests run before the step passes. "
+                          + str(t.get("notes") or "").strip())
+            changes.append(f"check_made_a_test: {t.get('id')} writes tests/{test}.py (it was a Shell check)")
+        else:
+            changes.append(f"shell_made_code: {t.get('id')} writes the code that does it (it was a Shell step)")
 
     # 0b. §17.1768 — a step that writes tests writes a test module, not a module with tests of its own
     for t in tasks:
