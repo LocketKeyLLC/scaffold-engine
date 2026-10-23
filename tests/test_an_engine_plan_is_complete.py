@@ -1,0 +1,129 @@
+"""§17.1766 — a plan for code that extends the engine is completed before it runs: each module tested in the step
+that writes it, no engine module's name taken, the asking step made asynchronous, one step that wires the parts in.
+
+Live (job 2772acae, 28 steps): no step joined the nineteen modules (no call sites at all), the one test step came last
+and failed on bugs in all of them at once, T12 was planned as `kill_switch.py` (the engine's VPN kill switch), and T14
+was specified as `request_approval(proposal) -> bool`. The plan below is cut down from that one; titles and module
+names are the live ones.
+"""
+from __future__ import annotations
+
+import copy
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+from app.modules import dag_generator, engine_plan
+
+BRIEF = {"title": "Paper-trading research lab in scaffold engine",
+         "description": "Add a paper-trading research lab to the scaffold engine's own codebase.",
+         "goals": ["Add a paper-trading research lab module to this repository's code."]}
+
+PLAN = [
+    {"id": "T2", "name": "Define Postgres audit schema", "tool": "CodeGen", "depends_on": [],
+     "notes": "Create tables: signals, proposals, risk_checks."},
+    {"id": "T9", "name": "Implement Alpaca paper client", "tool": "CodeGen", "depends_on": [],
+     "notes": "Python module `alpaca_client.py` with functions `get_account() -> dict`."},
+    {"id": "T12", "name": "Implement kill switch", "tool": "CodeGen", "depends_on": ["T9"],
+     "notes": "Python module `kill_switch.py` with `activate_kill_switch() -> dict`."},
+    {"id": "T14", "name": "Implement approve-before-run step", "tool": "CodeGen", "depends_on": [],
+     "notes": "Python module `approval_step.py` with `request_approval(proposal) -> bool`."},
+    {"id": "T15", "name": "Implement order executor", "tool": "CodeGen", "depends_on": ["T9", "T14", "T12"],
+     "notes": "Python module `order_executor.py` with `execute_approved_order(proposal) -> dict`; uses "
+              "app.modules.kill_switch to check the halt."},
+    {"id": "T22", "name": "Write integration tests", "tool": "CodeGen", "depends_on": ["T9", "T12", "T15"],
+     "notes": "Python module `test_integration.py` with `def test_*` functions."},
+    {"id": "T28", "name": "Document the lab", "tool": "LLM", "depends_on": ["T22"], "notes": "README."},
+]
+
+
+def _plan():
+    return copy.deepcopy(PLAN)
+
+
+def test_the_live_plan_is_completed():
+    tasks = _plan()
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert "`paper_kill_switch.py`" in by["T12"]["notes"]
+    assert "app.modules.paper_kill_switch" in by["T15"]["notes"]                # renamed everywhere it is named
+    for k, mod in (("T9", "alpaca_client"), ("T12", "paper_kill_switch"), ("T14", "approval_step"),
+                   ("T15", "order_executor")):
+        assert f"tests/test_{mod}.py" in by[k]["notes"], k
+    assert "tests/test_test_integration" not in json.dumps(tasks)               # a test step is not a module
+    assert "operator_ask" in by["T14"]["notes"] and "operator_ask" not in by["T15"]["notes"]
+    wire = by["WIRE"]
+    assert wire["tool"] == "CodeGen" and set(wire["depends_on"]) == {"T9", "T12", "T14", "T15"}
+    assert "`paper_wiring.py`" in wire["notes"] and "def install(app)" in wire["notes"]
+    assert any(c.startswith("wiring_step_added") for c in changes)
+
+
+def test_completing_twice_changes_nothing_more():
+    tasks = _plan()
+    engine_plan.complete_engine_plan(tasks, BRIEF)
+    before = copy.deepcopy(tasks)
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+    assert tasks == before
+
+
+def test_a_plan_that_already_wires_and_tests_is_left_alone():
+    tasks = [
+        {"id": "A", "name": "Implement client", "tool": "CodeGen", "depends_on": [],
+         "notes": "Python module `paper_client.py`, with tests in `tests/test_paper_client.py`."},
+        {"id": "B", "name": "Implement runner", "tool": "CodeGen", "depends_on": ["A"],
+         "notes": "Python module `paper_runner.py` and `tests/test_paper_runner.py`; register it with "
+                  "get_scheduler() in app/main.py."},
+    ]
+    before = copy.deepcopy(tasks)
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+    assert tasks == before
+
+
+def test_the_prefix_comes_from_the_brief():
+    assert engine_plan.prefix_for(BRIEF) == "paper"
+    assert engine_plan.prefix_for({"title": "Add a lab"}) == "job"
+
+
+# ── the production path ──────────────────────────────────────────────────────
+
+async def _generate(brief: dict) -> tuple[list[dict], list[str]]:
+    async def _stub(brief_data, route_kwargs):
+        return {"dag_data": {"strategy": "sequential", "tasks": [
+                    {**t, "type": "action", "inputs": [], "outputs": [f"o_{t['id']}"], "domain": None,
+                     "assigned_model": None, "is_deliverable": t["id"] == "T28"} for t in _plan()]},
+                "raw_text": "", "model": "m", "duration_ms": 0, "warnings": [], "error": None, "attempts": 1,
+                "validator_calls": 0}
+
+    row = MagicMock()
+    row.first.return_value = ("planning", brief, None, None, None, 0, False)
+    inserted: list[dict] = []
+
+    async def _execute(stmt, params=None, *a, **k):
+        if params and "node_key" in params and "prompt_template" in params:
+            inserted.append(dict(params))
+        return row
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=_execute)
+    warnings: list[str] = []
+    with patch.object(dag_generator, "_generate_dag_with_validator", _stub), \
+         patch.object(dag_generator, "_fail_job", new_callable=AsyncMock):
+        try:
+            out = await dag_generator.generate_dag(str(uuid4()), db)
+            warnings = list((out or {}).get("validation", {}).get("warnings") or []) if isinstance(out, dict) else []
+        except Exception:                                    # the persistence tail is not under test
+            pass
+    return inserted, warnings
+
+
+async def test_generate_dag_completes_a_plan_for_the_engine():
+    inserted, _ = await _generate(BRIEF)
+    keys = {p["node_key"]: p for p in inserted}
+    assert "WIRE" in keys, sorted(keys)
+    assert "tests/test_paper_kill_switch.py" in keys["T12"]["prompt_template"]
+
+
+async def test_generate_dag_leaves_another_jobs_plan_alone():
+    inserted, _ = await _generate({"title": "News CLI", "description": "Write a news CLI.", "goals": ["A CLI."]})
+    keys = {p["node_key"]: p for p in inserted}
+    assert keys and "WIRE" not in keys
+    assert "tests/test_" not in keys["T12"]["prompt_template"]

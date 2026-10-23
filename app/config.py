@@ -333,6 +333,12 @@ class Settings(BaseSettings):
     # operator brings up the sandbox + opts in. Fail-soft: only a genuine
     # runtime error fails the node. See app/sandbox/codegen_check.py.
     codegen_execution_check_enabled: bool = False
+    # §17.1765 — the engine-test sandbox (compose `scaffold-enginetest`, docker/enginetest/): a CodeGen step that writes
+    # code for the engine itself has its tests -- or an import of its module -- run against the engine with the job's
+    # other modules written in, before it can pass. Unreachable, off, or holding another engine = a logged skip.
+    engine_test_check_enabled: bool = True
+    engine_test_url: str = "http://scaffold-enginetest:8020"
+    engine_test_timeout_s: float = Field(default=180.0, ge=10.0, le=600.0)
 
     searxng_url: str = "http://searxng:8080"
     # §17.1438 — Ollama web search (ollama.com/settings/keys). Supplements a THIN SearXNG answer; empty = off.

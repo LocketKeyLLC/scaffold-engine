@@ -593,6 +593,8 @@ build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restar
 	@# §17.1409 — the rehearsal sandbox the engine runs settings drafts in; up FIRST, so a
 	@# deploy never leaves the orchestrator pointing at a sandbox that is not there
 	$(COMPOSE) up -d --build scaffold-rehearsal
+	@# §17.1765 — and the engine-test sandbox, built from the same source as the orchestrator it tests for
+	$(COMPOSE) up -d --build scaffold-enginetest
 	$(COMPOSE) up -d --build $(CONTAINER)
 	@$(MAKE) --no-print-directory prune-images
 

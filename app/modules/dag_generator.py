@@ -1908,6 +1908,17 @@ async def generate_dag(
                 logger.warning(
                     "dag_os_install_gap_repaired: job=%s nodes=%s", job_id, _os_added,
                 )
+        # §17.1766 — a plan for code that extends the engine: each module tested where it is written, no engine
+        # module's name taken, one step that wires the parts in. Before validate_dag so an added step is edged.
+        try:
+            from app.modules import engine_plan, engine_source
+            _brief_d = brief if isinstance(brief, dict) else (json.loads(brief) if isinstance(brief, str) and brief else {})
+            if engine_source.targets_the_engine(_brief_d):
+                for _c in engine_plan.complete_engine_plan(normalized, _brief_d):
+                    validator_warnings.append(_c)
+                    logger.warning("dag_engine_plan_completed: job=%s %s", job_id, _c)
+        except Exception as exc:                          # noqa: BLE001 — the plan stands without it; logged loudly
+            logger.error("dag_engine_plan_failed: job=%s err=%r", job_id, exc)
         normalized, dag_warnings = validate_dag(normalized)
     except ValueError as exc:
         await _fail_job(db, uid, str(exc))

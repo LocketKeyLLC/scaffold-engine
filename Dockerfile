@@ -234,3 +234,16 @@ RUN mkdir -p /var/log/scaffold && chown scaffold:scaffold /var/log/scaffold
 USER 10001:10001
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]
+
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 4: enginetest — §17.1765 the engine-test sandbox. The dev image (the engine's packages, its test tooling,
+# its app/ as built) plus a small HTTP runner: a job's files are written over a temp copy of app/ and its tests run
+# there. Compose puts it on the internal `rehearsal` network (no route out), read-only, all capabilities dropped.
+# ────────────────────────────────────────────────────────────────────────────
+FROM dev AS enginetest
+COPY --chown=root:root docker/enginetest/server.py /srv/enginetest/server.py
+# scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141).
+# NOT an inline comment: Docker keeps `# …` on a USER line as part of the value.
+USER 10001:10001
+EXPOSE 8020
+CMD ["uvicorn", "server:app", "--app-dir", "/srv/enginetest", "--host", "0.0.0.0", "--port", "8020", "--log-level", "info"]
