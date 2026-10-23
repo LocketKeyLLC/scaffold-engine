@@ -290,3 +290,24 @@ def test_the_fifth_live_plan_writes_one_revision_and_applies_nothing_by_hand():
     assert engine_plan._module_of(by["T4"]) == "paper_audit_trail_writer"          # the writer stays a module
     assert any(c.startswith("ddl_apply_dropped: T3") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1772 an LLM step doing the lab's work is code; "for approval" asks (live job 918b6274's sixth plan) ──
+
+def test_an_llm_step_doing_the_labs_work_is_code_and_presenting_for_approval_asks():
+    tasks = [
+        {"id": "T13", "name": "Store signals to audit trail", "tool": "CodeGen", "type": "action", "depends_on": []},
+        {"id": "T14", "name": "Generate trade proposals", "tool": "LLM", "type": "action", "depends_on": ["T13"],
+         "notes": "From the stored signals, propose trades with a rationale."},
+        {"id": "T17", "name": "Present proposals for approval", "tool": "CodeGen", "type": "action", "depends_on": ["T14"]},
+        {"id": "T2", "name": "Design audit trail schema", "tool": "LLM", "type": "action", "depends_on": []},
+        {"id": "T32", "name": "Document the lab", "tool": "LLM", "type": "action", "depends_on": ["T17"]},
+        {"id": "T28", "name": "Validate no live key", "tool": "LLM", "type": "validation", "depends_on": ["T14"]},
+    ]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert by["T14"]["tool"] == "CodeGen" and engine_plan._module_of(by["T14"]) == "paper_trade_proposals"
+    assert all(by[k]["tool"] == "LLM" for k in ("T2", "T32", "T28"))          # designing, documenting, reviewing
+    assert "operator_ask" in by["T17"]["notes"]
+    assert any(c.startswith("llm_work_made_code: T14") for c in changes)
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
