@@ -2407,9 +2407,10 @@ async def execute_next_node(
             try:
                 from app.modules import engine_source as _es
                 if _es.targets_the_engine(brief):
+                    # §17.1759–1760 — and its SQL against the tables that exist, its migration against the
+                    # engine's history, and no sample value or note handing its unfinished work on
                     async with async_session() as _esdb:
-                        _own_mods, _own_names = await _es.job_code(_esdb, job_id, except_node=node_key)
-                    _refs = _es.unresolved_refs(output, _own_mods, _own_names)
+                        _refs = await _es.engine_findings(_esdb, job_id, node_key, output)
                     if _refs:
                         engine_reason = _es.unresolved_reason(_refs)
             except Exception as exc:
