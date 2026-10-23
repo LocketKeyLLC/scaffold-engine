@@ -113,15 +113,14 @@ def _column_name(call: ast.AST, local_fns: dict) -> str | None | bool:
                 params = [p.arg for p in fdef.args.args]
                 if a.id in params:
                     i = params.index(a.id)
-                    if i < len(call.args) and isinstance(call.args[i], ast.Constant):
-                        return call.args[i].value
                     kw = next((k.value for k in call.keywords if k.arg == a.id), None)
-                    if isinstance(kw, ast.Constant):
-                        return kw.value
                     defaults = fdef.args.defaults
                     j = i - (len(params) - len(defaults))
-                    if 0 <= j < len(defaults) and isinstance(defaults[j], ast.Constant):
-                        return defaults[j].value
+                    for cand in ((call.args[i] if i < len(call.args) else None), kw,
+                                 (defaults[j] if 0 <= j < len(defaults) else None)):
+                        if cand is not None:
+                            v = cand.value if isinstance(cand, ast.Constant) else None
+                            return v if isinstance(v, str) else None
         return None
     return False                                            # sa.Index, sa.UniqueConstraint, … — not a column
 

@@ -876,7 +876,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += replaces_an_engine_module(output, me)
     tables = dict(await engine_schema.live_tables(db))
     for k, v in engine_schema.tables_in_code(others).items():
-        tables[k] = v if k not in tables or tables[k] is None or v is None else tables[k] | v
+        have = tables.get(k)
+        tables[k] = v if have is None or v is None else have | v
     found += engine_schema.unknown_schema_refs(output, tables)
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
