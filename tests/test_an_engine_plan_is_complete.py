@@ -231,7 +231,7 @@ def test_the_third_live_plan_is_completed():
     assert by["T4"]["type"] == "decision" and by["T4"]["tool"] == "LLM"
     assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
     assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == []    # asked at the end, blocks no build
-    assert {c.split(":")[0] for c in changes} >= {"migration_named", "test_run_dropped", "secret_step_made_the_operators"}
+    assert {c.split(":")[0] for c in changes} >= {"ddl_made_a_migration", "test_run_dropped", "secret_step_made_the_operators"}
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
 
 
@@ -262,4 +262,31 @@ def test_no_shell_step_is_left_in_a_plan_for_engine_code():
     # a check about keys is a check, not the operator's keys to store (it was made a question by §17.1769)
     assert by["T28"]["type"] != "decision" and "tests/test_paper_no_live_trading_keys" in by["T28"]["notes"]
     assert not any(c.startswith("secret_step_made_the_operators") for c in changes)
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+
+# ── §17.1771 a step that writes the schema is the revision; a step that only applies it is dropped ──
+
+def test_the_fifth_live_plan_writes_one_revision_and_applies_nothing_by_hand():
+    from app.modules.engine_source import _latest_migration
+    tasks = [
+        {"id": "T2", "name": "Design audit trail schema", "tool": "CodeGen", "type": "action", "depends_on": [],
+         "notes": "Emit SQL DDL for tables: signals, proposals, risk_checks. Append-only via triggers."},
+        {"id": "T3", "name": "Apply audit trail schema", "tool": "CodeGen", "type": "action", "depends_on": ["T2"],
+         "notes": "Run the DDL against the existing Postgres. Verify tables exist and UPDATE/DELETE are revoked."},
+        {"id": "T4", "name": "Implement audit trail writer", "tool": "CodeGen", "type": "action", "depends_on": ["T3"],
+         "notes": "Exports append_signal(). Uses existing Postgres connection."},
+        {"id": "T33", "name": "Validate audit trail append-only", "tool": "LLM", "type": "validation",
+         "depends_on": ["T3", "T4"]},
+    ]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    head = _latest_migration()
+    rev = f"{int(head[:4]) + 1:04d}_paper_audit_trail"
+    assert "T3" not in by and by["T4"]["depends_on"] == ["T2"] and by["T33"]["depends_on"] == ["T4", "T2"]
+    assert by["T2"]["notes"].startswith(f"An Alembic revision `alembic/versions/{rev}.py`")
+    assert f'down_revision = "{head}"' in by["T2"]["notes"] and engine_plan._module_of(by["T2"]) is None
+    assert engine_plan._module_of(by["T4"]) == "paper_audit_trail_writer"          # the writer stays a module
+    assert any(c.startswith("ddl_apply_dropped: T3") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []

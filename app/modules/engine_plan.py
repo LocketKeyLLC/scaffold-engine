@@ -46,7 +46,10 @@ _MIGRATION_STEP_RE = re.compile(r"\bmigration\b", re.I)
 _RUN_TESTS_RE = re.compile(r"\b(?:run|execute|runs|executes)\b.{0,30}\b(?:tests?|test suite|pytest)\b|\bpytest\b", re.I)
 _STORE_SECRET_RE = re.compile(r"\b(?:store|save|add|put|integrate|set)\b.{0,60}\b(?:keys?|secrets?|credentials?|tokens?)\b",
                               re.I)
-_DDL_RE = re.compile(r"\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b|\bcreate\s+(?:the\s+)?(?:\w+\s+){0,3}tables?\b", re.I)
+_SCHEMA_WORDS_RE = re.compile(r"\b(?:migration|ddl|schema)\b", re.I)
+_APPLY_DDL_RE = re.compile(r"\b(?:run|runs|apply|applies|execute|executes)\b.{0,30}\b(?:ddl|schema|migrations?|create table)\b",
+                           re.I)
+_DDL_RE = re.compile(r"\bDDL\b|\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b|\bcreate\s+(?:the\s+)?(?:\w+\s+){0,3}tables?\b", re.I)
 _TESTS_STEP_RE = re.compile(r"\b(?:write|add|implement|build)\b.{0,40}\btests?\b|\btest suite\b", re.I)
 _TESTS_WORD_RE = re.compile(r"\b(?:tests?|suite)\b", re.I)
 _MIGRATION_RE = re.compile(r"\b(?:alembic|migration|(?:postgres|database|db|audit)\s+schema|create\s+tables?)\b", re.I)
@@ -74,31 +77,36 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     engine_leaves = {m.rsplit(".", 1)[-1] for m in module_index() if m.startswith("app.modules.")}
     pre = prefix_for(brief)
 
-    # 0a. §17.1768 — the engine's own tables are an Alembic revision, never DDL a shell step runs by hand (live
-    #     918b6274 T3 [Shell] "Create audit trail tables: Runs CREATE TABLE statements in the existing Postgres
-    #     database" -- on whichever machine the runner is, outside the engine's history)
+    # 0a. §17.1768/1769/1771 — the engine's own tables are an Alembic revision, never DDL run by hand or by app code.
+    #     Live (job 918b6274's re-plans): T3 [Shell] "Runs CREATE TABLE statements in the existing Postgres database";
+    #     T3 [CodeGen] "Executable SQL migration implementing T2's schema"; and T2 [CodeGen] "Emit SQL DDL for tables …"
+    #     with T3 [CodeGen] "Run the DDL against the existing Postgres" -- tables made at runtime from a module, which
+    #     the engine's conventions forbid. A step that WRITES the schema becomes the revision; a step that only APPLIES
+    #     it is dropped (the engine applies its revisions when it starts); a lone applier becomes the revision.
     from app.modules.engine_source import _latest_migration
     head = _latest_migration()
-    nxt = f"{int(head[:4]) + 1:04d}" if head[:4].isdigit() else "NNNN"
-    for t in tasks:
-        if str(t.get("tool") or "").lower() == "shell" and _DDL_RE.search(_text(t)):
-            rev = f"{nxt}_{pre}_{_slug(str(t.get('name') or 'tables'))}"
-            t["tool"] = "CodeGen"
-            t["notes"] = (f"An Alembic revision `alembic/versions/{rev}.py` (revision = \"{rev}\", down_revision = the "
-                          "engine's newest revision) creating these tables; the engine applies it when it starts -- "
-                          "no SQL is run by hand. " + str(t.get("notes") or "").strip())
-            changes.append(f"ddl_made_a_migration: {t.get('id')} is the Alembic revision {rev} (it was a Shell step "
-                           "running CREATE TABLE)")
-
-    # 0c. §17.1769 — a code step that writes "a migration" writes an Alembic revision (live 918b6274 T3 "Executable SQL
-    #     migration implementing T2's schema")
-    for t in tasks:
-        if (str(t.get("tool") or "").lower() == "codegen" and _MIGRATION_STEP_RE.search(_text(t))
-                and "alembic/versions/" not in _text(t) and not _module_of(t)):
-            rev = f"{nxt}_{pre}_{_slug(str(t.get('name') or 'migration').replace('migration', ''))}"
-            t["notes"] = (f"An Alembic revision `alembic/versions/{rev}.py` (revision = \"{rev}\", down_revision = the "
-                          "engine's newest revision); the engine applies it when it starts. " + str(t.get("notes") or "").strip())
-            changes.append(f"migration_named: {t.get('id')} is the Alembic revision {rev}")
+    num = int(head[:4]) + 1 if head[:4].isdigit() else 0
+    schema = [t for t in tasks if str(t.get("tool") or "").lower() in ("shell", "codegen")
+              and (_DDL_RE.search(_text(t)) or _MIGRATION_STEP_RE.search(_text(t)))
+              and "alembic/versions/" not in _text(t) and not _CHECK_STEP_RE.match(str(t.get("name") or ""))]
+    appliers = [t for t in schema if _APPLY_DDL_RE.search(_text(t))]
+    writers = [t for t in schema if t not in appliers]
+    if appliers and not writers:
+        writers = [appliers.pop(0)]
+    for t in appliers:
+        _drop(tasks, t)
+        changes.append(f"ddl_apply_dropped: {t.get('id')} (the engine applies its Alembic revisions when it starts)")
+    prev = head
+    for t in writers:
+        what = _SCHEMA_WORDS_RE.sub(" ", str(t.get("name") or "tables"))
+        rev = f"{num:04d}_{pre}_{_slug(what)}"
+        was = str(t.get("tool") or "")
+        t["tool"] = "CodeGen"
+        t["notes"] = (f"An Alembic revision `alembic/versions/{rev}.py` (revision = \"{rev}\", down_revision = "
+                      f"\"{prev}\") creating these tables; the engine applies it when it starts -- no SQL is run by "
+                      "hand or by app code. " + str(t.get("notes") or "").strip())
+        changes.append(f"ddl_made_a_migration: {t.get('id')} is the Alembic revision {rev} (it was a {was} step)")
+        prev, num = rev, num + 1
 
     # 0d. §17.1769 — a Shell step that runs this job's tests is the sandbox's work already (§17.1765 runs a test step's
     #     tests before it passes); live 918b6274 T29 [Shell] "Run integration tests: Execute test suite" would have run
