@@ -20,7 +20,8 @@ _WIRING_RE = re.compile(r"\bapp/main\.py\b|\binclude_router\b|\bget_scheduler\b|
                         r"\bwire[sd]?\b.{0,40}\b(?:engine|lab|modules?|together)\b|\bentry (?:point|function)\b", re.I)
 #: the step that ASKS (not the ones that act on, record or show an approval)
 _ASKS_APPROVAL_RE = re.compile(r"approve-before-run|\b(?:request|ask(?:s|ing)?\s+for|seek|get)\w*\s+(?:\w+\s+){0,3}"
-                               r"(?:operator\s+)?approv|\bapproval (?:step|gate|request|prompt)\b", re.I)
+                               r"(?:operator\s+)?approv|\bapproval (?:step|gate|request|prompt|flow)\b|\b(?:request|ask_for|get)_approval\b",
+                               re.I)
 _STOP = {"implement", "build", "create", "add", "write", "the", "a", "an", "lab", "engine", "scaffold", "research"}
 
 
@@ -38,6 +39,18 @@ def _module_of(t: dict) -> str | None:
     return None
 
 
+_VERB_RE = re.compile(r"^\s*(?:implement|configure|ingest|store|acquire|build|determine|create|add|write|define|"
+                      r"design|make|set\s*up|compute|fetch|track|generate|record|run|load)\s+", re.I)
+_MIGRATION_RE = re.compile(r"\b(?:alembic|migration|(?:postgres|database|db|audit)\s+schema|create\s+tables?)\b", re.I)
+_ARTICLES = {"a", "an", "the", "of", "for", "and", "to", "with", "via", "from", "into", "on", "in"}
+
+
+def _slug(title: str) -> str:
+    """`Implement audit trail writes` → `audit_trail_writes` (at most four words)."""
+    words = [w for w in re.findall(r"[a-z0-9]+", _VERB_RE.sub("", title).lower()) if w not in _ARTICLES]
+    return "_".join(words[:4]) or "step"
+
+
 def prefix_for(brief: dict | None) -> str:
     """A short word from the brief's title for the job's own module names (`paper` for "Paper-trading …")."""
     title = str((brief or {}).get("title") or "")
@@ -52,6 +65,23 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     changes: list[str] = []
     engine_leaves = {m.rsplit(".", 1)[-1] for m in module_index() if m.startswith("app.modules.")}
     pre = prefix_for(brief)
+
+    # 0. a code step that names no module is given one, from its title (live, job 918b6274 2026-10-23: the planner
+    #    wrote "Exports append_signal(), …" for every step and named no file -- nothing below could see a module, so
+    #    the plan went uncompleted and each step would have guessed its own file name)
+    taken = {m for t in tasks if (m := _module_of(t))}
+    for t in tasks:
+        if str(t.get("tool") or "").lower() != "codegen" or _module_of(t) or _MODULE_RE.search(_text(t)):
+            continue
+        if _MIGRATION_RE.search(_text(t)):
+            continue                                       # a schema step writes an Alembic revision, not a module
+        base = f"{pre}_{_slug(str(t.get('name') or t.get('id') or 'step'))}"
+        name, n = base, 2
+        while name in taken or name in engine_leaves:
+            name, n = f"{base}_{n}", n + 1
+        taken.add(name)
+        t["notes"] = f"Python module `{name}.py`." + (" " + str(t["notes"]).strip() if t.get("notes") else "")
+        changes.append(f"module_named: {t.get('id')} writes `{name}.py` (its text named no file)")
 
     # 1. a module that would take an engine module's name is renamed, in every task that names it
     for t in tasks:
@@ -80,7 +110,11 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     # 3. approval is asked now and answered later: a step specified to return the answer cannot be written
     #    (live T14: `request_approval(proposal) -> bool`; every draft either blocked or returned before any answer)
     for t in tasks:
-        if _module_of(t) and _ASKS_APPROVAL_RE.search(_text(t)) and "operator_ask" not in _text(t):
+        # the step's own name says it asks, or it exports the asking function; a step that only mentions the
+        # approval flow it is "consumed by" (live 918b6274 T6, T24) does not ask
+        asks = (_ASKS_APPROVAL_RE.search(str(t.get("name") or ""))
+                or re.search(r"\b(?:request|ask_for|get)_approval\b", _text(t)))
+        if _module_of(t) and asks and "operator_ask" not in _text(t):
             t["notes"] = str(t.get("notes") or "").rstrip() + (
                 " The operator's answer arrives later, through `app.modules.operator_ask`: this step opens the "
                 "decisions (`open_decision_job`) and acts in an `@answer_handler` when each answer is recorded; no "
