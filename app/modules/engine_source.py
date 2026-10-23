@@ -570,6 +570,22 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
     return found
 
 
+def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list[str]:
+    """§17.1775 — an output whose code is headed with another step's module: it would overwrite that step's file."""
+    theirs = {step_module(r): r.get("node_key") for r in others if step_module(r)}
+    own = step_module({k: v for k, v in row.items() if k != "output_text"})
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
+        if not m:
+            continue
+        leaf = m.group(2)
+        if leaf in theirs and leaf != own and not re.match(r"(?:test_\w+|\w+_test|conftest)$", leaf):
+            found.append(f"`# {m.group(1)}{leaf}.py`: that module is step {theirs[leaf]}'s; this step writes "
+                         f"`{own}.py`" + (" -- import what it needs from it" if own else ""))
+    return found
+
+
 def replaces_an_engine_module(output: str, row: dict) -> list[str]:
     """§17.1762 — a step whose module has the name of an engine module it does not keep. Live: T12 wrote
     `kill_switch.py`; `app/modules/kill_switch.py` is the engine's VPN kill switch (§17.1670), imported by
@@ -883,6 +899,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
     found += sibling_refs(output, sibling_definitions([dict(r) for r in rows if r["node_key"] != node_key]))
     found += replaces_an_engine_module(output, me)
+    found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
     tables = dict(await engine_schema.live_tables(db))
     for k, v in engine_schema.tables_in_code(others).items():
         have = tables.get(k)
@@ -1078,8 +1095,19 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000) 
         if head:
             layout.setdefault(head, []).append(leaf)
     hit_fields = matching_settings(_words(str(node.get("title") or "")))
+    # §17.1775 — which file is THIS step's. Live (job f00ea97f): T6's second attempt wrote T4's
+    # `paper_audit_trail_writer.py`, and T9's third imported its own `_extract_tickers` from T5's module -- the step
+    # was shown its siblings' code and never told which module was its own.
+    own = step_module(node)
+    others = sorted(set(siblings) - {own})
+    mine = ""
+    if own:
+        mine = (f"\n**This step writes `app/modules/{own}.py`** (its first line `# app/modules/{own}.py`), and its "
+                f"tests in `tests/test_{own}.py`. "
+                + (f"The other modules -- {', '.join(f'`{m}.py`' for m in others[:24])} -- belong to other steps: "
+                   "import what they define, never write them or define their names here.\n" if others else "\n"))
     parts = [
-        "\n\n## The engine's own code (read from the running engine, §17.1749)\n"
+        "\n\n## The engine's own code (read from the running engine, §17.1749)\n" + mine +
         "This step writes code that becomes part of the scaffold engine. Import only the engine modules and names "
         "listed here (they exist), packages the engine has installed, or the modules this job's own steps write"
         + (f" ({', '.join(sorted(siblings)[:20])})" if siblings else "") + ". A name not listed here does not "
