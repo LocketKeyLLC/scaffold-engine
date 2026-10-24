@@ -48,7 +48,15 @@ _OPERATORS_RE = re.compile(
     # have been recorded done with nothing installed. "Ask … operator" only as an instruction opening a sentence (the
     # stored corpus says "never ask the operator for …" four times). Measured over 797 stored steps: those 5, no other.
     r"(?:^\s*|[.;:!?]\s+)ask\s+(?:the\s+)?operator\s+(?:to|for|how|what|which|whether|about)\b|\boperator\s+(?:performs|executes|physically)\b|"
-    r"\bengine\s+provides\s+instructions\s+only\b|\bwalkthrough\s*(?::|for\s+(?:the\s+)?operator\b)",
+    r"\bengine\s+provides\s+instructions\s+only\b|\bwalkthrough\s*(?::|for\s+(?:the\s+)?operator\b)|"
+    # §17.1809 — "Walk/Guide operator through/to …" and a physical act opening a sentence ("Plug laptop into wired
+    # Ethernet"). Live (job 700dd9c0 T3 "Walk operator through downloading the chosen OS ISO to a machine with a USB
+    # writer"): framed as a run on the Proxmox host as root, with `dd if=… of=<USB_DEVICE>` -- the hypervisor, whose
+    # own disks a wrong device path would overwrite; the engine's own runbook said the writer is "a separate machine
+    # from the Proxmox host; the operator picks it". Measured over 990 stored steps: these phrasings hit ADD4, T3, T4
+    # and T5, T6 -- every one the operator's hands -- and nothing else.
+    r"\b(?:walk|guide|talk|lead|take)\s+(?:the\s+)?(?:operator|user|owner)\s+(?:through|to|in)\b|"
+    r"(?:^\s*|[.;:!?]\s+)(?:plug|unplug|insert|boot)\s+(?:the\s+)?(?:laptop|usb|cable|stick|machine|it)\b",
     re.I)
 # §17.1468 — a sentence ends at punctuation followed by a space or the end; the dots inside `192.168.1.44`,
 # `homelab-demo.duckdns.org` or `106.fw` do not end it. Live (ADD152): the operator's part was cut to
