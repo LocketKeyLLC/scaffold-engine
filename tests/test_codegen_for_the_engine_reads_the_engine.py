@@ -317,7 +317,8 @@ def _session(db):
     return f
 
 
-async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra: dict | None = None):
+async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra: dict | None = None,
+               chat_tokens: int = 1):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
@@ -334,8 +335,9 @@ async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra
 
     async def chat(messages, **kw):
         captured["prompt"] = messages[-1]["content"]
+        captured["max_tokens"] = kw.get("max_tokens")
         return SimpleNamespace(text=output, success=True, model="m", error=None, tool_calls=None,
-                               fallback_used=False, prompt_tokens=1, completion_tokens=1, retries=0)
+                               fallback_used=False, prompt_tokens=1, completion_tokens=chat_tokens, retries=0)
     set_status = AsyncMock()
     verify = AsyncMock(return_value=("pass", "fine", 0.9))
     with patch.object(xa.settings, "execution_optimize_enabled", False), \

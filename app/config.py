@@ -1687,6 +1687,10 @@ class Settings(BaseSettings):
     # at ~4.3k completion tokens with content present. Mirrors the CoVe
     # _ANSWER_TOKENS=8192 live-tuning (§17.453).
     node_generation_max_tokens: int = Field(default=8192, ge=512, le=16384)
+    # §17.1792 — a CodeGen step that writes code for the engine itself writes a module AND its tests in one output;
+    # live (job f00ea97f T24, the dashboard) every attempt stopped at exactly 8,192 tokens, mid-module, tests never
+    # reached. Its own, larger budget.
+    engine_codegen_max_tokens: int = Field(default=24576, ge=1024, le=65536)
     # §17.465 — generation-layer redraws on a success+empty draw, BEFORE the
     # verifier/W.1 retry. Thinking-model emptiness is sampling variance: a fresh
     # draw almost always lands non-empty. Cheaper than a full node retry
