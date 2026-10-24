@@ -108,6 +108,15 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
         }
 
     if row.retry_count >= row.max_retries:
+        # §17.1793 — a code step for the engine that keeps leaving out part of its own task is split in two and
+        # starts again (fresh attempts), before any other escalation
+        try:
+            from app.modules.engine_plan import split_oversized_step
+            split = await split_oversized_step(db, job_id, node_key)
+            if split:
+                return {"status": "reset", "node_key": node_key, "retry_count": 0, "split": split}
+        except Exception as exc:                          # noqa: BLE001 — the step stays failed as before
+            logger.warning("split_oversized_step_failed job=%s node=%s err=%r", job_id, node_key, exc)
         # §17.577 — final escalation rung: hand the job to Assist Mode (human)
         # instead of just failing. Opt-in + fail-soft (falls through to the
         # normal exhausted error if assist can't start).

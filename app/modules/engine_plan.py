@@ -10,9 +10,12 @@ kill switch. Each is a property of the plan, checkable before a step runs, so it
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.modules.engine_source import module_index
+
+logger = logging.getLogger("scaffold")
 
 _MODULE_RE = re.compile(r"`?\b([a-z_][a-z0-9_]*)\.py\b`?")
 _TEST_RE = re.compile(r"^(?:test_\w+|\w+_test|conftest)$")
@@ -490,3 +493,75 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
             return {**out, "changes": changes, "inserted": inserted, "edited": edited}
         edited.append(t["id"])
     return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept}
+
+
+# ── §17.1793 a step too big for one output is split ──────────────────────────────────────────────────────────
+
+#: a refusal that says the step left out a part of its OWN task
+_OMISSION_RE = re.compile(r"\b(?:entirely absent|is absent|are absent|was not written|were not written|not written at "
+                          r"all|never (?:written|implemented|rendered)|is missing|are missing|missing the (?:explicitly )?"
+                          r"required|required (?:export|deliverable|tests?)[^.]{0,80}\babsent)\b", re.I)
+
+
+async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions: int = 2) -> dict | None:
+    """When a code step written for the engine has used its attempts and its refusals keep saying it LEFT OUT part of
+    its own task, split it: a new data step (`<module>_data.py`: every query and data function the task needs) and the
+    step itself as the part that uses them (rendering / entry point), standing on the data step. Live (job f00ea97f T24
+    "Implement operator dashboard", 23 attempts): six queries, an HTML/CLI view and tests in one output -- every draw
+    dropped `render_dashboard()` or the tests ("entirely absent"). Returns the split, or None when it does not apply
+    (not engine code, already split, too few omissions). The step keeps its key and its dependents; edit_node resets it."""
+    import json as _json
+
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source, node_editor
+    row = (await db.execute(_t(
+        "SELECT n.id, n.title, n.prompt_template, n.tool, n.tool_config, n.depends_on, j.refined_brief "
+        "FROM dag_nodes n JOIN jobs j ON j.id = n.job_id WHERE n.job_id = :j AND n.node_key = :k"),
+        {"j": job_id, "k": node_key})).mappings().first()
+    if not row or str(row["tool"] or "").lower() != "codegen":
+        return None
+    brief = row["refined_brief"] if isinstance(row["refined_brief"], dict) else _json.loads(row["refined_brief"] or "{}")
+    cfg = row["tool_config"] if isinstance(row["tool_config"], dict) else _json.loads(row["tool_config"] or "{}")
+    if not engine_source.targets_the_engine(brief) or cfg.get("split") or cfg.get("split_from"):
+        return None
+    reasons = (await db.execute(_t(
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f"),
+        {"j": job_id, "n": row["id"], "f": "%-> failed"})).scalars().all()
+    omissions = sum(1 for r in reasons if r and _OMISSION_RE.search(r))
+    if omissions < min_omissions:
+        return None
+    own = engine_source.step_module({"prompt_template": row["prompt_template"], "title": row["title"]})
+    if not own:
+        return None
+    data_mod, data_key = f"{own}_data", f"{node_key}D"
+    task = re.sub(r"\s*In this same step also write `tests/[^`]+`:.*?(?=(?: The operator|$))", " ",
+                  str(row["prompt_template"] or ""), flags=re.S).strip()
+    task = re.sub(r"^Python module `[^`]+`\.\s*", "", task)
+    out = await node_editor.insert_node(job_id, {
+        "node_key": data_key, "title": f"{row['title']} -- data", "tool": "CodeGen", "node_type": "task",
+        "depends_on": list(row["depends_on"] or []),
+        "tool_config": {"split_from": node_key},
+        "prompt_template": (
+            f"Python module `{data_mod}.py`: the DATA part of this task -- every query and data function it needs, "
+            f"returning plain values; nothing that renders, formats or presents. The task: {task} In this same step "
+            f"also write `tests/test_{data_mod}.py`: pytest tests of each function against the scratch database "
+            "(insert the rows, call the function, check the result)."),
+    }, edited_by="engine §17.1793", db=db)
+    if out.get("error"):
+        logger.warning("split_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    out2 = await node_editor.edit_node(job_id, node_key, {
+        "depends_on": [*list(row["depends_on"] or []), data_key],
+        "tool_config": {**cfg, "split": True},
+        "prompt_template": (
+            f"Python module `{own}.py`: the part of this task that USES the data -- rendering / the exported entry "
+            f"points. Import every query and data function from `{data_mod}.py` (step {data_key}); never "
+            f"re-implement them here. The task: {task} In this same step also write `tests/test_{own}.py`: pytest "
+            f"tests of the rendering / entry points (mock `{data_mod}`'s functions)."),
+    }, edited_by="engine §17.1793", db=db)
+    if out2.get("error"):
+        logger.warning("split_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
+        return None
+    logger.warning("engine_step_split job=%s node=%s data_step=%s omissions=%d", job_id, node_key, data_key, omissions)
+    return {"node_key": node_key, "data_step": data_key, "data_module": data_mod, "omissions": omissions}
