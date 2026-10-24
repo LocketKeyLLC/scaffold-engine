@@ -533,7 +533,8 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                             names.add(x.id)
         if mod and seen:
             out[mod] = {"node": r.get("node_key"), "names": names, "defined": defined, "funcs": funcs,
-                        "classes": classes}
+                        "classes": classes,
+                        "ctors": {k: v["init"] for k, v in classes.items() if v.get("init")}}     # §17.1803
     return out
 
 
@@ -545,6 +546,8 @@ def _class_shape(c: ast.ClassDef) -> dict:
     init: dict | None = None
     methods: dict[str, dict] = {}
     fields: list[str] = []
+    props: list[str] = []
+    ann: list[tuple[str, bool]] = []                     # every annotated field, and whether it has a default
     for x in c.body:
         if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
             deco = {getattr(d, "id", None) or getattr(d, "attr", None) for d in x.decorator_list}
@@ -554,13 +557,28 @@ def _class_shape(c: ast.ClassDef) -> dict:
                     sh[k] = sh[k][1:] if sh[k] and sh[k][0] in ("self", "cls") else sh[k]
             if x.name == "__init__":
                 init = sh
-            elif not x.name.startswith("_") and "property" not in deco:
+            elif "property" in deco:
+                # §17.1803 — a property is read, never passed: live (f00ea97f T25E3) `RiskState(daily_pnl=…)` after
+                # the index listed `daily_pnl` among RiskState's fields
+                if not x.name.startswith("_"):
+                    props.append(x.name)
+            elif not x.name.startswith("_"):
                 methods[x.name] = sh
-            elif "property" in deco and not x.name.startswith("_"):
-                fields.append(x.name)
-        elif isinstance(x, ast.AnnAssign) and isinstance(x.target, ast.Name) and not x.target.id.startswith("_"):
-            fields.append(x.target.id)
-    return {"init": init, "methods": methods, "fields": fields}
+        elif isinstance(x, ast.AnnAssign) and isinstance(x.target, ast.Name):
+            if "ClassVar" not in ast.unparse(x.annotation):
+                ann.append((x.target.id, x.value is not None))
+            if not x.target.id.startswith("_"):
+                fields.append(x.target.id)
+    # §17.1803 — a data class is built from its fields: its constructor is checked like any call
+    is_dc = any((getattr(d, "id", None) or getattr(d, "attr", None)
+                 or getattr(getattr(d, "func", None), "id", None) or getattr(getattr(d, "func", None), "attr", None))
+                == "dataclass" for d in c.decorator_list)
+    if init is None and is_dc:
+        names = [n for n, _ in ann]
+        init = {"async": False, "pos": names, "required_pos": [n for n, has in ann if not has], "posonly": [],
+                "kwonly": [], "kw_required": [], "varargs": False, "varkw": False, "kinds": {},
+                "returns_tuple": False}
+    return {"init": init, "methods": methods, "fields": fields, "props": props, "dataclass": is_dc}
 
 
 def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
@@ -601,7 +619,7 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                                  "(a table the job's migration creates is written with `async_session` + `text`)")
                         if msg not in found:
                             found.append(msg)
-                    elif al.name in d["funcs"]:
+                    elif al.name in d["funcs"] or al.name in d.get("ctors", {}):
                         imported[al.asname or al.name] = (leaf, al.name)
             elif isinstance(n, ast.Import):
                 for al in n.names:
@@ -611,7 +629,7 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
         # §17.1787 — a sibling's coroutine used as a value, the same rule §17.1756 applies to the engine's own. Live
         # (job f00ea97f T18): `… = client.get_order(…)["filled_qty"]` -- "'coroutine' object is not subscriptable"
         # in the sandbox, every attempt.
-        pseudo = {leaf: {"funcs": d["funcs"]} for leaf, d in defs.items()}
+        pseudo = {leaf: {"funcs": {**d.get("ctors", {}), **d["funcs"]}} for leaf, d in defs.items()}
         misused = _coroutines_used_as_values(tree, imported, mods, pseudo) if (imported or mods) else set()
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
@@ -628,7 +646,10 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                                  f"`{n.func.attr}`")
             if target:
                 leaf, fname = target
-                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], id(n) in misused):
+                shape = defs[leaf]["funcs"].get(fname) or defs[leaf].get("ctors", {}).get(fname)
+                if not shape:
+                    continue
+                for m in _call_mismatches(n, fname, shape, id(n) in misused):
                     m = m.replace("in the engine", f"in `{leaf}`")
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
@@ -1324,10 +1345,13 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> 
         for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
             if cname.startswith("_") or cname.endswith(("Error", "Exception")):
                 continue
-            if c["methods"]:
-                ms = ", ".join(_shape_signature(m, sh) for m, sh in sorted(c["methods"].items()))
-                sigs.append(f"class {_shape_signature(cname, c['init']) if c['init'] else cname + '()'} "
-                            f"{{{ms}}}")
+            inner = ", ".join(_shape_signature(m, sh) for m, sh in sorted(c["methods"].items()))
+            if c.get("props"):
+                inner += ("; " if inner else "") + "read-only: " + ", ".join(c["props"])
+            if c["init"]:
+                sigs.append(f"class {_shape_signature(cname, c['init'])}" + (f" {{{inner}}}" if inner else ""))
+            elif c["methods"] or c.get("props"):
+                sigs.append(f"class {cname}() {{{inner}}}")
             elif c["fields"]:
                 sigs.append(f"class {cname} {{fields: {', '.join(c['fields'])}}}")
         if sigs:

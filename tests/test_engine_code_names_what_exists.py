@@ -773,10 +773,10 @@ class AlpacaPaperClient:
 def test_the_index_shows_a_modules_public_classes():
     r = es._render_job_modules(es.sibling_definitions([T5_CLIENT]), "other")
     line = [x for x in r.splitlines() if "paper_alpaca_paper_client" in x][0]
-    assert "class AlpacaAccount {fields: equity, cash}" in line
+    assert "class AlpacaAccount(equity, cash, _raw=…)" in line                              # §17.1803 its constructor
     assert ("class AlpacaPaperClient(*, base_url=…) {build(symbol, qty), async get_account(), "
-            "async get_latest_trade(symbol)}") in line
-    assert "AlpacaPaperClientError" not in line and "_request" not in line and "ready" not in line
+            "async get_latest_trade(symbol); read-only: ready}") in line                    # §17.1803
+    assert "AlpacaPaperClientError" not in line and "_request" not in line
 
 
 # ── §17.1801 a left-out test file is asked for alone (live job f00ea97f, the entry-point steps) ──
@@ -821,3 +821,39 @@ async def test_a_complete_output_is_not_asked_again():
         captured, _, _ = await _run(MODULE_ONLY + "\n\n" + TESTS_ONLY, LIVE_BRIEF,
                                     node_extra={"prompt_template": ENTRY_STEP})
     assert not [c for c in captured["calls"] if "Your answer left out" in c[-1]["content"]]
+
+
+# ── §17.1803 a data class is its constructor; a property is read-only (live job f00ea97f T25E3) ──
+
+T6_STATE = {"node_key": "T6", "prompt_template": "", "output_text": """```python
+# app/modules/paper_risk_control_module.py
+from dataclasses import dataclass, field
+from typing import ClassVar
+
+
+@dataclass(frozen=True)
+class RiskState:
+    LIMIT: ClassVar[int] = 3
+    equity: float
+    day_start_equity: float
+    now: float = field(default=0.0)
+
+    @property
+    def daily_pnl(self) -> float:
+        return self.equity - self.day_start_equity
+```"""}
+
+
+def test_a_data_class_renders_as_its_constructor_with_properties_read_only():
+    r = es._render_job_modules(es.sibling_definitions([T6_STATE]), "other")
+    assert "class RiskState(equity, day_start_equity, now=…) {read-only: daily_pnl}" in r
+
+
+def test_a_data_class_built_with_a_property_or_without_a_field_is_refused():
+    defs = es.sibling_definitions([T6_STATE])
+    head = "```python\nfrom app.modules.paper_risk_control_module import RiskState\n"
+    bad = es.sibling_refs(head + "s = RiskState(equity=1, day_start_equity=1, daily_pnl=0)\n```", defs)
+    assert bad and "`RiskState(…)` has no parameter `daily_pnl`" in bad[0]
+    missing = es.sibling_refs(head + "s = RiskState(equity=1)\n```", defs)
+    assert missing and "missing required argument(s) `day_start_equity`" in missing[0]
+    assert es.sibling_refs(head + "s = RiskState(equity=1, day_start_equity=1)\nprint(s.daily_pnl)\n```", defs) == []
