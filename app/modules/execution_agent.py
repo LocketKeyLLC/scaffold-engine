@@ -2160,6 +2160,17 @@ async def execute_next_node(
             _verify_add = EXECUTION_SYSTEM_VERIFY_ADDENDUM
             logger.info("runbook_verify_mode job=%s node=%s", job_id, node_key)
 
+    # §17.1792 — the output budget: code for the engine itself (a module and its tests) gets its own, larger one;
+    # and an output that stops AT the budget was cut off, which the gate below says instead of judging half a file
+    _gen_budget = settings.node_generation_max_tokens
+    _cut_off: dict = {"at": 0}
+    try:
+        from app.modules import engine_source as _es_b
+        if tool_lower == "codegen" and _es_b.targets_the_engine(brief if isinstance(brief, dict) else {}):
+            _gen_budget = max(_gen_budget, settings.engine_codegen_max_tokens)
+    except Exception as exc:
+        logger.warning("engine_budget_check_failed node=%s err=%r", node_key, exc)
+
     # Execute with timeout guard.
     _node_t0 = time.monotonic()
     try:
@@ -2183,13 +2194,15 @@ async def execute_next_node(
                 messages,
                 {"role": exec_role, "overrides": exec_overrides},
                 temperature=0.7,
-                max_tokens=settings.node_generation_max_tokens,
+                max_tokens=_gen_budget,
                 draws=settings.node_generation_max_draws,
                 label=f"node-exec {node_key}",
                     think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
             )
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")
+            if (getattr(resp, "completion_tokens", 0) or 0) >= _gen_budget:
+                _cut_off["at"] = _gen_budget
             return resp.text.strip()
 
         async def _run_inference_streaming():
@@ -2215,7 +2228,7 @@ async def execute_next_node(
                     role=exec_role,
                     overrides=exec_overrides,
                     temperature=0.7,
-                    max_tokens=settings.node_generation_max_tokens,
+                    max_tokens=_gen_budget,
                 ):
                     if delta:
                         chunks.append(delta)
@@ -2236,7 +2249,7 @@ async def execute_next_node(
                     messages,
                     {"role": exec_role, "overrides": exec_overrides},
                     temperature=0.7,
-                    max_tokens=settings.node_generation_max_tokens,
+                    max_tokens=_gen_budget,
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-stream-fallback {node_key}",
                     think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
@@ -2342,7 +2355,7 @@ async def execute_next_node(
                 chat_until_nonempty(
                     model_router.chat, _messages,
                     {"role": exec_role, "overrides": exec_overrides},
-                    temperature=0.7, max_tokens=settings.node_generation_max_tokens,
+                    temperature=0.7, max_tokens=_gen_budget,           # §17.1792
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-regen {node_key}",
                     think_off_rescue=True,   # §17.1483
@@ -2519,7 +2532,15 @@ async def execute_next_node(
             except Exception as exc:
                 logger.warning("codegen_exec_smoke_error: node='%s' error=%s", title, exc)
 
-        if syntax_reason is not None:
+        if _cut_off["at"] and (tool or "").lower() == "codegen":
+            # §17.1792 — judged as a whole it is wrong; it is not a whole
+            verify_status = "fail"
+            reason, confidence = (
+                f"§17.1792 the output stopped at the {_cut_off['at']}-token limit, mid-way: what follows the cut "
+                "(and any tests after it) was never written. Write it more compactly -- no repeated helpers or "
+                "long docstrings, the module first and its tests after -- so all of it fits."), 0.0
+            logger.warning("codegen_output_cut_off: node='%s' at=%d", title, _cut_off["at"])
+        elif syntax_reason is not None:
             verify_status = "fail"
             reason, confidence = syntax_reason, 0.0
             logger.warning("codegen_syntax_gate_fail: node='%s'", title)
