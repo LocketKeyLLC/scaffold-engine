@@ -223,6 +223,46 @@ def plan_misses_pool(tasks: list[dict], brief: dict | str) -> list[str]:
     return missing
 
 
+def insert_member_ollama(tasks: list[dict], brief: dict | str) -> list[str]:
+    """§17.1808 — when the redrafts still leave no step that runs Ollama ON the added machines, the plan gets one,
+    deterministically: right before the first step that pulls models or sets OLLAMA_POOL_URLS, standing on what that
+    step stood on. Live (job 700dd9c0, 3 attempts): the redrafts added "Set OLLAMA_POOL_URLS" and "Pull role models
+    per laptop" but never installed Ollama on a laptop -- the pull had nothing to pull into."""
+    import re
+    gap = plan_misses_pool(tasks, brief)
+    if not gap or not gap[0].startswith("no step runs Ollama"):
+        return []
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    pos = {t["id"]: i for i, t in enumerate(real)}
+
+    def txt(t: dict) -> str:
+        return " ".join(str(t.get(k) or "") for k in ("name", "notes", "description"))
+    uses = [t for t in real if "OLLAMA_POOL_URLS" in txt(t)
+            or re.search(r"\bpull\w*\b[^.\n]{0,60}\bmodels?\b", txt(t), re.I)]
+    if not uses:
+        return []
+    first = min(uses, key=lambda t: pos[t["id"]])
+    noun_m = re.search(r"\b(laptop|machine|node|worker|server|member)s?\b", " ".join(txt(t) for t in uses), re.I)
+    noun = noun_m.group(1).lower() if noun_m else "machine"
+    new_id, n = "OLM", 2
+    while new_id in ids:
+        new_id, n = f"OLM{n}", n + 1
+    node = {"id": new_id, "name": f"Run Ollama on each {noun}", "type": "action", "tool": "Shell",
+            "inputs": [], "outputs": [f"Ollama serving on each {noun}'s own address, port 11434"],
+            "depends_on": list(first.get("depends_on") or []),
+            "notes": (f"On each {noun} the engine reaches: run Ollama so it serves at that {noun}'s OWN address on port "
+                      f"11434 (`OLLAMA_HOST=0.0.0.0:11434`) -- the official installer as a systemd service, or a k3s "
+                      f"DaemonSet with hostNetwork -- and read `curl -s http://<{noun}-address>:11434/api/version` from "
+                      "the engine host for every one. The engine's pool needs each address, so no single load-balanced "
+                      "Service in front of them.")}
+    if first.get("domain"):
+        node["domain"] = first["domain"]
+    tasks.insert(tasks.index(first), node)
+    first["depends_on"] = [new_id]
+    return [f"{new_id} runs Ollama on each {noun} before {first['id']} (no step put Ollama on the added machines)"]
+
+
 def render_pool_corrections(missing: list[str], next_attempt: int) -> str:
     return (f"## Engine-compute corrections needed (attempt {next_attempt})\n\nThis brief adds AI compute for the "
             "engine, and the plan does not use the engine's Ollama pool (see ENGINE CAPABILITY above):\n"

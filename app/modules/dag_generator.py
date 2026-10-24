@@ -2008,6 +2008,14 @@ async def generate_dag(
                 logger.warning(
                     "dag_os_install_gap_repaired: job=%s nodes=%s", job_id, _os_added,
                 )
+        # §17.1808 — a plan for added AI compute that still has no step running Ollama on the added machines gets one
+        try:
+            from app.modules import ollama_pool as _pool_i
+            for _c in _pool_i.insert_member_ollama(normalized, brief):
+                validator_warnings.append(f"member_ollama_inserted: {_c}")
+                logger.warning("dag_member_ollama_inserted: job=%s %s", job_id, _c)
+        except Exception as exc:                          # noqa: BLE001 — the plan stands without it; logged loudly
+            logger.warning("dag_member_ollama_pass_failed: job=%s err=%r", job_id, exc)
         # §17.1804 — what a machine holds about itself is read off it once reachable, never asked of the operator
         try:
             for _c in read_machine_facts_instead_of_asking(normalized):
