@@ -35,6 +35,8 @@ class CodeRunResult:
     # Transport/availability error (None when the sidecar actually ran the code,
     # regardless of the code's own exit status).
     error: str | None = None
+    #: §17.1783 — the engine-test sandbox's database for this run: "" | "ok" | "unavailable: …"
+    database: str = ""
 
 
 async def run_code(
@@ -46,6 +48,7 @@ async def run_code(
     mem_mb: int = 512,
     max_output_bytes: int = 256_000,
     base_url: str | None = None,
+    database: bool = False,
 ) -> CodeRunResult:
     """Run ``command`` (argv) against ``files`` in the sandbox; never raises.
 
@@ -64,6 +67,7 @@ async def run_code(
         "cpu_seconds": cpu_seconds,
         "mem_mb": mem_mb,
         "max_output_bytes": max_output_bytes,
+        **({"database": True} if database else {}),    # §17.1783 — the engine-test sandbox's scratch database
     }
     http_timeout = timeout_s + 15.0
     try:
@@ -87,4 +91,5 @@ async def run_code(
         timed_out=bool(data.get("timed_out", False)),
         truncated=bool(data.get("truncated", False)),
         error=None,
+        database=str(data.get("database") or ""),
     )

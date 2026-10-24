@@ -941,6 +941,30 @@ services:
   # the step can pass. Built from the engine's own Dockerfile (stage `enginetest` = the dev image + a runner), so it
   # holds the engine's packages and test tooling; on the INTERNAL rehearsal network, so nothing in it reaches out --
   # no database, no secrets, no broker. `make build` brings it up with the orchestrator.
+  # §17.1783 — the sandbox's scratch database: a throwaway Postgres (same pinned image as scaffold-postgres) on the
+  # internal rehearsal network only, data on tmpfs. It holds no engine data: the sandbox builds a template from the
+  # repo's own schema files, copies it per test run and drops the copy. The password guards nothing reachable.
+  scaffold-enginetest-db:
+    image: postgres:16@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417
+    container_name: scaffold-enginetest-db
+    logging: *default-logging
+    mem_limit: 768m
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: postgres
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=1g
+    restart: always
+    networks:
+      - rehearsal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandbox -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
   scaffold-enginetest:
     image: scaffold-enginetest:${SCAFFOLD_IMAGE_TAG:-local}
     build:
@@ -961,6 +985,10 @@ services:
       - /tmp:rw,nosuid,nodev,exec,size=512m
     environment:
       - HOME=/tmp
+      - SANDBOX_DB_DSN=postgresql://sandbox:sandbox@scaffold-enginetest-db:5432
+    depends_on:
+      scaffold-enginetest-db:
+        condition: service_healthy
     restart: always
     networks:
       - rehearsal

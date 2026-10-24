@@ -954,8 +954,10 @@ CONVENTIONS = (
     "code refuses to run while it is missing, and never ships a sample (`…@example.com`).\n"
     "- A new module never takes the name of an engine module listed in the layout below; name it for what it is.\n"
     "- The step is RUN before it passes (§17.1765): its tests, or an import of its module, against the engine with "
-    "this job's finished modules, in a sandbox with no network, no database and no secrets -- tests mock "
-    "`async_session`, HTTP clients and model calls, and must pass there.")
+    "this job's finished modules, in a sandbox with no network and no secrets. `async_session` there is a fresh "
+    "scratch database with the engine's schema and this job's migrations (§17.1783): test SQL against it (insert "
+    "rows, call the code, read the result) rather than a fake session that ignores the query; mock HTTP clients and "
+    "model calls. The tests must pass there.")
 
 
 def _words(text: str) -> set[str]:
