@@ -477,6 +477,9 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
         for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
             if lang not in PYTHON_LANGS:
                 continue
+            head = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if code.strip() else None
+            if head and re.match(r"(?:test_\w+|\w+_test|conftest)$", head.group(2)):
+                continue        # §17.1784 — a step's test file is not its module (live: T21 "had" FakeSecretStore)
             try:
                 tree = ast.parse(code)
             except SyntaxError:
