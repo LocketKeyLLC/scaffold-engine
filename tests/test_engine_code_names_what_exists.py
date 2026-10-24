@@ -628,3 +628,15 @@ async def test_the_executor_passes_the_foreign_keys():
          patch("app.modules.engine_schema.foreign_keys_in_code", return_value={"fill": {"broker_order_id": "broker_order_id.id"}}):
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
     assert "fill: broker_order_id→broker_order_id.id, id" in captured["prompt"]
+
+
+def test_a_refused_column_says_where_it_lives_and_how_to_reach_it():
+    """§17.1791 — live (f00ea97f T24): `SELECT … ticker … FROM fill`, refused round after round."""
+    tables = {"fill": {"id", "broker_order_id", "price"}, "broker_order_id": {"id", "proposal_id"},
+              "proposal": {"id", "ticker", "signal_id"}, "signal": {"id", "ticker"}}
+    fks = {"fill": {"broker_order_id": "broker_order_id.id"}, "broker_order_id": {"proposal_id": "proposal.id"},
+           "proposal": {"signal_id": "signal.id"}}
+    out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT ticker, price FROM fill WHERE id = :i')\n```"
+    found = sch.unknown_schema_refs(out, tables, set(tables), fks)
+    assert found and ("`ticker` is on `proposal` -- reach it from `fill` with a JOIN along "
+                      "fill.broker_order_id → broker_order_id.id , broker_order_id.proposal_id → proposal.id") in found[0]

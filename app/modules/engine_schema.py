@@ -231,7 +231,35 @@ def _known(table: str, tables: Tables) -> bool:
     return table.lower() in tables
 
 
-def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | frozenset[str] = frozenset()) -> list[str]:
+def where_a_column_is(col: str, table: str, tables: Tables, fks: dict | None) -> str:
+    """§17.1791 — "`ticker` is on `proposal` -- reach it from `fill` via fill.broker_order_id → broker_order_id.proposal_id
+    → proposal". Live (job f00ea97f T24, the dashboard): `SELECT … ticker … FROM fill` refused round after round;
+    the refusal never said where `ticker` lives."""
+    owners = sorted(t for t, cols in tables.items() if cols and col in cols and t != table)
+    if not owners:
+        return ""
+    fks = fks or {}
+    # breadth-first over the foreign keys, from `table` outward (child → parent), at most 3 hops
+    paths: dict[str, list[str]] = {table: []}
+    frontier = [table]
+    for _ in range(3):
+        nxt = []
+        for t in frontier:
+            for c, ref in (fks.get(t) or {}).items():
+                parent = ref.split(".")[0]
+                if parent not in paths:
+                    paths[parent] = paths[t] + [f"{t}.{c} → {ref}"]
+                    nxt.append(parent)
+        frontier = nxt
+    reach = [o for o in owners if o in paths]
+    if reach:
+        o = reach[0]
+        return f"; `{col}` is on `{o}` -- reach it from `{table}` with a JOIN along {' , '.join(paths[o])}"
+    return f"; `{col}` is on {', '.join('`' + o + '`' for o in owners[:4])}"
+
+
+def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | frozenset[str] = frozenset(),
+                        fks: dict | None = None) -> list[str]:
     """Every table or column the output's SQL names that neither the engine's database nor this job's migrations
     have. ``tables`` is the union of both; the output's own migrations are added here."""
     known: dict = dict(tables)
@@ -279,7 +307,7 @@ def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | froz
                 if missing:
                     have = ", ".join(sorted(known[t.lower()]))
                     note(f"`INSERT INTO {t} (…)`: `{t}` has no column {', '.join('`' + c + '`' for c in missing)} "
-                         f"(it has {have})")
+                         f"(it has {have})" + where_a_column_is(missing[0], t.lower(), known, fks))
             for m in _UPDATE.finditer(sql):
                 t = m.group(1)
                 if not table_ok(t, f"UPDATE {t}") or "{" in m.group(2):
@@ -305,7 +333,7 @@ def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | froz
             for col, t in _plain_select_columns(sql, ctes):
                 if _known(t, known) and known[t.lower()] is not None and col not in known[t.lower()]:
                     note(f"`SELECT … {col} … FROM {t}`: `{t}` has no column `{col}` "
-                         f"(it has {', '.join(sorted(known[t.lower()]))})")
+                         f"(it has {', '.join(sorted(known[t.lower()]))})" + where_a_column_is(col, t.lower(), known, fks))
     return found
 
 
