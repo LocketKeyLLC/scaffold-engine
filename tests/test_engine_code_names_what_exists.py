@@ -640,3 +640,13 @@ def test_a_refused_column_says_where_it_lives_and_how_to_reach_it():
     found = sch.unknown_schema_refs(out, tables, set(tables), fks)
     assert found and ("`ticker` is on `proposal` -- reach it from `fill` with a JOIN along "
                       "fill.broker_order_id → broker_order_id.id , broker_order_id.proposal_id → proposal.id") in found[0]
+
+
+def test_a_refused_plural_column_points_to_its_singular():
+    """§17.1793 — live (f00ea97f T24): `SELECT … sources … FROM proposal`; the job keeps `ingested_item.source`."""
+    tables = {"proposal": {"id", "signal_id", "rationale"}, "signal": {"id", "ingested_item_id"},
+              "ingested_item": {"id", "source", "payload"}}
+    fks = {"proposal": {"signal_id": "signal.id"}, "signal": {"ingested_item_id": "ingested_item.id"}}
+    out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT rationale, sources FROM proposal')\n```"
+    found = sch.unknown_schema_refs(out, tables, set(tables), fks)
+    assert found and "`source` (not `sources`) is on `ingested_item` -- reach it from `proposal` with a JOIN" in found[0]
