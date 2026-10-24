@@ -685,7 +685,8 @@ def test_json_columns_and_checks_are_read_and_shown():
     b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_RULES]), rules=rules)
     assert ("required: source, external_id, payload; UNIQUE (slug); UNIQUE (source, external_id); "
             "JSON: payload (json); CHECK source IN ('sec_edgar','reddit')") in b
-    assert "each test makes its own UNIQUE values, e.g. `uuid4().hex`" in b
+    assert "each test makes its own UNIQUE values -- a text one from `uuid4().hex`" in b
+    assert "an id is never made up: it is the `RETURNING id` of the row the test inserted" in b   # §17.1802
     assert "`CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own type" in b
 
 

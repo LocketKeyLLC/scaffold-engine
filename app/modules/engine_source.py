@@ -1307,7 +1307,8 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
             + ("    (a JSON/JSONB column takes `json.dumps(value)` with `CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own "
                "type -- through `text()`, never a dict; a CHECK lists the only values a row may hold -- tests use those "
                "values; a `required` column has no default, so every INSERT gives it; the tests of one run share one "
-               "scratch database, so each test makes its own UNIQUE values, e.g. `uuid4().hex`)\n" if rules else ""))
+               "scratch database, so each test makes its own UNIQUE values -- a text one from `uuid4().hex`; an id "
+               "is never made up: it is the `RETURNING id` of the row the test inserted)\n" if rules else ""))
 
 
 def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> str:
