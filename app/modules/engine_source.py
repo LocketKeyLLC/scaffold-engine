@@ -1159,7 +1159,18 @@ def matching_settings(want: set[str], rare: int = 3) -> list[str]:
     return [f for f in fields if any(len(w) >= 6 and df[w] <= rare and w in want for w in f.split("_"))][:20]
 
 
-def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000) -> str:
+def _render_job_tables(tables: dict) -> str:
+    """§17.1786 — the job's own tables, exactly as its migration makes them. Live (job f00ea97f T13, T20): the plan's
+    text said "filter on publication_time" while the migration made `published_ts`; each attempt followed the text and
+    §17.1782 refused it."""
+    rows = [f"    {t}: {', '.join(sorted(c))}" for t, c in sorted(tables.items()) if c]
+    if not rows:
+        return ""
+    return ("### This job's tables (from its migration -- exact names; where this step's text names a table or column "
+            "differently, these win)\n" + "\n".join(rows) + "\n")
+
+
+def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, tables: dict | None = None) -> str:
     """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042)."""
     index = module_index()
     layout: dict[str, list[str]] = {}
@@ -1188,6 +1199,10 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000) 
         "### Conventions\n" + CONVENTIONS + "\n",
         "### Modules every change uses\n" + "".join(_render_module(m) for m in _CORE),
     ]
+    if tables:
+        jt = _render_job_tables(tables)
+        if jt:
+            parts.insert(1, jt)              # near the top: the block is cut at `budget`, the schema must survive
     caps = capabilities_for(node)
     if caps:
         parts.append("### The engine's own way to do what this step names\n" + "".join(_render_capability(c) for c in caps))

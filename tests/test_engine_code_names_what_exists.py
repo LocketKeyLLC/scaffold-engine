@@ -518,3 +518,23 @@ def test_a_call_refusal_carries_the_whole_signature():
     found = es.sibling_refs(out, es.sibling_definitions([t4]))
     assert found and all("the signature is `async write_order(*, proposal_id, approval_id, broker_order_id, "
                          "submitted_ts=…)`" in f for f in found)
+
+
+# ── §17.1786 every code step is shown the job's own tables (live job f00ea97f T13, T20) ──
+
+def test_the_block_shows_the_jobs_tables_first_and_says_they_win():
+    tables = sch.tables_in_code([T3_HELPER])
+    b = es.block_for(T6_ROW, {"paper_risk_control_module"}, tables=tables)
+    assert "### This job's tables (from its migration -- exact names; where this step's text names a table or column " \
+           "differently, these win)" in b
+    assert "    ingested_item: data_ts, fetched_ts, id, model_ts, published_ts" in b
+    assert b.index("This job's tables") < b.index("### Conventions")       # survives the budget cut
+    assert "This job's tables" not in es.block_for(T6_ROW, set())
+
+
+@pytest.mark.asyncio
+async def test_the_executor_shows_the_steps_the_jobs_tables():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.modules.engine_schema.tables_in_code", return_value={"ingested_item": {"published_ts", "id"}}):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    assert "    ingested_item: id, published_ts" in captured["prompt"]
