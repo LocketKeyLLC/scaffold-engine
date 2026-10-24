@@ -673,10 +673,10 @@ def upgrade() -> None:
 
 def test_json_columns_and_checks_are_read_and_shown():
     rules = sch.column_rules_in_code([T3_RULES])
-    assert rules == {"ingested_item": {"json": ["payload"], "checks": ["source IN ('sec_edgar','reddit')"]}}
+    assert rules == {"ingested_item": {"json": ["payload (json)"], "checks": ["source IN ('sec_edgar','reddit')"]}}
     b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_RULES]), rules=rules)
-    assert "JSON: payload; CHECK source IN ('sec_edgar','reddit')" in b
-    assert "a JSON column takes `json.dumps(value)` with `CAST(:p AS jsonb)`" in b
+    assert "JSON: payload (json); CHECK source IN ('sec_edgar','reddit')" in b
+    assert "`CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own type" in b
 
 
 @pytest.mark.asyncio
@@ -716,3 +716,53 @@ async def test_the_executor_passes_the_module_index():
                                          "funcs": {"go": es._call_shape(__import__("ast").parse("def go(a, *, b=1): pass").body[0])}}}):
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
     assert "    paper_x: go(a, *, b=…)" in captured["prompt"]
+
+
+# ── §17.1798 the module index shows public classes (live job f00ea97f T25: AlpacaPaperClient invisible) ──
+
+T5_CLIENT = {"node_key": "T5", "prompt_template": "", "output_text": """```python
+# app/modules/paper_alpaca_paper_client.py
+from dataclasses import dataclass
+
+
+class AlpacaPaperClientError(Exception):
+    pass
+
+
+@dataclass
+class AlpacaAccount:
+    equity: str
+    cash: str
+    _raw: dict | None = None
+
+
+class AlpacaPaperClient:
+    def __init__(self, *, base_url: str = "x") -> None:
+        self._c = None
+
+    async def _request(self, m):
+        ...
+
+    async def get_account(self) -> AlpacaAccount:
+        ...
+
+    async def get_latest_trade(self, symbol: str) -> dict:
+        ...
+
+    @staticmethod
+    def build(symbol, qty):
+        ...
+
+    @property
+    def ready(self) -> bool:
+        return True
+```"""}
+
+
+def test_the_index_shows_a_modules_public_classes():
+    r = es._render_job_modules(es.sibling_definitions([T5_CLIENT]), "other")
+    line = [x for x in r.splitlines() if "paper_alpaca_paper_client" in x][0]
+    assert "class AlpacaAccount {fields: equity, cash}" in line
+    assert ("class AlpacaPaperClient(*, base_url=…) {build(symbol, qty), async get_account(), "
+            "async get_latest_trade(symbol)}") in line
+    assert "AlpacaPaperClientError" not in line and "_request" not in line and "ready" not in line

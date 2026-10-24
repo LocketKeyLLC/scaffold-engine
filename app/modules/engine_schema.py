@@ -244,7 +244,8 @@ def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
                         tname = (getattr(typ, "attr", None) or getattr(typ, "id", None)
                                  or getattr(getattr(typ, "func", None), "attr", None) or "")
                         if str(tname).upper() in ("JSON", "JSONB"):
-                            rules["json"].append(str(a.args[0].value).lower())
+                            # §17.1798 — the type is shown: a `json` column told `CAST(... AS jsonb)` drew a refusal
+                            rules["json"].append(f"{str(a.args[0].value).lower()} ({str(tname).lower()})")
                     elif fname == "CheckConstraint" and a.args and isinstance(a.args[0], ast.Constant):
                         rules["checks"].append(str(a.args[0].value))
     return {k: v for k, v in out.items() if v["json"] or v["checks"]}
