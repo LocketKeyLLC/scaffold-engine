@@ -31,3 +31,29 @@ def test_the_live_steps_are_the_operators(key):
 ])
 def test_engine_work_stays_the_engines(text):
     assert not ops.is_wholly_operators({"title": "x", "description": text, "tool": "Shell"})
+
+
+# ── §17.1809 "Walk/Guide operator …" and a physical act (live job 700dd9c0 T3, framed as a root run on the host) ──
+
+LIVE_V2 = {
+    "T3": "Walk operator through downloading the chosen OS ISO to a machine with a USB writer. Acquisition only — no install.",
+    "T4": "Guide operator to write the ISO to a USB stick (e.g., balenaEtcher, dd). Produces the install medium only.",
+    "T6": "Plug laptop into wired Ethernet, confirm DHCP lease or set static IP on the LAN. Network identity only — no SSH key yet.",
+}
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("key", sorted(LIVE_V2))
+def test_walking_the_operator_through_is_theirs(key):
+    assert ops.is_wholly_operators({"title": key, "description": LIVE_V2[key], "tool": "Shell"})
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("text", [
+    "Install k3s agent on each laptop, pointing to VM 110's server URL with the token.",
+    "Read the engine's /health and confirm the pool lists every laptop as up.",
+    "Boot order is set by the BIOS; run `qm set 110 --boot order=scsi0` to pin it.",     # 'boot' not opening a sentence
+    "Walking through the logs, find the failed unit.",                                  # not walking the operator
+])
+def test_engine_work_with_those_words_stays_the_engines(text):
+    assert not ops.is_wholly_operators({"title": "x", "description": text, "tool": "Shell"})
