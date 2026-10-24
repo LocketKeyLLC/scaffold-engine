@@ -2039,7 +2039,13 @@ async def execute_next_node(
                 if _es.targets_the_engine(brief):
                     async with async_session() as _esdb:
                         _own_mods, _ = await _es.job_code(_esdb, job_id, except_node=node_key)
-                    _grounding_blocks.append(_es.block_for(node_snapshot, _own_mods))
+                        # §17.1786 — and the job's tables, as its finished migration makes them
+                        _outs = (await _esdb.execute(text(
+                            "SELECT output_text FROM dag_nodes WHERE job_id = :j AND status = 'done' "
+                            "AND node_key <> :k"), {"j": job_id, "k": node_key})).scalars().all()
+                    from app.modules import engine_schema as _esch
+                    _grounding_blocks.append(_es.block_for(
+                        node_snapshot, _own_mods, tables=_esch.tables_in_code([str(o or "") for o in _outs])))
             except Exception as exc:
                 logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
