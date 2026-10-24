@@ -496,6 +496,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
         names: set[str] = set()
         defined: set[str] = set()
         funcs: dict[str, dict] = {}
+        classes: dict[str, dict] = {}
         seen = False
         for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
             if lang not in PYTHON_LANGS:
@@ -516,6 +517,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                 elif isinstance(n, ast.ClassDef):
                     names.add(n.name)
                     defined.add(n.name)
+                    classes[n.name] = _class_shape(n)                     # §17.1798
                 elif isinstance(n, (ast.Assign, ast.AnnAssign)):
                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
                         ids = {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
@@ -530,8 +532,35 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                         elif isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store):
                             names.add(x.id)
         if mod and seen:
-            out[mod] = {"node": r.get("node_key"), "names": names, "defined": defined, "funcs": funcs}
+            out[mod] = {"node": r.get("node_key"), "names": names, "defined": defined, "funcs": funcs,
+                        "classes": classes}
     return out
+
+
+def _class_shape(c: ast.ClassDef) -> dict:
+    """§17.1798 — a class's public surface: how it is built, its public methods (without `self`), and the fields of a
+    data class. Live (job f00ea97f T25): the module index showed module-level functions only, so the whole
+    `AlpacaPaperClient` API (get_account, get_position, list_orders, get_latest_trade) was invisible and the
+    integration hard-coded a price of 100.00 and day-start equity equal to equity."""
+    init: dict | None = None
+    methods: dict[str, dict] = {}
+    fields: list[str] = []
+    for x in c.body:
+        if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            deco = {getattr(d, "id", None) or getattr(d, "attr", None) for d in x.decorator_list}
+            sh = _call_shape(x)
+            if "staticmethod" not in deco:
+                for k in ("pos", "required_pos", "posonly"):
+                    sh[k] = sh[k][1:] if sh[k] and sh[k][0] in ("self", "cls") else sh[k]
+            if x.name == "__init__":
+                init = sh
+            elif not x.name.startswith("_") and "property" not in deco:
+                methods[x.name] = sh
+            elif "property" in deco and not x.name.startswith("_"):
+                fields.append(x.name)
+        elif isinstance(x, ast.AnnAssign) and isinstance(x.target, ast.Name) and not x.target.id.startswith("_"):
+            fields.append(x.target.id)
+    return {"init": init, "methods": methods, "fields": fields}
 
 
 def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
@@ -1273,11 +1302,12 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
             "differently, these win)\n" + "\n".join(rows) + "\n"
             + ("    (`col→table.id` is a foreign key: insert the parent row first -- in tests too, the scratch database "
                "enforces it)\n" if any(fks.values()) else "")
-            + ("    (a JSON column takes `json.dumps(value)` with `CAST(:p AS jsonb)` through `text()`, never a dict; a "
-               "CHECK lists the only values a row may hold -- tests use those values)\n" if rules else ""))
+            + ("    (a JSON/JSONB column takes `json.dumps(value)` with `CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own "
+               "type -- through `text()`, never a dict; a CHECK lists the only values a row may hold -- tests use those "
+               "values)\n" if rules else ""))
 
 
-def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 3500) -> str:
+def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> str:
     """§17.1796 — the public functions of every module this job has written, with exact signatures, one line each.
     Live (job f00ea97f T25, the integration step over ~20 modules): attempt after attempt guessed
     `ingest_congressional_trades`, `fetch_13f_holdings`, `generate_signals(as_of=…)`; the refusal's "it has" list was
@@ -1287,6 +1317,15 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 3500) -> 
         if mod == own:
             continue
         sigs = [_shape_signature(f, sh) for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
+        for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
+            if cname.startswith("_") or cname.endswith(("Error", "Exception")):
+                continue
+            if c["methods"]:
+                ms = ", ".join(_shape_signature(m, sh) for m, sh in sorted(c["methods"].items()))
+                sigs.append(f"class {_shape_signature(cname, c['init']) if c['init'] else cname + '()'} "
+                            f"{{{ms}}}")
+            elif c["fields"]:
+                sigs.append(f"class {cname} {{fields: {', '.join(c['fields'])}}}")
         if sigs:
             lines.append(f"    {mod}: " + "; ".join(sigs))
     if not lines:
