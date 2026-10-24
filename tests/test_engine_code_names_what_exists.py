@@ -220,7 +220,8 @@ def test_agent():
 
 def test_the_live_approval_calls_are_refused_for_the_kinds_they_pass():
     found = [f for f in es.unresolved_refs(T14_APPROVAL) if "given a" in f]
-    assert "`frame_decision(…)`: `upstream` is `str`; it was given a `dict`" in found
+    assert any(f.startswith("`frame_decision(…)`: `upstream` is `str`; it was given a `dict`")
+               and "the signature is `async frame_decision(node, *, brief=…, upstream=…)`" in f for f in found)
     assert any("park_awaiting_decision" in f and "`node` is `dict`" in f and "APPROVAL_NODE_KEY" in f for f in found)
 
 
@@ -505,3 +506,15 @@ def test_a_missing_table_is_told_which_tables_the_job_has():
     out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT * FROM positions')\n```"
     found = sch.unknown_schema_refs(out, {**LIVE, **sch.tables_in_code([T3_HELPER])}, {"ingested_item", "signal"})
     assert found and "this job's tables are `ingested_item`, `signal`" in found[0]
+
+
+
+def test_a_call_refusal_carries_the_whole_signature():
+    """§17.1785 — live (f00ea97f T17, three attempts on the same call): "takes at most 0 positional argument(s)",
+    "missing `approval_id`" -- each attempt fixed one argument and broke another."""
+    t4 = {"node_key": "T4", "prompt_template": "", "output_text": "```python\n# app/modules/paper_audit_trail_writer.py\n"
+          "async def write_order(*, proposal_id, approval_id, broker_order_id, submitted_ts=None):\n    ...\n```"}
+    out = "```python\nfrom app.modules.paper_audit_trail_writer import write_order\n\nasync def go(o):\n    await write_order(o)\n```"
+    found = es.sibling_refs(out, es.sibling_definitions([t4]))
+    assert found and all("the signature is `async write_order(*, proposal_id, approval_id, broker_order_id, "
+                         "submitted_ts=…)`" in f for f in found)
