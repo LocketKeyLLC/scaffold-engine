@@ -124,3 +124,35 @@ def test_any_on_the_write_list_elevates_the_READ_tool_too():
     assert "allow.append(ANY)" in build
     # and the read tool is the one that consumes `allow`
     assert "apply_sudo_policy(command, allow)" in build
+
+
+# ── §17.1806 a compound read runs as root as a whole (live job 0fb4ea7f RB1) ──
+
+LIVE_LOOP = ("for id in $(qm list | awk 'NR>1 && $3==\"running\" {print $1}'); do "
+             "echo \"VM $id: $(qm config $id | grep onboot)\"; done")
+
+
+def test_a_compound_read_is_wrapped_and_really_runs(tmp_path):
+    import os
+    import stat
+    import subprocess
+    r = _runner()
+    out = r.apply_sudo_policy(LIVE_LOOP, [r.ANY])[0]
+    assert out.startswith("sudo -n sh -c '")
+    for name, body in {"sudo": 'shift; exec "$@"',                         # `sudo -n X…` → X…
+                       "qm": 'if [ "$1" = list ]; then printf "VMID NAME STATUS\\n106 pal running\\n100 gpu stopped\\n"; '
+                             'else echo "onboot: 1"; fi'}.items():
+        f = tmp_path / name
+        f.write_text("#!/bin/sh\n" + body + "\n")
+        f.chmod(f.stat().st_mode | stat.S_IEXEC)
+    done = subprocess.run(["sh", "-c", out], capture_output=True, text=True,
+                          env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
+    assert done.returncode == 0 and done.stdout.strip() == "VM 106: onboot: 1", (done.stdout, done.stderr)
+    assert r.apply_sudo_policy("qm status 106", [r.ANY])[0] == "sudo -n qm status 106"     # a simple one as before
+
+
+def test_a_check_the_shell_could_not_parse_is_not_evidence():
+    from app.modules.assist_local_runner import not_evidence
+    assert not_evidence('/bin/sh: 1: Syntax error: "do" unexpected') == "the shell could not parse the check, so it never ran"
+    assert not_evidence("bash: line 1: syntax error near unexpected token `do'")
+    assert not_evidence("VM 106: onboot: 1") == ""
