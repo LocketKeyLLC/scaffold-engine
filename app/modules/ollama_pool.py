@@ -197,6 +197,41 @@ def planner_note_applies(brief: dict | str) -> bool:
     return bool(re.search(_AI_RE, text)) and bool(re.search(_MORE_RE, text))
 
 
+def plan_misses_pool(tasks: list[dict], brief: dict | str) -> list[str]:
+    """§17.1807 — what a plan for a brief that adds AI compute leaves out of PLANNER_NOTE's shape: Ollama on each
+    added machine, and the engine-host step that sets OLLAMA_POOL_URLS. Live (job 700dd9c0, the laptop cluster
+    re-planned 2026-10-24): the note was in the prompt and the plan had "research worker pods", "coding worker pods"
+    and "configure the server engine to dispatch tasks" -- no Ollama anywhere, no OLLAMA_POOL_URLS. A note is advice;
+    nothing checked that the plan took it."""
+    import re
+    if not planner_note_applies(brief):
+        return []
+    texts = [" ".join(str(t.get(k) or "") for k in ("name", "notes", "description")) for t in tasks or []]
+    text = " ".join(texts)
+    # a step that puts Ollama ON the added machines -- not one that only mentions the engine's own ("keeping Ollama
+    # on VM 110 responsive", live 700dd9c0 T21)
+    runs_ollama = re.compile(
+        r"\b(?:deploy|install|run|start|pull)\w*\b[^.\n]{0,40}\bollama\b[^.\n]{0,40}\b(?:on|to|per|across)\b"
+        r"[^.\n]{0,20}\b(?:each|every|all|worker|laptop|node|machine|member)s?\b"
+        r"|\bollama\b[^.\n]{0,20}\b(?:daemonset|per[- ]node|on\s+(?:each|every)\b)", re.I)
+    missing = []
+    if not any(runs_ollama.search(x) for x in texts):
+        missing.append("no step runs Ollama on each added machine (its own address, port 11434)")
+    if "OLLAMA_POOL_URLS" not in text:
+        missing.append("no step on the engine host sets OLLAMA_POOL_URLS to those addresses, redeploys the engine and "
+                       "reads /health showing every member up")
+    return missing
+
+
+def render_pool_corrections(missing: list[str], next_attempt: int) -> str:
+    return (f"## Engine-compute corrections needed (attempt {next_attempt})\n\nThis brief adds AI compute for the "
+            "engine, and the plan does not use the engine's Ollama pool (see ENGINE CAPABILITY above):\n"
+            + "\n".join(f"- {m}" for m in missing)
+            + "\n\nReplace vague 'worker pods' / 'dispatch tasks to the cluster' steps with: each added machine runs "
+            "its own Ollama and pulls the role models that fit its RAM; then ONE engine-host step sets "
+            "OLLAMA_POOL_URLS, redeploys the engine and reads /health; the lose-one-machine check comes after it.")
+
+
 PLANNER_NOTE = """ENGINE CAPABILITY — an Ollama pool (§17.1727). The scaffold engine can spread its OWN model calls over
 more Ollama servers: the setting OLLAMA_POOL_URLS (comma-separated http://<address>:11434, one entry per server)
 in the engine's .env, applied by redeploying the engine. Each call goes to a member that already holds that

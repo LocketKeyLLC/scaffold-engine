@@ -1602,8 +1602,11 @@ async def _generate_dag_with_validator(
 
         # §17.1729 — numbered copies of a step for a count nobody gave. Retry so the model writes ONE node.
         invented = detect_invented_counts(dag_data.get("tasks", []), json.dumps(brief_data))
+        # §17.1807 — a brief adding AI compute: the plan uses the engine's Ollama pool, or it is re-asked
+        from app.modules import ollama_pool as _pool_g
+        pool_gap = _pool_g.plan_misses_pool(dag_data.get("tasks", []), brief_data)
 
-        if not outcome.issues and not dead_ends and not unimplemented and not invented:
+        if not outcome.issues and not dead_ends and not unimplemented and not invented and not pool_gap:
             if attempt > 1:
                 warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
             return {
@@ -1635,6 +1638,8 @@ async def _generate_dag_with_validator(
                     + ", ".join(unimplemented)
                     + " (decided but never carried out — plan may be incomplete)"
                 )
+            if pool_gap:
+                warnings.append(f"pool_plan_gap: {'; '.join(pool_gap)} after {attempt} attempts")
             if invented:
                 warnings.append(
                     "invented_counts: " + "; ".join(
@@ -1651,6 +1656,7 @@ async def _generate_dag_with_validator(
             tuple(sorted(dead_ends)),
             tuple(sorted(unimplemented)),
             tuple(sorted(i for g in invented for i in g["ids"])),
+            tuple(pool_gap),
         )
         if sig == last_issue_signature:
             warnings.append(
@@ -1703,6 +1709,9 @@ async def _generate_dag_with_validator(
                 + ", ".join("/".join(g["ids"]) for g in invented)
             )
             correction_parts.append(render_invented_count_corrections(invented, attempt + 1))
+        if pool_gap:
+            warnings.append(f"pool_plan_gap_attempt_{attempt}: " + "; ".join(pool_gap))
+            correction_parts.append(_pool_g.render_pool_corrections(pool_gap, attempt + 1))
         corrections_block = "\n\n".join(correction_parts)
 
     # Reached only when the loop broke mid-flight after attempt 1 (e.g., a

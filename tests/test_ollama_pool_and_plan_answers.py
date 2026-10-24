@@ -452,3 +452,48 @@ def test_mid_title_numbers_and_the_planners_n_are_a_series_and_a_lone_n_joins_it
     assert [g["ids"] for g in merged] == [["T16", "T17", "T18"], ["T8", "T10"]]
     assert dag_generator.detect_invented_counts(
         [{"id": "A", "name": "Start VM 106"}, {"id": "B", "name": "Start VM 110"}], "") == []
+
+
+# ---------------------------------------------------------------------------
+# §17.1807 — a plan for added AI compute must use the pool (live job 700dd9c0)
+# ---------------------------------------------------------------------------
+
+_VAGUE = [{"id": "T19", "name": "Deploy research worker pods", "notes": "Deploy background research worker pods."},
+          {"id": "T21", "name": "Integrate engine with cluster",
+           "notes": "Configure the server engine to dispatch tasks to the k3s workers, keeping Ollama on VM 110 responsive."}]
+_POOLED = [{"id": "T16", "name": "Deploy Ollama on workers", "notes": "Deploy Ollama as a DaemonSet on each laptop."},
+           {"id": "T17", "name": "Configure engine Ollama pool", "notes": "Set OLLAMA_POOL_URLS, redeploy, read /health."}]
+
+
+def test_a_plan_without_the_pool_is_named_and_one_with_it_passes():
+    gap = ollama_pool.plan_misses_pool(_VAGUE, _K8S_BRIEF)
+    assert len(gap) == 2 and "runs Ollama on each added machine" in gap[0] and "OLLAMA_POOL_URLS" in gap[1]
+    assert ollama_pool.plan_misses_pool(_POOLED, _K8S_BRIEF) == []
+    assert ollama_pool.plan_misses_pool(_VAGUE, _MOVE_BRIEF) == []                 # not a brief adding compute
+
+
+async def test_the_planner_is_sent_back_to_use_the_pool(monkeypatch):
+    from app import model_router as _mr
+    monkeypatch.setattr(settings, "dag_validator_enabled", True)
+    monkeypatch.setattr(settings, "dag_validator_max_retries", 1)
+
+    def _plan(rows):
+        return json.dumps({"strategy": "s", "tasks": [
+            {**r, "type": "action", "inputs": [], "outputs": [f"o{i}"], "depends_on": [] if i == 0 else [rows[i - 1]["id"]],
+             "tool": "Shell", "domain": None, "assigned_model": None, "is_deliverable": i == len(rows) - 1}
+            for i, r in enumerate(rows)]})
+    prompts: list[str] = []
+    replies = iter([_resp(_plan(_VAGUE)), _resp(json.dumps({"issues": []})),
+                    _resp(_plan(_POOLED)), _resp(json.dumps({"issues": []}))])
+
+    async def _gen(prompt, *a, **k):
+        prompts.append(prompt)
+        return next(replies)
+    with patch.object(_mr, "generate", new=AsyncMock(side_effect=_gen)), \
+         patch("app.modules.flywheel.retrieve_exemplars", new=AsyncMock(return_value="")):
+        result = await dag_generator._generate_dag_with_validator(_K8S_BRIEF, {"role": "model_general"})
+    assert result["attempts"] == 2
+    redraft = [p for p in prompts if "Decompose this refined brief" in p][1]
+    assert "Engine-compute corrections needed" in redraft and "OLLAMA_POOL_URLS" in redraft
+    assert any(w.startswith("pool_plan_gap_attempt_1") for w in result["warnings"])
+    assert "validator_clean_after_retry_attempt_2" in result["warnings"]
