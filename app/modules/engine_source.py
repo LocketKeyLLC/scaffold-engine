@@ -1016,6 +1016,58 @@ def answers_read_where_asked(output: str) -> list[str]:
     return found
 
 
+async def adopt_imported_siblings(db, job_id: str, node_key: str, output: str) -> list[str]:
+    """§17.1788 — a step that imports another step's module stands on that step. Live (job f00ea97f T20 "walk-forward
+    backtester", ~20 attempts): it used T21's `paper_spy_benchmark_tracker` (prices, the SPY benchmark) and T22's
+    metrics, but stood on neither -- so neither the step nor its verifier was ever shown them (a verdict said the SPY
+    module "is not among the provided upstream blocks"), and T22 was not even written. The dependency is the step's own
+    code's; it is added (never one that would close a cycle), so the next attempt -- and its verifier -- see the module,
+    and a step waiting on an unwritten one waits for it. Returns the node keys added."""
+    from sqlalchemy import text as _t
+    rows = [dict(r) for r in (await db.execute(_t(
+        "SELECT node_key, title, description, prompt_template, output_text, depends_on FROM dag_nodes "
+        "WHERE job_id = :j"), {"j": job_id})).mappings().all()]
+    me = next((r for r in rows if r["node_key"] == node_key), None)
+    if not me:
+        return []
+    owner = {step_module(r): r["node_key"] for r in rows if r["node_key"] != node_key and step_module(r)}
+    deps = {r["node_key"]: [str(d) for d in (r["depends_on"] or [])] for r in rows}
+    wanted: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            mods = ([n.module] if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module else
+                    [a.name for a in n.names] if isinstance(n, ast.Import) else [])
+            for m in mods:
+                k = owner.get(m.split(".")[-1])
+                if k and m not in module_index() and k not in wanted:
+                    wanted.append(k)
+
+    def upstream(key: str) -> set[str]:
+        seen: set[str] = set()
+        todo = list(deps.get(key, []))
+        while todo:
+            x = todo.pop()
+            if x not in seen:
+                seen.add(x)
+                todo.extend(deps.get(x, []))
+        return seen
+
+    mine = upstream(node_key)
+    add = [k for k in wanted if k not in mine and node_key not in upstream(k)]
+    if not add:
+        return []
+    await db.execute(_t("UPDATE dag_nodes SET depends_on = depends_on || CAST(:add AS text[]), updated_at = NOW() "
+                        "WHERE job_id = :j AND node_key = :k"), {"add": add, "j": job_id, "k": node_key})
+    await db.commit()
+    return add
+
+
 def unresolved_reason(findings: list[str]) -> str:
     """The refusal the next attempt is drafted from (W.1 retry loop)."""
     return ("§17.1749 this step writes code for the engine itself, and it reaches for things the engine does not have:\n"

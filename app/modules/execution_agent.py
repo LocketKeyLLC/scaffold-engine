@@ -2450,6 +2450,15 @@ async def execute_next_node(
                         _refs = await _es.engine_findings(_esdb, job_id, node_key, output)
                     if _refs:
                         engine_reason = _es.unresolved_reason(_refs)
+                    # §17.1788 — the steps whose modules this one imports become its dependencies
+                    try:
+                        async with async_session() as _esdb:
+                            _adopted = await _es.adopt_imported_siblings(_esdb, job_id, node_key, output)
+                        if _adopted:
+                            logger.warning("engine_step_dependency_adopted job=%s node=%s added=%s", job_id,
+                                           node_key, _adopted)
+                    except Exception as exc:
+                        logger.warning("engine_dependency_adopt_failed node='%s' error=%r", title, exc)
             except Exception as exc:
                 logger.warning("engine_source_gate_error: node='%s' error=%r", title, exc)
         # §17.1765 — and it is RUN: its tests, or an import of its module, in the engine-test sandbox with this job's
