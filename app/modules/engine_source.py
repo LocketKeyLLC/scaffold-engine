@@ -321,6 +321,12 @@ def _coroutines_used_as_values(tree: ast.AST, engine_funcs: dict, engine_mods: d
         if isinstance(p, ast.Expr):
             out.add(id(call))                                        # discarded
             continue
+        # §17.1787 — indexed, an attribute read, compared, iterated or computed with: a coroutine has none of that
+        if ((isinstance(p, (ast.Subscript, ast.Attribute)) and p.value is call)
+                or isinstance(p, (ast.Compare, ast.BinOp, ast.BoolOp))
+                or (isinstance(p, (ast.For, ast.comprehension)) and p.iter is call)):
+            out.add(id(call))
+            continue
         r = receiver(call)
         if r is not None:
             if _engine_target(r, engine_funcs, engine_mods, index):
@@ -572,6 +578,11 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                     leaf = al.name.split(".")[-1]
                     if leaf in defs and not al.name in module_index():
                         mods[al.asname or leaf] = leaf
+        # §17.1787 — a sibling's coroutine used as a value, the same rule §17.1756 applies to the engine's own. Live
+        # (job f00ea97f T18): `… = client.get_order(…)["filled_qty"]` -- "'coroutine' object is not subscriptable"
+        # in the sandbox, every attempt.
+        pseudo = {leaf: {"funcs": d["funcs"]} for leaf, d in defs.items()}
+        misused = _coroutines_used_as_values(tree, imported, mods, pseudo) if (imported or mods) else set()
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
@@ -587,7 +598,7 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                                  f"`{n.func.attr}`")
             if target:
                 leaf, fname = target
-                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], False):
+                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], id(n) in misused):
                     m = m.replace("in the engine", f"in `{leaf}`")
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")

@@ -579,3 +579,17 @@ async def test_the_executor_tells_the_step_which_modules_are_not_written_yet():
     from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
     captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)          # its one sibling (T9, alpaca_client.py) has no output
     assert "Not written yet, so NOT importable here: `alpaca_client.py`" in captured["prompt"]
+
+
+def test_a_siblings_coroutine_used_as_a_value_is_refused():
+    """§17.1787 — live (f00ea97f T18): "'coroutine' object is not subscriptable" in the sandbox, every attempt."""
+    t5 = {"node_key": "T5", "prompt_template": "", "output_text": "```python\n# app/modules/paper_alpaca_paper_client.py\n"
+          "async def get_order(order_id):\n    ...\n```"}
+    bad = ("```python\nfrom app.modules.paper_alpaca_paper_client import get_order\n\n"
+           "async def qty(oid):\n    return get_order(oid)['filled_qty']\n```")
+    ok = ("```python\nfrom app.modules.paper_alpaca_paper_client import get_order\n\n"
+          "async def qty(oid):\n    return (await get_order(oid))['filled_qty']\n```")
+    defs = es.sibling_definitions([t5])
+    found = es.sibling_refs(bad, defs)
+    assert found and "is `async def` in `paper_alpaca_paper_client`" in found[0] and "step T5" in found[0]
+    assert es.sibling_refs(ok, defs) == []
