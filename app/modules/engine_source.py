@@ -720,12 +720,31 @@ def replaces_an_engine_module(output: str, row: dict) -> list[str]:
             "under that name everywhere"]
 
 
-async def job_code(db, job_id: str, *, except_node: str | None = None) -> tuple[set[str], set[str]]:
-    """`job_own_code` over this job's steps, read from `dag_nodes`; a step's own last output is not its sibling."""
+async def code_rows(db, job_id: str) -> list[dict]:
+    """§17.1811 — the steps whose code this job's code stands on: the finished steps of each job it `builds_on`
+    (keyed `<job>:<key>` so they never meet this job's own keys), then this job's own steps, which win any file
+    both write. A follow-up job is written against the modules its earlier job finished, not a guess at them."""
     from sqlalchemy import text
     rows = (await db.execute(text(
-        "SELECT node_key, title, description, prompt_template, output_text FROM dag_nodes WHERE job_id = :j"),
+        "SELECT * FROM ("
+        " SELECT 0 AS src, d.execution_order AS ord, left(d.job_id::text, 8) || ':' || d.node_key AS node_key,"
+        "        d.title, d.description, d.prompt_template, d.output_text, d.status"
+        "   FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
+        "        CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on'"
+        "             ELSE '[]'::jsonb END) AS b(prior)"
+        "   JOIN dag_nodes d ON d.job_id::text = b.prior"
+        "  WHERE j.id = :j AND d.status = 'done' AND d.output_text IS NOT NULL"
+        " UNION ALL"
+        " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status"
+        "   FROM dag_nodes WHERE job_id = :j"
+        ") r ORDER BY src, CASE WHEN src = 0 THEN ord END NULLS LAST, CASE WHEN src = 0 THEN node_key END"),
         {"j": job_id})).mappings().all()
+    return [{k: v for k, v in dict(r).items() if k not in ("src", "ord")} for r in rows]
+
+
+async def job_code(db, job_id: str, *, except_node: str | None = None) -> tuple[set[str], set[str]]:
+    """`job_own_code` over this job's steps, read from `dag_nodes`; a step's own last output is not its sibling."""
+    rows = await code_rows(db, job_id)
     texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
                       + (() if r["node_key"] == except_node else ("output_text",)))
              for r in rows]
@@ -1005,9 +1024,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from sqlalchemy import text
 
     from app.modules import engine_schema
-    rows = (await db.execute(text(
-        "SELECT node_key, title, description, prompt_template, output_text FROM dag_nodes WHERE job_id = :j"),
-        {"j": job_id})).mappings().all()
+    rows = await code_rows(db, job_id)                  # §17.1811
     others = [str(r["output_text"] or "") for r in rows if r["node_key"] != node_key]
     texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
                       + (() if r["node_key"] == node_key else ("output_text",)))
