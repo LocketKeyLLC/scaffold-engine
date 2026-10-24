@@ -2379,6 +2379,37 @@ async def execute_next_node(
     except Exception as exc:
         logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
 
+    # §17.1801 — code for the engine that left out its required test file is asked for that file alone, once, with
+    # the module in hand -- before any gate spends a check or the attempt is lost on the omission
+    if (tool or "").lower() == "codegen" and output:
+        try:
+            from app.modules import engine_source as _es_t
+            _need = (_es_t.missing_test_file(output, str(node_snapshot.get("prompt_template") or ""))
+                     if _es_t.targets_the_engine(brief if isinstance(brief, dict) else {}) else None)
+            if _need:
+                _tresp = await asyncio.wait_for(chat_until_nonempty(
+                    model_router.chat,
+                    [{"role": "system", "content": _system_for_tool(tool)},
+                     {"role": "user", "content": exec_prompt},
+                     {"role": "assistant", "content": output},
+                     {"role": "user", "content": (
+                         f"Your answer left out `{_need}`, which this step requires. Write only that file now: one "
+                         f"```python block whose first line is `# {_need}` -- pytest tests of the module above (its "
+                         "rules, its edge cases, its failure paths), using only names the module and this job's "
+                         "modules define.")}],
+                    {"role": exec_role, "overrides": exec_overrides},
+                    temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
+                    label=f"node-tests {node_key}", think_off_rescue=True),
+                    timeout=settings.node_timeout_seconds)
+                _tests = (_tresp.text or "").strip() if getattr(_tresp, "success", False) else ""
+                if _tests and _es_t.missing_test_file(_tests, _need) is None:
+                    output = output.rstrip() + "\n\n" + _tests
+                    logger.info("engine_tests_completed job=%s node=%s file=%s", job_id, node_key, _need)
+                else:
+                    logger.warning("engine_tests_not_completed job=%s node=%s file=%s", job_id, node_key, _need)
+        except Exception as exc:
+            logger.warning("engine_tests_completion_failed node=%s err=%r", node_key, exc)
+
     verify_status: Literal["pass", "fail", "skipped"]
     # §17.1235 — a step that says, in its own words, that it cannot be carried
     # out yet must not be recorded as finished. Live, ADD98 ("Prove it end to

@@ -318,7 +318,7 @@ def _session(db):
 
 
 async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra: dict | None = None,
-               chat_tokens: int = 1):
+               chat_tokens: int = 1, outputs: list[str] | None = None):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
@@ -331,12 +331,15 @@ async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra
         "prompt_template": "Python module `news_client.py`: fetch news via the engine's SearXNG.", "domain": None,
         "depends_on": [], "assigned_model": None, "retry_count": 0, "last_verification_reason": None,
         **(node_extra or {})})
-    captured: dict = {}
+    captured: dict = {"calls": []}
+    queue = list(outputs or [])
 
     async def chat(messages, **kw):
+        captured["calls"].append(messages)
         captured["prompt"] = messages[-1]["content"]
         captured["max_tokens"] = kw.get("max_tokens")
-        return SimpleNamespace(text=output, success=True, model="m", error=None, tool_calls=None,
+        return SimpleNamespace(text=queue.pop(0) if queue else output, success=True, model="m", error=None,
+                               tool_calls=None,
                                fallback_used=False, prompt_tokens=1, completion_tokens=chat_tokens, retries=0)
     set_status = AsyncMock()
     verify = AsyncMock(return_value=("pass", "fine", 0.9))

@@ -11,6 +11,7 @@ cut down from those outputs; the names are the live ones.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -766,3 +767,47 @@ def test_the_index_shows_a_modules_public_classes():
     assert ("class AlpacaPaperClient(*, base_url=…) {build(symbol, qty), async get_account(), "
             "async get_latest_trade(symbol)}") in line
     assert "AlpacaPaperClientError" not in line and "_request" not in line and "ready" not in line
+
+
+# ── §17.1801 a left-out test file is asked for alone (live job f00ea97f, the entry-point steps) ──
+
+ENTRY_STEP = ("Python module `paper_entry_execution.py`: the lab's `execution` entry point. In this same step also write "
+              "`tests/test_paper_entry_execution.py`: pytest tests of what `paper_entry_execution.py` must do.")
+MODULE_ONLY = "```python\n# app/modules/paper_entry_execution.py\nasync def run_execution():\n    return 1\n```"
+TESTS_ONLY = ("```python\n# tests/test_paper_entry_execution.py\nimport pytest\n\n\n@pytest.mark.asyncio\n"
+              "async def test_run():\n    from app.modules.paper_entry_execution import run_execution\n"
+              "    assert await run_execution() == 1\n```")
+
+
+def test_a_required_test_file_left_out_is_named():
+    assert es.missing_test_file(MODULE_ONLY, ENTRY_STEP) == "tests/test_paper_entry_execution.py"
+    assert es.missing_test_file(MODULE_ONLY + "\n\n" + TESTS_ONLY, ENTRY_STEP) is None
+    assert es.missing_test_file(MODULE_ONLY, "Python module `paper_x.py`.") is None       # no tests required
+    other = TESTS_ONLY.replace("test_paper_entry_execution.py", "test_other.py")
+    assert es.missing_test_file(MODULE_ONLY + "\n\n" + other, ENTRY_STEP) == "tests/test_paper_entry_execution.py"
+
+
+@pytest.mark.asyncio
+async def test_the_executor_asks_for_the_missing_tests_and_checks_the_whole():
+    from tests.test_codegen_for_the_engine_reads_the_engine import LIVE_BRIEF, _run
+    checked = AsyncMock(return_value=SimpleNamespace(verdict="pass", reason="", ran=[]))
+    with patch("app.sandbox.engine_tests.check", new=checked), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(MODULE_ONLY, LIVE_BRIEF, outputs=[MODULE_ONLY, TESTS_ONLY],
+                                    node_extra={"prompt_template": ENTRY_STEP})
+    asks = [c for c in captured["calls"] if "Your answer left out `tests/test_paper_entry_execution.py`" in
+            c[-1]["content"]]
+    assert len(asks) == 1 and asks[0][-2] == {"role": "assistant", "content": MODULE_ONLY}
+    checked.assert_awaited()
+    assert "# tests/test_paper_entry_execution.py" in checked.await_args.args[0]      # the sandbox runs both
+
+
+@pytest.mark.asyncio
+async def test_a_complete_output_is_not_asked_again():
+    from tests.test_codegen_for_the_engine_reads_the_engine import LIVE_BRIEF, _run
+    with patch("app.sandbox.engine_tests.check",
+               new=AsyncMock(return_value=SimpleNamespace(verdict="pass", reason="", ran=[]))), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(MODULE_ONLY + "\n\n" + TESTS_ONLY, LIVE_BRIEF,
+                                    node_extra={"prompt_template": ENTRY_STEP})
+    assert not [c for c in captured["calls"] if "Your answer left out" in c[-1]["content"]]

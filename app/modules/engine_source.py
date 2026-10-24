@@ -1334,6 +1334,24 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> 
     return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
 
 
+_REQUIRED_TESTS_RE = re.compile(r"\b(tests/test_\w+\.py)\b")
+
+
+def missing_test_file(output: str, step_text: str) -> str | None:
+    """§17.1801 — the test file this step's text requires and its output left out (no code block starts with its
+    path), or None. Live (job f00ea97f, the entry-point steps of §17.1799): half the attempts dropped the required
+    `tests/test_<module>.py` -- in a small step too -- and each drop cost a whole attempt and a verifier call."""
+    m = _REQUIRED_TESTS_RE.search(step_text or "")
+    if not m:
+        return None
+    path = m.group(1)
+    for _lang, code in extract_code_blocks(output or ""):
+        first = code.lstrip().splitlines()[0] if code.strip() else ""
+        if path in first or (path.rsplit("/", 1)[-1] in first and first.lstrip().startswith("#")):
+            return None
+    return path
+
+
 def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000, tables: dict | None = None,
               written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None,
               modules: dict[str, dict] | None = None) -> str:
