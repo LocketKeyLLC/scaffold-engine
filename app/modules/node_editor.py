@@ -443,7 +443,14 @@ async def edit_node(
         if err:
             return {"error": err, "http_status": 400}
 
-    before = {k: node.get(k) for k in updates}
+    # §17.1795 — the pre-image is the row's real current values: `_load_nodes` carries key/status/depends_on only, so
+    # an edit of prompt_template / tool / tool_config / title recorded `null` as what it replaced (live f00ea97f T25:
+    # the §17.1793 split could not be undone from the ledger)
+    _cols = [c for c in updates if c in EDITABLE_FIELDS]
+    _cur = (await db.execute(text(
+        f"SELECT {', '.join(_cols)} FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+        {"j": job_id, "k": node_key})).mappings().first() if _cols else None
+    before = {k: (_cur[k] if _cur is not None and k in _cur else node.get(k)) for k in updates}
 
     # Build the UPDATE. depends_on is a text[]; the rest are scalar columns.
     set_parts = []
