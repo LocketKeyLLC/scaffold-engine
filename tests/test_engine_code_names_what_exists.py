@@ -288,10 +288,10 @@ def test_a_step_reads_which_module_it_writes():
 def test_the_live_kill_switch_is_refused_for_names_its_siblings_never_wrote():
     found = es.sibling_refs(T12_KILL, es.sibling_definitions([T10_STREAM, T16_AUDIT]))
     text = "\n".join(found)
-    assert "`alpaca_stream` (step T10) has no `get_open_orders` (it has MAX_BACKOFF_SECONDS, start_stream)" in text
+    assert "`alpaca_stream` (step T10) has no `get_open_orders` (it has start_stream, MAX_BACKOFF_SECONDS)" in text
     assert "has no `OrderState`" in text
     assert "has no parameter `runner_id`" in text and "step T16" in text
-    assert "start_stream`" not in text.replace("(it has MAX_BACKOFF_SECONDS, start_stream)", "")
+    assert "start_stream`" not in text.replace("(it has start_stream, MAX_BACKOFF_SECONDS)", "")
     assert len(found) == 3, found
 
 
@@ -687,3 +687,32 @@ async def test_the_executor_passes_the_column_rules():
                return_value={"ingested_item": {"json": ["payload"], "checks": []}}):
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
     assert "JSON: payload" in captured["prompt"]
+
+
+# ── §17.1796 an index of the job's written modules (live job f00ea97f T25) ──
+
+def test_the_block_indexes_the_jobs_modules_with_signatures():
+    defs = es.sibling_definitions([T4_ROW, T10_STREAM])
+    b = es.block_for(T6_ROW, set(), modules=defs)
+    assert "### This job's modules (written -- their public functions, exact signatures)" in b
+    assert "    alpaca_stream: async start_stream(callback)" in b
+    assert "    paper_audit_trail_writer: async write_signal(**kwargs)" in b
+    assert b.index("This job's modules") < b.index("### Conventions")
+
+
+def test_the_it_has_list_shows_functions_before_constants():
+    t9 = {"node_key": "T9", "prompt_template": "", "output_text": "```python\n# app/modules/paper_congress.py\n"
+          + "".join(f"ALLOWED_{i} = {i}\n" for i in range(30)) + "async def fetch_disclosures(client=None):\n    ...\n```"}
+    found = es.sibling_refs("```python\nfrom app.modules.paper_congress import ingest_trades\n```",
+                            es.sibling_definitions([t9]))
+    assert found and "(it has fetch_disclosures, ALLOWED_0" in found[0]
+
+
+@pytest.mark.asyncio
+async def test_the_executor_passes_the_module_index():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.modules.engine_source.sibling_definitions",
+               return_value={"paper_x": {"node": "T1", "names": {"go"}, "defined": {"go"},
+                                         "funcs": {"go": es._call_shape(__import__("ast").parse("def go(a, *, b=1): pass").body[0])}}}):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    assert "    paper_x: go(a, *, b=…)" in captured["prompt"]
