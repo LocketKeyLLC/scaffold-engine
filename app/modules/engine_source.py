@@ -321,6 +321,12 @@ def _coroutines_used_as_values(tree: ast.AST, engine_funcs: dict, engine_mods: d
         if isinstance(p, ast.Expr):
             out.add(id(call))                                        # discarded
             continue
+        # §17.1787 — indexed, an attribute read, compared, iterated or computed with: a coroutine has none of that
+        if ((isinstance(p, (ast.Subscript, ast.Attribute)) and p.value is call)
+                or isinstance(p, (ast.Compare, ast.BinOp, ast.BoolOp))
+                or (isinstance(p, (ast.For, ast.comprehension)) and p.iter is call)):
+            out.add(id(call))
+            continue
         r = receiver(call)
         if r is not None:
             if _engine_target(r, engine_funcs, engine_mods, index):
@@ -572,6 +578,11 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                     leaf = al.name.split(".")[-1]
                     if leaf in defs and not al.name in module_index():
                         mods[al.asname or leaf] = leaf
+        # §17.1787 — a sibling's coroutine used as a value, the same rule §17.1756 applies to the engine's own. Live
+        # (job f00ea97f T18): `… = client.get_order(…)["filled_qty"]` -- "'coroutine' object is not subscriptable"
+        # in the sandbox, every attempt.
+        pseudo = {leaf: {"funcs": d["funcs"]} for leaf, d in defs.items()}
+        misused = _coroutines_used_as_values(tree, imported, mods, pseudo) if (imported or mods) else set()
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
@@ -587,10 +598,37 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                                  f"`{n.func.attr}`")
             if target:
                 leaf, fname = target
-                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], False):
+                for m in _call_mismatches(n, fname, defs[leaf]["funcs"][fname], id(n) in misused):
                     m = m.replace("in the engine", f"in `{leaf}`")
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
+    return found
+
+
+def imports_an_unwritten_sibling(output: str, others: list[dict], written: dict[str, dict]) -> list[str]:
+    """§17.1787 — an import of a module another step has not written yet. Live (job f00ea97f T20, 16 attempts): the
+    backtester imported T22's `paper_performance_metrics_calculator`, which a reset had emptied and T20 does not stand
+    on -- §17.1749 allowed any module the plan names, so it passed the static check and every sandbox run failed with
+    `No module named …`."""
+    planned = {step_module(r): r.get("node_key") for r in others if step_module(r)}
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            mods = ([n.module] if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module else
+                    [a.name for a in n.names] if isinstance(n, ast.Import) else [])
+            for m in mods:
+                leaf = m.split(".")[-1]
+                if leaf in planned and leaf not in written and m not in module_index():
+                    msg = (f"`{m}`: that module is step {planned[leaf]}'s and is not written yet -- this step cannot "
+                           "import it; use the modules that exist (listed above), or compute what it needs here")
+                    if msg not in found:
+                        found.append(msg)
     return found
 
 
@@ -926,7 +964,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     mods, names = job_own_code(texts)
     found = unresolved_refs(output, mods, names)
     me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
-    found += sibling_refs(output, sibling_definitions([dict(r) for r in rows if r["node_key"] != node_key]))
+    _others = [dict(r) for r in rows if r["node_key"] != node_key]
+    found += sibling_refs(output, sibling_definitions(_others))
+    found += imports_an_unwritten_sibling(output, _others, sibling_definitions(_others))
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
     tables = dict(await engine_schema.live_tables(db))
@@ -1170,7 +1210,8 @@ def _render_job_tables(tables: dict) -> str:
             "differently, these win)\n" + "\n".join(rows) + "\n")
 
 
-def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, tables: dict | None = None) -> str:
+def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, tables: dict | None = None,
+              written: set[str] | None = None) -> str:
     """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042)."""
     index = module_index()
     layout: dict[str, list[str]] = {}
@@ -1184,12 +1225,17 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, 
     # was shown its siblings' code and never told which module was its own.
     own = step_module(node)
     others = sorted(set(siblings) - {own})
+    # §17.1787 — only a module that is WRITTEN can be imported; when the caller knows which are, say so
+    ready = sorted(set(others) & set(written)) if written is not None else others
+    later = sorted(set(others) - set(written)) if written is not None else []
     mine = ""
     if own:
         mine = (f"\n**This step writes `app/modules/{own}.py`** (its first line `# app/modules/{own}.py`), and its "
                 f"tests in `tests/test_{own}.py`. "
-                + (f"The other modules -- {', '.join(f'`{m}.py`' for m in others[:24])} -- belong to other steps: "
-                   "import what they define, never write them or define their names here.\n" if others else "\n"))
+                + (f"The other modules -- {', '.join(f'`{m}.py`' for m in ready[:24])} -- belong to other steps: "
+                   "import what they define, never write them or define their names here. " if ready else "")
+                + (f"Not written yet, so NOT importable here: {', '.join(f'`{m}.py`' for m in later[:24])}. "
+                   if later else "") + "\n")
     parts = [
         "\n\n## The engine's own code (read from the running engine, §17.1749)\n" + mine +
         "This step writes code that becomes part of the scaffold engine. Import only the engine modules and names "

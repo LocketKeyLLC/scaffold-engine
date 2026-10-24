@@ -538,3 +538,58 @@ async def test_the_executor_shows_the_steps_the_jobs_tables():
     with patch("app.modules.engine_schema.tables_in_code", return_value={"ingested_item": {"published_ts", "id"}}):
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
     assert "    ingested_item: id, published_ts" in captured["prompt"]
+
+
+# ── §17.1787 a module another step has not written yet is not importable (live job f00ea97f T20) ──
+
+def test_importing_an_unwritten_siblings_module_is_refused():
+    t22 = {"node_key": "T22", "prompt_template": "Python module `paper_performance_metrics_calculator.py`.",
+           "output_text": ""}                                             # reset: nothing written
+    out = ("```python\nfrom app.modules.paper_performance_metrics_calculator import get_performance_metrics\n"
+           "from app.modules.paper_audit_trail_writer import write_signal\n```")
+    others = [t22, T4_ROW]
+    found = es.imports_an_unwritten_sibling(out, others, es.sibling_definitions(others))
+    assert found == ["`app.modules.paper_performance_metrics_calculator`: that module is step T22's and is not "
+                     "written yet -- this step cannot import it; use the modules that exist (listed above), or "
+                     "compute what it needs here"]
+
+
+def test_the_block_offers_only_written_modules():
+    b = es.block_for(T6_ROW, {"paper_risk_control_module", "paper_audit_trail_writer", "paper_performance_metrics_calculator"},
+                     written={"paper_audit_trail_writer"})
+    assert "The other modules -- `paper_audit_trail_writer.py` -- belong to other steps" in b
+    assert "Not written yet, so NOT importable here: `paper_performance_metrics_calculator.py`" in b
+
+
+@pytest.mark.asyncio
+async def test_engine_findings_refuses_an_unwritten_import():
+    db = AsyncMock()
+    t22 = {"node_key": "T22", "title": "Implement performance metrics calculator", "description": "",
+           "prompt_template": "Python module `paper_performance_metrics_calculator.py`.", "output_text": ""}
+    nodes = MagicMock(); nodes.mappings.return_value.all.return_value = [t22, T6_ROW]
+    cols = MagicMock(); cols.all.return_value = []
+    db.execute = AsyncMock(side_effect=[nodes, cols])
+    out = "```python\n# app/modules/paper_risk_control_module.py\nfrom app.modules.paper_performance_metrics_calculator import x\n```"
+    found = "\n".join(await es.engine_findings(db, "job-1", "T6", out))
+    assert "step T22's and is not written yet" in found
+
+
+@pytest.mark.asyncio
+async def test_the_executor_tells_the_step_which_modules_are_not_written_yet():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)          # its one sibling (T9, alpaca_client.py) has no output
+    assert "Not written yet, so NOT importable here: `alpaca_client.py`" in captured["prompt"]
+
+
+def test_a_siblings_coroutine_used_as_a_value_is_refused():
+    """§17.1787 — live (f00ea97f T18): "'coroutine' object is not subscriptable" in the sandbox, every attempt."""
+    t5 = {"node_key": "T5", "prompt_template": "", "output_text": "```python\n# app/modules/paper_alpaca_paper_client.py\n"
+          "async def get_order(order_id):\n    ...\n```"}
+    bad = ("```python\nfrom app.modules.paper_alpaca_paper_client import get_order\n\n"
+           "async def qty(oid):\n    return get_order(oid)['filled_qty']\n```")
+    ok = ("```python\nfrom app.modules.paper_alpaca_paper_client import get_order\n\n"
+          "async def qty(oid):\n    return (await get_order(oid))['filled_qty']\n```")
+    defs = es.sibling_definitions([t5])
+    found = es.sibling_refs(bad, defs)
+    assert found and "is `async def` in `paper_alpaca_paper_client`" in found[0] and "step T5" in found[0]
+    assert es.sibling_refs(ok, defs) == []
