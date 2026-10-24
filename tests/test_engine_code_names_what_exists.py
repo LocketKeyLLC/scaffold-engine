@@ -664,8 +664,13 @@ def upgrade() -> None:
         "ingested_item",
         sa.Column("id", sa.BigInteger, primary_key=True),
         sa.Column("source", sa.Text, nullable=False),
+        sa.Column("external_id", sa.Text, nullable=False),
         sa.Column("payload", sa.JSON, nullable=False),
+        sa.Column("note", sa.Text, nullable=True),
+        sa.Column("fetched_ts", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("slug", sa.Text, unique=True),
         sa.CheckConstraint("source IN ('sec_edgar','reddit')", name="ck_source"),
+        sa.UniqueConstraint("source", "external_id", name="uq_source_external_id"),
     )
     op.create_table("plain", sa.Column("id", sa.BigInteger, primary_key=True))
 ```'''
@@ -673,9 +678,13 @@ def upgrade() -> None:
 
 def test_json_columns_and_checks_are_read_and_shown():
     rules = sch.column_rules_in_code([T3_RULES])
-    assert rules == {"ingested_item": {"json": ["payload (json)"], "checks": ["source IN ('sec_edgar','reddit')"]}}
+    assert rules == {"ingested_item": {"json": ["payload (json)"], "checks": ["source IN ('sec_edgar','reddit')"],
+                                       "required": ["source", "external_id", "payload"],     # §17.1800
+                                       "unique": ["(slug)", "(source, external_id)"]}}
     b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_RULES]), rules=rules)
-    assert "JSON: payload (json); CHECK source IN ('sec_edgar','reddit')" in b
+    assert ("required: source, external_id, payload; UNIQUE (slug); UNIQUE (source, external_id); "
+            "JSON: payload (json); CHECK source IN ('sec_edgar','reddit')") in b
+    assert "each test makes its own UNIQUE values, e.g. `uuid4().hex`" in b
     assert "`CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own type" in b
 
 

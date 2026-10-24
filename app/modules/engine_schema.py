@@ -234,7 +234,8 @@ def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
                 if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "create_table"
                         and n.args and isinstance(n.args[0], ast.Constant)):
                     continue
-                rules = out.setdefault(str(n.args[0].value).lower(), {"json": [], "checks": []})
+                rules = out.setdefault(str(n.args[0].value).lower(),
+                                       {"json": [], "checks": [], "required": [], "unique": []})
                 for a in n.args[1:]:
                     if not isinstance(a, ast.Call):
                         continue
@@ -243,12 +244,33 @@ def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
                         typ = a.args[1]
                         tname = (getattr(typ, "attr", None) or getattr(typ, "id", None)
                                  or getattr(getattr(typ, "func", None), "attr", None) or "")
+                        col = str(a.args[0].value).lower()
                         if str(tname).upper() in ("JSON", "JSONB"):
                             # §17.1798 — the type is shown: a `json` column told `CAST(... AS jsonb)` drew a refusal
-                            rules["json"].append(f"{str(a.args[0].value).lower()} ({str(tname).lower()})")
+                            rules["json"].append(f"{col} ({str(tname).lower()})")
+                        # §17.1800 — a column a row must carry (NOT NULL, no default) and a UNIQUE column; live
+                        # (f00ea97f T25E2) tests omitted `signal.ingested_item_id` and reused one external_id
+                        kw = {k.arg: k.value for k in a.keywords if k.arg}
+                        if (_is_false(kw.get("nullable")) and "default" not in kw and "server_default" not in kw
+                                and not _is_true(kw.get("primary_key"))):
+                            rules["required"].append(col)
+                        if _is_true(kw.get("unique")):
+                            rules["unique"].append(f"({col})")
                     elif fname == "CheckConstraint" and a.args and isinstance(a.args[0], ast.Constant):
                         rules["checks"].append(str(a.args[0].value))
-    return {k: v for k, v in out.items() if v["json"] or v["checks"]}
+                    elif fname == "UniqueConstraint":
+                        cols = [str(x.value).lower() for x in a.args if isinstance(x, ast.Constant)]
+                        if cols:
+                            rules["unique"].append(f"({', '.join(cols)})")
+    return {k: v for k, v in out.items() if any(v.values())}
+
+
+def _is_false(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is False
+
+
+def _is_true(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
 
 
 async def live_tables(db) -> Tables:
