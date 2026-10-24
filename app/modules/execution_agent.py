@@ -2542,11 +2542,21 @@ async def execute_next_node(
             # the upstream sibling code (already in scope from the prompt-build
             # session above). Same dispatch/cache/fail-closed path as the
             # generic verifier. Flip codegen_verifier_strict=False to fall back.
+            _others: list[str] = []
+            try:                                     # §17.1790 — what the rest of the plan delivers
+                async with async_session() as _vdb:
+                    _others = [f"{k}: {t}" for k, t in (await _vdb.execute(text(
+                        "SELECT node_key, title FROM dag_nodes WHERE job_id = :j AND node_key <> :k "
+                        "ORDER BY execution_order"), {"j": job_id, "k": node_key})).all()]
+            except Exception as exc:
+                logger.warning("verify_other_steps_failed node='%s' err=%r", title, exc)
             vstatus, reason, confidence = await _verify_codegen_output(
                 title, output,
                 brief_goal=extract_brief_goal(brief),
                 upstream_code=collect_upstream_code(upstream_outputs),
                 overrides=model_overrides,
+                step_text=str(node_snapshot.get("prompt_template") or node_snapshot.get("description") or ""),
+                other_steps=_others,
             )
             verify_status = vstatus
             if verify_status == "fail":
