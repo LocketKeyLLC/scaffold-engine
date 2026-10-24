@@ -221,9 +221,26 @@ def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
     return None
 
 
+def _shape_signature(name: str, shape: dict) -> str:
+    """`write_order(*, proposal_id, approval_id, broker_order_id=…)` from a call shape (§17.1785)."""
+    req = set(shape.get("required_pos") or []) | set(shape.get("kw_required") or [])
+    pos = [p if p in req else f"{p}=…" for p in shape.get("pos") or []]
+    kw = [p if p in req else f"{p}=…" for p in shape.get("kwonly") or []]
+    parts = pos + (["*args"] if shape.get("varargs") else (["*"] if kw else [])) + kw + (["**kwargs"] if shape.get("varkw") else [])
+    return f"{'async ' if shape.get('async') else ''}{name}({', '.join(parts)})"
+
+
 def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
                      consts: dict | None = None) -> list[str]:
-    """§17.1756 — a call to an engine function that cannot work as written."""
+    """§17.1756 — a call to an engine function that cannot work as written. §17.1785 — each finding ends with the
+    whole signature: live (job f00ea97f T17, three attempts) "takes at most 0 positional argument(s)" / "missing
+    `approval_id`" fixed one argument per attempt and broke another."""
+    found = _call_mismatches_bare(call, name, shape, coroutine_misused, consts)
+    return [f"{m} -- the signature is `{_shape_signature(name, shape)}`" for m in found]
+
+
+def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
+                          consts: dict | None = None) -> list[str]:
     out: list[str] = []
     label = f"`{name}(…)`"
     # §17.1761 — live (T14): `frame_decision(node, brief=…, upstream={"proposal": …})` (upstream: str) and

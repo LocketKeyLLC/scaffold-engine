@@ -219,8 +219,9 @@ async def request_approval(proposal, *, job_id=None):
 
 def test_the_live_unawaited_coroutine_is_refused():
     found = [f for f in es.unresolved_refs(LIVE_T14) if "given a" not in f and "executor's own half" not in f]
-    assert found == ["`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a "
-                     "coroutine, not a result)"]
+    assert len(found) == 1 and found[0].startswith(
+        "`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a coroutine, not a result)")
+    assert found[0].endswith("the signature is `async frame_decision(node, *, brief=…, upstream=…)`")   # §17.1785
 
 
 @pytest.mark.parametrize("ok", [
