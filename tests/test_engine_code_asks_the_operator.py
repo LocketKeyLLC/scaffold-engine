@@ -154,3 +154,68 @@ from app.modules.decision_pause import frame_decision, park_awaiting_decision
 from app.modules.operator_ask import answer_handler, decision, open_decision_job
 ```"""
     assert es.unresolved_refs(ok) == []
+
+
+# ── §17.1784 an answer is never read where it was asked (live job f00ea97f T16) ──
+
+LIVE_T16 = """```python
+from app.modules.operator_ask import answer_handler, answer_of, decision, open_decision_job
+
+
+async def request_approval(*, proposal, db=None):
+    decisions = [decision(key="approve_proposal", question="Approve?", payload={"proposal": proposal})]
+    job_id = await open_decision_job(db, title="Paper-trade proposal approval", decisions=decisions,
+                                     on_answer="app.modules.paper_operator_approval_gate:_on_approval_answer")
+    answer = await answer_of(db, job_id, "approve_proposal")
+    if answer is not None and answer.get("approved"):
+        proposal["approval_decision"] = "approved"
+    else:
+        proposal["approval_decision"] = "rejected"
+    return proposal
+```"""
+
+RIGHT = """```python
+from app.modules.operator_ask import answer_handler, answer_of, decision, open_decision_job
+
+
+async def request_approval(*, proposal, db=None):
+    return await open_decision_job(db, title="Approve", decisions=[decision("p1", "Approve?", payload=proposal)],
+                                   on_answer="app.modules.paper_gate:on_answer")
+
+
+@answer_handler
+async def on_answer(job_id, node_key, answer, payload):
+    if answer["approved"]:
+        await place(payload)
+
+
+async def later_report(db, job_id):
+    return await answer_of(db, job_id, "p1")
+```"""
+
+
+def test_reading_the_answer_right_after_asking_is_refused():
+    from app.modules import engine_source as es
+    found = es.answers_read_where_asked(LIVE_T16)
+    assert found and "`request_approval` reads `answer_of(…)`" in found[0] and "@answer_handler" in found[0]
+    assert es.answers_read_where_asked(RIGHT) == []
+
+
+def test_the_approval_guidance_says_the_handler_does_the_work():
+    from app.modules import engine_source as es
+    cap = next(c for c in es.CAPABILITIES if c["name"].startswith("operator approval"))
+    assert "THE HANDLER IS WHERE THE APPROVED WORK HAPPENS" in cap["how"] and "never reads the answer" in cap["how"]
+
+
+@pytest.mark.asyncio
+async def test_engine_findings_refuses_the_live_t16():
+    from unittest.mock import MagicMock
+    from app.modules import engine_source as es
+    db = AsyncMock()
+    nodes = MagicMock(); nodes.mappings.return_value.all.return_value = [
+        {"node_key": "T16", "title": "Implement operator approval gate", "description": "",
+         "prompt_template": "Python module `paper_operator_approval_gate.py`.", "output_text": ""}]
+    cols = MagicMock(); cols.all.return_value = []
+    db.execute = AsyncMock(side_effect=[nodes, cols])
+    found = "\n".join(await es.engine_findings(db, "job-1", "T16", LIVE_T16))
+    assert "reads `answer_of(…)` for the decision job it has just opened" in found
