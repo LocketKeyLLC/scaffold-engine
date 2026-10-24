@@ -1291,7 +1291,9 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
 
     def _rules(t: str) -> str:
         r = rules.get(t) or {}
-        bits = ([f"JSON: {', '.join(r['json'])}"] if r.get("json") else []) + \
+        bits = ([f"required: {', '.join(r['required'])}"] if r.get("required") else []) + \
+               ([f"UNIQUE {u}" for u in r.get("unique", [])]) + \
+               ([f"JSON: {', '.join(r['json'])}"] if r.get("json") else []) + \
                ([f"CHECK {c}" for c in r.get("checks", [])])
         return ("\n        " + "; ".join(bits)) if bits else ""
     rows = [f"    {t}: " + ", ".join(f"{col}→{fks[t][col]}" if col in fks.get(t, {}) else col for col in sorted(c))
@@ -1304,7 +1306,8 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
                "enforces it)\n" if any(fks.values()) else "")
             + ("    (a JSON/JSONB column takes `json.dumps(value)` with `CAST(:p AS json)` / `CAST(:p AS jsonb)` -- its own "
                "type -- through `text()`, never a dict; a CHECK lists the only values a row may hold -- tests use those "
-               "values)\n" if rules else ""))
+               "values; a `required` column has no default, so every INSERT gives it; the tests of one run share one "
+               "scratch database, so each test makes its own UNIQUE values, e.g. `uuid4().hex`)\n" if rules else ""))
 
 
 def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> str:
