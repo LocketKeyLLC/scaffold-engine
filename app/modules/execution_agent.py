@@ -2001,8 +2001,11 @@ async def execute_next_node(
         elif tool_lower == "searxng":
             # §17.1039 — page content for the need-derived query, ranked and
             # dated (was: snippets for the bare title).
+            _tc = node.get("tool_config")
+            _tc = json.loads(_tc) if isinstance(_tc, str) else (_tc or {})
             _node_sources = await web_sources(
-                _node_need, node_key=node_key, domain=node_snapshot.get("domain"))
+                _node_need, node_key=node_key, domain=node_snapshot.get("domain"),
+                urls=[u for u in (_tc.get("urls") or []) if isinstance(u, str)] if isinstance(_tc, dict) else None)
             search_results = render_node_sources(_node_sources) or "No search results found."
             _grounding_blocks.append(f"\n\n## Web Search Results\n{search_results}")
             logger.info("searxng_context_injected: chars=%d sources=%d node='%s'",

@@ -324,6 +324,9 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
             tasks.append({
                 "id": key, "name": f"Research the {api['name']} as its documentation states it", "type": "research",
                 "tool": "SearXNG", "depends_on": [], "inputs": [], "outputs": [],
+                # §17.1781 — its official documentation, read first (measured: each URL loads from the engine and
+                # carries what the code steps guessed -- Alpaca's trade_updates fields, the SEC's User-Agent rule)
+                **({"tool_config": {"urls": list(api["docs"])}} if api.get("docs") else {}),
                 "notes": (f"Read the {api['name']}'s own documentation ({api['scope']}; official pages first) and state, "
                           "for what this lab calls: the base URLs; each endpoint (method, path, parameters); the headers "
                           "it requires (authentication, User-Agent / contact rules); the response FORMAT (JSON or XML) "
@@ -333,6 +336,11 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
             })
             ids.add(key)
             changes.append(f"api_research_added: {key} ({api['name']}) for {', '.join(str(c['id']) for c in callers)}")
+        else:
+            have = next(t for t in tasks if str(t.get("id")) == key)
+            if api.get("docs") and not ((have.get("tool_config") or {}).get("urls")):
+                have["tool_config"] = {**(have.get("tool_config") or {}), "urls": list(api["docs"])}
+                changes.append(f"api_research_docs: {key} reads {len(api['docs'])} official pages")
         for c in callers:
             if key not in (c.get("depends_on") or []):
                 c["depends_on"] = [*(c.get("depends_on") or []), key]
@@ -349,15 +357,20 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
 _KNOWN_APIS = (
     {"key": "SEC_EDGAR", "name": "SEC EDGAR APIs", "re": re.compile(r"\bedgar\b|\bform\s*4\b|\b13f\b|\bsec\s+filings?\b", re.I),
+     "docs": ["https://www.sec.gov/search-filings/edgar-application-programming-interfaces", "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data", "https://www.sec.gov/divisions/investment/13ffaq"],
      "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
     {"key": "ALPACA", "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
+     "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming"],
      "scope": "the paper REST API (account, orders, positions) and the trade_updates websocket stream"},
     {"key": "REDDIT", "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
+     "docs": ["https://github.com/reddit-archive/reddit/wiki/OAuth2", "https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki"],
      "scope": "OAuth app-only access, listing endpoints, User-Agent and rate-limit rules, personal-use terms"},
     {"key": "FINRA", "name": "FINRA data APIs", "re": re.compile(r"\bfinra\b", re.I),
+     "docs": ["https://developer.finra.org/docs"],
      "scope": "short interest and ATS / OTC transparency data: where it is published, its format and fields"},
     {"key": "CONGRESS_TRADES", "name": "Congressional trade disclosures",
      "re": re.compile(r"\bcongress(?:ional)?\b|\bsenate\b.{0,30}\bdisclos|\bhouse\b.{0,30}\bdisclos", re.I),
+     "docs": ["https://disclosures-clerk.house.gov/FinancialDisclosure", "https://efdsearch.senate.gov/search/home/"],
      "scope": "the official House and Senate periodic transaction report sources: URLs, formats, fields"},
 )
 #: only a name introduced AS an API ("via the Polygon API", "the Tiingo REST API"); a bare "<Word> API" also matched
@@ -429,11 +442,13 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
     if not engine_source.targets_the_engine(brief):
         return {"error": "this job does not write code for the engine", "http_status": 409}
     rows = (await db.execute(_text_sql(
-        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on FROM dag_nodes "
+        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on, tool_config FROM dag_nodes "
         "WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
     status = {r["node_key"]: r["status"] for r in rows}
     tasks = [{"id": r["node_key"], "name": r["title"], "notes": r["prompt_template"] or "", "tool": r["tool"],
-              "type": _TYPE_OF_NODE.get(r["node_type"] or "", "action"), "depends_on": list(r["depends_on"] or [])}
+              "type": _TYPE_OF_NODE.get(r["node_type"] or "", "action"), "depends_on": list(r["depends_on"] or []),
+              **({"tool_config": (r["tool_config"] if isinstance(r["tool_config"], dict)
+                                  else _json.loads(r["tool_config"]))} if r["tool_config"] else {})}
              for r in rows]
     before = {t["id"]: dict(t) for t in tasks}
     changes = complete_engine_plan(tasks, brief)
@@ -445,7 +460,8 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
             "node_key": t["id"], "title": t["name"], "tool": t.get("tool") or "LLM",
             "node_type": {"decision": "decision", "validation": "checkpoint"}.get(str(t.get("type")), "task"),
             "depends_on": [d for d in t.get("depends_on") or [] if d in status or d in {x["id"] for x in tasks}],
-            "prompt_template": t.get("notes") or ""}, edited_by=edited_by, db=db)
+            "prompt_template": t.get("notes") or "",
+            **({"tool_config": t["tool_config"]} if t.get("tool_config") is not None else {})}, edited_by=edited_by, db=db)
         if out.get("error"):
             return {**out, "changes": changes, "inserted": inserted}
         inserted.append(t["id"])
@@ -461,6 +477,8 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
             fields["depends_on"] = list(t.get("depends_on") or [])
         if (t.get("tool") or "") != (b.get("tool") or ""):
             fields["tool"] = t.get("tool")
+        if t.get("tool_config") != b.get("tool_config"):
+            fields["tool_config"] = t.get("tool_config")
         if not fields:
             continue
         if status.get(t["id"]) not in ("pending", "failed"):

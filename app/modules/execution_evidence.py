@@ -71,9 +71,42 @@ def node_need(node: dict, brief: Optional[dict]) -> Need:
     return need
 
 
-async def web_sources(need: Need, *, node_key: str, domain: Optional[str]) -> list[dict]:
+async def official_pages(urls: list[str], query: str, *, budget: int = 6000) -> list[dict]:
+    """§17.1781 — the pages a step names as its own sources (an API's official documentation), fetched directly and
+    focused on the query at a fuller length than a search hit. Live (job f00ea97f): the API research steps searched,
+    never reached docs.alpaca.markets or the SEC's fair-access page, and answered "not verified" for the very fields
+    the code steps had guessed. Fail-soft: a page that does not load is left out."""
+    if not urls:
+        return []
+    try:
+        from app.modules.research_agent import _fetch_and_extract
+        from app.utils.page_focus import focus as focus_page
+        pages = await _fetch_and_extract([{"url": u, "title": ""} for u in urls])
+    except Exception as exc:
+        logger.warning("official_pages_failed urls=%d err=%r", len(urls), exc)
+        return []
+    out = []
+    for p in pages:
+        content = (p.get("content") or "").strip()
+        if len(content) < 400:                       # a script-rendered shell, a login wall
+            continue
+        out.append({"query": query, "kind": "web", "official": True, "url": p.get("url", ""),
+                    "title": p.get("title") or p.get("url", ""), "text": focus_page(content, query, budget),
+                    "date": (p.get("date") or "")[:10]})
+    logger.info("official_pages urls=%d kept=%d", len(urls), len(out))
+    return out
+
+
+async def web_sources(need: Need, *, node_key: str, domain: Optional[str],
+                      urls: Optional[list[str]] = None) -> list[dict]:
     """§17.1039 — page content for a SearXNG node, ranked and dated. Falls
-    back to the snippet path when the valve is off."""
+    back to the snippet path when the valve is off. §17.1781 — ``urls`` (the step's own sources, from its
+    tool_config) are read first and kept ahead of what the search finds."""
+    if urls:
+        first = await official_pages(list(urls), finalize_query(need, node_key=node_key) or node_key)
+        rest = await web_sources(need, node_key=node_key, domain=domain)
+        seen = {s.get("url") for s in first}
+        return first + [s for s in rest if s.get("url") not in seen]
     from app.modules.assist_research_lib import _confirm_query, _is_useful_grounding
     # The need's hardware and goal terms are ENFORCED into the query here, at
     # the retrieval site itself (the §17.1020 retrieval-grounding gate).
