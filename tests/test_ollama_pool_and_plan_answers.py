@@ -497,3 +497,58 @@ async def test_the_planner_is_sent_back_to_use_the_pool(monkeypatch):
     assert "Engine-compute corrections needed" in redraft and "OLLAMA_POOL_URLS" in redraft
     assert any(w.startswith("pool_plan_gap_attempt_1") for w in result["warnings"])
     assert "validator_clean_after_retry_attempt_2" in result["warnings"]
+
+
+# ── §17.1808 the step that runs Ollama on the members is inserted when the redrafts never wrote it (700dd9c0) ──
+
+_NO_MEMBER_OLLAMA = [
+    {"id": "T17", "name": "Verify cluster nodes", "notes": "kubectl get nodes", "depends_on": ["T16"]},
+    {"id": "T18", "name": "Configure Ollama pool URLs", "depends_on": ["T17"],
+     "notes": "Set OLLAMA_POOL_URLS in the engine's .env to the laptops' Ollama addresses. Redeploy the engine."},
+    {"id": "T19", "name": "Pull role models per laptop", "depends_on": ["T18"],
+     "notes": "On each laptop, pull the engine's role models that fit its RAM."},
+]
+
+
+def test_ollama_on_each_member_is_inserted_before_the_pool_is_used():
+    import copy
+    tasks = copy.deepcopy(_NO_MEMBER_OLLAMA)
+    assert ollama_pool.insert_member_ollama(tasks, _K8S_BRIEF) == [
+        "OLM runs Ollama on each laptop before T18 (no step put Ollama on the added machines)"]
+    by = {t["id"]: t for t in tasks}
+    assert by["OLM"]["depends_on"] == ["T17"] and by["T18"]["depends_on"] == ["OLM"]
+    assert "OLLAMA_HOST=0.0.0.0:11434" in by["OLM"]["notes"] and by["OLM"]["tool"] == "Shell"
+    assert [t["id"] for t in tasks] == ["T17", "OLM", "T18", "T19"]
+    assert ollama_pool.plan_misses_pool(tasks, _K8S_BRIEF) == []
+    assert ollama_pool.insert_member_ollama(tasks, _K8S_BRIEF) == []                    # idempotent
+    assert ollama_pool.insert_member_ollama(copy.deepcopy(_NO_MEMBER_OLLAMA), _MOVE_BRIEF) == []
+
+
+async def test_generate_dag_stores_the_inserted_step():
+    from uuid import uuid4
+
+    async def _stub(brief_data, route_kwargs):
+        return {"dag_data": {"strategy": "sequential", "tasks": [
+                    {**t, "type": "action", "tool": "Shell", "inputs": [], "outputs": [f"o_{t['id']}"], "domain": None,
+                     "assigned_model": None, "is_deliverable": t["id"] == "T19",
+                     "depends_on": [d for d in t["depends_on"] if d != "T16"]} for t in _NO_MEMBER_OLLAMA]},
+                "raw_text": "", "model": "m", "duration_ms": 0, "warnings": [], "error": None, "attempts": 1,
+                "validator_calls": 0}
+    row = MagicMock()
+    row.first.return_value = ("planning", _K8S_BRIEF, None, None, None, 0, False)
+    inserted: list[dict] = []
+
+    async def _execute(stmt, params=None, *a, **k):
+        if params and "node_key" in params and "prompt_template" in params:
+            inserted.append(dict(params))
+        return row
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=_execute)
+    with patch.object(dag_generator, "_generate_dag_with_validator", _stub), \
+         patch.object(dag_generator, "_fail_job", new_callable=AsyncMock):
+        try:
+            await dag_generator.generate_dag(str(uuid4()), db)
+        except Exception:                                    # the persistence tail is not under test
+            pass
+    keys = {p["node_key"]: p for p in inserted}
+    assert "OLM" in keys and "OLLAMA_HOST=0.0.0.0:11434" in keys["OLM"]["prompt_template"], sorted(keys)
