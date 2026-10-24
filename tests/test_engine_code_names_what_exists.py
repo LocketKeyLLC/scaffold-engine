@@ -857,3 +857,14 @@ def test_a_data_class_built_with_a_property_or_without_a_field_is_refused():
     missing = es.sibling_refs(head + "s = RiskState(equity=1)\n```", defs)
     assert missing and "missing required argument(s) `day_start_equity`" in missing[0]
     assert es.sibling_refs(head + "s = RiskState(equity=1, day_start_equity=1)\nprint(s.daily_pnl)\n```", defs) == []
+
+
+# ── §17.1805 a subdomain of a sample domain is a sample (live job f00ea97f T21) ──
+
+def test_a_sample_subdomain_url_is_refused_and_a_real_one_is_not():
+    t21 = ('```python\n# app/modules/paper_spy_benchmark_tracker.py\n'
+           'SPY_PRICE_URL = "https://api.example.com/v1/spy/history"\n```')
+    found = es.placeholder_refs(t21)
+    assert found and "`api.example.com` is a sample, not a value" in found[0]
+    real = '```python\n# app/modules/paper_spy_benchmark_tracker.py\nDATA_URL = "https://data.alpaca.markets/v2"\n```'
+    assert es.placeholder_refs(real) == []

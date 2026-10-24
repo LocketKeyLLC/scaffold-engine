@@ -5437,8 +5437,11 @@ _TARGETED_RE = re.compile(r"\b(?:ping|ssh|ssh-copy-id|scp|sftp|nc|curl|wget)\b[^
 
 
 #: §17.1306 — sample values a model writes when it has no real one.
+# §17.1805 — and any subdomain of one: live (job f00ea97f T21) `SPY_PRICE_URL = "https://api.example.com/v1/spy/history"`
+# passed, because `api.` stood before `example` and the look-behind refused it
 _PLACEHOLDER_VALUE_RE = re.compile(
-    r"(?<![\w.-])(?:[\w.+-]+@)?(?:example|yourdomain|your-domain|mydomain|my-domain|changeme|change-me|placeholder)"
+    r"(?<![\w.-])(?:[\w.+-]+@)?(?:[a-z0-9-]+\.)*"
+    r"(?:example|yourdomain|your-domain|mydomain|my-domain|changeme|change-me|placeholder)"
     r"\.(?:com|org|net|local|test)\b|\b(?:CHANGE_?ME|changeme|YOUR_(?:DOMAIN|EMAIL|PASSWORD|TOKEN|API_KEY|HOST))\b"
     r"|\byour-?(?:domain|email|password)\.?(?:here)?\b|\bsome\.?domain\.(?:com|org)\b", re.I)
 _DOMAIN_IN_FACT_RE = re.compile(r"\b((?:[a-z0-9-]+\.)+(?:duckdns\.org|com|org|net|io|dev|xyz|me|us|cc|tv))\b", re.I)
