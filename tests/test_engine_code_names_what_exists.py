@@ -432,3 +432,58 @@ def test_a_value_only_the_operator_has_is_read_from_the_engines_secrets():
          if "sec_user_agent_contact" in f]
     assert s and "values_for" in s[0] and "a step of this job adds" not in s[0]
     assert "values_for(db, [\\\"UPPER_SNAKE_NAME\\\"])" in es.CONVENTIONS or 'values_for(db, ["UPPER_SNAKE_NAME"])' in es.CONVENTIONS
+
+
+# ── §17.1782 a one-table SELECT's columns; a starred column helper (live job f00ea97f T3, T13) ──
+
+T3_HELPER = '''```python
+import sqlalchemy as sa
+from alembic import op
+
+
+def _audit_columns() -> list[sa.Column]:
+    return [sa.Column("model_ts", sa.DateTime(timezone=True)), sa.Column("data_ts", sa.DateTime(timezone=True))]
+
+
+def upgrade() -> None:
+    op.create_table(
+        "ingested_item",
+        sa.Column("id", sa.BigInteger, primary_key=True),
+        sa.Column("published_ts", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("fetched_ts", sa.DateTime(timezone=True), nullable=False),
+        *_audit_columns(),
+        sa.UniqueConstraint("id", name="uq"),
+    )
+```'''
+
+
+def test_a_starred_column_helper_is_read():
+    assert sch.tables_in_code([T3_HELPER])["ingested_item"] == {"id", "published_ts", "fetched_ts", "model_ts", "data_ts"}
+
+
+def test_the_live_point_in_time_read_is_refused_for_its_columns():
+    t13 = '''```python
+from sqlalchemy import text
+Q = text("SELECT id, publication_time, fetched_time FROM ingested_item WHERE published_ts <= :as_of ORDER BY published_ts")
+OK = text("SELECT id, published_ts AS t, COUNT(*) AS n FROM ingested_item WHERE fetched_ts <= :x ORDER BY n, t")
+J = text("SELECT i.id, s.nope FROM ingested_item i JOIN signal s ON s.ingested_item_id = i.id")
+```'''
+    found = sch.unknown_schema_refs(t13, {**sch.tables_in_code([T3_HELPER]), "signal": {"id", "ingested_item_id"}})
+    text = "\n".join(found)
+    assert "no column `publication_time`" in text and "no column `fetched_time`" in text
+    assert len(found) == 2, found          # the aliased ORDER BY passes; a JOIN is not read for columns
+
+
+def test_the_engines_own_selects_pass_against_its_live_columns():
+    """Measured 2026-10-24 against the live database's information_schema: 534 SELECT strings, 0 findings (the
+    first version hit `ORDER BY calls`, an alias, twice). Here: the engine's own tables as its DDL makes them."""
+    import re
+    p = es.ENGINE_PKG / "modules" / "cost_rollup.py"
+    src = p.read_text()
+    assert "AS calls" in src
+    tables = {"llm_call_logs": {"id", "job_id", "model", "call_kind", "cost_usd", "created_at", "latency_ms",
+                                "prompt_tokens", "completion_tokens", "error", "node_key", "role", "provider",
+                                "success", "fallback_used", "retries", "duration_ms", "tokens"}}
+    found = [f for f in sch.unknown_schema_refs("```python\n" + src + "\n```", tables) if "SELECT …" in f
+             and re.search(r"no column `calls`", f)]
+    assert found == []

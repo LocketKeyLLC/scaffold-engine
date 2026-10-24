@@ -148,6 +148,13 @@ def tables_in_code(texts: list[str]) -> Tables:
                             items = [a]
                             if isinstance(a, ast.Starred):
                                 src = consts.get(a.value.id) if isinstance(a.value, ast.Name) else None
+                                # §17.1782 — or `*_audit_columns()`: a local function returning a list of columns
+                                # (live f00ea97f T3 -- unread, every table of the job was names-only, so no column
+                                # check ran on any step that wrote or read them)
+                                if (src is None and isinstance(a.value, ast.Call) and isinstance(a.value.func, ast.Name)
+                                        and a.value.func.id in local_fns):
+                                    src = next((r.value for r in ast.walk(local_fns[a.value.func.id])
+                                                if isinstance(r, ast.Return)), None)
                                 items = list(src.elts) if isinstance(src, (ast.List, ast.Tuple)) else [None]
                             for it in items:
                                 c = _column_name(it, local_fns) if it is not None else None
@@ -250,4 +257,66 @@ def unknown_schema_refs(output: str, tables: Tables) -> list[str]:
                 if m.group(1).upper() == "FROM" and re.search(r"\bDELETE\s*$", sql[:m.start()], re.I):
                     continue                                 # DELETE FROM is checked above
                 table_ok(m.group(3), f"{m.group(1).upper()} {m.group(3)}")
+            # §17.1782 — and the columns a plain one-table SELECT reads. Live (job f00ea97f T13): `SELECT …
+            # publication_time, fetched_time FROM ingested_item` against a migration that made `published_ts` /
+            # `fetched_ts`; the verifier caught it, the mocked tests could not. Only the unambiguous shape is read: one
+            # table, no JOIN / subquery / CTE / UNION; bare names in the select list, and `col <op>` in WHERE / ORDER BY.
+            for col, t in _plain_select_columns(sql, ctes):
+                if _known(t, known) and known[t.lower()] is not None and col not in known[t.lower()]:
+                    note(f"`SELECT … {col} … FROM {t}`: `{t}` has no column `{col}` "
+                         f"(it has {', '.join(sorted(known[t.lower()]))})")
     return found
+
+
+_PLAIN_SELECT = re.compile(r"^\s*SELECT\s+(?:DISTINCT\s+)?(?P<cols>.+?)\s+FROM\s+" + _QUAL + r'"?(?P<t>[A-Za-z_][A-Za-z0-9_]*)"?'
+                           r"(?:\s+(?:AS\s+)?(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?(?P<rest>(?:\s+(?:WHERE|ORDER|GROUP|LIMIT|OFFSET|FOR|HAVING)\b.*)?)\s*;?\s*$",
+                           re.I | re.S)
+_SQL_WORDS = {"and", "or", "not", "null", "is", "in", "like", "ilike", "between", "true", "false", "asc", "desc",
+              "limit", "offset", "by", "order", "group", "having", "as", "on", "now", "interval", "current_date",
+              "current_timestamp", "case", "when", "then", "else", "end", "distinct", "any", "all", "exists",
+              "nulls", "first", "last", "for", "update", "share", "skip", "locked", "nowait", "of", "at", "time",
+              "zone", "date", "timestamp", "timestamptz", "text", "int", "integer", "bigint", "numeric", "jsonb",
+              "json", "uuid", "boolean", "where"}
+
+
+def _plain_select_columns(sql: str, ctes: set[str]) -> list[tuple[str, str]]:
+    """(column, table) pairs a one-table SELECT names unambiguously; [] for any other shape."""
+    if re.search(r"\b(?:JOIN|UNION|INTERSECT|EXCEPT|LATERAL)\b|\(\s*SELECT\b", sql, re.I) or "{" in sql:
+        return []
+    m = _PLAIN_SELECT.match(sql)
+    if not m or m.group("t").lower() in ctes:
+        return []
+    t, alias = m.group("t"), (m.group("alias") or "")
+    if alias.upper() in {"WHERE", "ORDER", "GROUP", "LIMIT", "OFFSET", "FOR", "HAVING"}:
+        alias = ""
+    out: list[tuple[str, str]] = []
+    # a name the select list defines (`COUNT(*) AS calls`) is not a column (measured: `ORDER BY calls` twice)
+    aliases = {a.lower() for a in re.findall(r"\bAS\s+\"?([A-Za-z_][A-Za-z0-9_]*)", m.group("cols"), re.I)}
+    for item in _split_top(m.group("cols")):
+        item = re.sub(r"\s+AS\s+\w+\s*$", "", item.strip(), flags=re.I)
+        if alias:
+            item = re.sub(rf"^{re.escape(alias)}\.", "", item)
+        name = re.fullmatch(r'"?([A-Za-z_][A-Za-z0-9_]*)"?', item)
+        if name and name.group(1).lower() not in _SQL_WORDS:
+            out.append((name.group(1).lower(), t))
+    rest = re.sub(r"'(?:[^']|'')*'", "''", m.group("rest") or "")
+    rest = re.sub(r":[A-Za-z_]\w*|\$\d+", " ", rest)            # bound parameters are not columns
+    for c in re.findall(r"(?:\bWHERE|\bAND|\bOR|\bBY|,)\s+(?:" + (re.escape(alias) + r"\." if alias else "") +
+                        r')?"?([A-Za-z_][A-Za-z0-9_]*)"?\s*(?:=|<>|!=|<=|>=|<|>|\bIN\b|\bIS\b|\bLIKE\b|\bILIKE\b|'
+                        r"\bBETWEEN\b|\bASC\b|\bDESC\b|,|$)", rest, re.I):
+        if c.lower() not in _SQL_WORDS and c.lower() not in aliases:
+            out.append((c.lower(), t))
+    return out
+
+
+def _split_top(text: str) -> list[str]:
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return parts + [cur]
