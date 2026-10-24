@@ -433,3 +433,27 @@ async def test_completion_is_applied_to_a_started_plan_without_touching_finished
             await db.execute(text("DELETE FROM dag_node_edits WHERE job_id = :j"), {"j": jid})
             await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
             await db.commit()
+
+
+# ── §17.1797 a step planned before the scratch database is reworded (live job f00ea97f T25) ──
+
+T25_STALE = ("Python module `paper_integrate_lab_scaffold_engine.py`. Wire all modules into the scaffold engine's existing "
+             "code. In this same step also write `tests/test_paper_integrate_lab_scaffold_engine.py`: pytest tests of "
+             "what `paper_integrate_lab_scaffold_engine.py` must do (its rules, its edge cases, its failure paths), with "
+             "`async_session`, HTTP clients and model calls mocked -- they run before the step passes, with no network, "
+             "database or secrets.")
+
+
+def test_a_stale_no_database_test_sentence_is_replaced_once():
+    tasks = [{"id": "T25", "name": "Integrate lab into scaffold engine", "tool": "CodeGen", "depends_on": [],
+              "notes": T25_STALE},
+             {"id": "T26", "name": "Wire it", "tool": "CodeGen", "depends_on": ["T25"],
+              "notes": "Register paper_integrate_lab_scaffold_engine with get_scheduler() in app/main.py."}]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    assert "module_tests_reworded: T25 tests use the scratch database" in changes
+    notes = tasks[0]["notes"]
+    assert "no network, database or secrets" not in notes and "mocked --" not in notes
+    assert "`async_session` is a scratch database with this job's tables" in notes
+    assert notes.count("tests/test_paper_integrate_lab_scaffold_engine.py") == 1
+    assert notes.startswith("Python module `paper_integrate_lab_scaffold_engine.py`. Wire all modules")
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
