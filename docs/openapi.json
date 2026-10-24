@@ -9989,6 +9989,56 @@
         ]
       }
     },
+    "/jobs/{job_id}/complete-plan": {
+      "post": {
+        "description": "§17.1780 — apply the engine's plan completion (engine_plan) to a job whose plan has already started: new steps\nare inserted and pending or failed steps updated; finished steps are never touched. Engine-code jobs only.",
+        "operationId": "complete_plan_endpoint_jobs__job_id__complete_plan_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Complete Plan Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/costs": {
       "get": {
         "description": "Sprint J.3.b — aggregate cost + latency for a job.\n\nReturns total USD spent (computed at insert time, immutable),\ntotal prompt/completion tokens, total LLM latency, the count of\nLLM calls logged for this job, and a per-(provider, model)\nbreakdown sorted by descending cost. Job_ids with no logged\ncalls return the zero shape with an empty breakdown — fail-open\nmatches the rest of the cost-tracking surface.",
