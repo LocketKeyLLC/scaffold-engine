@@ -216,6 +216,40 @@ def foreign_keys_in_code(texts: list[str]) -> dict[str, dict[str, str]]:
     return out
 
 
+def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
+    """§17.1794 — `{table: {"json": [cols], "checks": [sql]}}` from a job's migrations. Live (job f00ea97f T24D): its
+    tests passed a dict into the JSON column `payload` through `text()` (asyncpg: "descriptor 'encode' for 'str'
+    objects doesn't apply to a 'dict' object") and a `source` the CHECK constraint refuses -- the step was shown
+    the column names, never their type or their allowed values."""
+    out: dict[str, dict] = {}
+    for t in texts:
+        for lang, code in extract_code_blocks(t or ""):
+            if lang not in PYTHON_LANGS:
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "create_table"
+                        and n.args and isinstance(n.args[0], ast.Constant)):
+                    continue
+                rules = out.setdefault(str(n.args[0].value).lower(), {"json": [], "checks": []})
+                for a in n.args[1:]:
+                    if not isinstance(a, ast.Call):
+                        continue
+                    fname = getattr(a.func, "attr", None) or getattr(a.func, "id", None)
+                    if fname == "Column" and a.args and isinstance(a.args[0], ast.Constant) and len(a.args) > 1:
+                        typ = a.args[1]
+                        tname = (getattr(typ, "attr", None) or getattr(typ, "id", None)
+                                 or getattr(getattr(typ, "func", None), "attr", None) or "")
+                        if str(tname).upper() in ("JSON", "JSONB"):
+                            rules["json"].append(str(a.args[0].value).lower())
+                    elif fname == "CheckConstraint" and a.args and isinstance(a.args[0], ast.Constant):
+                        rules["checks"].append(str(a.args[0].value))
+    return {k: v for k, v in out.items() if v["json"] or v["checks"]}
+
+
 async def live_tables(db) -> Tables:
     """The engine's own tables and their columns, from the database it is running on."""
     from sqlalchemy import text
