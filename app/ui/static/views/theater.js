@@ -657,8 +657,20 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   // §17.1040 — one line per finding in the evidence report; empty when clean.
   function evidenceLines(ev) {
-    if (!ev || !ev.checked) return [];
+    if (!ev) return [];
     const out = [];
+    // §17.1810 — what the engine-test sandbox actually ran for this code step.
+    const et = ev.engine_test;
+    if (et && et.verdict === "pass")
+      out.push(et.kind === "tests"
+        ? "✓ Tested: its own tests passed in the engine-test sandbox (" + (et.ran || []).join(", ") + ")."
+        : "⚠️ Not tested: no tests were written; the sandbox only checked that " + (et.ran || []).join(", ") + " loads.");
+    else if (et && et.verdict === "fail")
+      out.push("❌ The engine-test sandbox failed " + (et.kind === "tests" ? "its tests" : "loading it") + ": " + String(et.reason || "").slice(0, 300));
+    else if (et)
+      out.push("⚠️ Not run in the engine-test sandbox: " + (et.reason || "skipped") + ".");
+    if (!ev.checked) return out;
+    const tested = out.length;
     if (ev.unsupported && ev.unsupported.length)
       out.push("⚠️ Unverified specifics — appear in no source, fact or note for this step; confirm before relying on them: " + ev.unsupported.join(", "));
     if (ev.plan_only && ev.plan_only.length)
@@ -667,7 +679,7 @@ export function renderTheater(container, jobId, ctx = {}) {
       out.push("⚠️ Command mismatch — an interpreter paired with a file it cannot run: " + ev.command_shape.join(", "));
     if (ev.citation_score != null && ev.citation_score < 0.6)
       out.push(`⚠️ Weak sourcing — only ${Math.round(ev.citation_score * 100)}% of cited statements are backed by the source they cite.`);
-    if (ev.regenerated && !out.length)
+    if (ev.regenerated && out.length === tested)
       out.push("✓ First draft stated values from memory; regenerated against the sources.");
     return out;
   }

@@ -2525,6 +2525,7 @@ async def execute_next_node(
                     (logger.warning if _et_res.verdict == "skip" else logger.info)(
                         "engine_test_check: node='%s' verdict=%s ran=%s reason=%s", title, _et_res.verdict,
                         _et_res.ran, _et_res.reason[:200])
+                    _evidence_summary["engine_test"] = _et.record(_et_res)   # §17.1810 — kept, not only logged
                     if _et_res.verdict == "fail":
                         engine_test_reason = _et_res.reason
             except Exception as exc:
@@ -2765,7 +2766,7 @@ async def execute_next_node(
             f"Node '{title}' -> {final_status}",
             {"model": exec_model, "confidence": confidence, "reason": reason},
         )
-        if _evidence_summary.get("checked"):
+        if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes
             # read `unsupported` from it so a flagged value is not credited by
             # the upstream text it sits in.
