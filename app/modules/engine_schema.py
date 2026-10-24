@@ -194,7 +194,7 @@ def _known(table: str, tables: Tables) -> bool:
     return table.lower() in tables
 
 
-def unknown_schema_refs(output: str, tables: Tables) -> list[str]:
+def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Every table or column the output's SQL names that neither the engine's database nor this job's migrations
     have. ``tables`` is the union of both; the output's own migrations are added here."""
     known: dict = dict(tables)
@@ -222,8 +222,12 @@ def unknown_schema_refs(output: str, tables: Tables) -> list[str]:
                 if "{" in t or t.lower() in ctes:
                     return False
                 if not _known(t, known):
+                    # §17.1784 — and which ones there ARE: live (f00ea97f T24, four attempts) the dashboard was told
+                    # `positions`, `broker_orders`, `paper_positions` did not exist and guessed a new name each time
+                    have = sorted(job_tables) if job_tables else []
                     note(f"`{where}`: there is no table `{t}` -- not in the engine's database, and no step of this "
-                         "job creates it (a new table is an Alembic revision a step of this job writes)")
+                         "job creates it (a new table is an Alembic revision a step of this job writes)"
+                         + (f"; this job's tables are {', '.join('`' + h + '`' for h in have)}" if have else ""))
                     return False
                 return known[t.lower()] is not None
 

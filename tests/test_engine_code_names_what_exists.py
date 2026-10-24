@@ -487,3 +487,21 @@ def test_the_engines_own_selects_pass_against_its_live_columns():
     found = [f for f in sch.unknown_schema_refs("```python\n" + src + "\n```", tables) if "SELECT …" in f
              and re.search(r"no column `calls`", f)]
     assert found == []
+
+
+
+def test_a_siblings_test_file_is_not_part_of_its_module():
+    """Live (job f00ea97f T20): T21's module "had" FakeResponse / FakeSecretStore -- the names of its test file."""
+    t21 = {"node_key": "T21", "prompt_template": "Python module `paper_spy_benchmark_tracker.py`.", "output_text":
+           "```python\n# app/modules/paper_spy_benchmark_tracker.py\ndef get_spy_benchmark():\n    ...\n```\n"
+           "```python\n# tests/test_paper_spy_benchmark_tracker.py\nclass FakeSecretStore:\n    pass\n```"}
+    d = es.sibling_definitions([t21])["paper_spy_benchmark_tracker"]
+    assert "get_spy_benchmark" in d["names"] and "FakeSecretStore" not in d["names"]
+
+
+
+def test_a_missing_table_is_told_which_tables_the_job_has():
+    """§17.1784 — live (f00ea97f T24): four attempts each guessed a new table name; the refusal never said which exist."""
+    out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT * FROM positions')\n```"
+    found = sch.unknown_schema_refs(out, {**LIVE, **sch.tables_in_code([T3_HELPER])}, {"ingested_item", "signal"})
+    assert found and "this job's tables are `ingested_item`, `signal`" in found[0]

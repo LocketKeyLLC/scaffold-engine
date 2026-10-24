@@ -477,6 +477,9 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
         for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
             if lang not in PYTHON_LANGS:
                 continue
+            head = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if code.strip() else None
+            if head and re.match(r"(?:test_\w+|\w+_test|conftest)$", head.group(2)):
+                continue        # §17.1784 — a step's test file is not its module (live: T21 "had" FakeSecretStore)
             try:
                 tree = ast.parse(code)
             except SyntaxError:
@@ -910,12 +913,49 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
     tables = dict(await engine_schema.live_tables(db))
-    for k, v in engine_schema.tables_in_code(others).items():
+    jobs_own = engine_schema.tables_in_code(others)
+    for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    found += engine_schema.unknown_schema_refs(output, tables)
+    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own))
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
+    found += answers_read_where_asked(output)
+    return found
+
+
+def answers_read_where_asked(output: str) -> list[str]:
+    """§17.1784 — an answer read in the same function that just opened the question. Live (job f00ea97f T16):
+    `job_id = await open_decision_job(…)` then `answer = await answer_of(db, job_id, "approve_proposal")` on the next
+    line -- None every time (nobody has answered), so every proposal came back "rejected"; the @answer_handler, where
+    the answer actually arrives, only logged. The first lab's T14 did the same with the decision pause."""
+    found: list[str] = []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            opened: set[str] = set()
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                    call = n.value.value if isinstance(n.value, ast.Await) else n.value
+                    if isinstance(call, ast.Call) and getattr(call.func, "id", getattr(call.func, "attr", "")) == "open_decision_job":
+                        opened.add(n.targets[0].id)
+            if not opened:
+                continue
+            for n in ast.walk(fn):
+                if (isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "answer_of"
+                        and any(isinstance(a, ast.Name) and a.id in opened for a in n.args)):
+                    found.append(f"`{fn.name}` reads `answer_of(…)` for the decision job it has just opened: nobody "
+                                 "has answered yet, so it is always None. Return once the decisions are open; act on "
+                                 "the answer in the `@answer_handler` (`on_answer=`), which the engine calls when the "
+                                 "operator answers -- that is where an approved order is executed")
+                    break
     return found
 
 
@@ -997,8 +1037,10 @@ CAPABILITIES: tuple[dict, ...] = (
             "open_decision_job(db, title=…, decisions=[…], on_answer=\"app.modules.<module>:<fn>\")`; it returns at "
             "once. The operator answers each in the UI. `fn` is `@answer_handler async def fn(job_id, node_key, "
             "answer, payload)`, called as each answer is recorded, with `answer = {\"choice\", \"note\", "
-            "\"approved\"}`; act only when `answer[\"approved\"]` is True. `await answer_of(db, job_id, key)` reads "
-            "an answer later (None while open). Nothing the code does is approved until that answer exists.",
+            "\"approved\"}`: THE HANDLER IS WHERE THE APPROVED WORK HAPPENS (an approved order is placed there, "
+            "with what it needs carried in `payload`); act only when `answer[\"approved\"]` is True. The function "
+            "that opens the decisions returns at once and never reads the answer itself (§17.1784: it does not exist "
+            "yet). `await answer_of(db, job_id, key)` is for a later, separate read (None while open).",
      "names": {"app.modules.operator_ask": ["decision", "open_decision_job", "answer_handler", "answer_of"]}},
     {"name": "secrets the engine holds",
      "when": r"secret|api[ _-]?key|credential|broker key|password|token",
