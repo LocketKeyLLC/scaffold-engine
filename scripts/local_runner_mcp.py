@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "24"
+HELPER_VERSION = "25"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -947,6 +947,9 @@ def verify_approval(command: str, approval: dict, token: str, *, now: int | None
     return True, ""
 
 
+_COMPOUND_RE = re.compile(r"^\s*(?:for|while|until|if|case|function|\{|\()\b|^\s*[({]|[;|&\n]|\$\(|`")
+
+
 def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
     """``(command to run, note)``. A leading ``sudo`` becomes ``sudo -n`` when
     the rest matches an allowed prefix (whole-token match), and is dropped
@@ -959,7 +962,13 @@ def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
     # the second half of the enumeration treadmill.
     if ANY in [p.strip() for p in (allow or []) if p and p.strip()]:
         m_any = _SUDO_RE.match(cmd)
-        return f"sudo -n {cmd[m_any.end():].strip() if m_any else cmd}", ""
+        rest = cmd[m_any.end():].strip() if m_any else cmd
+        # §17.1806 — a compound command (a loop, `if`, a group, a list, a pipeline, a substitution) is not a program
+        # `sudo` can run: `sudo -n for id in …; do …; done` is a shell syntax error ("do" unexpected), and in
+        # `sudo -n a | b` only `a` ran as root. Live (job 0fb4ea7f RB1): both verify loops over `qm list` died this way.
+        if _COMPOUND_RE.search(rest):
+            return f"sudo -n sh -c {shlex.quote(rest)}", ""
+        return f"sudo -n {rest}", ""
     m = _SUDO_RE.match(cmd)
     if not m:
         return cmd, ""

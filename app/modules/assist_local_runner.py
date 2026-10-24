@@ -82,7 +82,15 @@ def not_evidence(text_out: str, is_error: bool = False) -> str:
     for prefix, why in _NOT_EVIDENCE:
         if head.startswith(prefix):
             return why
+    # §17.1806 — the shell could not parse the check: it never ran, so it says nothing about the system. Live (job
+    # 0fb4ea7f RB1): two verify loops answered `/bin/sh: 1: Syntax error: "do" unexpected` and the step was `done`.
+    if _SHELL_PARSE_ERROR_RE.match(head):
+        return "the shell could not parse the check, so it never ran"
     return "the runner reported an error" if is_error else ""
+
+
+_SHELL_PARSE_ERROR_RE = re.compile(
+    r"(?:/bin/|/usr/bin/)?(?:sh|bash|dash):\s*(?:line\s+)?\d*:?\s*(?:Syntax error|syntax error near unexpected token)")
 
 
 async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str, list[dict]]:
