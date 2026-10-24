@@ -188,6 +188,7 @@ PASS only when ALL hold:
 - It is complete: no leftover TODO/FIXME and no placeholder bodies (`pass`, `...`, "implement me") UNLESS the task explicitly asked only for a signature, interface, or stub.
 - It is consistent with the upstream code it builds on: any function/class/constant it imports or calls from an UPSTREAM block is used with a signature that matches that upstream's actual definition (same name, compatible parameters). Do NOT accept an invented or drifted signature.
 - If the brief enumerates specific required items (flags, fields, mappings, formats, supported values), they are all implemented — or explicitly marked out of scope. Silently implementing only a subset is a FAIL.
+- When OTHER STEPS OF THE PLAN are listed, the brief is split across them: judge only what THIS step's task asks for. An item another step owns (its title names it) is not missing here — never fail this step for it.
 
 FAIL when:
 - The requested functionality is missing, stubbed where real code was required, or fundamentally incorrect.
@@ -269,6 +270,8 @@ async def _verify_codegen_output(
     upstream_code: list[tuple[str, str]] | None = None,
     role: str = "model_verifier",
     overrides: dict | None = None,
+    step_text: str = "",
+    other_steps: list[str] | None = None,
 ) -> tuple[Literal["pass", "fail"], str, float]:
     """Stricter verifier for CodeGen nodes (§17.429).
 
@@ -278,8 +281,16 @@ async def _verify_codegen_output(
     consistency (§17.367) and brief-spec completeness (§17.365).
     """
     parts = [f"TASK: {task_title}"]
+    # §17.1790 — the step's own task, and the steps that deliver the rest of the brief. Live (job f00ea97f T19 "P&L
+    # calculator"): refused for "sharpe_ratio and turnover are hardcoded None … SPY benchmark never computed" -- the
+    # metrics step's (T22) work; the verifier saw only the title and the whole brief.
+    if step_text:
+        parts.append(f"\nTHIS STEP'S TASK:\n{step_text[:3000]}")
     if brief_goal:
         parts.append(f"\nPROJECT GOAL / BRIEF:\n{brief_goal}")
+    if other_steps:
+        parts.append("\nOTHER STEPS OF THE PLAN (they deliver the rest of the brief -- not this step's to do):\n"
+                     + "\n".join(f"- {t}" for t in other_steps[:60]))
     if upstream_code:
         blocks = "\n\n".join(
             f"### upstream {key}\n```python\n{code}\n```"
