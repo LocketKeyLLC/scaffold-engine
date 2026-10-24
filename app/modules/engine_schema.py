@@ -237,6 +237,11 @@ def where_a_column_is(col: str, table: str, tables: Tables, fks: dict | None) ->
     the refusal never said where `ticker` lives."""
     owners = sorted(t for t, cols in tables.items() if cols and col in cols and t != table)
     if not owners:
+        # §17.1793 — or its singular / plural (live f00ea97f T24: `proposal.sources`; the job has `ingested_item.source`)
+        alt = col[:-1] if col.endswith("s") else col + "s"
+        found = [t for t, cols in tables.items() if cols and alt in cols and t != table]
+        if found:
+            return where_a_column_is(alt, table, tables, fks).replace(f"`{alt}` is on", f"`{alt}` (not `{col}`) is on")
         return ""
     fks = fks or {}
     # breadth-first over the foreign keys, from `table` outward (child → parent), at most 3 hops
