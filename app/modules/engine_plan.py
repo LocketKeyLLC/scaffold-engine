@@ -498,9 +498,11 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
 # ── §17.1793 a step too big for one output is split ──────────────────────────────────────────────────────────
 
 #: a refusal that says the step left out a part of its OWN task
+#: §17.1795 — never "is missing required argument(s)" (a call-shape refusal, §17.1756): live (f00ea97f T25, the
+#: integration step) its signature refusals read as omissions and split a wiring step into a "data" half
 _OMISSION_RE = re.compile(r"\b(?:entirely absent|is absent|are absent|was not written|were not written|not written at "
-                          r"all|never (?:written|implemented|rendered)|is missing|are missing|missing the (?:explicitly )?"
-                          r"required|required (?:export|deliverable|tests?)[^.]{0,80}\babsent)\b", re.I)
+                          r"all|never (?:written|implemented|rendered)|missing the (?:explicitly )?required [^.]{0,60}?\b(?:export|"
+                          r"deliverable|tests?|file)|required (?:export|deliverable|tests?)[^.]{0,80}\babsent)\b", re.I)
 
 
 async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions: int = 2) -> dict | None:

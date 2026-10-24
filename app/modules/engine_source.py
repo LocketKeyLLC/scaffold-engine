@@ -561,8 +561,9 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                     if al.name == "*":
                         continue
                     if al.name not in d["names"]:
-                        have = ", ".join(sorted(x for x in d["defined"] if not x.startswith("_")
-                                                and x not in ("logger", "__all__"))[:16])
+                        # §17.1796 — functions first (what a caller needs), constants after
+                        pub = [x for x in d["defined"] if not x.startswith("_") and x not in ("logger", "__all__")]
+                        have = ", ".join(sorted(pub, key=lambda x: (x not in d["funcs"], x))[:24])
                         msg = (f"`from {n.module} import {al.name}`: `{leaf}` (step {d['node']}) has no `{al.name}`"
                                + (f" (it has {have})" if have else "")
                                # §17.1776 — live (f00ea97f T7/T8/T12): every ingestion step invented T4's
@@ -1276,8 +1277,27 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
                "CHECK lists the only values a row may hold -- tests use those values)\n" if rules else ""))
 
 
-def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, tables: dict | None = None,
-              written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None) -> str:
+def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 3500) -> str:
+    """§17.1796 — the public functions of every module this job has written, with exact signatures, one line each.
+    Live (job f00ea97f T25, the integration step over ~20 modules): attempt after attempt guessed
+    `ingest_congressional_trades`, `fetch_13f_holdings`, `generate_signals(as_of=…)`; the refusal's "it has" list was
+    16 names sorted alphabetically -- in a module of constants, only constants."""
+    lines: list[str] = []
+    for mod in sorted(defs):
+        if mod == own:
+            continue
+        sigs = [_shape_signature(f, sh) for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
+        if sigs:
+            lines.append(f"    {mod}: " + "; ".join(sigs))
+    if not lines:
+        return ""
+    out = "### This job's modules (written -- their public functions, exact signatures)\n" + "\n".join(lines) + "\n"
+    return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
+
+
+def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000, tables: dict | None = None,
+              written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None,
+              modules: dict[str, dict] | None = None) -> str:
     """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042)."""
     index = module_index()
     layout: dict[str, list[str]] = {}
@@ -1311,6 +1331,10 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, 
         "### Conventions\n" + CONVENTIONS + "\n",
         "### Modules every change uses\n" + "".join(_render_module(m) for m in _CORE),
     ]
+    if modules:
+        jm = _render_job_modules(modules, own)
+        if jm:
+            parts.insert(1, jm)
     if tables:
         jt = _render_job_tables(tables, fks, rules)
         if jt:
