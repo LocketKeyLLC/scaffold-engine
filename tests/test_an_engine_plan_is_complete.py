@@ -13,6 +13,8 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from app.modules import dag_generator, engine_plan
 
 BRIEF = {"title": "Paper-trading research lab in scaffold engine",
@@ -230,7 +232,7 @@ def test_the_third_live_plan_is_completed():
     assert "T29" not in by and by["T30"]["depends_on"] == ["T28"]                 # the sandbox runs T28's tests
     assert by["T4"]["type"] == "decision" and by["T4"]["tool"] == "LLM"
     assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
-    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == ["T3"]  # asked at the end; T5 on the schema
+    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == ["T3", "API_ALPACA"]  # asked last; schema + API research
     assert {c.split(":")[0] for c in changes} >= {"ddl_made_a_migration", "test_run_dropped", "secret_step_made_the_operators"}
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
 
@@ -351,3 +353,83 @@ def test_every_code_step_stands_on_the_jobs_revision():
     assert by["T24"]["depends_on"] == ["T5"]                                      # an LLM review is not code
     assert any(c.startswith("schema_first: T5") for c in changes)
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1780 an outside API is researched before the code that calls it (live job f00ea97f) ──
+
+PLAN_API = [
+    {"id": "T3", "name": "Implement audit trail schema", "tool": "CodeGen", "type": "action", "depends_on": [],
+     "notes": "Create migration SQL for append-only tables."},
+    {"id": "T5", "name": "Implement Alpaca paper client", "tool": "CodeGen", "type": "action", "depends_on": ["T3"],
+     "notes": "Python module `paper_alpaca_paper_client.py`. Reads API keys from the secrets store; REST + websocket."},
+    {"id": "T7", "name": "Implement EDGAR Form 4 ingestion", "tool": "CodeGen", "type": "action", "depends_on": ["T3"],
+     "notes": "Python module `paper_edgar_form_4_ingestion.py`. Insider purchases from Form 4 filings."},
+    {"id": "T18", "name": "Implement fill tracker", "tool": "CodeGen", "type": "action", "depends_on": ["T5", "T3"],
+     "notes": "Python module `paper_fill_tracker.py`. Consumes the paper client's stream of trade updates."},
+    {"id": "T15", "name": "Implement trade proposer", "tool": "CodeGen", "type": "action", "depends_on": ["T7", "T3"],
+     "notes": "Python module `paper_trade_proposer.py`. Weighs the stored signals."},
+]
+
+
+def test_each_outside_api_is_researched_and_its_callers_stand_on_it():
+    tasks = copy.deepcopy(PLAN_API)
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert by["API_ALPACA"]["tool"] == "SearXNG" and by["API_SEC_EDGAR"]["tool"] == "SearXNG"
+    assert "exact field names and nesting" in by["API_SEC_EDGAR"]["notes"] and "cite its URL" in by["API_SEC_EDGAR"]["notes"]
+    assert "API_ALPACA" in by["T5"]["depends_on"] and "API_SEC_EDGAR" in by["T7"]["depends_on"]
+    assert "API_ALPACA" in by["T18"]["depends_on"]                     # consumes the client's stream: one hop
+    assert not any(d.startswith("API_") for d in by["T15"]["depends_on"])   # downstream of an ingester only
+    assert not any(k == "API_READS" for k in by)                       # "Reads API keys" is not an API
+    assert by["API_ALPACA"]["depends_on"] == []                        # research stands on nothing (not the schema)
+    assert any(c.startswith("api_research_added: API_SEC_EDGAR") for c in changes)
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+def test_a_named_api_outside_the_known_list_is_found_only_when_introduced_as_one():
+    tasks = [{"id": "A", "name": "Implement quotes", "tool": "CodeGen", "type": "action", "depends_on": [],
+              "notes": "Python module `paper_quotes.py`. Pulls daily bars via the Tiingo REST API."},
+             {"id": "B", "name": "Implement limits", "tool": "CodeGen", "type": "action", "depends_on": [],
+              "notes": "Python module `paper_limits.py`. Reads API keys. Uses SearXNG via the SearXNG API."}]
+    engine_plan.complete_engine_plan(tasks, BRIEF)
+    keys = {t["id"] for t in tasks}
+    assert "API_TIINGO" in keys and "API_SEARXNG" not in keys and "API_READS" not in keys
+
+
+@pytest.mark.integration
+async def test_completion_is_applied_to_a_started_plan_without_touching_finished_steps():
+    import uuid
+    from app.database import async_session
+    from app.modules import node_editor
+    text = node_editor.text
+    jid = str(uuid.uuid4())
+    try:
+        async with async_session() as db:
+            await db.execute(text("INSERT INTO jobs (id, title, status, refined_brief) VALUES (:id, 'lab', 'blocked', "
+                                  "CAST(:b AS jsonb))"), {"id": jid, "b": json.dumps(BRIEF)})
+            for i, (t, st) in enumerate(zip(PLAN_API, ["done", "done", "failed", "failed", "pending"], strict=True)):
+                await db.execute(text(
+                    "INSERT INTO dag_nodes (job_id, node_key, title, tool, node_type, status, depends_on, "
+                    "prompt_template, execution_order) VALUES (:j, :k, :t, :tool, 'task', :s, :d, :p, :o)"),
+                    {"j": jid, "k": t["id"], "t": t["name"], "tool": t["tool"], "s": st, "d": t["depends_on"],
+                     "p": t["notes"], "o": i})
+            await db.commit()
+        # make the stored plan already "completed" by earlier passes, as a real started plan is
+        async with async_session() as db:
+            out = await engine_plan.apply_to_job(db, jid, edited_by="test")
+        assert "API_ALPACA" in out["inserted"] and "API_SEC_EDGAR" in out["inserted"]
+        assert "T5" in out["kept_finished"] and "T5" not in out["edited"]              # done: never touched
+        assert {"T7", "T18"} <= set(out["edited"])                                     # failed: updated (and reset)
+        async with async_session() as db:
+            rows = {r[0]: (r[1], list(r[2] or [])) for r in (await db.execute(text(
+                "SELECT node_key, status, depends_on FROM dag_nodes WHERE job_id = :j"), {"j": jid})).all()}
+        assert rows["T5"] == ("done", ["T3"])
+        assert "API_SEC_EDGAR" in rows["T7"][1] and rows["API_SEC_EDGAR"][0] == "pending"
+        async with async_session() as db:                                              # applying again: nothing new
+            again = await engine_plan.apply_to_job(db, jid, edited_by="test")
+        assert again["inserted"] == [] and again["edited"] == []
+    finally:
+        async with async_session() as db:
+            await db.execute(text("DELETE FROM dag_node_edits WHERE job_id = :j"), {"j": jid})
+            await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
+            await db.commit()

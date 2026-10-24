@@ -176,6 +176,22 @@ async def reask_endpoint(
     return {**out, "run_started": started}
 
 
+@router.post("/jobs/{job_id}/complete-plan", tags=["Management"])
+async def complete_plan_endpoint(
+    job_id: UuidPath,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1780 — apply the engine's plan completion (engine_plan) to a job whose plan has already started: new steps
+    are inserted and pending or failed steps updated; finished steps are never touched. Engine-code jobs only."""
+    from app.modules import engine_plan
+    await assert_visible(db, principal, str(job_id), detail=f"Job {job_id} not found")
+    out = await engine_plan.apply_to_job(db, str(job_id), edited_by=principal.identity)
+    if "error" in out:
+        raise HTTPException(status_code=out.pop("http_status", 409), detail=out)
+    return out
+
+
 @router.post("/jobs/{job_id}/replan", tags=["Management"])
 async def replan_endpoint(
     job_id: UuidPath,

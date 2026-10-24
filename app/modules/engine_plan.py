@@ -298,12 +298,90 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
                 t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *missing]))
                 changes.append(f"schema_first: {t.get('id')} stands on {', '.join(missing)}")
 
+    # 6. §17.1780 — an outside API a code step calls is researched first, from its own documentation, and the steps
+    #    that call it stand on that research. Live (job f00ea97f T7/T8, nine attempts each): with every naming defect
+    #    fixed, the drafts still parsed Form 4 / 13F XML as JSON, called a made-up `…/submissions.json`, read
+    #    `formType` where the SEC's key is `form`, and T18 read Alpaca fill fields from the wrong level -- facts the
+    #    model did not have, which no refusal could teach. The research step is the engine's own web research (§17.1039:
+    #    pages fetched, ranked, dated, the output checked against them).
+    ids = {str(t.get("id")) for t in tasks}
+    for api in _APIS_NAMED(tasks):
+        key = f"API_{api['key']}"
+        callers = [t for t in tasks if str(t.get("tool") or "").lower() == "codegen" and api["re"].search(_text(t))
+                   and not str(t.get("notes") or "").startswith("An Alembic revision")]
+        if not callers:
+            continue
+        # one hop: a code step standing on a caller consumes what the API returns (live f00ea97f T18, the fill
+        # tracker over T5's Alpaca stream, read the fill fields from the wrong level and never named Alpaca)
+        # -- only over a caller that IS the API's client or stream (not every step downstream of an ingester)
+        direct = {str(c["id"]) for c in callers
+                  if re.search(r"\b(?:client|stream|websocket|feed|api)\b", str(c.get("name") or ""), re.I)}
+        callers += [t for t in tasks if str(t.get("tool") or "").lower() == "codegen" and t not in callers
+                    and direct & {str(d) for d in (t.get("depends_on") or [])}
+                    and not str(t.get("notes") or "").startswith("An Alembic revision")
+                    and not str(t.get("id", "")).startswith("WIRE")]
+        if key not in ids:
+            tasks.append({
+                "id": key, "name": f"Research the {api['name']} as its documentation states it", "type": "research",
+                "tool": "SearXNG", "depends_on": [], "inputs": [], "outputs": [],
+                "notes": (f"Read the {api['name']}'s own documentation ({api['scope']}; official pages first) and state, "
+                          "for what this lab calls: the base URLs; each endpoint (method, path, parameters); the headers "
+                          "it requires (authentication, User-Agent / contact rules); the response FORMAT (JSON or XML) "
+                          "and its exact field names and nesting, with a short real example; pagination; rate limits and "
+                          "terms of use. Quote the documentation for each point and cite its URL; state nothing a "
+                          "source does not say."),
+            })
+            ids.add(key)
+            changes.append(f"api_research_added: {key} ({api['name']}) for {', '.join(str(c['id']) for c in callers)}")
+        for c in callers:
+            if key not in (c.get("depends_on") or []):
+                c["depends_on"] = [*(c.get("depends_on") or []), key]
+                changes.append(f"api_research_first: {c.get('id')} stands on {key}")
+
     # the operator's credentials come after the code that reads them, wired (0e)
     wires = [str(t["id"]) for t in tasks if str(t.get("id", "")).startswith("WIRE")]
     for t in secret_steps:
         want = wires or [str(m["id"]) for m in modules]
         t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *want]))
     return changes
+
+
+#: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
+_KNOWN_APIS = (
+    {"key": "SEC_EDGAR", "name": "SEC EDGAR APIs", "re": re.compile(r"\bedgar\b|\bform\s*4\b|\b13f\b|\bsec\s+filings?\b", re.I),
+     "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
+    {"key": "ALPACA", "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
+     "scope": "the paper REST API (account, orders, positions) and the trade_updates websocket stream"},
+    {"key": "REDDIT", "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
+     "scope": "OAuth app-only access, listing endpoints, User-Agent and rate-limit rules, personal-use terms"},
+    {"key": "FINRA", "name": "FINRA data APIs", "re": re.compile(r"\bfinra\b", re.I),
+     "scope": "short interest and ATS / OTC transparency data: where it is published, its format and fields"},
+    {"key": "CONGRESS_TRADES", "name": "Congressional trade disclosures",
+     "re": re.compile(r"\bcongress(?:ional)?\b|\bsenate\b.{0,30}\bdisclos|\bhouse\b.{0,30}\bdisclos", re.I),
+     "scope": "the official House and Senate periodic transaction report sources: URLs, formats, fields"},
+)
+#: only a name introduced AS an API ("via the Polygon API", "the Tiingo REST API"); a bare "<Word> API" also matched
+#: sentence-initial verbs (live f00ea97f T5: "Reads API keys…" → a "Reads API")
+_GENERIC_API_RE = re.compile(r"\b(?:the|via|through|using|from|with|calls?|queries)\s+(?:the\s+)?([A-Z][A-Za-z0-9.]{2,})"
+                             r"\s+(?:REST\s+|public\s+|web\s+|HTTP\s+)?API\b")
+#: the engine's own services are not outside APIs (shown by §17.1749 / §17.1754 instead)
+_ENGINE_SERVICES = {"searxng", "ollama", "scaffold", "engine", "openai", "the", "this", "rest", "public"}
+
+
+def _APIS_NAMED(tasks: list[dict]) -> list[dict]:
+    code = " ".join(_text(t) for t in tasks if str(t.get("tool") or "").lower() == "codegen")
+    found = [a for a in _KNOWN_APIS if a["re"].search(code)]
+    known = " ".join(a["name"].lower() for a in found)
+    for m in _GENERIC_API_RE.finditer(code):
+        name = m.group(1)
+        if name.lower() in _ENGINE_SERVICES or name.lower() in known:
+            continue
+        key = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")
+        if not any(a["key"] == key for a in found):
+            found.append({"key": key, "name": f"{name} API", "re": re.compile(rf"\b{re.escape(name)}\b"),
+                          "scope": "the endpoints and data this lab uses"})
+            known += " " + name.lower()
+    return found
 
 
 def _upstream_of(tasks: list[dict], key: str) -> set[str]:
@@ -326,3 +404,70 @@ def _drop(tasks: list[dict], gone: dict) -> None:
         if gone["id"] in (u.get("depends_on") or []):
             u["depends_on"] = list(dict.fromkeys(
                 [d for d in u["depends_on"] if d != gone["id"]] + list(gone.get("depends_on") or [])))
+
+
+# ── §17.1780 applying completion to a plan that has already started ─────────────────────────────────────────────
+
+_TYPE_OF_NODE = {"decision": "decision", "checkpoint": "validation"}
+
+
+async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict:
+    """Run `complete_engine_plan` over a job's stored plan and apply what it adds to the steps that have not passed:
+    new steps are inserted, and a pending or failed step takes its new text and dependencies; a finished step is
+    never touched. Live (job f00ea97f): §17.1780 arrived with twelve steps done -- re-planning would have thrown
+    them away. Returns the changes and what was applied."""
+    import json as _json
+
+    from sqlalchemy import text as _text_sql
+
+    from app.modules import engine_source, node_editor
+    job = (await db.execute(_text_sql("SELECT refined_brief FROM jobs WHERE id = :j"), {"j": job_id})).mappings().first()
+    if not job:
+        return {"error": f"job {job_id} not found", "http_status": 404}
+    brief = job["refined_brief"]
+    brief = brief if isinstance(brief, dict) else (_json.loads(brief) if brief else {})
+    if not engine_source.targets_the_engine(brief):
+        return {"error": "this job does not write code for the engine", "http_status": 409}
+    rows = (await db.execute(_text_sql(
+        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on FROM dag_nodes "
+        "WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
+    status = {r["node_key"]: r["status"] for r in rows}
+    tasks = [{"id": r["node_key"], "name": r["title"], "notes": r["prompt_template"] or "", "tool": r["tool"],
+              "type": _TYPE_OF_NODE.get(r["node_type"] or "", "action"), "depends_on": list(r["depends_on"] or [])}
+             for r in rows]
+    before = {t["id"]: dict(t) for t in tasks}
+    changes = complete_engine_plan(tasks, brief)
+    inserted, edited, kept = [], [], []
+    for t in tasks:                                       # new steps first: an edit may depend on one
+        if t["id"] in before:
+            continue
+        out = await node_editor.insert_node(job_id, {
+            "node_key": t["id"], "title": t["name"], "tool": t.get("tool") or "LLM",
+            "node_type": {"decision": "decision", "validation": "checkpoint"}.get(str(t.get("type")), "task"),
+            "depends_on": [d for d in t.get("depends_on") or [] if d in status or d in {x["id"] for x in tasks}],
+            "prompt_template": t.get("notes") or ""}, edited_by=edited_by, db=db)
+        if out.get("error"):
+            return {**out, "changes": changes, "inserted": inserted}
+        inserted.append(t["id"])
+        status[t["id"]] = "pending"
+    for t in tasks:
+        b = before.get(t["id"])
+        if not b:
+            continue
+        fields = {}
+        if (t.get("notes") or "") != (b.get("notes") or ""):
+            fields["prompt_template"] = t.get("notes") or ""
+        if list(t.get("depends_on") or []) != list(b.get("depends_on") or []):
+            fields["depends_on"] = list(t.get("depends_on") or [])
+        if (t.get("tool") or "") != (b.get("tool") or ""):
+            fields["tool"] = t.get("tool")
+        if not fields:
+            continue
+        if status.get(t["id"]) not in ("pending", "failed"):
+            kept.append(t["id"])
+            continue
+        out = await node_editor.edit_node(job_id, t["id"], fields, edited_by=edited_by, db=db)
+        if out.get("error"):
+            return {**out, "changes": changes, "inserted": inserted, "edited": edited}
+        edited.append(t["id"])
+    return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept}
