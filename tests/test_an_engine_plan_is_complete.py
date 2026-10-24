@@ -457,3 +457,68 @@ def test_a_stale_no_database_test_sentence_is_replaced_once():
     assert notes.count("tests/test_paper_integrate_lab_scaffold_engine.py") == 1
     assert notes.startswith("Python module `paper_integrate_lab_scaffold_engine.py`. Wire all modules")
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+# ── §17.1799 an integration step with several entry points is one step per entry point (live f00ea97f T25) ──
+
+def _integration_plan():
+    return [
+        {"id": "T15", "name": "Implement approval gate", "tool": "CodeGen", "depends_on": [], "status": "done",
+         "notes": "Python module `paper_operator_approval_gate.py`, with tests in `tests/test_paper_operator_approval_gate.py`."},
+        {"id": "T24", "name": "Build operator dashboard", "tool": "CodeGen", "depends_on": [], "status": "skipped",
+         "notes": "Python module `paper_operator_dashboard.py`, with tests in `tests/test_paper_operator_dashboard.py`."},
+        {"id": "T25", "name": "Integrate lab into scaffold engine", "tool": "CodeGen", "depends_on": ["T15", "T24"],
+         "status": "failed", "notes": T25_STALE.replace(
+             "existing code.", "existing code. Expose as a lab module with entry points for daily batch proposals, "
+             "approval, execution, backtesting, dashboard. This is the deliverable code module.")},
+        {"id": "T26", "name": "Wire it", "tool": "CodeGen", "depends_on": ["T25"],
+         "notes": "Register paper_integrate_lab_scaffold_engine with get_scheduler() in app/main.py."},
+    ]
+
+
+def test_each_entry_point_is_its_own_step_and_the_facade_reexports_them():
+    tasks = _integration_plan()
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    assert "entry_points_split: T25 → T25E1, T25E2, T25E3, T25E4 (left out: dashboard)" in changes
+    by = {t["id"]: t for t in tasks}
+    assert [by[k]["name"] for k in ("T25E1", "T25E2", "T25E3", "T25E4")] == [
+        "Entry point: daily batch proposals", "Entry point: approval", "Entry point: execution",
+        "Entry point: backtesting"]
+    e3 = by["T25E3"]
+    assert e3["depends_on"] == ["T15", "T24"] and e3["tool"] == "CodeGen"
+    assert "`paper_entry_execution.py`" in e3["notes"] and "tests/test_paper_entry_execution.py" in e3["notes"]
+    assert "never a placeholder" in e3["notes"]
+    facade = by["T25"]
+    assert facade["depends_on"] == ["T15", "T24", "T25E1", "T25E2", "T25E3", "T25E4"]
+    assert "re-export the entry function of `paper_entry_daily_batch_proposals`" in facade["notes"]
+    assert "Not exposed: dashboard (its step was skipped)." in facade["notes"]
+    assert "entry points for" not in facade["notes"] and "no network, database or secrets" not in facade["notes"]
+    assert [t["id"] for t in tasks].index("T25E1") < [t["id"] for t in tasks].index("T25")
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+
+
+def test_two_entry_points_are_left_as_one_step():
+    tasks = [{"id": "A", "name": "Build CLI", "tool": "CodeGen", "depends_on": [],
+              "notes": "Python module `paper_cli.py` with entry points for run and stop, with tests in "
+                       "`tests/test_paper_cli.py`. Register it with get_scheduler() in app/main.py."}]
+    assert not any(c.startswith("entry_points_split") for c in engine_plan.complete_engine_plan(tasks, BRIEF))
+    assert [t["id"] for t in tasks] == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_apply_to_job_carries_status_so_a_skipped_step_is_left_out():
+    rows = [{"node_key": t["id"], "title": t["name"], "prompt_template": t["notes"], "tool": t["tool"],
+             "node_type": "task", "status": t.get("status", "pending"), "depends_on": t["depends_on"],
+             "tool_config": None} for t in _integration_plan()]
+    db = MagicMock()
+    brief_row = MagicMock(); brief_row.mappings.return_value.first.return_value = {"refined_brief": BRIEF}
+    plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = rows
+    db.execute = AsyncMock(side_effect=[brief_row, plan_rows])
+    with patch("app.modules.engine_source.targets_the_engine", return_value=True), \
+         patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})) as ins, \
+         patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
+        out = await engine_plan.apply_to_job(db, str(uuid4()))
+    assert out["inserted"] == ["T25E1", "T25E2", "T25E3", "T25E4"]
+    assert "T25" in out["edited"] and "Not exposed: dashboard" in ed.await_args_list[
+        [c.args[1] for c in ed.await_args_list].index("T25")].args[2]["prompt_template"]
+    assert ins.await_count == 4
