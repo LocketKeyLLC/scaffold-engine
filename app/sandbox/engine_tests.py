@@ -28,7 +28,8 @@ from app.sandbox.client import run_code
 
 logger = logging.getLogger("scaffold")
 
-_HEADER_RE = re.compile(r"^\s*#\s*((?:[\w.-]+/)*[A-Za-z_]\w*\.py)\b")
+#: a file named in the block's first line; an Alembic revision's file starts with digits (`0010_paper_audit_trail.py`)
+_HEADER_RE = re.compile(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b")
 _TEST_NAME_RE = re.compile(r"(?:^|/)(?:test_\w+|\w+_test|conftest)\.py$")
 
 
@@ -61,8 +62,9 @@ def files_of(row: dict) -> dict[str, str]:
             continue
         if "/" not in path:
             path = f"tests/{path}" if _TEST_NAME_RE.search(path) else f"app/modules/{path}"
-        if path.split("/")[0] not in ("app", "tests"):
-            continue                                        # a migration, a script: not imported by a test
+        if path.split("/")[0] not in ("app", "tests") and not path.startswith("alembic/versions/"):
+            continue                                        # a script: not imported by a test
+        # §17.1783 — a job's Alembic revision IS carried: the sandbox applies it to the run's scratch database
         out[path] = code
     return out
 
@@ -125,6 +127,8 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
             files.update(files_of(r))
     files.update(mine)
     for p in list(files):                                   # every folder a test imports through is a package
+        if p.startswith("alembic/"):
+            continue        # §17.1783 — never: an `alembic/__init__.py` shadows the alembic library itself
         parts = p.split("/")[:-1]
         for i in range(1, len(parts) + 1):
             init = "/".join(parts[:i]) + "/__init__.py"
@@ -151,7 +155,9 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
                    f"for m in {mods!r}:\n    importlib.import_module(m)\nprint('imported', len({mods!r}))"]
     res = await run_code(files, command, timeout_s=settings.engine_test_timeout_s,
                          cpu_seconds=int(settings.engine_test_timeout_s) + 10, mem_mb=1536,
-                         base_url=url)
+                         base_url=url, database=True)
+    if res.database.startswith("unavailable"):
+        logger.warning("engine_test_database_unavailable node=%s %s", node.get("node_key"), res.database[:200])
     ran = tests or [p for p in mine if p.startswith("app/")]
     if res.error is not None:
         return EngineTestResult("skip", f"engine-test sandbox: {res.error}", ran)
@@ -167,5 +173,9 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
     return EngineTestResult("fail", (
         f"§17.1765 engine-test sandbox: {what} failed, run against the engine with this job's finished modules "
         f"({', '.join(sorted(p for p in files if p not in mine and not p.endswith('__init__.py'))) or 'none yet'}). "
-        "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
-        "in tests. Fix the code (or the test, when the test is what is wrong):\n\n" + why[:6000]), ran)
+        + ("The sandbox has no network and no secrets; `async_session` is a fresh scratch database with the engine's "
+           "schema and this job's migrations applied -- test SQL against it instead of a fake session that ignores "
+           "the query; mock HTTP clients and model calls. " if res.database == "ok" else
+           "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
+           "in tests. ")
+        + "Fix the code (or the test, when the test is what is wrong):\n\n" + why[:6000]), ran)

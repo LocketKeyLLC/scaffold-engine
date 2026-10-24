@@ -221,8 +221,9 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
             continue
         t["notes"] = (str(t.get("notes") or "").rstrip() + " " if t.get("notes") else "") + (
             f"In this same step also write `tests/test_{mod}.py`: pytest tests of what `{mod}.py` must do (its rules, "
-            "its edge cases, its failure paths), with `async_session`, HTTP clients and model calls mocked -- they "
-            "run before the step passes, with no network, database or secrets.")
+            "its edge cases, its failure paths). They run before the step passes, with no network or secrets; "
+            "`async_session` is a scratch database with this job's tables, so SQL is tested for real; HTTP clients "
+            "and model calls are mocked.")
         changes.append(f"module_tests_added: {t.get('id')} writes tests/test_{mod}.py")
 
     # 3. approval is asked now and answered later: a step specified to return the answer cannot be written

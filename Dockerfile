@@ -241,7 +241,7 @@ CMD ["python", "-m", "app.run_server"]
 # there. Compose puts it on the internal `rehearsal` network (no route out), read-only, all capabilities dropped.
 # ────────────────────────────────────────────────────────────────────────────
 FROM dev AS enginetest
-COPY --chown=root:root docker/enginetest/server.py /srv/enginetest/server.py
+COPY --chown=root:root docker/enginetest/server.py docker/enginetest/build_base.py /srv/enginetest/
 # scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141).
 # NOT an inline comment: Docker keeps `# …` on a USER line as part of the value.
 USER 10001:10001

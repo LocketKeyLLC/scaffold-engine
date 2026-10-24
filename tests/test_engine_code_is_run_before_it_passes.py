@@ -35,7 +35,7 @@ def test_each_block_lands_at_its_header_or_the_steps_own_module():
     bare_test = {"prompt_template": "Python module `test_integration.py`", "output_text": "```python\ndef test_a(): pass\n```"}
     assert list(et.files_of(bare_test)) == ["tests/test_integration.py"]
     migration = {"output_text": "```python\n# alembic/versions/0010_lab.py\nrevision = '0010_lab'\n```"}
-    assert et.files_of(migration) == {}
+    assert list(et.files_of(migration)) == ["alembic/versions/0010_lab.py"]    # §17.1783: applied to the scratch db
 
 
 def _ok(stdout="1 passed"):
@@ -139,3 +139,42 @@ async def test_the_executor_does_not_run_another_jobs_code():
     with patch("app.sandbox.engine_tests.check", new=spy):
         await _run(GROUNDED, {"description": "Write a news CLI.", "goals": ["A CLI."]})
     spy.assert_not_awaited()
+
+
+# ── §17.1783 the sandbox's scratch database ─────────────────────────────────
+
+T3_REVISION = {"node_key": "T3", "status": "done", "prompt_template": "",
+               "output_text": "```python\n# alembic/versions/0010_paper_audit_trail.py\nrevision = '0010_paper_audit_trail'\n```"}
+
+
+def test_a_jobs_revision_is_carried_into_the_run():
+    """Live: `0010_paper_audit_trail.py` starts with digits; the header reader required a letter and dropped it, so the
+    scratch database stayed at the engine's 0009 and every table of the job was missing."""
+    assert list(et.files_of(T3_REVISION)) == ["alembic/versions/0010_paper_audit_trail.py"]
+
+
+@pytest.mark.asyncio
+async def test_the_run_asks_for_a_database_and_never_shadows_alembic():
+    run = AsyncMock(return_value=CodeRunResult(ok=True, exit_code=0, stdout="1 passed", database="ok"))
+    with patch.object(et.settings, "engine_test_check_enabled", True), \
+         patch.object(et.settings, "engine_test_url", "http://sandbox:8020"), \
+         patch.object(et, "_sandbox_engine", new=AsyncMock(return_value="d")), \
+         patch.object(et, "_local_digest", return_value="d"), \
+         patch.object(et, "run_code", new=run):
+        res = await et.check(WITH_TEST, ME, [T10, T3_REVISION])
+    files = run.await_args.args[0]
+    assert res.verdict == "pass" and run.await_args.kwargs["database"] is True
+    assert "alembic/versions/0010_paper_audit_trail.py" in files
+    assert not any(p.startswith("alembic/") and p.endswith("__init__.py") for p in files)   # would shadow alembic
+
+
+@pytest.mark.asyncio
+async def test_a_failure_with_the_database_says_to_test_sql_against_it():
+    run = AsyncMock(return_value=CodeRunResult(ok=False, exit_code=1, stdout="E assert 3 == 2", database="ok"))
+    with patch.object(et.settings, "engine_test_check_enabled", True), \
+         patch.object(et.settings, "engine_test_url", "http://sandbox:8020"), \
+         patch.object(et, "_sandbox_engine", new=AsyncMock(return_value="d")), \
+         patch.object(et, "_local_digest", return_value="d"), \
+         patch.object(et, "run_code", new=run):
+        res = await et.check(WITH_TEST, ME, [T10])
+    assert "fresh scratch database" in res.reason and "fake session that ignores the query" in res.reason
