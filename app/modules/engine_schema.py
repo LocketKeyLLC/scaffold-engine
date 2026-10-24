@@ -179,6 +179,43 @@ def tables_in_code(texts: list[str]) -> Tables:
     return found
 
 
+def foreign_keys_in_code(texts: list[str]) -> dict[str, dict[str, str]]:
+    """§17.1789 — `{table: {column: "parent.column"}}` from a job's migrations (`sa.Column(..., sa.ForeignKey("p.id"))`).
+    Live (job f00ea97f T18): a test inserted into `broker_order_id` without the `approval` row its `approval_id`
+    references, and the scratch database refused it -- the step was shown the columns, never what they reference."""
+    out: dict[str, dict[str, str]] = {}
+    for t in texts:
+        for lang, code in extract_code_blocks(t or ""):
+            if lang not in PYTHON_LANGS:
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "create_table"
+                        and n.args and isinstance(n.args[0], ast.Constant)):
+                    continue
+                table = str(n.args[0].value).lower()
+                for col in n.args[1:]:
+                    if not (isinstance(col, ast.Call) and (getattr(col.func, "attr", None) or getattr(col.func, "id", None)) == "Column"
+                            and col.args and isinstance(col.args[0], ast.Constant)):
+                        continue
+                    for a in col.args[1:]:
+                        if (isinstance(a, ast.Call) and (getattr(a.func, "attr", None) or getattr(a.func, "id", None)) == "ForeignKey"
+                                and a.args and isinstance(a.args[0], ast.Constant)):
+                            out.setdefault(table, {})[str(col.args[0].value).lower()] = str(a.args[0].value).lower()
+            for s in _strings(tree):                 # REFERENCES in SQL DDL
+                for stmt in s.split(";"):
+                    m = _CREATE.search(stmt)
+                    if not m:
+                        continue
+                    for c, ref_t, ref_c in re.findall(r'"?(\w+)"?\s+[^,]*?\bREFERENCES\s+"?(\w+)"?\s*\(\s*"?(\w+)"?\s*\)',
+                                                      m.group(2), re.I):
+                        out.setdefault(m.group(1).lower(), {})[c.lower()] = f"{ref_t.lower()}.{ref_c.lower()}"
+    return out
+
+
 async def live_tables(db) -> Tables:
     """The engine's own tables and their columns, from the database it is running on."""
     from sqlalchemy import text

@@ -593,3 +593,38 @@ def test_a_siblings_coroutine_used_as_a_value_is_refused():
     found = es.sibling_refs(bad, defs)
     assert found and "is `async def` in `paper_alpaca_paper_client`" in found[0] and "step T5" in found[0]
     assert es.sibling_refs(ok, defs) == []
+
+
+# ── §17.1789 the job's foreign keys are shown (live job f00ea97f T18) ──
+
+T3_FK = '''```python
+import sqlalchemy as sa
+from alembic import op
+
+
+def upgrade() -> None:
+    op.create_table("approval", sa.Column("id", sa.BigInteger, primary_key=True))
+    op.create_table(
+        "broker_order_id",
+        sa.Column("id", sa.BigInteger, primary_key=True),
+        sa.Column("approval_id", sa.BigInteger, sa.ForeignKey("approval.id"), nullable=False, unique=True),
+    )
+    op.execute("CREATE TABLE IF NOT EXISTS fill (id BIGSERIAL PRIMARY KEY, broker_order_id BIGINT NOT NULL REFERENCES broker_order_id (id))")
+```'''
+
+
+def test_foreign_keys_are_read_and_shown():
+    fks = sch.foreign_keys_in_code([T3_FK])
+    assert fks == {"broker_order_id": {"approval_id": "approval.id"}, "fill": {"broker_order_id": "broker_order_id.id"}}
+    b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_FK]), fks=fks)
+    assert "    broker_order_id: approval_id→approval.id, id" in b
+    assert "insert the parent row first -- in tests too" in b
+
+
+@pytest.mark.asyncio
+async def test_the_executor_passes_the_foreign_keys():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.modules.engine_schema.tables_in_code", return_value={"fill": {"id", "broker_order_id"}}), \
+         patch("app.modules.engine_schema.foreign_keys_in_code", return_value={"fill": {"broker_order_id": "broker_order_id.id"}}):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    assert "fill: broker_order_id→broker_order_id.id, id" in captured["prompt"]

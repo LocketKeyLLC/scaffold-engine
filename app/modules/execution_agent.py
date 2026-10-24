@@ -2048,7 +2048,8 @@ async def execute_next_node(
                     _grounding_blocks.append(_es.block_for(
                         node_snapshot, _own_mods,
                         tables=_esch.tables_in_code([str(r.get("output_text") or "") for r in _done]),
-                        written=set(_es.sibling_definitions(_done))))          # §17.1787
+                        written=set(_es.sibling_definitions(_done)),          # §17.1787
+                        fks=_esch.foreign_keys_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1789
             except Exception as exc:
                 logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
