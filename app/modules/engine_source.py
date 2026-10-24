@@ -913,10 +913,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
     tables = dict(await engine_schema.live_tables(db))
-    for k, v in engine_schema.tables_in_code(others).items():
+    jobs_own = engine_schema.tables_in_code(others)
+    for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    found += engine_schema.unknown_schema_refs(output, tables)
+    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own))
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)

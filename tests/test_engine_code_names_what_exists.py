@@ -497,3 +497,11 @@ def test_a_siblings_test_file_is_not_part_of_its_module():
            "```python\n# tests/test_paper_spy_benchmark_tracker.py\nclass FakeSecretStore:\n    pass\n```"}
     d = es.sibling_definitions([t21])["paper_spy_benchmark_tracker"]
     assert "get_spy_benchmark" in d["names"] and "FakeSecretStore" not in d["names"]
+
+
+
+def test_a_missing_table_is_told_which_tables_the_job_has():
+    """§17.1784 — live (f00ea97f T24): four attempts each guessed a new table name; the refusal never said which exist."""
+    out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT * FROM positions')\n```"
+    found = sch.unknown_schema_refs(out, {**LIVE, **sch.tables_in_code([T3_HELPER])}, {"ingested_item", "signal"})
+    assert found and "this job's tables are `ingested_item`, `signal`" in found[0]
