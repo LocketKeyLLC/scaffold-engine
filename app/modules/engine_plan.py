@@ -81,6 +81,18 @@ def prefix_for(brief: dict | None) -> str:
     return "job"
 
 
+#: §17.1797 — the per-module test sentence written before §17.1783 (no database; `async_session` mocked)
+_STALE_TESTS_RE = re.compile(r"In this same step also write `tests/test_(\w+)\.py`:[^`]*(?:`[^`]*`[^`]*)*?with no network, "
+                             r"database or secrets\.")
+
+
+def _tests_note(mod: str) -> str:
+    return (f"In this same step also write `tests/test_{mod}.py`: pytest tests of what `{mod}.py` must do (its "
+            "rules, its edge cases, its failure paths). They run before the step passes, with no network or secrets; "
+            "`async_session` is a scratch database with this job's tables, so SQL is tested for real; HTTP clients "
+            "and model calls are mocked.")
+
+
 def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     """Complete ``tasks`` in place; return what was changed, one line each (the plan's validator warnings)."""
     changes: list[str] = []
@@ -220,13 +232,19 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
     # 2. every module is tested in the step that writes it
     for t in tasks:
         mod = _module_of(t)
-        if not mod or re.search(rf"\btest_{re.escape(mod)}\.py\b", _text(t)):
+        if not mod:
             continue
-        t["notes"] = (str(t.get("notes") or "").rstrip() + " " if t.get("notes") else "") + (
-            f"In this same step also write `tests/test_{mod}.py`: pytest tests of what `{mod}.py` must do (its rules, "
-            "its edge cases, its failure paths). They run before the step passes, with no network or secrets; "
-            "`async_session` is a scratch database with this job's tables, so SQL is tested for real; HTTP clients "
-            "and model calls are mocked.")
+        # §17.1797 — a step planned before the scratch database (§17.1783) still says to mock `async_session` and
+        # that tests run "with no network, database or secrets"; live (f00ea97f T25) the verifier refused a real SQL
+        # test on that sentence while the engine block said the opposite. The old sentence is replaced.
+        notes = str(t.get("notes") or "")
+        if _STALE_TESTS_RE.search(notes):
+            t["notes"] = _STALE_TESTS_RE.sub(lambda m: _tests_note(m.group(1)), notes)
+            changes.append(f"module_tests_reworded: {t.get('id')} tests use the scratch database")
+            continue
+        if re.search(rf"\btest_{re.escape(mod)}\.py\b", _text(t)):
+            continue
+        t["notes"] = (notes.rstrip() + " " if notes else "") + _tests_note(mod)
         changes.append(f"module_tests_added: {t.get('id')} writes tests/test_{mod}.py")
 
     # 3. approval is asked now and answered later: a step specified to return the answer cannot be written
