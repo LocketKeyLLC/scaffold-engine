@@ -634,6 +634,8 @@ class IdeaInput(BaseModel):
     # §17.809 — per-job --quick: flag the job quick-mode so every phase layers
     # the fast "quick" model map, without touching global settings.
     quick: bool = False
+    # §17.1811 — the finished jobs whose code this one continues; their done code steps count as its own siblings.
+    builds_on: list[UUID] = Field(default_factory=list, max_length=5)
 
     @field_validator("idea")
     @classmethod

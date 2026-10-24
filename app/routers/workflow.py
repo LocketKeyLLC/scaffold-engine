@@ -143,6 +143,18 @@ async def ideate_endpoint(
     return result
 
 
+async def _finished_jobs_or_422(db, ids) -> list[str]:
+    """§17.1811 — a job builds only on jobs that finished: their done steps are what its code stands on."""
+    out: list[str] = []
+    for jid in ids or []:
+        status = (await db.execute(text("SELECT status FROM jobs WHERE id = :j"), {"j": str(jid)})).scalar()
+        if status != "completed":
+            raise HTTPException(status_code=422, detail=f"builds_on: job {jid} is {status or 'not found'}, "
+                                                        "not completed")
+        out.append(str(jid))
+    return out
+
+
 @router.post("/ideate/start")
 async def ideate_start_endpoint(
     body: IdeaInput,
@@ -164,9 +176,15 @@ async def ideate_start_endpoint(
         else body.model_overrides
     )
     await _require_valid_models(overrides)
+    builds_on = await _finished_jobs_or_422(db, body.builds_on)      # §17.1811
     # §17.810 — stamp owner at row creation; the background refine reuses this
     # same row (job_id), so ownership is set before Phase 1 even starts.
     job_id = await create_ideation_job(body.idea, db, domain=body.domain, owner=principal.identity)
+    if builds_on:
+        await db.execute(text(
+            "UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{builds_on}', CAST(:b AS jsonb)) "
+            "WHERE id = :j"), {"b": json.dumps(builds_on), "j": job_id})
+        await db.commit()
     if body.quick:
         await mark_job_quick(job_id)
     spawn_phase1_background(

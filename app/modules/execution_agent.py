@@ -2040,10 +2040,8 @@ async def execute_next_node(
                     async with async_session() as _esdb:
                         _own_mods, _ = await _es.job_code(_esdb, job_id, except_node=node_key)
                         # §17.1786 — and the job's tables, as its finished migration makes them
-                        _done = [dict(r) for r in (await _esdb.execute(text(
-                            "SELECT node_key, title, description, prompt_template, output_text FROM dag_nodes "
-                            "WHERE job_id = :j AND status = 'done' AND node_key <> :k"),
-                            {"j": job_id, "k": node_key})).mappings().all()]
+                        _done = [r for r in await _es.code_rows(_esdb, job_id)      # §17.1811
+                                 if r.get("status") == "done" and r.get("node_key") != node_key]
                     from app.modules import engine_schema as _esch
                     _grounding_blocks.append(_es.block_for(
                         node_snapshot, _own_mods,
@@ -2517,14 +2515,13 @@ async def execute_next_node(
                 if _es.targets_the_engine(brief):
                     from app.sandbox import engine_tests as _et
                     async with async_session() as _etdb:
-                        _rows = [dict(r) for r in (await _etdb.execute(text(
-                            "SELECT node_key, title, description, prompt_template, output_text, status "
-                            "FROM dag_nodes WHERE job_id = :j"), {"j": job_id})).mappings().all()]
+                        _rows = await _es.code_rows(_etdb, job_id)                  # §17.1811
                     _me = next((r for r in _rows if r["node_key"] == node_key), {"node_key": node_key})
                     _et_res = await _et.check(output, _me, _rows)
                     (logger.warning if _et_res.verdict == "skip" else logger.info)(
                         "engine_test_check: node='%s' verdict=%s ran=%s reason=%s", title, _et_res.verdict,
                         _et_res.ran, _et_res.reason[:200])
+                    _evidence_summary["engine_test"] = _et.record(_et_res)   # §17.1810 — kept, not only logged
                     if _et_res.verdict == "fail":
                         engine_test_reason = _et_res.reason
             except Exception as exc:
@@ -2765,7 +2762,7 @@ async def execute_next_node(
             f"Node '{title}' -> {final_status}",
             {"model": exec_model, "confidence": confidence, "reason": reason},
         )
-        if _evidence_summary.get("checked"):
+        if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes
             # read `unsupported` from it so a flagged value is not credited by
             # the upstream text it sits in.
