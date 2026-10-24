@@ -650,3 +650,40 @@ def test_a_refused_plural_column_points_to_its_singular():
     out = "```python\nfrom sqlalchemy import text\nQ = text('SELECT rationale, sources FROM proposal')\n```"
     found = sch.unknown_schema_refs(out, tables, set(tables), fks)
     assert found and "`source` (not `sources`) is on `ingested_item` -- reach it from `proposal` with a JOIN" in found[0]
+
+
+# ── §17.1794 JSON columns and CHECK constraints are shown (live job f00ea97f T24D) ──
+
+T3_RULES = '''```python
+import sqlalchemy as sa
+from alembic import op
+
+
+def upgrade() -> None:
+    op.create_table(
+        "ingested_item",
+        sa.Column("id", sa.BigInteger, primary_key=True),
+        sa.Column("source", sa.Text, nullable=False),
+        sa.Column("payload", sa.JSON, nullable=False),
+        sa.CheckConstraint("source IN ('sec_edgar','reddit')", name="ck_source"),
+    )
+    op.create_table("plain", sa.Column("id", sa.BigInteger, primary_key=True))
+```'''
+
+
+def test_json_columns_and_checks_are_read_and_shown():
+    rules = sch.column_rules_in_code([T3_RULES])
+    assert rules == {"ingested_item": {"json": ["payload"], "checks": ["source IN ('sec_edgar','reddit')"]}}
+    b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_RULES]), rules=rules)
+    assert "JSON: payload; CHECK source IN ('sec_edgar','reddit')" in b
+    assert "a JSON column takes `json.dumps(value)` with `CAST(:p AS jsonb)`" in b
+
+
+@pytest.mark.asyncio
+async def test_the_executor_passes_the_column_rules():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.modules.engine_schema.tables_in_code", return_value={"ingested_item": {"id", "payload"}}), \
+         patch("app.modules.engine_schema.column_rules_in_code",
+               return_value={"ingested_item": {"json": ["payload"], "checks": []}}):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    assert "JSON: payload" in captured["prompt"]

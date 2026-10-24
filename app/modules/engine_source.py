@@ -1252,23 +1252,32 @@ def matching_settings(want: set[str], rare: int = 3) -> list[str]:
     return [f for f in fields if any(len(w) >= 6 and df[w] <= rare and w in want for w in f.split("_"))][:20]
 
 
-def _render_job_tables(tables: dict, fks: dict | None = None) -> str:
+def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None = None) -> str:
     """§17.1786 — the job's own tables, exactly as its migration makes them. Live (job f00ea97f T13, T20): the plan's
     text said "filter on publication_time" while the migration made `published_ts`; each attempt followed the text and
     §17.1782 refused it."""
     fks = fks or {}
+    rules = rules or {}
+
+    def _rules(t: str) -> str:
+        r = rules.get(t) or {}
+        bits = ([f"JSON: {', '.join(r['json'])}"] if r.get("json") else []) + \
+               ([f"CHECK {c}" for c in r.get("checks", [])])
+        return ("\n        " + "; ".join(bits)) if bits else ""
     rows = [f"    {t}: " + ", ".join(f"{col}→{fks[t][col]}" if col in fks.get(t, {}) else col for col in sorted(c))
-            for t, c in sorted(tables.items()) if c]
+            + _rules(t) for t, c in sorted(tables.items()) if c]
     if not rows:
         return ""
     return ("### This job's tables (from its migration -- exact names; where this step's text names a table or column "
             "differently, these win)\n" + "\n".join(rows) + "\n"
             + ("    (`col→table.id` is a foreign key: insert the parent row first -- in tests too, the scratch database "
-               "enforces it)\n" if any(fks.values()) else ""))
+               "enforces it)\n" if any(fks.values()) else "")
+            + ("    (a JSON column takes `json.dumps(value)` with `CAST(:p AS jsonb)` through `text()`, never a dict; a "
+               "CHECK lists the only values a row may hold -- tests use those values)\n" if rules else ""))
 
 
 def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, tables: dict | None = None,
-              written: set[str] | None = None, fks: dict | None = None) -> str:
+              written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None) -> str:
     """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042)."""
     index = module_index()
     layout: dict[str, list[str]] = {}
@@ -1303,7 +1312,7 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 9000, 
         "### Modules every change uses\n" + "".join(_render_module(m) for m in _CORE),
     ]
     if tables:
-        jt = _render_job_tables(tables, fks)
+        jt = _render_job_tables(tables, fks, rules)
         if jt:
             parts.insert(1, jt)              # near the top: the block is cut at `budget`, the schema must survive
     caps = capabilities_for(node)
