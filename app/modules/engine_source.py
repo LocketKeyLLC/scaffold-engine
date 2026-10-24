@@ -974,7 +974,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own))
+    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own),
+                                               engine_schema.foreign_keys_in_code(others))
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
