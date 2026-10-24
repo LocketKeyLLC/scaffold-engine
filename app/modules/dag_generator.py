@@ -77,6 +77,11 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 Rules:
 - Decompose the idea into SINGLE-OUTCOME execution steps (see "Single outcome per node" below): each step produces ONE discrete, independently verifiable result the operator can finish and check before moving on. §17.686 — COVER THE ENTIRE GOAL: emit one node for EACH distinct outcome the goal actually requires, so that completing every node completes the whole goal. Do NOT drop, skip, or merge away real work to save space, and do NOT pad with filler. A simple brief is 3-6 steps; a multi-part host-action / infra / deployment brief needs a node for EACH install / configure / integrate / verify outcome and is typically 12-30 (a large multi-service build legitimately reaches the cap). HARD LIMIT: never emit more than the "maximum tasks" count stated in the request below. Only if the goal genuinely needs MORE nodes than that cap should you fold the lowest-value adjacent work into consolidated phase-level tasks to fit — otherwise prefer full granular per-outcome coverage. When unsure whether something is one step or several, SPLIT — smaller steps are easier to execute, verify, and recover than big ones.
 - Every task must have a unique id (T1, T2, ...)
+- §17.1804 — NEVER plan a step that asks the operator for a fact a machine holds about itself (its model, CPU and
+  cores, RAM, disks): the engine reads it off the machine (lscpu, free, lsblk, /sys/class/dmi) in a step that depends
+  on the step giving the engine access (SSH + its key), and every step that USES those facts (sizing, capacity,
+  comparison, a choice made on them) depends on that read. Setting the machines up (OS, network, SSH) never waits on
+  their facts. How many machines there are is the number set up.
 - depends_on references other task ids — only use ids you have defined
 - No circular dependencies
 - First task(s) must have empty depends_on — ONLY genuine starting work (nothing
@@ -896,6 +901,92 @@ def insert_missing_os_install(tasks: list[dict]) -> list[str]:
             ]
         added.append(new_id)
     return added
+
+
+# §17.1804 — a fact a machine holds about itself is read off the machine, never asked of the operator.
+_ASKS_OPERATOR_RE = re.compile(
+    r"\b(?:ask|have|get|collect\s+from|query)\s+(?:the\s+)?(?:operator|user|owner)\b"
+    r"|\b(?:operator|user|owner)\s+(?:reports?|provides?|lists?|supplies|tells?|enters?|gives?)\b", re.IGNORECASE)
+_MACHINE_FACT_RE = re.compile(
+    r"\b(?:model|ram|memory|cpus?|cores?|core\s+count|disks?|disk\s+size|storage|ssd|hdd|specs?|"
+    r"specifications|hardware)\b", re.IGNORECASE)
+_REACHABLE_RE = re.compile(
+    r"\bssh\b[^.\n]{0,60}\bkeys?\b|\bkeys?\b[^.\n]{0,60}\bssh\b|\bpasswordless\b", re.IGNORECASE)
+_SETUP_RE = re.compile(
+    r"\b(?:install(?:ation)?|walkthrough|operating\s+system|os|lan|network|ssh|boot|usb|bios|partition(?:ing)?|"
+    r"connect|wi-?fi|ethernet)\b", re.IGNORECASE)
+_MACHINE_NOUN_RE = re.compile(r"\b(laptop|machine|server|node|host|pc|computer|desktop|worker)s?\b", re.IGNORECASE)
+
+
+def _task_text(t: dict) -> str:
+    return " ".join(str(t.get(k) or "") for k in ("name", "description", "notes"))
+
+
+def read_machine_facts_instead_of_asking(tasks: list[dict]) -> list[str]:
+    """§17.1804 — a step that asks the operator for what a machine knows about itself (model, CPU and cores, RAM,
+    disks) becomes a read on the machine, once the engine can reach it; the setup that makes it reachable no longer
+    waits on those facts, and everything that uses them comes after the read. Returns one line per step changed.
+
+    Live (job f9ca3ee1, a cluster from old laptops): T1 "Ask the operator how many old laptops exist and their
+    model, RAM, core count, and disk size"; the capacity estimate, the comparison and the approval stood on it, and
+    the OS install walkthrough and the engine's SSH key stood on the approval. The operator: "the owner doesnt know
+    the exact models or information and it can be obtained after the engine walks the user through downloading and
+    implementing the new os' on the laptops connecting everything then finding out." Deterministic and acyclic:
+    the read depends on the reachability step, and no step of the setup chain depends on anything after the read."""
+    real = [t for t in tasks if t.get("id")]
+    by_id = {t["id"]: t for t in real}
+    changed: list[str] = []
+
+    def ancestors(tid: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(by_id.get(tid, {}).get("depends_on") or [])
+        while stack:
+            d = stack.pop()
+            if d in by_id and d not in seen:
+                seen.add(d)
+                stack.extend(by_id[d].get("depends_on") or [])
+        return seen
+
+    def descendants(tid: str) -> set[str]:
+        return {x for x in by_id if tid in ancestors(x)}
+
+    reach = [t for t in real if _REACHABLE_RE.search(_task_text(t))]
+    for t in real:
+        text = _task_text(t)
+        if not _ASKS_OPERATOR_RE.search(text):
+            continue
+        if len({m.group(0).lower() for m in _MACHINE_FACT_RE.finditer(text)}) < 2:
+            continue
+        cands = [r for r in reach if r["id"] != t["id"]]
+        if not cands:
+            continue
+        r = max(cands, key=lambda x: len(ancestors(x["id"])))   # the last step that makes the machines reachable
+        # the setup chain: the reachability step and the setup steps it stands on
+        chain = {r["id"]}
+        stack = [r["id"]]
+        while stack:
+            for d in by_id[stack.pop()].get("depends_on") or []:
+                if d in by_id and d not in chain and d != t["id"] and _SETUP_RE.search(_task_text(by_id[d])):
+                    chain.add(d)
+                    stack.append(d)
+        after = descendants(t["id"]) | {t["id"]}
+        for c in chain:
+            by_id[c]["depends_on"] = [d for d in by_id[c].get("depends_on") or [] if d in chain or d not in after]
+        noun_m = _MACHINE_NOUN_RE.search(text)
+        noun = noun_m.group(1).lower() if noun_m else "machine"
+        t["name"] = f"Read {noun} hardware"
+        t["tool"] = "Shell"
+        t["type"] = "action"
+        t["notes"] = t["description"] = (                 # `notes` is what is stored as the step's text
+            f"On each {noun} the engine can reach (set up in {r['id']}): read its own hardware -- model "
+            "(`cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name`), CPU and cores (`lscpu`), RAM "
+            "(`free -b`), disks (`lsblk -b -d -o NAME,SIZE,ROTA,MODEL`) -- and produce one inventory row per "
+            f"{noun}. The operator is never asked for these: the machine holds them. How many {noun}s there are is "
+            "the number that were set up.")
+        t["depends_on"] = [r["id"]] + [d for d in t.get("depends_on") or [] if d != r["id"] and d not in chain]
+        changed.append(f"{t['id']} reads each {noun}'s hardware after {r['id']} instead of asking the operator "
+                       f"(setup chain {', '.join(sorted(chain))} no longer waits on it)")
+    return changed
 
 
 def _enforce_deliverable_marking(tasks: list[dict]) -> list[str]:
@@ -1908,6 +1999,13 @@ async def generate_dag(
                 logger.warning(
                     "dag_os_install_gap_repaired: job=%s nodes=%s", job_id, _os_added,
                 )
+        # §17.1804 — what a machine holds about itself is read off it once reachable, never asked of the operator
+        try:
+            for _c in read_machine_facts_instead_of_asking(normalized):
+                validator_warnings.append(f"machine_facts_read_not_asked: {_c}")
+                logger.warning("dag_machine_facts_read_not_asked: job=%s %s", job_id, _c)
+        except Exception as exc:                          # noqa: BLE001 — the plan stands without it; logged loudly
+            logger.warning("dag_machine_facts_pass_failed: job=%s err=%r", job_id, exc)
         # §17.1766 — a plan for code that extends the engine: each module tested where it is written, no engine
         # module's name taken, one step that wires the parts in. Before validate_dag so an added step is edged.
         try:
