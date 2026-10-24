@@ -81,6 +81,16 @@ def prefix_for(brief: dict | None) -> str:
     return "job"
 
 
+#: §17.1799 — "entry points for A, B, C" in a step's text
+_ENTRY_POINTS_RE = re.compile(r"\bentry points? for ([^.;:`]+)", re.I)
+
+
+def _stem(item: str) -> str:
+    """The word that names an entry point (`dashboard` of "operator dashboard"); its first 6 letters match a step."""
+    words = [w for w in re.findall(r"[a-z]+", item.lower()) if len(w) > 3 and w not in ("daily", "batch", "operator")]
+    return words[-1][:6] if words else ""
+
+
 #: §17.1797 — the per-module test sentence written before §17.1783 (no database; `async_session` mocked)
 _STALE_TESTS_RE = re.compile(r"In this same step also write `tests/test_(\w+)\.py`:[^`]*(?:`[^`]*`[^`]*)*?with no network, "
                              r"database or secrets\.")
@@ -228,6 +238,42 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
                         u[k] = pat.sub(lambda m: m.group(0).replace(mod, new), str(u[k]))
             changes.append(f"engine_module_renamed: {t.get('id')} `{mod}.py` → `{new}.py` "
                            f"(app.modules.{mod} is the engine's own)")
+
+    # 1b. §17.1799 — a step that wires many modules into several entry points is one step per entry point. Live (job
+    #     f00ea97f T25 "Expose as a lab module with entry points for daily batch proposals, approval, execution,
+    #     backtesting, dashboard"): 16 attempts over four rounds, each wiring a different subset of ~20 modules and
+    #     mostly dropping its tests. Each entry point gets its own module and tests; the step itself re-exports them.
+    #     An entry point whose own step was skipped is left out (T24, the dashboard, skipped by the operator).
+    skipped = [str(t.get("name") or "").lower() for t in tasks if t.get("status") == "skipped"]
+    for t in list(tasks):
+        mod = _module_of(t)
+        m = _ENTRY_POINTS_RE.search(str(t.get("notes") or "")) if mod else None
+        items = [x.strip() for x in re.split(r",\s*(?:and\s+)?|\s+and\s+", m.group(1))] if m else []
+        items = [x for x in items if x and len(x.split()) <= 4 and not x.lower().startswith(("with ", "in "))]
+        if len(items) < 3:
+            continue
+        keep = [x for x in items if not any(_stem(x) and _stem(x) in n for n in skipped)]
+        left_out = [x for x in items if x not in keep]
+        subs: list[dict] = []
+        for i, item in enumerate(keep):
+            sub_mod = f"{pre}_entry_{_slug(item)}"
+            # `E<n>`, never a letter: `<key>D` is §17.1793's data step
+            subs.append({"id": f"{t.get('id')}E{i + 1}", "name": f"Entry point: {item}", "tool": "CodeGen",
+                         "type": t.get("type") or "action", "depends_on": list(t.get("depends_on") or []),
+                         "notes": (f"Python module `{sub_mod}.py`: the lab's `{item}` entry point -- one async "
+                                   f"function that runs this one path end to end through the job's own modules (see "
+                                   f"\"This job's modules\"), with every input it needs read from those modules or "
+                                   f"the job's tables, never a placeholder. Only this path; the other entry points are "
+                                   f"their own steps. " + _tests_note(sub_mod))})
+        at = tasks.index(t)
+        tasks[at:at] = subs
+        t["notes"] = (f"Python module `{mod}.py`: the lab's single import point -- re-export the entry function of "
+                      + ", ".join(f"`{x['notes'].split('`')[1][:-3]}`" for x in subs)
+                      + " and nothing else (no logic of its own). " + _tests_note(mod)
+                      + (f" Not exposed: {', '.join(left_out)} (its step was skipped)." if left_out else ""))
+        t["depends_on"] = list(t.get("depends_on") or []) + [x["id"] for x in subs]
+        changes.append(f"entry_points_split: {t.get('id')} → " + ", ".join(x["id"] for x in subs)
+                       + (f" (left out: {', '.join(left_out)})" if left_out else ""))
 
     # 2. every module is tested in the step that writes it
     for t in tasks:
@@ -468,6 +514,7 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
         "WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
     status = {r["node_key"]: r["status"] for r in rows}
     tasks = [{"id": r["node_key"], "name": r["title"], "notes": r["prompt_template"] or "", "tool": r["tool"],
+              "status": r["status"],                                              # §17.1799 skipped entry points
               "type": _TYPE_OF_NODE.get(r["node_type"] or "", "action"), "depends_on": list(r["depends_on"] or []),
               **({"tool_config": (r["tool_config"] if isinstance(r["tool_config"], dict)
                                   else _json.loads(r["tool_config"]))} if r["tool_config"] else {})}
