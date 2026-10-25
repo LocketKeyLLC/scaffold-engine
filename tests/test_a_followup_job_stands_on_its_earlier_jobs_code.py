@@ -330,3 +330,30 @@ async def test_a_step_that_does_not_rewrite_the_module_is_still_held_to_it():
            "async def run():\n    await execute_order(db=1, client=2, approval=3)\n```")
     found = await _findings_for(out, [OLD_EXECUTOR, me])
     assert "has no parameter `db`, `client`" in found and "(it takes approval)" in found, found
+
+
+# ── §17.1822 — each file is its own module; an earlier module is rewritten only by the step that names it ─────
+
+TWO_FILES = {"node_key": "T6D", "title": "Build daily signal-to-proposal batch -- data", "description": "",
+             "status": "done", "prompt_template": "Python module `paper_batch_data.py`: the DATA part of this task.",
+             "output_text": "```python\n# app/modules/paper_batch_data.py\nasync def get_batch_proposals(db):\n"
+                            "    return []\n```\n```python\n# app/modules/paper_audit_trail_writer.py\n"
+                            "async def write_approval(*, proposal_id):\n    return 1\n```"}
+
+
+def test_each_file_is_credited_with_its_own_names():
+    defs = es.sibling_definitions([TWO_FILES])
+    assert "get_batch_proposals" in defs["paper_batch_data"]["defined"]
+    assert "write_approval" not in defs["paper_batch_data"]["names"]              # live: credited here
+    assert defs["paper_audit_trail_writer"]["node"] == "T6D" and "write_approval" in defs["paper_audit_trail_writer"]["funcs"]
+
+
+def test_a_step_that_does_not_name_an_earlier_module_may_not_rewrite_it():
+    writer = {"node_key": "f00ea97f:T4", "title": "Implement audit trail writer", "description": "", "status": "done",
+              "prompt_template": "Python module `paper_audit_trail_writer.py`",
+              "output_text": "```python\n# app/modules/paper_audit_trail_writer.py\nX = 1\n```"}
+    me = {k: TWO_FILES[k] for k in ("node_key", "title", "description", "prompt_template")}
+    found = es.writes_a_siblings_module(TWO_FILES["output_text"], me, [writer])
+    assert found and "paper_audit_trail_writer.py`: that module is step f00ea97f:T4's" in found[0]
+    fixer = {**me, "prompt_template": "Fix paper_audit_trail_writer: write_approval takes proposal_id."}
+    assert es.writes_a_siblings_module(TWO_FILES["output_text"], fixer, [writer]) == []
