@@ -286,3 +286,27 @@ async def test_the_sandbox_runs_short_tracebacks_and_reports_from_the_first_fail
     assert res.verdict == "fail"
     assert "--tb=short" in run.await_args.args[1]
     assert "E   ValueError: cause number 0" in res.reason and "12 failed, 2 passed" in res.reason
+
+
+# ── §17.1823 — a recognised cause is named next to the error ───────────────────────────────────────────────
+
+LIVE_JSON = ("E   TypeError: descriptor 'encode' for 'str' objects doesn't apply to a 'dict' object\n"
+             "E   asyncpg.exceptions.DataError: invalid input for query argument $4: {'ticker': 'SPY'} (descriptor "
+             "'encode' for 'str' objects doesn't apply to a 'dict' object)\n1 failed, 2 passed in 1.1s")
+LIVE_MOCK = ("    result = await db.execute(\nE   TypeError: 'MagicMock' object can't be awaited\n"
+             "1 failed, 7 passed in 1.92s")
+
+
+def test_a_recognised_failure_gets_its_cause_and_a_miss_gets_none():
+    assert "json.dumps(value)" in et.known_causes(LIVE_JSON) and "AsyncMock" not in et.known_causes(LIVE_JSON)
+    assert "AsyncMock" in et.known_causes(LIVE_MOCK)
+    assert et.known_causes("E   assert 0 == 3\n1 failed") == ""                      # an ordinary failure: nothing
+    assert et.known_causes("E   KeyError: 'dict'") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_reason_carries_the_cause():
+    run = AsyncMock(return_value=CodeRunResult(ok=False, exit_code=1, stdout=LIVE_JSON, stderr=""))
+    res = await _check(WITH_TEST, run)
+    head = res.reason.split("\n\n", 1)[0]
+    assert res.verdict == "fail" and "Cause the engine recognises: a Python dict or list was bound" in head
