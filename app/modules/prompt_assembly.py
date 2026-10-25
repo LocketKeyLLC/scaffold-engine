@@ -632,6 +632,24 @@ def truncate_output(content: str, max_chars: int) -> str:
     )
 
 
+def brief_items(items, *, each: int = 500, budget: int = 6000) -> str:
+    """§17.1820 — a brief list (constraints, inventory) as bullet lines: every item, none dropped by its position.
+    Live (follow-up 5b4880c0, 2026-10-25): an operator decision added mid-project went in as the 11th constraint, and
+    the step prompts showed the first 8 -- the newest decision, the one the next attempts needed, was the one cut. Over
+    `budget` the rest is counted, never silently dropped."""
+    lines: list[str] = []
+    used = 0
+    vals = [str(i).strip() for i in (items or []) if i is not None and str(i).strip()]
+    for n, v in enumerate(vals):
+        line = f"- {v[:each]}"
+        if used + len(line) > budget:
+            lines.append(f"- … {len(vals) - n} more not shown (over the prompt budget)")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
 def _brief_essentials(brief: dict) -> str:
     """§17.850 — compact operator-established facts for the task prompt.
 
@@ -643,13 +661,12 @@ def _brief_essentials(brief: dict) -> str:
     if not brief:
         return ""
     parts = []
-    constraints = [str(c) for c in (brief.get("constraints") or []) if str(c).strip()][:8]
+    constraints = brief_items(brief.get("constraints"))                       # §17.1820
     if constraints:
-        parts.append("Constraints (honor these):\n" + "\n".join(f"- {c[:200]}" for c in constraints))
-    inputs = [str(i) for i in (brief.get("inputs_available") or []) if str(i).strip()][:10]
+        parts.append("Constraints (honor these):\n" + constraints)
+    inputs = brief_items(brief.get("inputs_available"))
     if inputs:
-        parts.append("Available hardware/inputs (already owned — use them):\n"
-                     + "\n".join(f"- {i[:200]}" for i in inputs))
+        parts.append("Available hardware/inputs (already owned — use them):\n" + inputs)
     feedback = (brief.get("user_feedback") or "").strip()
     if feedback:
         # §17.1218 — "already decided … do not re-ask" was applied to answers
