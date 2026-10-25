@@ -2030,7 +2030,13 @@ async def generate_dag(
             _brief_d = brief if isinstance(brief, dict) else (json.loads(brief) if isinstance(brief, str) and brief else {})
             _brief_d = engine_source.brief_for_the_engine(_brief_d, input_text)       # §17.1813
             if engine_source.targets_the_engine(_brief_d):
-                for _c in engine_plan.complete_engine_plan(normalized, _brief_d):
+                try:
+                    async with db.begin_nested():
+                        _carried = await engine_source.carried_modules(db, job_id)             # §17.1814
+                except Exception as exc:                  # noqa: BLE001 — a plan without a prior job's names
+                    logger.warning("dag_carried_modules_failed: job=%s err=%r", job_id, exc)
+                    _carried = []
+                for _c in engine_plan.complete_engine_plan(normalized, _brief_d, _carried):
                     validator_warnings.append(_c)
                     logger.warning("dag_engine_plan_completed: job=%s %s", job_id, _c)
         except Exception as exc:                          # noqa: BLE001 — the plan stands without it; logged loudly

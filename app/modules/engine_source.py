@@ -736,8 +736,10 @@ def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list
             continue
         leaf = m.group(2)
         if leaf in theirs and leaf != own and not re.match(r"(?:test_\w+|\w+_test|conftest)$", leaf):
-            found.append(f"`# {m.group(1)}{leaf}.py`: that module is step {theirs[leaf]}'s; this step writes "
-                         f"`{own}.py`" + (" -- import what it needs from it" if own else ""))
+            found.append(f"`# {m.group(1)}{leaf}.py`: that module is step {theirs[leaf]}'s; "
+                         + (f"this step writes `{own}.py` -- import what it needs from it" if own else
+                            "this step names no module of its own -- write its own file and import what it needs "
+                            "from that one"))
     return found
 
 
@@ -782,6 +784,16 @@ async def code_rows(db, job_id: str) -> list[dict]:
         ") r ORDER BY src, CASE WHEN src = 0 THEN ord END NULLS LAST, CASE WHEN src = 0 THEN node_key END"),
         {"j": job_id})).mappings().all()
     return [{k: v for k, v in dict(r).items() if k not in ("src", "ord")} for r in rows]
+
+
+async def carried_modules(db, job_id: str) -> list[str]:
+    """§17.1814 — the modules the jobs this one builds on finished (`paper_order_executor`, …), in plan order."""
+    out: list[str] = []
+    for r in await code_rows(db, job_id):
+        m = step_module(r) if is_carried(r) else ""
+        if m and m not in out:
+            out.append(m)
+    return out
 
 
 def is_carried(row: dict) -> bool:

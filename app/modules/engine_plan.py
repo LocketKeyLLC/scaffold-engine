@@ -103,11 +103,37 @@ def _tests_note(mod: str) -> str:
             "and model calls are mocked.")
 
 
-def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
-    """Complete ``tasks`` in place; return what was changed, one line each (the plan's validator warnings)."""
+def _carried_prefix(carried: list[str]) -> str | None:
+    """§17.1814 — the word the earlier job's modules start with (`paper` for `paper_order_executor`, …)."""
+    heads = [m.split("_", 1)[0] for m in carried if "_" in m]
+    return max(sorted(set(heads)), key=heads.count) if heads else None
+
+
+_EDITS_RE = r"\b(?:edit|fix|change|update|modify|correct|repair|extend)\w*\s+(?:the\s+|existing\s+|in\s+)*`?"
+
+
+def _carried_own(t: dict, carried: list[str]) -> str | None:
+    """§17.1814 — the earlier job's module this step changes: its title names it ("Fix SPY benchmark tracker"), or
+    its text says to edit it ("Edit paper_order_executor in place"). A module it only USES is not its own."""
+    from app.modules.engine_source import _names_module
+    title = str(t.get("name") or "").lower()
+    for leaf in carried:
+        if _names_module(leaf, title, set(re.findall(r"[a-z0-9]+", title))):
+            return leaf
+    for leaf in carried:
+        if re.search(_EDITS_RE + re.escape(leaf) + r"\b", _text(t), re.I):
+            return leaf
+    return None
+
+
+def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[str] | None = None) -> list[str]:
+    """Complete ``tasks`` in place; return what was changed, one line each (the plan's validator warnings).
+    ``carried`` (§17.1814): the modules a job this one builds on finished -- a step that fixes one writes it in
+    place, and the job's new modules take their prefix."""
     changes: list[str] = []
     engine_leaves = {m.rsplit(".", 1)[-1] for m in module_index() if m.startswith("app.modules.")}
-    pre = prefix_for(brief)
+    carried = list(carried or [])
+    pre = _carried_prefix(carried) or prefix_for(brief)
 
     # 0a. §17.1768/1769/1771 — the engine's own tables are an Alembic revision, never DDL run by hand or by app code.
     #     Live (job 918b6274's re-plans): T3 [Shell] "Runs CREATE TABLE statements in the existing Postgres database";
@@ -218,9 +244,15 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None) -> list[str]:
             continue
         if _MIGRATION_RE.search(_text(t)):
             continue                                       # a schema step writes an Alembic revision, not a module
+        own = _carried_own(t, carried)
+        if own:                                            # §17.1814 — the earlier job's module, fixed in place
+            t["notes"] = (f"Python module `{own}.py` -- the earlier job's module: edit it in place (the whole file, "
+                          "its public names kept)." + (" " + str(t["notes"]).strip() if t.get("notes") else ""))
+            changes.append(f"carried_module_named: {t.get('id')} edits `{own}.py` in place (the earlier job wrote it)")
+            continue
         base = f"{pre}_{_slug(str(t.get('name') or t.get('id') or 'step'))}"
         name, n = base, 2
-        while name in taken or name in engine_leaves:
+        while name in taken or name in engine_leaves or name in carried:
             name, n = f"{base}_{n}", n + 1
         taken.add(name)
         t["notes"] = f"Python module `{name}.py`." + (" " + str(t["notes"]).strip() if t.get("notes") else "")
@@ -529,7 +561,7 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
                                   else _json.loads(r["tool_config"]))} if r["tool_config"] else {})}
              for r in rows]
     before = {t["id"]: dict(t) for t in tasks}
-    changes = complete_engine_plan(tasks, brief)
+    changes = complete_engine_plan(tasks, brief, await engine_source.carried_modules(db, job_id))    # §17.1814
     inserted, edited, kept = [], [], []
     for t in tasks:                                       # new steps first: an edit may depend on one
         if t["id"] in before:

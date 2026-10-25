@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -107,6 +108,11 @@ async def _generate(brief: dict, input_text: str | None = None) -> tuple[list[di
         return row
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=_execute)
+
+    @asynccontextmanager
+    async def _nested():
+        yield
+    db.begin_nested = MagicMock(side_effect=_nested)
     warnings: list[str] = []
     with patch.object(dag_generator, "_generate_dag_with_validator", _stub), \
          patch.object(dag_generator, "_fail_job", new_callable=AsyncMock):
@@ -515,6 +521,7 @@ async def test_apply_to_job_carries_status_so_a_skipped_step_is_left_out():
     plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = rows
     db.execute = AsyncMock(side_effect=[brief_row, plan_rows])
     with patch("app.modules.engine_source.targets_the_engine", return_value=True), \
+         patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})) as ins, \
          patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
         out = await engine_plan.apply_to_job(db, str(uuid4()))
