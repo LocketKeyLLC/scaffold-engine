@@ -186,3 +186,105 @@ async def test_the_name_checks_accept_a_call_to_the_earlier_jobs_module_and_refu
     head = "```python\n# app/modules/paper_order_executor.py\nfrom app.modules.paper_alpaca_paper_client import "
     assert "get_bars" not in await findings(head + "get_bars\n```")
     assert "get_price_history" in await findings(head + "get_price_history\n```")
+
+
+# ── §17.1812 — a follow-up step is shown the earlier job's code, and may fix it ─────────────────────────────────
+
+SPY = {"node_key": "f00ea97f:T21", "title": "Implement SPY benchmark tracker", "description": "", "status": "done",
+       "prompt_template": "", "output_text": "```python\n# app/modules/paper_spy_benchmark_tracker.py\n"
+       "URL = 'https://api.example.com/spy'\n```\n```python\n# tests/test_paper_spy_benchmark_tracker.py\n"
+       "def test_url():\n    assert True\n```"}
+MIGRATION = {"node_key": "f00ea97f:T3", "title": "Implement audit trail schema", "description": "", "status": "done",
+             "prompt_template": "", "output_text": "```python\n# alembic/versions/0010_paper_audit_trail.py\n"
+             "revision = '0010'\n```"}
+LAB = [{**CLIENT, "node_key": "f00ea97f:T5"}, {**EXECUTOR, "node_key": "f00ea97f:T17"}, SPY, MIGRATION]
+
+
+def _step(title, prompt=""):
+    return {"node_key": "T2", "title": title, "description": "", "prompt_template": prompt}
+
+
+def test_every_file_is_listed_with_whether_it_has_tests():
+    out = es.carried_block(LAB, _step("Audit existing paper modules"))
+    assert "app/modules/paper_order_executor.py (step f00ea97f:T17) -- NO test file" in out
+    assert "app/modules/paper_spy_benchmark_tracker.py (step f00ea97f:T21) -- tests: " \
+           "tests/test_paper_spy_benchmark_tracker.py" in out
+    assert "alembic/versions/0010_paper_audit_trail.py (step f00ea97f:T3)\n" in out        # a migration has no tests
+    assert "Every file (4 modules)" in out
+
+
+def test_a_step_that_fixes_a_module_gets_its_current_code_first():
+    out = es.carried_block(LAB, _step("Fix ticker field consistency", "Edit paper_order_executor in place."))
+    assert "### `app/modules/paper_order_executor.py` (this step names it)\n```python\n" in out
+    assert "OLD = 'ticker'" in out
+    assert out.index("paper_order_executor.py` (this") < out.index("### `app/modules/paper_alpaca")
+    assert "edits it in place: the whole file under the same path" in out
+
+
+def test_a_module_is_named_by_its_words_and_brings_its_tests():
+    out = es.carried_block(LAB, _step("Fix SPY benchmark tracker", "Replace the api.example.com URL."))
+    assert "### `app/modules/paper_spy_benchmark_tracker.py` (this step names it)" in out
+    assert "### `tests/test_paper_spy_benchmark_tracker.py` (this step names it)" in out
+    assert "### `app/modules/paper_order_executor.py` (this" not in out            # one word ("tracker") is not a name
+    mig = es.carried_block(LAB, _step("Audit", "Read the audit-trail migration."))
+    assert "### `alembic/versions/0010_paper_audit_trail.py` (this step names it)" in mig   # the revision number aside
+
+
+def test_over_the_limit_a_file_is_named_not_cut():
+    step = _step("Fix SPY benchmark tracker")
+    whole = es.carried_block(LAB, step, budget=100000)
+    last = whole.rsplit("### `", 1)[1].split("`")[0]                     # the file the full block ends on
+    out = es.carried_block(LAB, step, budget=len(whole) - 1)
+    assert "paper_spy_benchmark_tracker.py` (this step names it)" in out
+    assert f"### `{last}`" not in out and f"Not shown here (over the size limit): `{last}`" in out
+
+
+def test_the_rest_comes_by_the_words_few_files_hold():
+    def mod(key, name, body):
+        return {"node_key": f"f00ea97f:{key}", "title": key, "description": "", "status": "done", "prompt_template": "",
+                "output_text": f"```python\n# app/modules/{name}.py\n{body}\n```"}
+    big = mod("T9", "paper_congress", "# every proposal and every order\n" + "X = 1\n" * 400)
+    lab = [big, mod("T1", "paper_a", "# proposal order"), mod("T2", "paper_b", "# proposal order"), SPY]
+    out = es.carried_block(lab, _step("Audit", "Find each proposal order and the made-up example URL."),
+                           budget=100000)
+    # two words every file holds lose to the one word only the SPY tracker holds; the biggest file comes last
+    assert out.index("### `app/modules/paper_spy_benchmark") < out.index("### `app/modules/paper_congress")
+
+
+def test_no_files_no_block():
+    assert es.carried_block([{**CLIENT, "node_key": "f00ea97f:T1", "output_text": "a decision"}], _step("x")) == ""
+
+
+def test_a_followup_step_may_rewrite_the_earlier_jobs_module_but_not_a_siblings():
+    me = {"node_key": "T2", "title": "Fix ticker field consistency", "prompt_template": "Edit paper_order_executor."}
+    fix = "```python\n# app/modules/paper_order_executor.py\nNEW = 'symbol'\n```"
+    assert es.writes_a_siblings_module(fix, me, [{**EXECUTOR, "node_key": "f00ea97f:T17"}]) == []
+    own_sibling = {**EXECUTOR, "node_key": "T7"}
+    assert "step T7's" in es.writes_a_siblings_module(fix, me, [own_sibling])[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["LLM", "CodeGen"])
+async def test_the_executor_shows_a_followup_step_the_earlier_jobs_code(tool):
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.sandbox.engine_tests.check", new=AsyncMock(return_value=SimpleNamespace(
+                verdict="pass", reason="ok", ran=[]))), \
+         patch("app.modules.engine_source.code_rows", new=AsyncMock(return_value=LAB)), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF, node_extra={
+            "tool": tool, "title": "Audit existing paper modules",
+            "prompt_template": "Read the paper_order_executor and report every field name."})
+    prompt = captured["calls"][0][-1]["content"]
+    assert "## The code this job builds on (job f00ea97f" in prompt, captured.get("raised")
+    assert "OLD = 'ticker'" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_builds_on_nothing_gets_no_block():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.sandbox.engine_tests.check", new=AsyncMock(return_value=SimpleNamespace(
+                verdict="pass", reason="ok", ran=[]))), \
+         patch("app.modules.engine_source.code_rows", new=AsyncMock(return_value=[{**CLIENT, "node_key": "T5"}])), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF, node_extra={"tool": "LLM"})
+    assert "The code this job builds on" not in captured["calls"][0][-1]["content"], captured.get("raised")

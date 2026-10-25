@@ -685,7 +685,8 @@ def imports_an_unwritten_sibling(output: str, others: list[dict], written: dict[
 
 def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list[str]:
     """§17.1775 — an output whose code is headed with another step's module: it would overwrite that step's file."""
-    theirs = {step_module(r): r.get("node_key") for r in others if step_module(r)}
+    # §17.1812 — a module the earlier job finished is not a sibling's file: a follow-up step exists to fix it
+    theirs = {step_module(r): r.get("node_key") for r in others if step_module(r) and not is_carried(r)}
     own = step_module({k: v for k, v in row.items() if k != "output_text"})
     found: list[str] = []
     for lang, code in extract_code_blocks(output or ""):
@@ -740,6 +741,69 @@ async def code_rows(db, job_id: str) -> list[dict]:
         ") r ORDER BY src, CASE WHEN src = 0 THEN ord END NULLS LAST, CASE WHEN src = 0 THEN node_key END"),
         {"j": job_id})).mappings().all()
     return [{k: v for k, v in dict(r).items() if k not in ("src", "ord")} for r in rows]
+
+
+def is_carried(row: dict) -> bool:
+    """A `code_rows` row from a job this one builds on (keyed `<job>:<key>`); this job's own keys never hold a colon."""
+    return ":" in str(row.get("node_key") or "")
+
+
+def _names_module(leaf: str, text: str, words: set[str]) -> bool:
+    """The step names this module: `paper_order_executor` itself, or every word of it ("SPY benchmark tracker")."""
+    toks = {t for t in leaf.lower().split("_") if t and t != "paper" and not t.isdigit()}     # `0010_paper_audit_trail`
+    return leaf.lower() in text or (len(toks) >= 2 and toks <= words)
+
+
+def carried_block(rows: list[dict], node: dict, budget: int = 40000) -> str:
+    """§17.1812 — what a step of a follow-up job is shown of the code its earlier job finished: every file with
+    whether it has tests, then the full current source of the modules the step names, then the rest by relevance,
+    up to `budget`. Live (follow-up 5b4880c0, 2026-10-25): T1 "Audit existing paper modules" -- an LLM step -- was
+    shown none of f00ea97f's 22 modules (only CodeGen steps got the engine block, and only signatures) and answered
+    "Cannot produce the requested audit inventory ... would be fabricated"; T2 "Edit paper_order_executor in place"
+    would have been given the executor's signatures, never its code."""
+    from app.sandbox.engine_tests import files_of, is_test
+    files: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        for path, code in files_of(r).items():
+            files[path] = (code, str(r.get("node_key") or ""))
+    if not files:
+        return ""
+    text = " ".join(str(node.get(k) or "") for k in ("title", "description", "prompt_template")).lower()
+    words = set(re.findall(r"[a-z0-9]+", text))
+    tested = {Path(p).stem.removeprefix("test_") for p in files if is_test(p)}
+    mods = [p for p in files if not is_test(p)]
+    manifest = "".join(
+        f"    {p} (step {files[p][1]})"
+        + ("" if p.startswith("alembic/") else
+           f" -- {'tests: tests/test_' + Path(p).stem + '.py' if Path(p).stem in tested else 'NO test file'}") + "\n"
+        for p in mods)
+    named = [p for p in mods if _names_module(Path(p).stem, text, words)]
+    named += [p for p in files if is_test(p) and Path(p).stem.removeprefix("test_") in {Path(n).stem for n in named}]
+    # the rest by the step's words each file holds, a word in few files counting most (a word in every file -- "the
+    # code" -- picks nothing; the largest file would otherwise come first by sheer size)
+    want = _words(text)
+    has = {p: want & set(re.findall(r"[a-z][a-z0-9]{3,}", files[p][0].lower())) for p in files}
+    df = {w: sum(w in h for h in has.values()) for w in want}
+    rest = sorted((p for p in files if p not in named),
+                  key=lambda p: (-sum(1 / df[w] for w in has[p]), len(files[p][0])))
+    job = next(iter(files.values()))[1].split(":")[0]
+    head = (f"\n\n## The code this job builds on (job {job}, finished -- the files as they are now, §17.1812)\n"
+            "These files exist. A step that fixes one of them edits it in place: the whole file under the same path, "
+            "its public names kept, only what the step asks changed -- never a new module under another name.\n"
+            f"### Every file ({len(mods)} modules)\n{manifest}")
+    out, left = [head], budget - len(head)
+    shown: list[str] = []
+    for p in named + rest:
+        part = f"### `{p}`" + (" (this step names it)" if p in named else "") + f"\n```python\n{files[p][0]}\n```\n"
+        if len(part) > left:
+            continue
+        out.append(part)
+        shown.append(p)
+        left -= len(part)
+    if len(shown) < len(files):
+        out.append("Not shown here (over the size limit): "
+                   + ", ".join(f"`{p}`" for p in files if p not in shown) + "\n")
+    return "".join(out)
 
 
 async def job_code(db, job_id: str, *, except_node: str | None = None) -> tuple[set[str], set[str]]:

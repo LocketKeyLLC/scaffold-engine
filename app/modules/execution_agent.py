@@ -2052,6 +2052,18 @@ async def execute_next_node(
                         rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1794
             except Exception as exc:
                 logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # §17.1812 — a step of a follow-up job, reading or fixing, is shown the code its earlier job finished
+        if tool_lower in ("llm", "codegen"):
+            try:
+                from app.modules import engine_source as _es
+                async with async_session() as _cbdb:
+                    _carried = [r for r in await _es.code_rows(_cbdb, job_id) if _es.is_carried(r)]
+                if _carried:
+                    _grounding_blocks.append(_es.carried_block(
+                        _carried, node_snapshot,
+                        budget=40000 if tool_lower == "codegen" else settings.max_report_upstream_chars))
+            except Exception as exc:
+                logger.warning("carried_code_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
