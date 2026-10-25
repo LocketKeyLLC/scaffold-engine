@@ -85,8 +85,8 @@ async def test_a_reset_or_edited_step_is_not_held_to_its_old_versions_refusals()
     jid = str(uuid.uuid4())
     log = ("INSERT INTO execution_logs (job_id, node_id, log_level, message, details, created_at) VALUES "
            "(:j, :n, 'warning', 'Node x -> failed', CAST(:d AS jsonb), now() + make_interval(secs => :t))")
-    edit = ("INSERT INTO dag_node_edits (job_id, node_key, op, edited_by, created_at) VALUES "
-            "(:j, :k, :op, 'test', now() + make_interval(secs => :t))")
+    edit = ("INSERT INTO dag_node_edits (job_id, node_key, op, after, edited_by, created_at) VALUES "
+            "(:j, :k, :op, CAST(:a AS jsonb), 'test', now() + make_interval(secs => :t))")
     try:
         async with async_session() as db:
             await db.execute(text("INSERT INTO jobs (id, title, status) VALUES (:id, 'retry history', 'running')"),
@@ -97,17 +97,22 @@ async def test_a_reset_or_edited_step_is_not_held_to_its_old_versions_refusals()
                     "INSERT INTO dag_nodes (job_id, node_key, title, status, execution_order) "
                     "VALUES (:j, :k, 'x', 'pending', 0) RETURNING id"), {"j": jid, "k": k})).scalar())
             nid, other = ids
-            for t, reason in ((1, "old: tests/test_paper_entry_batch.py"), (5, SAMPLE), (7, LAST)):
+            for t, reason in ((1, "old: tests/test_paper_entry_batch.py"), (5, SAMPLE), (8, LAST)):
                 await db.execute(text(log), {"j": jid, "n": nid, "d": json.dumps({"reason": reason}), "t": t})
-            await db.execute(text(edit), {"j": jid, "k": "T4", "op": "reset", "t": 2})
-            await db.execute(text(edit), {"j": jid, "k": "T4", "op": "edit", "t": 3})
-            await db.execute(text(edit), {"j": jid, "k": "T6", "op": "edit", "t": 6})    # another step's edit
+            await db.execute(text(log), {"j": jid, "n": other, "d": json.dumps({"reason": SAMPLE}), "t": 1})
+            for k, op, after, t in (("T4", "reset", {"status": "pending"}, 2),
+                                    ("T4", "edit", {"prompt_template": "Python module `new.py`."}, 3),   # changed
+                                    ("T4", "reset", {"status": "pending"}, 6),                         # a retry
+                                    ("T4", "edit", {"depends_on": ["T1"]}, 7),                         # only edges
+                                    ("T6", "reset", {"status": "pending"}, 4),
+                                    ("T6", "reorder", {"execution_order": 3}, 5)):
+                await db.execute(text(edit), {"j": jid, "k": k, "op": op, "a": json.dumps(after), "t": t})
             await db.commit()
         async with async_session() as db:
             got = await xa.prior_refusals(db, jid, str(nid))
-            never_edited = await xa.prior_refusals(db, jid, str(other))
-        assert got == [SAMPLE, LAST]
-        assert never_edited == []
+            only_retried = await xa.prior_refusals(db, jid, str(other))
+        assert got == [SAMPLE, LAST]                  # cut at the prompt edit, not at the later reset or edge edit
+        assert only_retried == [SAMPLE]               # a retry and a reorder keep the history (§17.1815b)
     finally:
         async with async_session() as db:
             for tbl in ("execution_logs", "dag_node_edits"):
