@@ -10431,6 +10431,65 @@
         ]
       }
     },
+    "/jobs/{job_id}/steps/{node_key}/split": {
+      "post": {
+        "description": "§17.1821 — the operator asks the engine to split a code step for the engine (§17.1793): a `<key>D` data step\n(its queries and data functions, with tests) and the step itself as the part that uses them. 409 when it does not\napply: not an engine-code CodeGen step, already split, or naming no module of its own.",
+        "operationId": "split_step_endpoint_jobs__job_id__steps__node_key__split_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_key",
+            "required": true,
+            "schema": {
+              "title": "Node Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Split Step Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/synthesis": {
       "patch": {
         "description": "Sprint X.6 — set the per-job opt-in for the W.7 LLM synthesis pass.\n\nBody ``{\"override\": true}`` forces synthesis on for this job;\n``{\"override\": false}`` forces it off; ``{\"override\": null}`` clears\nthe override so the job inherits ``settings.compile_synthesis_enabled``.\n\nThe override is read by ``execution_compile._resolve_synthesis_enabled``\non the next compile pass — set it before ``/execute/all`` (or before\na final-node retry) for it to take effect on the resulting deliverable.",
