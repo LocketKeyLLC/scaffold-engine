@@ -796,6 +796,16 @@ async def carried_modules(db, job_id: str) -> list[str]:
     return out
 
 
+def _written_modules(output: str) -> set[str]:
+    """The (non-test) modules an output's code blocks are headed with: `# app/modules/x.py` -> `x`."""
+    out: set[str] = set()
+    for lang, code in extract_code_blocks(output or ""):
+        m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
+        if m and not re.match(r"(?:test_\w+|\w+_test|conftest)$", m.group(2)):
+            out.add(m.group(2))
+    return out
+
+
 def is_carried(row: dict) -> bool:
     """A `code_rows` row from a job this one builds on (keyed `<job>:<key>`); this job's own keys never hold a colon."""
     return ":" in str(row.get("node_key") or "")
@@ -1150,8 +1160,17 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found = unresolved_refs(output, mods, names)
     me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
     _others = [dict(r) for r in rows if r["node_key"] != node_key]
-    found += sibling_refs(output, sibling_definitions(_others))
-    found += imports_an_unwritten_sibling(output, _others, sibling_definitions(_others))
+    # §17.1816 — a module this output rewrites is checked against what the output now defines, not against the
+    # earlier job's version of it. Live (5b4880c0 T2, rewriting `paper_order_executor` in place): its tests' calls to
+    # its own new `execute_order(db=…, client=…)` were refused as "has no parameter `db` (it takes approval)" -- the
+    # signature of the file being replaced.
+    mine = _written_modules(output)
+    _defs_rows = [r for r in _others if not (is_carried(r) and step_module(r) in mine)]
+    if len(_defs_rows) != len(_others):
+        _defs_rows.append({**me, "output_text": output})
+    _defs = sibling_definitions(_defs_rows)
+    found += sibling_refs(output, _defs)
+    found += imports_an_unwritten_sibling(output, _others, _defs)
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
     tables = dict(await engine_schema.live_tables(db))
