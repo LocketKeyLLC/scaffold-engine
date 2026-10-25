@@ -99,8 +99,8 @@ _STALE_TESTS_RE = re.compile(r"In this same step also write `tests/test_(\w+)\.p
 def _tests_note(mod: str) -> str:
     return (f"In this same step also write `tests/test_{mod}.py`: pytest tests of what `{mod}.py` must do (its "
             "rules, its edge cases, its failure paths). They run before the step passes, with no network or secrets; "
-            "`async_session` is a scratch database with this job's tables, so SQL is tested for real; HTTP clients "
-            "and model calls are mocked.")
+            "`async_session` is a scratch database with this job's tables, so SQL is tested for real (each test starts "
+            "with them empty and inserts the rows it needs); HTTP clients and model calls are mocked.")
 
 
 def _carried_prefix(carried: list[str]) -> str | None:
