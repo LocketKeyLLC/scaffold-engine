@@ -872,13 +872,14 @@ def _brief_essentials_block(brief: dict) -> str:
     desc = (brief.get("description") or "").strip()
     if desc:
         parts.append(f"PROJECT: {desc[:500]}")
-    constraints = [str(c) for c in (brief.get("constraints") or []) if str(c).strip()][:8]
+    from app.modules.prompt_assembly import brief_items                    # §17.1820 — one rendering for both
+    constraints = brief_items(brief.get("constraints"))
     if constraints:
-        parts.append("CONSTRAINTS (honor these):\n" + "\n".join(f"- {c[:220]}" for c in constraints))
-    inputs = [str(i) for i in (brief.get("inputs_available") or []) if str(i).strip()][:10]
+        parts.append("CONSTRAINTS (honor these):\n" + constraints)
+    inputs = brief_items(brief.get("inputs_available"))
     if inputs:
         parts.append("AVAILABLE HARDWARE / INPUTS (the operator already has these — use them, don't ask again):\n"
-                     + "\n".join(f"- {i[:220]}" for i in inputs))
+                     + inputs)
     feedback = (brief.get("user_feedback") or "").strip()
     if feedback:
         parts.append("OPERATOR ANSWERS (already given at the approval gate — treat as decided; "
