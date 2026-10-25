@@ -119,6 +119,20 @@ def _tail(text: str, lines: int = 60) -> str:
     return "\n".join(keep[-lines:])
 
 
+def _report(text: str, budget: int = 6000) -> str:
+    """§17.1817 — a failed test run as the next attempt needs it: every failure's short traceback from the FIRST one
+    (often the cause the rest follow from), then pytest's summary. Live (follow-up 5b4880c0 T6, 8-14 of its tests
+    failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
+    ("- sqlalc..."), so each attempt was redrafted from one failure out of ten."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    whole = "\n".join(lines)
+    if len(whole) <= budget:
+        return whole
+    cut = next((i for i, ln in enumerate(lines) if "short test summary info" in ln), len(lines))
+    summary = "\n".join(lines[cut:])[-(budget // 4):]
+    return "\n".join(lines[:cut])[: budget - len(summary) - 3] + "\n…\n" + summary
+
+
 async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResult:
     """Run this step's tests (or import its modules) with its finished siblings' files present."""
     url = (settings.engine_test_url or "").strip()
@@ -150,7 +164,7 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         return EngineTestResult("skip", f"engine-test sandbox holds another engine ({there} vs {here})", [])
     tests = sorted(p for p in mine if is_test(p))
     if tests:
-        command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
+        command = ["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
                    "-o", "asyncio_default_fixture_loop_scope=function", "--timeout=60", "-c", "/dev/null",
                    "--rootdir", ".", "-W", "ignore::DeprecationWarning", *tests]
     else:
@@ -173,6 +187,8 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         why = f"timed out after {settings.engine_test_timeout_s:.0f}s (a test waiting on a network or database it does not have?)"
     elif tests and res.exit_code == 5:
         why = "pytest collected no tests: name them `def test_…` / `async def test_…` at module level"
+    elif tests:
+        why = _report(res.stdout + "\n" + res.stderr)                               # §17.1817
     else:
         why = _tail(res.stdout + "\n" + res.stderr)
     what = "its tests" if tests else "importing its module" + ("s" if len(ran) > 1 else "")

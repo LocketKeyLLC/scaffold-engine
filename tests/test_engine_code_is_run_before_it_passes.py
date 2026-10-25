@@ -246,3 +246,43 @@ def test_the_run_tab_says_tested_or_only_loaded_before_the_evidence_gate():
     assert et_at < gate_at                       # an unchecked report still shows what the sandbox ran
     for phrase in ("✓ Tested", "⚠️ Not tested", "❌ The engine-test sandbox failed", "Not run in the engine-test sandbox"):
         assert phrase in body
+
+
+# ── §17.1817 — a failed test run reports every failure, from the first ─────────────────────────────────────
+
+def _pytest_out(n: int = 12) -> str:
+    """A `pytest -q --tb=short` run with `n` failures, as the sandbox returns it (live: 5b4880c0 T6, 8-14 failing)."""
+    body = ["FFFFFFFFFFFF.." + " " * 50 + "[100%]", "=" * 30 + " FAILURES " + "=" * 30]
+    for i in range(n):
+        body += [f"_____ test_case_{i} _____", f"tests/test_paper_batch.py:{100 + i}: in test_case_{i}",
+                 "    await run_daily_batch(db)", "app/modules/paper_batch.py:88: in run_daily_batch",
+                 "    qty = equity * FRACTION / price", "    " + "x = 1  # context line " * 12,
+                 f"E   ValueError: cause number {i}"]
+    body += ["=" * 20 + " short test summary info " + "=" * 20]
+    body += [f"FAILED tests/test_paper_batch.py::test_case_{i} - ValueError: cause n..." for i in range(n)]
+    body += [f"{n} failed, 2 passed in 3.10s"]
+    return "\n".join(body)
+
+
+def test_the_report_keeps_the_first_failure_and_the_summary():
+    out = _pytest_out()
+    assert len(out) > 6000                                           # over the limit: something must go
+    rep = et._report(out)
+    assert len(rep) <= 6000
+    assert "E   ValueError: cause number 0" in rep and "E   ValueError: cause number 1" in rep   # the first ones
+    assert "12 failed, 2 passed" in rep and "short test summary info" in rep
+    assert "cause number 0" not in et._tail(out)                     # what the old tail kept: not the first
+
+
+def test_a_short_run_is_reported_whole():
+    out = _pytest_out(2)
+    assert et._report(out) == "\n".join(ln for ln in out.splitlines() if ln.strip())
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_runs_short_tracebacks_and_reports_from_the_first_failure():
+    run = AsyncMock(return_value=CodeRunResult(ok=False, exit_code=1, stdout=_pytest_out(), stderr=""))
+    res = await _check(WITH_TEST, run)
+    assert res.verdict == "fail"
+    assert "--tb=short" in run.await_args.args[1]
+    assert "E   ValueError: cause number 0" in res.reason and "12 failed, 2 passed" in res.reason
