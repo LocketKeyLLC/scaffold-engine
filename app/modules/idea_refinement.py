@@ -356,6 +356,16 @@ async def refine_idea(
     if domain:
         brief["domain"] = domain
 
+    # 3c. §17.1813 — whether this job writes the engine's own code is decided here, once, from the operator's words
+    # (and the job it builds on), not re-read from the refiner's paraphrase by every later step.
+    try:
+        from app.modules.engine_source import job_targets_the_engine
+        async with db.begin_nested():
+            if await job_targets_the_engine(db, job_id, idea_text, brief):
+                brief["targets_engine"] = True
+    except Exception as exc:
+        logger.warning("targets_engine_check_failed job=%s err=%r", job_id, exc)
+
     # 4. Update job with refined brief, transition to planning
     title = _truncate_title(brief.get("title") or idea_text)
     # §17.1107 (ledger S-3) — guarded: a job cancelled mid-refine stays cancelled.
