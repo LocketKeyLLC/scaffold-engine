@@ -1169,10 +1169,17 @@ _system_for_tool = system_for_tool
 
 
 async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[str]:
-    """§17.1779 — the distinct reasons this step's earlier attempts were refused, oldest first (from the run log)."""
+    """§17.1779 — the distinct reasons this step's earlier attempts were refused, oldest first (from the run log).
+    §17.1815 — only since the step was last reset or edited: live (follow-up 5b4880c0 T4, after a reset and a new
+    prompt naming `paper_day_start_equity_recording.py`), "every one must stay fixed" listed the refusals of the
+    version before, about `tests/test_paper_entry_batch.py` -- and two of three attempts went back to importing
+    `paper_entry_batch`, the module the reset step no longer writes."""
     rows = (await db.execute(text(
-        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n "
-        "AND message LIKE :failed AND details->>'reason' IS NOT NULL ORDER BY created_at"),
+        "SELECT l.details->>'reason' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'reason' IS NOT NULL "
+        "AND l.created_at > COALESCE((SELECT max(e.created_at) FROM dag_node_edits e JOIN dag_nodes d "
+        "  ON d.job_id = e.job_id AND d.node_key = e.node_key WHERE d.id = CAST(:n AS uuid)), '-infinity') "
+        "ORDER BY l.created_at"),
         {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
     seen: list[str] = []
     keys: set[str] = set()
