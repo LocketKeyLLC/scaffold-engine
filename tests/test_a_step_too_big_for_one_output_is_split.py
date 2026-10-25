@@ -93,3 +93,38 @@ async def test_no_split_without_repeated_omissions_or_when_already_split():
     finally:
         await _drop(once)
         await _drop(done)
+
+
+# ── §17.1821 — the operator asks for the split ────────────────────────────────────────────────────────────
+
+@pytest.mark.integration
+async def test_the_operator_can_ask_for_the_split_whatever_the_refusals_say():
+    from fastapi import HTTPException
+
+    from app.database import async_session
+    from app.authz import ROLE_ADMIN, Principal
+    from app.routers.jobs import split_step_endpoint
+    async with async_session() as db:
+        jid = await _job(db, reasons=["tests failed: assert 0 == 3", "has no parameter `symbol`"])   # no omission
+        done = await _job(db, reasons=[], cfg={"split": True})
+    try:
+        op = Principal(identity="operator", role=ROLE_ADMIN)
+        async with async_session() as db:
+            out = await split_step_endpoint(uuid.UUID(jid), "T24", db=db, principal=op)
+        assert out["data_step"] == "T24D" and out["data_module"] == "paper_operator_dashboard_data"
+        async with async_session() as db:
+            rows = {r["node_key"]: r for r in (await db.execute(text(
+                "SELECT node_key, status, depends_on FROM dag_nodes WHERE job_id = :j"), {"j": jid})).mappings().all()}
+            who = dict((await db.execute(text(
+                "SELECT node_key, string_agg(DISTINCT edited_by, ',') FROM dag_node_edits WHERE job_id = :j "
+                "AND node_key IN ('T24', 'T24D') AND op IN ('insert', 'edit') GROUP BY node_key"), {"j": jid})).all())
+        assert rows["T24D"]["status"] == "pending" and rows["T24"]["status"] == "pending"
+        assert list(rows["T24"]["depends_on"]) == ["T22", "T24D"]
+        assert who == {"T24": "operator", "T24D": "operator"}                       # the operator asked, both say so
+        async with async_session() as db:
+            with pytest.raises(HTTPException) as e:
+                await split_step_endpoint(uuid.UUID(done), "T24", db=db, principal=op)
+        assert e.value.status_code == 409
+    finally:
+        await _drop(jid)
+        await _drop(done)

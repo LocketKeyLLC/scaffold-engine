@@ -192,6 +192,26 @@ async def complete_plan_endpoint(
     return out
 
 
+@router.post("/jobs/{job_id}/steps/{node_key}/split", tags=["Management"])
+async def split_step_endpoint(
+    job_id: UuidPath,
+    node_key: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1821 — the operator asks the engine to split a code step for the engine (§17.1793): a `<key>D` data step
+    (its queries and data functions, with tests) and the step itself as the part that uses them. 409 when it does not
+    apply: not an engine-code CodeGen step, already split, or naming no module of its own."""
+    from app.modules import engine_plan
+    await assert_visible(db, principal, str(job_id), detail=f"Job {job_id} not found")
+    out = await engine_plan.split_oversized_step(db, str(job_id), node_key, asked_by=principal.identity)
+    if out is None:
+        raise HTTPException(status_code=409, detail=(
+            f"step {node_key} cannot be split: it must be a CodeGen step writing the engine's own code, name its own "
+            "module, and not be split already"))
+    return out
+
+
 @router.post("/jobs/{job_id}/replan", tags=["Management"])
 async def replan_endpoint(
     job_id: UuidPath,

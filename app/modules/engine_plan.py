@@ -692,7 +692,8 @@ _OMISSION_RE = re.compile(r"\b(?:entirely absent|is absent|are absent|was not wr
                           r"deliverable|tests?|file)|required (?:export|deliverable|tests?)[^.]{0,80}\babsent)\b", re.I)
 
 
-async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions: int = 2) -> dict | None:
+async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions: int = 2,
+                               asked_by: str | None = None) -> dict | None:
     """When a code step written for the engine has used its attempts and its refusals keep saying it LEFT OUT part of
     its own task, split it: a new data step (`<module>_data.py`: every query and data function the task needs) and the
     step itself as the part that uses them (rendering / entry point), standing on the data step. Live (job f00ea97f T24
@@ -718,7 +719,11 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
         "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f"),
         {"j": job_id, "n": row["id"], "f": "%-> failed"})).scalars().all()
     omissions = sum(1 for r in reasons if r and _OMISSION_RE.search(r))
-    if omissions < min_omissions:
+    # §17.1821 — the operator may ask for the split whatever the refusals say. Live (follow-up 5b4880c0 T6, the daily
+    # batch over six freshly fixed modules): ~15 attempts, each failing differently (an old parameter name, a patched
+    # function that does not exist, a dict into a JSON column, wrong counts) -- never "left out", so the engine's own
+    # trigger never fired; the operator chose "split T6 into smaller steps".
+    if omissions < min_omissions and not asked_by:
         return None
     own = engine_source.step_module({"prompt_template": row["prompt_template"], "title": row["title"]})
     if not own:
@@ -736,7 +741,7 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
             f"returning plain values; nothing that renders, formats or presents. The task: {task} In this same step "
             f"also write `tests/test_{data_mod}.py`: pytest tests of each function against the scratch database "
             "(insert the rows, call the function, check the result)."),
-    }, edited_by="engine §17.1793", db=db)
+    }, edited_by=asked_by or "engine §17.1793", db=db)
     if out.get("error"):
         logger.warning("split_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
         return None
@@ -748,7 +753,7 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
             f"points. Import every query and data function from `{data_mod}.py` (step {data_key}); never "
             f"re-implement them here. The task: {task} In this same step also write `tests/test_{own}.py`: pytest "
             f"tests of the rendering / entry points (mock `{data_mod}`'s functions)."),
-    }, edited_by="engine §17.1793", db=db)
+    }, edited_by=asked_by or "engine §17.1793", db=db)
     if out2.get("error"):
         logger.warning("split_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
         return None
