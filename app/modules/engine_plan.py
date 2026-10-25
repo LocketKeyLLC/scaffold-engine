@@ -116,6 +116,9 @@ def _carried_own(t: dict, carried: list[str]) -> str | None:
     """§17.1814 — the earlier job's module this step changes: its title names it ("Fix SPY benchmark tracker"), or
     its text says to edit it ("Edit paper_order_executor in place"). A module it only USES is not its own."""
     from app.modules.engine_source import _names_module
+    mod = _module_of(t)
+    if mod in carried:                                # §17.1818 — the module it is given is the earlier job's
+        return mod
     title = str(t.get("name") or "").lower()
     for leaf in carried:
         if _names_module(leaf, title, set(re.findall(r"[a-z0-9]+", title))):
@@ -124,6 +127,72 @@ def _carried_own(t: dict, carried: list[str]) -> str | None:
         if re.search(_EDITS_RE + re.escape(leaf) + r"\b", _text(t), re.I):
             return leaf
     return None
+
+
+#: §17.1818 — a step that reads the earlier job's code and reports on it
+_REVIEW_STEP_RE = re.compile(r"^\s*(?:audit|review|inspect|examine|analy[sz]e|assess|inventory|read)\b", re.I)
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+
+
+def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
+    """§17.1818 — what a review step found in each of the earlier job's modules: every bullet whose subject (the first
+    module it names) is one of them and that says something about it; a bare
+    list of paths -- "the twelve untested modules" -- is an inventory, not a finding (five words or more beside the
+    code; a bare path has none)."""
+    found: dict[str, list[str]] = {}
+    for line in (output or "").splitlines():
+        m = _BULLET_RE.match(line)
+        if not m:
+            continue
+        body = m.group(1).strip()
+        hits = sorted(((mm.start(), leaf) for leaf in carried
+                       for mm in [re.search(rf"\b{re.escape(leaf)}\b", body)] if mm), key=lambda x: x[0])
+        if not hits:
+            continue
+        prose = re.sub(r"`[^`]*`", " ", body)
+        if len(re.findall(r"[A-Za-z]{2,}", prose)) < 5:
+            continue
+        found.setdefault(hits[0][1], []).append(body)
+    return found
+
+
+def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[str]) -> list[str]:
+    """§17.1818 — each module of the earlier job a review step found defects in, and no step fixes, gets a fix step
+    (that module, edited in place, with its tests); the code steps not yet run wait for the fixes. Live (follow-up
+    5b4880c0): T1 "Audit existing paper modules" found `paper_trade_proposer` returning proposals with no `signal_id`
+    and inserting rejected ones with NULL `signal_id` and quantity 0 -- both refused by the schema -- and nothing in the
+    plan fixed it; T6, the daily batch built on it, failed nine attempts on those rows."""
+    changes: list[str] = []
+    if not carried or not reviews:
+        return changes
+    owned = {own for t in tasks if (own := _carried_own(t, carried))}
+    existing = {t["id"] for t in tasks}
+    fixes: list[str] = []
+    for key, output in reviews.items():
+        n = 0
+        for leaf, lines in review_findings(output, carried).items():
+            if leaf in owned:
+                continue
+            n += 1
+            fid = f"{key}F{n}"
+            while fid in existing:
+                n += 1
+                fid = f"{key}F{n}"
+            existing.add(fid)
+            owned.add(leaf)
+            tasks.append({"id": fid, "name": f"Fix {leaf} (review {key} findings)", "tool": "CodeGen",
+                          "type": "action", "status": "pending", "depends_on": [key],
+                          "notes": (f"Python module `{leaf}.py` -- the earlier job's module: edit it in place (the whole "
+                                    f"file, its public names kept). Fix what review step {key} found in it:\n"
+                                    + "".join(f"- {ln}\n" for ln in lines) + _tests_note(leaf))})
+            fixes.append(fid)
+            changes.append(f"review_fix_added: {fid} fixes `{leaf}.py` ({len(lines)} finding(s) of {key})")
+    if fixes:
+        for t in tasks:
+            if (t["id"] not in fixes and str(t.get("tool") or "").lower() == "codegen"
+                    and t.get("status", "pending") in ("pending", "failed")):
+                t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *fixes]))
+    return changes
 
 
 def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[str] | None = None) -> list[str]:
@@ -524,7 +593,7 @@ def _drop(tasks: list[dict], gone: dict) -> None:
 _TYPE_OF_NODE = {"decision": "decision", "checkpoint": "validation"}
 
 
-async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict:
+async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_reviews: bool = False) -> dict:
     """Run `complete_engine_plan` over a job's stored plan and apply what it adds to the steps that have not passed:
     new steps are inserted, and a pending or failed step takes its new text and dependencies; a finished step is
     never touched. Live (job f00ea97f): §17.1780 arrived with twelve steps done -- re-planning would have thrown
@@ -561,7 +630,14 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
                                   else _json.loads(r["tool_config"]))} if r["tool_config"] else {})}
              for r in rows]
     before = {t["id"]: dict(t) for t in tasks}
-    changes = complete_engine_plan(tasks, brief, await engine_source.carried_modules(db, job_id))    # §17.1814
+    carried = await engine_source.carried_modules(db, job_id)
+    changes = [] if only_reviews else complete_engine_plan(tasks, brief, carried)                   # §17.1814
+    if carried:                                                                                     # §17.1818
+        reviews = {r[0]: r[1] for r in (await db.execute(_text_sql(
+            "SELECT node_key, output_text FROM dag_nodes WHERE job_id = :j AND status = 'done' "
+            "AND lower(tool) = 'llm' AND output_text IS NOT NULL ORDER BY execution_order"), {"j": job_id})).all()
+            if _REVIEW_STEP_RE.match(next((t["name"] for t in tasks if t["id"] == r[0]), "") or "")}
+        changes += add_review_fixes(tasks, reviews, carried)
     inserted, edited, kept = [], [], []
     for t in tasks:                                       # new steps first: an edit may depend on one
         if t["id"] in before:

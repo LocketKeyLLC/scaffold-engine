@@ -110,7 +110,8 @@ async def test_plan_completion_on_a_started_job_hands_the_pass_the_earlier_jobs_
     plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = [
         {"node_key": t["id"], "title": t["name"], "prompt_template": t["notes"], "tool": t["tool"], "node_type": "task",
          "status": "pending", "depends_on": [], "tool_config": None} for t in _plan()]
-    db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows]); db.commit = AsyncMock()
+    no_reviews = MagicMock(); no_reviews.all.return_value = []
+    db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows, no_reviews]); db.commit = AsyncMock()
     with patch.object(engine_source, "carried_modules", new=AsyncMock(return_value=CARRIED)), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})), \
          patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
