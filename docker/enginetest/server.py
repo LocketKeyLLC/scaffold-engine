@@ -126,6 +126,55 @@ async def _drop_db(name: str) -> None:
         logger.warning("enginetest_drop_failed db=%s err=%r", name, exc)
 
 
+#: §17.1819 — a pytest plugin (`PYTEST_PLUGINS`) that empties the job's own tables before every test. Live (follow-up
+#: 5b4880c0 T1F1, the P&L calculator): the run's one scratch database was shared by all its tests and the job's audit
+#: tables are append-only (UPDATE/DELETE refused by trigger), so a test could not clean up -- "no fills" saw the last
+#: test's AAPL position and realized P&L summed across tests (20, 50, 70, 90): seven correct tests failed together.
+#: TRUNCATE is not a row DELETE, so the triggers do not refuse it; the engine's own (seeded) tables are left alone.
+ISOLATION_PLUGIN = '''"""§17.1819 — every test starts with this job's own tables empty."""
+import asyncio
+import os
+
+import pytest
+
+_TABLES = [t for t in os.environ.get("ENGINETEST_JOB_TABLES", "").split(",") if t]
+
+
+@pytest.fixture(autouse=True)
+def _enginetest_job_tables_empty():
+    if _TABLES:
+        import asyncpg
+
+        async def _truncate():
+            conn = await asyncpg.connect(os.environ["ENGINETEST_DB_DSN"])
+            try:
+                await conn.execute("TRUNCATE " + ", ".join('"%s"' % t for t in _TABLES) + " RESTART IDENTITY CASCADE")
+            finally:
+                await conn.close()
+        asyncio.run(_truncate())
+    yield
+'''
+
+
+async def job_tables(run_conn, base_conn) -> list[str]:
+    """§17.1819 — the tables the job's own revisions added: in the run's database, not in the engine's template."""
+    q = "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+    have = {r["tablename"] for r in await run_conn.fetch(q)}
+    base = {r["tablename"] for r in await base_conn.fetch(q)}
+    return sorted(have - base)
+
+
+async def _job_tables_of(dbname: str) -> list[str]:
+    import asyncpg
+    run_conn = await asyncpg.connect(DB_DSN + "/" + dbname)
+    base_conn = await asyncpg.connect(DB_DSN + "/engine_base")
+    try:
+        return await job_tables(run_conn, base_conn)
+    finally:
+        await run_conn.close()
+        await base_conn.close()
+
+
 _UPGRADE = ("from alembic.config import Config\nfrom alembic import command\n"
             "c = Config('alembic.ini'); c.set_main_option('script_location', 'alembic')\n"
             "command.upgrade(c, 'head')\n")
@@ -225,6 +274,11 @@ async def run(req: RunRequest) -> RunResponse:
                                                   "database:\n" + tail, duration_ms=0, timed_out=False,
                                            truncated=False)
                     db_state = "ok"
+                    # §17.1819 — each test starts with the job's tables empty
+                    env["ENGINETEST_JOB_TABLES"] = ",".join(await _job_tables_of(dbname))
+                    env["ENGINETEST_DB_DSN"] = DB_DSN + "/" + dbname
+                    env["PYTEST_PLUGINS"] = "_enginetest_isolation"
+                    (workdir / "_enginetest_isolation.py").write_text(ISOLATION_PLUGIN, encoding="utf-8")
         t0 = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(

@@ -196,7 +196,8 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         f"§17.1765 engine-test sandbox: {what} failed, run against the engine with this job's finished modules "
         f"({', '.join(sorted(p for p in files if p not in mine and not p.endswith('__init__.py'))) or 'none yet'}). "
         + ("The sandbox has no network and no secrets; `async_session` is a fresh scratch database with the engine's "
-           "schema and this job's migrations applied -- test SQL against it instead of a fake session that ignores "
+           "schema and this job's migrations applied, and each test starts with this job's own tables empty (§17.1819) "
+           "-- a test inserts the rows it needs; test SQL against it instead of a fake session that ignores "
            "the query; mock HTTP clients and model calls. " if res.database == "ok" else
            "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
            "in tests. ")
