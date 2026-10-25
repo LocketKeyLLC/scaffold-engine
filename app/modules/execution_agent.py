@@ -4891,6 +4891,18 @@ async def execute_all_nodes(
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                     "evidence": result.get("evidence"),  # §17.1040
                 })
+                # §17.1818 — a review of the earlier job's code adds the fix steps its findings call for, now
+                if _done_tool == "llm":
+                    try:
+                        from app.modules import engine_plan as _ep
+                        if _ep._REVIEW_STEP_RE.match(str(result.get("title") or "")):
+                            async with async_session() as _rdb:
+                                _rf = await _ep.apply_to_job(_rdb, job_id, edited_by="engine:review_fixes",
+                                                             only_reviews=True)
+                            if _rf.get("inserted"):
+                                logger.warning("review_fixes_added job=%s %s", job_id, _rf["inserted"])
+                    except Exception as exc:
+                        logger.warning("review_fixes_failed job=%s node=%s err=%r", job_id, result.get("node_key"), exc)
                 if _prog is not None:  # §17.811
                     _prog_done.append(result.get("title") or result.get("node_key") or "step")
                     snap = _prog.tick(done_items=_prog_done)
