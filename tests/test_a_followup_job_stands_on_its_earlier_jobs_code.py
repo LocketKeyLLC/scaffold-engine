@@ -288,3 +288,45 @@ async def test_a_job_that_builds_on_nothing_gets_no_block():
          patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF, node_extra={"tool": "LLM"})
     assert "The code this job builds on" not in captured["calls"][0][-1]["content"], captured.get("raised")
+
+
+# ── §17.1816 — a module the output rewrites is checked against its new definitions ──────────────────────────
+
+OLD_EXECUTOR = {"node_key": "f00ea97f:T17", "title": "Implement order executor", "description": "", "status": "done",
+                "prompt_template": "Python module `paper_order_executor.py`",
+                "output_text": "```python\n# app/modules/paper_order_executor.py\nasync def execute_order(approval):\n"
+                               "    return approval\n```"}
+REWRITE = ("```python\n# app/modules/paper_order_executor.py\nALPACA_PAPER_BASE_URL = 'https://paper-api.alpaca.markets'\n"
+           "async def execute_order(*, db, client, approval):\n    return approval\n```\n"
+           "```python\n# tests/test_paper_order_executor.py\n"
+           "from app.modules.paper_order_executor import ALPACA_PAPER_BASE_URL, execute_order\n"
+           "async def test_it():\n    await execute_order(db=1, client=2, approval=3)\n{call}\n```")
+
+
+async def _findings_for(output, rows):
+    nodes = MagicMock(); nodes.mappings.return_value.all.return_value = [{"src": 0, "ord": 1, **r} for r in rows]
+    cols = MagicMock(); cols.all.return_value = []
+    db = AsyncMock(); db.execute = AsyncMock(side_effect=[nodes, cols])
+    return "\n".join(await es.engine_findings(db, "job-2", "T2", output))
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_module_is_checked_against_what_the_output_now_defines():
+    me = {"node_key": "T2", "title": "Fix ticker field consistency", "description": "", "status": "pending",
+          "prompt_template": "Python module `paper_order_executor.py` -- the earlier job's module: edit it in place",
+          "output_text": None}
+    ok = await _findings_for(REWRITE.format(call=""), [OLD_EXECUTOR, me])
+    assert "has no parameter" not in ok and "ALPACA_PAPER_BASE_URL" not in ok, ok
+    bad = await _findings_for(REWRITE.format(call="    await execute_order(approval=3, size=9)"), [OLD_EXECUTOR, me])
+    assert "has no parameter `size`" in bad and "(it takes *, db, client, approval)" in bad, bad     # the NEW one
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_does_not_rewrite_the_module_is_still_held_to_it():
+    me = {"node_key": "T2", "title": "Build execution", "description": "", "status": "pending",
+          "prompt_template": "Python module `paper_execution_entry_point.py`", "output_text": None}
+    out = ("```python\n# app/modules/paper_execution_entry_point.py\n"
+           "from app.modules.paper_order_executor import execute_order\n"
+           "async def run():\n    await execute_order(db=1, client=2, approval=3)\n```")
+    found = await _findings_for(out, [OLD_EXECUTOR, me])
+    assert "has no parameter `db`, `client`" in found and "(it takes approval)" in found, found
