@@ -61,6 +61,15 @@ def idea_targets_the_engine(idea_text: str | None) -> bool:
     return bool(_TARGETS_RE.search(idea_text or ""))
 
 
+def brief_for_the_engine(brief, input_text: str | None) -> dict:
+    """§17.1813 — a brief refined before `targets_engine` was stamped: the operator's own words decide. Used by every
+    reader of an existing job's brief (planner, plan completion, executor), so all three answer alike."""
+    b = brief if isinstance(brief, dict) else {}
+    if "targets_engine" not in b and idea_targets_the_engine(input_text):
+        return {**b, "targets_engine": True}
+    return b
+
+
 async def job_targets_the_engine(db, job_id, idea_text: str | None, brief: dict | None) -> bool:
     """§17.1813 — whether a job writes the engine's own code, from the operator's words, the brief, or a job it
     builds on. Live (follow-up 5b4880c0, 2026-10-25): the idea said "in the scaffold engine itself (this repository's

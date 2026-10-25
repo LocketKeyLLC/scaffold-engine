@@ -502,11 +502,20 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None) -> dict
     from sqlalchemy import text as _text_sql
 
     from app.modules import engine_source, node_editor
-    job = (await db.execute(_text_sql("SELECT refined_brief FROM jobs WHERE id = :j"), {"j": job_id})).mappings().first()
+    job = (await db.execute(_text_sql("SELECT refined_brief, input_text FROM jobs WHERE id = :j"),
+                            {"j": job_id})).mappings().first()
     if not job:
         return {"error": f"job {job_id} not found", "http_status": 404}
     brief = job["refined_brief"]
     brief = brief if isinstance(brief, dict) else (_json.loads(brief) if brief else {})
+    # §17.1813 — a job refined before the stamp: its operator's words decide, and the stamp is kept on the job
+    stamped = engine_source.brief_for_the_engine(brief, job.get("input_text"))
+    if stamped.get("targets_engine") and not brief.get("targets_engine"):
+        await db.execute(_text_sql(
+            "UPDATE jobs SET refined_brief = jsonb_set(COALESCE(refined_brief, '{}'::jsonb), '{targets_engine}', "
+            "'true'::jsonb) WHERE id = :j"), {"j": job_id})
+        await db.commit()
+    brief = stamped
     if not engine_source.targets_the_engine(brief):
         return {"error": "this job does not write code for the engine", "http_status": 409}
     rows = (await db.execute(_text_sql(

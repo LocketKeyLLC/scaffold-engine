@@ -89,7 +89,7 @@ def test_the_prefix_comes_from_the_brief():
 
 # ── the production path ──────────────────────────────────────────────────────
 
-async def _generate(brief: dict) -> tuple[list[dict], list[str]]:
+async def _generate(brief: dict, input_text: str | None = None) -> tuple[list[dict], list[str]]:
     async def _stub(brief_data, route_kwargs):
         return {"dag_data": {"strategy": "sequential", "tasks": [
                     {**t, "type": "action", "inputs": [], "outputs": [f"o_{t['id']}"], "domain": None,
@@ -98,7 +98,7 @@ async def _generate(brief: dict) -> tuple[list[dict], list[str]]:
                 "validator_calls": 0}
 
     row = MagicMock()
-    row.first.return_value = ("planning", brief, None, None, None, 0, False)
+    row.first.return_value = ("planning", brief, None, None, input_text, 0, False)
     inserted: list[dict] = []
 
     async def _execute(stmt, params=None, *a, **k):

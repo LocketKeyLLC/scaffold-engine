@@ -137,3 +137,48 @@ async def test_the_executor_reads_the_operators_words_for_a_job_refined_before_t
         captured, _, _ = await _run(GROUNDED, LIVE_BRIEF, job_extra={"input_text": idea})
     assert ("## The engine's own code (read from the running engine" in captured["prompt"]) is shown, \
         captured.get("raised")
+
+
+# ── a job refined before the stamp: planner, plan completion and executor all answer from the operator's words ──
+
+def test_an_unstamped_brief_is_read_with_the_operators_words():
+    assert es.brief_for_the_engine(LIVE_BRIEF, IDEA)["targets_engine"] is True
+    assert "targets_engine" not in es.brief_for_the_engine(LIVE_BRIEF, "Build a CLI.")
+    assert es.brief_for_the_engine({"targets_engine": False}, IDEA) == {"targets_engine": False}   # a decision stands
+    assert es.brief_for_the_engine(None, None) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idea, completed", [(IDEA, True), ("Build a CLI that tracks my stocks.", False)])
+async def test_the_planner_completes_an_engine_plan_from_the_operators_words(idea, completed):
+    from tests.test_an_engine_plan_is_complete import _generate
+    inserted, _ = await _generate(LIVE_BRIEF, input_text=idea)
+    assert ("WIRE" in {p["node_key"] for p in inserted}) is completed
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("idea, ok", [(IDEA, True), ("Build a CLI that tracks my stocks.", False)])
+async def test_plan_completion_reads_the_operators_words_and_keeps_the_stamp(idea, ok):
+    from sqlalchemy import text
+
+    from app.database import async_session
+    from app.modules import engine_plan
+    jid = str(uuid.uuid4())
+    try:
+        async with async_session() as db:
+            await db.execute(text("INSERT INTO jobs (id, title, status, refined_brief, input_text) VALUES "
+                                  "(:id, 'lab', 'blocked', CAST(:b AS jsonb), :i)"),
+                             {"id": jid, "b": json.dumps(LIVE_BRIEF), "i": idea})
+            await db.commit()
+        async with async_session() as db:
+            out = await engine_plan.apply_to_job(db, jid, edited_by="test")
+        async with async_session() as db:
+            saved = (await db.execute(text("SELECT refined_brief FROM jobs WHERE id = :j"), {"j": jid})).scalar()
+        assert ("error" not in out) is ok, out
+        assert (saved.get("targets_engine") is True) is ok
+        assert saved["description"] == LIVE_BRIEF["description"]                    # the rest of the brief stands
+    finally:
+        async with async_session() as db:
+            await db.execute(text("DELETE FROM dag_node_edits WHERE job_id = :j"), {"j": jid})
+            await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
+            await db.commit()
