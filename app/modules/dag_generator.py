@@ -2028,6 +2028,7 @@ async def generate_dag(
         try:
             from app.modules import engine_plan, engine_source
             _brief_d = brief if isinstance(brief, dict) else (json.loads(brief) if isinstance(brief, str) and brief else {})
+            _brief_d = engine_source.brief_for_the_engine(_brief_d, input_text)       # §17.1813
             if engine_source.targets_the_engine(_brief_d):
                 for _c in engine_plan.complete_engine_plan(normalized, _brief_d):
                     validator_warnings.append(_c)

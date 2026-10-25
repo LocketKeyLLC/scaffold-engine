@@ -1827,10 +1827,9 @@ async def execute_next_node(
 
         brief = job.get("refined_brief") or {}
         # §17.1813 — a job refined before the brief carried `targets_engine`: the operator's own words decide
-        from app.modules import engine_source as _es_t0
-        if (isinstance(brief, dict) and "targets_engine" not in brief
-                and _es_t0.idea_targets_the_engine(job.get("input_text"))):
-            brief = {**brief, "targets_engine": True}
+        if isinstance(brief, dict):
+            from app.modules import engine_source as _es_t0
+            brief = _es_t0.brief_for_the_engine(brief, job.get("input_text"))
         depends_on = node.get("depends_on") or []
         # §17.1653 — a REPORT step reads every settled step (inserted fixes included), each labelled with its title
         _reports = bool(formats_what_came_before(dict(node) if hasattr(node, "keys") else {}))
