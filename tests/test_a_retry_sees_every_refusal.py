@@ -74,3 +74,43 @@ async def test_the_executor_puts_the_history_in_the_prompt():
         captured, _, _ = await _run(GROUNDED, {"description": "Write a news CLI.", "goals": ["A CLI."]},
                                     node_extra={"retry_count": 2, "last_verification_reason": LAST})
     assert SAMPLE in captured["prompt"] and "every one must stay fixed" in captured["prompt"]
+
+
+@pytest.mark.integration
+async def test_a_reset_or_edited_step_is_not_held_to_its_old_versions_refusals():
+    """§17.1815 — live 5b4880c0 T4: after a reset and a new prompt, the old version's refusals led two of three
+    attempts back to the module the step no longer writes."""
+    from app.database import async_session
+    text = xa.text
+    jid = str(uuid.uuid4())
+    log = ("INSERT INTO execution_logs (job_id, node_id, log_level, message, details, created_at) VALUES "
+           "(:j, :n, 'warning', 'Node x -> failed', CAST(:d AS jsonb), now() + make_interval(secs => :t))")
+    edit = ("INSERT INTO dag_node_edits (job_id, node_key, op, edited_by, created_at) VALUES "
+            "(:j, :k, :op, 'test', now() + make_interval(secs => :t))")
+    try:
+        async with async_session() as db:
+            await db.execute(text("INSERT INTO jobs (id, title, status) VALUES (:id, 'retry history', 'running')"),
+                             {"id": jid})
+            ids = []
+            for k in ("T4", "T6"):
+                ids.append((await db.execute(text(
+                    "INSERT INTO dag_nodes (job_id, node_key, title, status, execution_order) "
+                    "VALUES (:j, :k, 'x', 'pending', 0) RETURNING id"), {"j": jid, "k": k})).scalar())
+            nid, other = ids
+            for t, reason in ((1, "old: tests/test_paper_entry_batch.py"), (5, SAMPLE), (7, LAST)):
+                await db.execute(text(log), {"j": jid, "n": nid, "d": json.dumps({"reason": reason}), "t": t})
+            await db.execute(text(edit), {"j": jid, "k": "T4", "op": "reset", "t": 2})
+            await db.execute(text(edit), {"j": jid, "k": "T4", "op": "edit", "t": 3})
+            await db.execute(text(edit), {"j": jid, "k": "T6", "op": "edit", "t": 6})    # another step's edit
+            await db.commit()
+        async with async_session() as db:
+            got = await xa.prior_refusals(db, jid, str(nid))
+            never_edited = await xa.prior_refusals(db, jid, str(other))
+        assert got == [SAMPLE, LAST]
+        assert never_edited == []
+    finally:
+        async with async_session() as db:
+            for tbl in ("execution_logs", "dag_node_edits"):
+                await db.execute(text(f"DELETE FROM {tbl} WHERE job_id = :j"), {"j": jid})
+            await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
+            await db.commit()
