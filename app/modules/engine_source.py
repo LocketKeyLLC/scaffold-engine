@@ -530,15 +530,14 @@ def step_module(row: dict) -> str:
 def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     """§17.1762 — what each module this job's steps have already written defines: its top-level names and the call
     shape of each function, ``{"alpaca_stream": {"node": "T10", "names": {...}, "funcs": {...}}}``. A step not yet
-    written is absent (nothing to check against)."""
+    written is absent (nothing to check against). §17.1822 — each file is its own module: a block headed
+    `# app/modules/y.py` defines `y`, not the step's first module. Live (follow-up 5b4880c0): T6D's output also held a
+    rewrite of `paper_audit_trail_writer.py`; its `write_approval` was credited to T6D's data module, the check told T6
+    the data module "has write_approval", and T6's import of it failed in the sandbox twice."""
     out: dict[str, dict] = {}
     for r in rows:
-        mod = step_module(r)
-        names: set[str] = set()
-        defined: set[str] = set()
-        funcs: dict[str, dict] = {}
-        classes: dict[str, dict] = {}
-        seen = False
+        first = step_module(r)
+        acc: dict[str, dict] = {}
         for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
             if lang not in PYTHON_LANGS:
                 continue
@@ -549,7 +548,11 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                 tree = ast.parse(code)
             except SyntaxError:
                 continue
-            seen = True
+            mod = head.group(2) if head else first
+            if not mod:
+                continue
+            a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}})
+            names, defined, funcs, classes = a["names"], a["defined"], a["funcs"], a["classes"]
             for n in tree.body:
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     names.add(n.name)
@@ -572,10 +575,9 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                             names.add(x.name)
                         elif isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store):
                             names.add(x.id)
-        if mod and seen:
-            out[mod] = {"node": r.get("node_key"), "names": names, "defined": defined, "funcs": funcs,
-                        "classes": classes,
-                        "ctors": {k: v["init"] for k, v in classes.items() if v.get("init")}}     # §17.1803
+        for mod, a in acc.items():
+            out[mod] = {"node": r.get("node_key"), **a,
+                        "ctors": {k: v["init"] for k, v in a["classes"].items() if v.get("init")}}     # §17.1803
     return out
 
 
@@ -726,9 +728,13 @@ def imports_an_unwritten_sibling(output: str, others: list[dict], written: dict[
 
 def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list[str]:
     """§17.1775 — an output whose code is headed with another step's module: it would overwrite that step's file."""
-    # §17.1812 — a module the earlier job finished is not a sibling's file: a follow-up step exists to fix it
-    theirs = {step_module(r): r.get("node_key") for r in others if step_module(r) and not is_carried(r)}
     own = step_module({k: v for k, v in row.items() if k != "output_text"})
+    # §17.1812 — a module the earlier job finished is not a sibling's file when this step fixes it; §17.1822 — only
+    # then: a step whose own text never names it (live: T6D, the batch's data step, rewrote the audit trail writer in
+    # passing, and its copy replaced the finished one for every later step) is held to it like any sibling's
+    mine = " ".join(str(row.get(k) or "") for k in ("title", "description", "prompt_template"))
+    theirs = {step_module(r): r.get("node_key") for r in others if step_module(r)
+              and not (is_carried(r) and re.search(rf"\b{re.escape(step_module(r))}\b", mine))}
     found: list[str] = []
     for lang, code in extract_code_blocks(output or ""):
         m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
