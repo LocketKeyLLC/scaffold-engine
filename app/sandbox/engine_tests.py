@@ -119,6 +119,27 @@ def _tail(text: str, lines: int = 60) -> str:
     return "\n".join(keep[-lines:])
 
 
+#: §17.1823 — failures the engine recognises, with what fixes them, put next to the error rather than left to a rule
+#: far up the prompt. Live (follow-up 5b4880c0): a dict bound to a JSON column through `text()` was the cause of 20 of
+#: the job's 71 sandbox refusals, across six steps, though the tables block states the rule in every prompt.
+KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"descriptor 'encode' for 'str' objects doesn't apply to a '(?:dict|list)' object"
+                r"|invalid input for query argument \$\d+: [\[{]"),
+     "a Python dict or list was bound to a JSON/JSONB column through `text()`: asyncpg takes JSON only as text -- "
+     "bind `json.dumps(value)` and write `CAST(:p AS json)` (or `jsonb`, the column's own type) in the SQL; in the "
+     "tests' INSERTs too"),
+    (re.compile(r"'MagicMock' object can't be awaited|object MagicMock can't be used in 'await' expression"),
+     "an awaited call was mocked with `MagicMock`: use `AsyncMock` for anything the code awaits (`db.execute`, "
+     "`db.commit`, a client's coroutine methods) -- or test against the scratch database instead of a fake session"),
+)
+
+
+def known_causes(text: str) -> str:
+    """§17.1823 — the recognised causes in a failed run's output, one line each (empty when none)."""
+    hits = [hint for rx, hint in KNOWN_CAUSES if rx.search(text or "")]
+    return "".join(f"\nCause the engine recognises: {h}." for h in hits)
+
+
 def _report(text: str, budget: int = 6000) -> str:
     """§17.1817 — a failed test run as the next attempt needs it: every failure's short traceback from the FIRST one
     (often the cause the rest follow from), then pytest's summary. Live (follow-up 5b4880c0 T6, 8-14 of its tests
@@ -201,4 +222,5 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "the query; mock HTTP clients and model calls. " if res.database == "ok" else
            "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
            "in tests. ")
-        + "Fix the code (or the test, when the test is what is wrong):\n\n" + why[:6000]), ran)
+        + "Fix the code (or the test, when the test is what is wrong):"
+        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:6000]), ran)
