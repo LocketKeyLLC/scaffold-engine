@@ -143,3 +143,32 @@ async def test_a_finished_review_step_adds_its_fix_steps():
 async def test_another_finished_step_does_not():
     apply = await _loop("Document the lab")
     apply.assert_not_awaited()
+
+
+# ── §17.1818b — re-applying plan completion changes nothing (the title is kept) ─────────────────────────────
+
+async def _apply(rows):
+    brief_row = MagicMock(); brief_row.mappings.return_value.first.return_value = {
+        "refined_brief": {"title": "Finish paper-trading lab", "targets_engine": True}}
+    plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = rows
+    db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows]); db.commit = AsyncMock()
+    with patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), \
+         patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})), \
+         patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
+        out = await engine_plan.apply_to_job(db, "5b4880c0-0000-4000-8000-000000000000")
+    return out, {c.args[1]: c.args[2] for c in ed.await_args_list}
+
+
+@pytest.mark.asyncio
+async def test_reapplying_plan_completion_is_a_no_op():
+    t10 = {"node_key": "T10", "title": "Run end-to-end paper trade", "tool": "Shell", "node_type": "task",
+           "status": "pending", "depends_on": [], "tool_config": None,
+           "prompt_template": "Execute one trade on the paper account. Use secrets-store keys ALPACA_API_KEY_ID and "
+                              "ALPACA_API_SECRET_KEY."}
+    _, edits = await _apply([t10])
+    first = edits["T10"]
+    assert first["title"].startswith("Are the ") and first["tool"] == "LLM"           # the title is written too
+    stored = {**t10, "title": first["title"], "tool": first["tool"], "prompt_template": first["prompt_template"],
+              "depends_on": first.get("depends_on", t10["depends_on"])}
+    _, again = await _apply([stored])
+    assert "T10" not in again, again["T10"]                                            # live: it became CodeGen

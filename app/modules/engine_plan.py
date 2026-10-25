@@ -657,6 +657,11 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         if not b:
             continue
         fields = {}
+        # §17.1818b — the title too: live (5b4880c0 T10), the first pass made "Run end-to-end paper trade" the operator's
+        # "Are the … keys stored …?" step but kept the old title, so a second pass read "Run …" as runtime work and made
+        # it a CodeGen module -- re-applying plan completion was not a no-op
+        if (t.get("name") or "") != (b.get("name") or "") and t.get("name"):
+            fields["title"] = t.get("name")
         if (t.get("notes") or "") != (b.get("notes") or ""):
             fields["prompt_template"] = t.get("notes") or ""
         if list(t.get("depends_on") or []) != list(b.get("depends_on") or []):
