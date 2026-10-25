@@ -2484,6 +2484,15 @@
       },
       "IdeaInput": {
         "properties": {
+          "builds_on": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Builds On",
+            "type": "array"
+          },
           "domain": {
             "anyOf": [
               {

@@ -331,7 +331,7 @@ async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra
         "prompt_template": "Python module `news_client.py`: fetch news via the engine's SearXNG.", "domain": None,
         "depends_on": [], "assigned_model": None, "retry_count": 0, "last_verification_reason": None,
         **(node_extra or {})})
-    captured: dict = {"calls": []}
+    captured: dict = {"calls": [], "db": db}
     queue = list(outputs or [])
 
     async def chat(messages, **kw):

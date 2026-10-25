@@ -178,3 +178,71 @@ async def test_a_failure_with_the_database_says_to_test_sql_against_it():
          patch.object(et, "run_code", new=run):
         res = await et.check(WITH_TEST, ME, [T10])
     assert "fresh scratch database" in res.reason and "fake session that ignores the query" in res.reason
+
+
+# ── §17.1810 the verdict is kept on the step ─────────────────────────────────
+# Live (lab f00ea97f, 2026-10-24): asked "were the trading modules tested?", the only record of each sandbox verdict
+# was a log line, gone with the orchestrator's restart; and "done" said nothing of whether a step's own tests ran or
+# only an import of its module did (12 of 23 had no tests at all).
+
+def test_the_record_says_whether_tests_ran_or_only_an_import():
+    assert et.record(et.EngineTestResult("pass", "tests passed (tests/test_x.py)", ["tests/test_x.py"])) == {
+        "verdict": "pass", "kind": "tests", "ran": ["tests/test_x.py"], "reason": "tests passed (tests/test_x.py)"}
+    assert et.record(et.EngineTestResult("pass", "imports cleanly", ["app/modules/x.py", "app/modules/y.py"]))["kind"] \
+        == "import"
+    assert et.record(et.EngineTestResult("skip", "engine-test sandbox off", []))["kind"] == "none"
+    assert len(et.record(et.EngineTestResult("fail", "x" * 9000, ["tests/test_x.py"]))["reason"]) == 500
+
+
+def _evidence_written(db) -> list[dict]:
+    import json
+    return [json.loads(c.args[1]["ev"]) for c in db.execute.await_args_list
+            if "SET evidence" in str(c.args[0]) and len(c.args) > 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,ran,kind", [
+    ("pass", ["tests/test_news_client.py"], "tests"),
+    ("pass", ["app/modules/news_client.py"], "import"),
+    ("fail", ["tests/test_news_client.py"], "tests"),
+])
+async def test_the_executor_keeps_the_verdict_on_the_step(verdict, ran, kind):
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    answer = AsyncMock(return_value=SimpleNamespace(verdict=verdict, reason=f"§17.1765 {verdict}", ran=ran))
+    with patch("app.sandbox.engine_tests.check", new=answer), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    kept = [e["engine_test"] for e in _evidence_written(captured["db"]) if "engine_test" in e]
+    assert kept and kept[-1]["verdict"] == verdict and kept[-1]["kind"] == kind and kept[-1]["ran"] == ran, \
+        (kept, captured.get("raised"))
+
+
+@pytest.mark.asyncio
+async def test_another_jobs_code_keeps_no_sandbox_verdict():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, _run
+    captured, _, _ = await _run(GROUNDED, {"description": "Write a news CLI.", "goals": ["A CLI."]})
+    assert not [e for e in _evidence_written(captured["db"]) if "engine_test" in e]
+
+
+@pytest.mark.asyncio
+async def test_the_verdict_is_kept_when_the_evidence_check_itself_errors():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    answer = AsyncMock(return_value=SimpleNamespace(verdict="pass", reason="tests passed", ran=["tests/test_n.py"]))
+    with patch("app.sandbox.engine_tests.check", new=answer), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])), \
+         patch("app.modules.execution_agent.verify_node_output", new=AsyncMock(side_effect=RuntimeError("down"))):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    kept = [e for e in _evidence_written(captured["db"]) if "engine_test" in e]
+    assert kept and kept[-1]["checked"] is False and kept[-1]["engine_test"]["kind"] == "tests", \
+        (kept, captured.get("raised"))
+
+
+def test_the_run_tab_says_tested_or_only_loaded_before_the_evidence_gate():
+    import pathlib
+    import re
+    ui = pathlib.Path("app/ui/static/views/theater.js").read_text()
+    body = re.search(r"function evidenceLines\(ev\) \{(.*?)\n  \}\n", ui, re.S).group(1)
+    et_at, gate_at = body.index("ev.engine_test"), body.index("if (!ev.checked) return out;")
+    assert et_at < gate_at                       # an unchecked report still shows what the sandbox ran
+    for phrase in ("✓ Tested", "⚠️ Not tested", "❌ The engine-test sandbox failed", "Not run in the engine-test sandbox"):
+        assert phrase in body

@@ -40,6 +40,12 @@ class EngineTestResult:
     ran: list[str]
 
 
+def record(res: EngineTestResult) -> dict:
+    """§17.1810 — the verdict as the step keeps it: whether its own tests ran, or only an import of its module."""
+    kind = "tests" if any(is_test(p) for p in res.ran) else ("import" if res.ran else "none")
+    return {"verdict": res.verdict, "kind": kind, "ran": list(res.ran), "reason": (res.reason or "")[:500]}
+
+
 def files_of(row: dict) -> dict[str, str]:
     """The files one step writes: each Python block at the path its `# path.py` header names, else (the first
     unnamed block) at the step's own module -- `app/modules/x.py`, or `tests/test_x.py` for a test module."""
