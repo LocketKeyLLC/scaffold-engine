@@ -318,14 +318,14 @@ def _session(db):
 
 
 async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra: dict | None = None,
-               chat_tokens: int = 1, outputs: list[str] | None = None):
+               chat_tokens: int = 1, outputs: list[str] | None = None, job_extra: dict | None = None):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.commit = AsyncMock()
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
         {"node_key": "T9", "title": "Implement Alpaca paper client",
          "description": "", "prompt_template": "Python module `alpaca_client.py`", "output_text": ""}]
     db.execute = AsyncMock(return_value=rows)
-    job = AsyncMock(return_value={"id": "job-1", "status": "running", "refined_brief": brief})
+    job = AsyncMock(return_value={"id": "job-1", "status": "running", "refined_brief": brief, **(job_extra or {})})
     node = AsyncMock(return_value={
         "id": "node-7", "node_key": "T7", "title": "Implement news signal client", "tool": "CodeGen",
         "prompt_template": "Python module `news_client.py`: fetch news via the engine's SearXNG.", "domain": None,

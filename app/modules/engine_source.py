@@ -49,9 +49,41 @@ def targets_the_engine(brief: dict | None) -> bool:
     """Is this job writing code that becomes part of the engine itself?"""
     if not isinstance(brief, dict):
         return False
+    if brief.get("targets_engine") is True:         # §17.1813 — decided once, at refinement
+        return True
     parts = [brief.get("title"), brief.get("description"), *(brief.get("goals") or []),
              *(brief.get("outputs_expected") or [])]
     return bool(_TARGETS_RE.search(" ".join(str(p) for p in parts if p)))
+
+
+def idea_targets_the_engine(idea_text: str | None) -> bool:
+    """The operator's own words name the engine's code ("this repository's code")."""
+    return bool(_TARGETS_RE.search(idea_text or ""))
+
+
+async def job_targets_the_engine(db, job_id, idea_text: str | None, brief: dict | None) -> bool:
+    """§17.1813 — whether a job writes the engine's own code, from the operator's words, the brief, or a job it
+    builds on. Live (follow-up 5b4880c0, 2026-10-25): the idea said "in the scaffold engine itself (this repository's
+    code)"; the refiner wrote "inside this repository's scaffold engine", which no pattern reads -- so its CodeGen
+    steps ran with no engine block, no name checks and no engine-test sandbox, and passed unchecked."""
+    if targets_the_engine(brief) or idea_targets_the_engine(idea_text):
+        return True
+    import json
+
+    from sqlalchemy import text
+    rows = (await db.execute(text(
+        "SELECT p.refined_brief, p.input_text FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
+        " CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on' ELSE '[]'::jsonb END)"
+        " AS b(prior) JOIN jobs p ON p.id::text = b.prior WHERE j.id = :j"), {"j": str(job_id)})).all()
+    for rb, it in rows:
+        if isinstance(rb, str):
+            try:
+                rb = json.loads(rb)
+            except ValueError:
+                rb = None
+        if targets_the_engine(rb) or idea_targets_the_engine(it):
+            return True
+    return False
 
 
 def _dotted(path: Path) -> str:
