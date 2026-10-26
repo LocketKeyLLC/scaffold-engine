@@ -75,6 +75,8 @@ async def test_an_exhausted_step_that_keeps_omitting_is_split_and_starts_again()
         assert v["status"] == "pending" and v["retry_count"] == 0 and list(v["depends_on"]) == ["T22", "T24D"]
         assert "Import every query and data function `paper_operator_dashboard_data.py` (step T24D) has" in v["prompt_template"]
         assert "written in this module with `async_session` + `text`" in v["prompt_template"]     # §17.1828
+        assert "run through the real `paper_operator_dashboard_data` functions against the scratch database" in \
+            v["prompt_template"] and "mock `paper_operator_dashboard_data`" not in v["prompt_template"]   # §17.1829
         assert list(rows["T25"]["depends_on"]) == ["T24"]                   # dependents keep the step's key
     finally:
         await _drop(jid)
@@ -169,6 +171,8 @@ async def test_asking_again_re_renders_an_old_split_entry_and_keeps_its_task():
         assert "written in this module with `async_session` + `text`" in p
         assert "It writes proposals to the append-only audit trail with model and data timestamps." in p   # task kept
         assert "tests/test_paper_daily_signal_proposal_batch.py" in p and who == ["operator"]
+        assert "mock `paper_daily_signal_proposal_batch_data`'s functions" not in p                     # §17.1829
+        assert "mock only what reaches outside the engine" in p
         async with async_session() as db:                                       # asked once more: nothing to change
             again = await split_step_endpoint(uuid.UUID(jid), "T24", db=db, principal=op)
         assert again["refreshed"] is False
