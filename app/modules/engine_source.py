@@ -558,6 +558,9 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                     names.add(n.name)
                     defined.add(n.name)
                     funcs[n.name] = _call_shape(n)
+                    if not n.name.startswith("_"):                       # §17.1834 — what its dicts carry
+                        from app.modules.engine_contracts import returned_keys
+                        a.setdefault("returns", {})[n.name] = returned_keys(code, n.name)
                 elif isinstance(n, ast.ClassDef):
                     names.add(n.name)
                     defined.add(n.name)
@@ -837,9 +840,11 @@ def _public_api(code: str, limit: int = 600) -> str:
     fns: list[str] = []
     callers: list[str] = []         # classes with public methods: the client a step calls
     bare: list[str] = []            # exceptions, records -- named last, so a long list cuts these first
+    from app.modules.engine_contracts import returned_keys
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
-            fns.append(_signature(n).split("def ", 1)[1])
+            keys = returned_keys(code, n.name)                          # §17.1834
+            fns.append(_signature(n).split("def ", 1)[1] + (f" -> {{{', '.join(keys)}}}" if keys else ""))
         elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
             meths = [m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and not m.name.startswith("_")]
@@ -1589,7 +1594,9 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> 
     for mod in sorted(defs):
         if mod == own:
             continue
-        sigs = [_shape_signature(f, sh) for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
+        rk = defs[mod].get("returns") or {}
+        sigs = [_shape_signature(f, sh) + (f" -> {{{', '.join(rk[f])}}}" if rk.get(f) else "")       # §17.1834
+                for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
         for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
             if cname.startswith("_") or cname.endswith(("Error", "Exception")):
                 continue

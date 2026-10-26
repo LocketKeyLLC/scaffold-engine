@@ -836,7 +836,11 @@ def _entry_prompt(own: str, data_mod: str, data_key: str, task: str) -> str:
     ``context["equity"]``, a key ``load_batch_context`` never returns, and ``signal["id"]``, a key no signal has --
     in production it proposes nothing -- because a mocked data module returns whatever the test says. The split's
     boundary is exactly the contract the tests must cross, so they run through the real data functions against the
-    scratch database the sandbox provides (§17.1783)."""
+    scratch database the sandbox provides (§17.1783).
+
+    §17.1834 — model calls are mocked too. Live (same step, tenth run): `propose_trades` writes its rationale with a
+    model; the text allowed mocking only the broker, network and clock, so attempts mocked `propose_trades` -- and the
+    data functions with it -- wholesale, and the verifier refused every one."""
     return (
         f"Python module `{own}.py`: the part of this task that USES the data -- rendering / the exported entry "
         f"points. Import every query and data function `{data_mod}.py` (step {data_key}) has; never re-implement "
@@ -845,7 +849,7 @@ def _entry_prompt(own: str, data_mod: str, data_key: str, task: str) -> str:
         f"not take. The task: {task} In this same step also write `tests/test_{own}.py`: pytest tests of the "
         f"rendering / entry points that run through the real `{data_mod}` functions against the scratch database "
         f"(insert the rows they read, call the entry point, check what it returns and the rows it writes); mock only "
-        f"what reaches outside the engine -- the broker, the network, the clock.")
+        f"what reaches outside the engine -- the broker, the network, model calls, the clock.")
 
 
 _ENTRY_RE = re.compile(r"^Python module `(?P<own>[\w]+)\.py`: the part of this task that USES the data\b.*?"

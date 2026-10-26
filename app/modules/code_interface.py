@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 
+from app.modules.engine_contracts import returned_keys
 from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
 
 
@@ -25,12 +26,16 @@ def _doc(node: ast.AST) -> str:
     return first[0][:120] if first else ""
 
 
-def _fn(fn: ast.FunctionDef | ast.AsyncFunctionDef, indent: str) -> list[str]:
+def _fn(fn: ast.FunctionDef | ast.AsyncFunctionDef, indent: str, code: str = "") -> list[str]:
     out = [f"{indent}@{ast.unparse(d)}" for d in fn.decorator_list]
     ret = f" -> {ast.unparse(fn.returns)}" if fn.returns else ""
     head = f"{indent}{'async ' if isinstance(fn, ast.AsyncFunctionDef) else ''}def {fn.name}({ast.unparse(fn.args)}){ret}: ..."
     doc = _doc(fn)
-    out.append(head + (f"  # {doc}" if doc else ""))
+    # §17.1834 — and the keys the dicts it returns carry: a signature says `dict[str, Any]`, a first docstring line
+    # can say "the equity" of a dict that has no `equity`
+    keys = returned_keys(code, fn.name) if code and not indent else []
+    notes = ([f"returns keys: {', '.join(keys)}"] if keys else []) + ([doc] if doc else [])
+    out.append(head + (f"  # {' -- '.join(notes)}" if notes else ""))
     return out
 
 
@@ -80,7 +85,7 @@ def python_interface(text: str) -> str | None:
             if isinstance(n, (ast.Import, ast.ImportFrom)):
                 lines.append(ast.unparse(n))
             elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                lines.extend(_fn(n, ""))
+                lines.extend(_fn(n, "", code))
             elif isinstance(n, ast.ClassDef):
                 lines.extend(_class(n))
             elif isinstance(n, ast.Assign):
