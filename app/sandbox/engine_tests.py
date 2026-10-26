@@ -31,6 +31,8 @@ logger = logging.getLogger("scaffold")
 #: a file named in the block's first line; an Alembic revision's file starts with digits (`0010_paper_audit_trail.py`)
 _HEADER_RE = re.compile(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b")
 _TEST_NAME_RE = re.compile(r"(?:^|/)(?:test_\w+|\w+_test|conftest)\.py$")
+#: §17.1838 — a block headed with another kind of file (`# verifier_response.json`, `# config.yaml`) is that file
+_OTHER_FILE_RE = re.compile(r"^\s*#\s*(?:[\w.-]+/)*[\w.-]+\.(?!py\b)[A-Za-z0-9]{1,8}\s*$")
 
 
 @dataclass
@@ -55,9 +57,13 @@ def files_of(row: dict) -> dict[str, str]:
     for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
         if lang not in PYTHON_LANGS or not code.strip():
             continue
-        m = _HEADER_RE.match(code.lstrip().splitlines()[0])
+        first = code.lstrip().splitlines()[0]
+        m = _HEADER_RE.match(first)
+        named = bool(m)
         if m:
             path = m.group(1)
+        elif _OTHER_FILE_RE.match(first):
+            continue                                        # §17.1838 — not a Python file, never the step's module
         elif not unnamed_used:
             leaf = step_module(row)
             if not leaf:
@@ -71,6 +77,8 @@ def files_of(row: dict) -> dict[str, str]:
         if path.split("/")[0] not in ("app", "tests") and not path.startswith("alembic/versions/"):
             continue                                        # a script: not imported by a test
         # §17.1783 — a job's Alembic revision IS carried: the sandbox applies it to the run's scratch database
+        if not named and path in out:
+            continue                                        # §17.1838 — an unnamed block never replaces a named one
         out[path] = code
     return out
 
