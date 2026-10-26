@@ -682,6 +682,78 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
     return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept}
 
 
+# ── §17.1831 a step whose tests fail inside an earlier module gets that module fixed first ──────────────────
+
+async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str = "engine §17.1831") -> dict | None:
+    """When a code step written for the engine has used its attempts and its sandbox refusals fail INSIDE another
+    finished module -- a fault of that module (`engine_tests.CALLEE_CAUSES`), at its deepest frame -- the module gets a
+    fix step (`<step>U<n>`: that module edited in place, with its tests, told the frame and the cause), and the step
+    waits for it and starts again. A defect in an earlier module is fixed there, not worked around or retried
+    forever: live (follow-up 5b4880c0 T6), f00ea97f:T4's `write_risk_check` bound a dict to a JSONB column and every
+    attempt of the batch failed in it. None when no refusal points at another module."""
+    import json as _json
+
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source, node_editor
+    from app.sandbox.engine_tests import callee_defects
+    row = (await db.execute(_t(
+        "SELECT n.id, n.title, n.prompt_template, n.tool, n.depends_on, n.output_text, j.refined_brief "
+        "FROM dag_nodes n JOIN jobs j ON j.id = n.job_id WHERE n.job_id = :j AND n.node_key = :k"),
+        {"j": job_id, "k": node_key})).mappings().first()
+    if not row or str(row["tool"] or "").lower() != "codegen":
+        return None
+    brief = row["refined_brief"] if isinstance(row["refined_brief"], dict) else _json.loads(row["refined_brief"] or "{}")
+    if not engine_source.targets_the_engine(brief):
+        return None
+    reasons = (await db.execute(_t(
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f"),
+        {"j": job_id, "n": row["id"], "f": "%-> failed"})).scalars().all()
+    own = {engine_source.step_module({"prompt_template": row["prompt_template"], "title": row["title"]})} | \
+        engine_source._written_modules(str(row["output_text"] or ""))
+    owner: dict[str, str] = {}
+    for r in await engine_source.code_rows(db, job_id):          # a finished module and the step that wrote it last
+        if r.get("status") == "done" and r.get("node_key") != node_key:
+            for m in engine_source._written_modules(str(r.get("output_text") or "")):
+                owner[m] = str(r["node_key"])
+    found: dict[str, list[dict]] = {}
+    for reason in reasons:
+        for d in callee_defects(reason or ""):
+            if d["module"] in owner and d["module"] not in own and d not in found.get(d["module"], []):
+                found.setdefault(d["module"], []).append(d)
+    if not found:
+        return None
+    existing = set((await db.execute(_t("SELECT node_key FROM dag_nodes WHERE job_id = :j"), {"j": job_id})).scalars())
+    added: list[str] = []
+    for mod, defects in found.items():
+        n = 1
+        while f"{node_key}U{n}" in existing:
+            n += 1
+        fid = f"{node_key}U{n}"
+        existing.add(fid)
+        frames = "".join(f"- `{d['frame']}` (test `{d['test']}`): {d['cause']}\n" for d in defects[:5])
+        out = await node_editor.insert_node(job_id, {
+            "node_key": fid, "title": f"Fix {mod} (found by {node_key}'s tests)", "tool": "CodeGen",
+            "node_type": "task", "depends_on": [],
+            "tool_config": {"fixes_module": mod, "found_by": node_key},
+            "prompt_template": (
+                f"Python module `{mod}.py` -- step {owner[mod]}'s module: edit it in place (the whole file, its public "
+                f"names kept). Step {node_key}'s tests failed inside it, at its own code:\n{frames}Fix it there, in "
+                f"every function of the module with the same fault. " + _tests_note(mod)),
+        }, edited_by=edited_by, db=db)
+        if out.get("error"):
+            logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
+            return None
+        added.append(fid)
+    out2 = await node_editor.edit_node(job_id, node_key, {
+        "depends_on": list(dict.fromkeys([*list(row["depends_on"] or []), *added]))}, edited_by=edited_by, db=db)
+    if out2.get("error"):
+        logger.warning("upstream_fix_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
+        return None
+    logger.warning("engine_upstream_fix job=%s node=%s fixes=%s modules=%s", job_id, node_key, added, sorted(found))
+    return {"node_key": node_key, "fix_steps": added, "modules": sorted(found)}
+
+
 # ── §17.1793 a step too big for one output is split ──────────────────────────────────────────────────────────
 
 #: a refusal that says the step left out a part of its OWN task

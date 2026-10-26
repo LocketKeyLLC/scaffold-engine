@@ -108,6 +108,14 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
         }
 
     if row.retry_count >= row.max_retries:
+        # §17.1831 — its tests kept failing inside another finished module: that module is fixed first
+        try:
+            from app.modules.engine_plan import fix_upstream_defect
+            fixed = await fix_upstream_defect(db, job_id, node_key)
+            if fixed:
+                return {"status": "reset", "node_key": node_key, "retry_count": 0, "upstream_fix": fixed}
+        except Exception as exc:                          # noqa: BLE001 — the step stays failed as before
+            logger.warning("fix_upstream_defect_failed job=%s node=%s err=%r", job_id, node_key, exc)
         # §17.1793 — a code step for the engine that keeps leaving out part of its own task is split in two and
         # starts again (fresh attempts), before any other escalation
         try:
