@@ -159,6 +159,40 @@ def _awaited_mocks(text: str) -> list[str]:
     return found
 
 
+#: §17.1831 — the recognised causes that are the fault of the function that raised them (a dict bound to a JSON
+#: column is the binder's bug), not of the test that called it (an awaited `MagicMock` is the test's).
+CALLEE_CAUSES = (KNOWN_CAUSES[0],)
+_SECTION_RE = re.compile(r"^_{3,} (\S.*?) _{3,}$")
+_APP_FRAME_RE = re.compile(r"^(app/modules/(\w+)\.py):(\d+): in (\w+)$")
+
+
+def callee_defects(report: str) -> list[dict]:
+    """§17.1831 — each failure of a run whose cause is a `CALLEE_CAUSES` fault raised inside an engine module, as
+    ``{module, frame, test, cause}`` -- the module is the DEEPEST ``app/modules`` frame of that failure. Live
+    (follow-up 5b4880c0 T6, 2026-10-26): the batch's tests ran through f00ea97f:T4's ``write_risk_check``, which binds
+    its ``metrics: dict`` straight to a JSONB column; every attempt failed at ``paper_audit_trail_writer.py:131``, a
+    file the step may not rewrite, and the hint told it to ``json.dumps`` its own values."""
+    out: list[dict] = []
+    test, frame, errors = "", None, []
+
+    def close():
+        hit = next((hint for rx, hint in CALLEE_CAUSES for e in errors if rx.search(e)), None)
+        if frame and hit:
+            out.append({"module": frame[1], "frame": f"{frame[0]}:{frame[2]} in {frame[3]}", "test": test,
+                        "cause": hit})
+
+    for ln in (report or "").splitlines():
+        if (m := _SECTION_RE.match(ln.strip())) or "short test summary info" in ln:
+            close()
+            test, frame, errors = (m.group(1) if m else ""), None, []
+        elif (f := _APP_FRAME_RE.match(ln.strip())):
+            frame = f.groups()
+        elif ln.startswith("E "):
+            errors.append(ln)
+    close()
+    return out
+
+
 def known_causes(text: str) -> str:
     """§17.1823 — the recognised causes in a failed run's output, one line each (empty when none)."""
     hits = [hint for rx, hint in KNOWN_CAUSES if rx.search(text or "")]
