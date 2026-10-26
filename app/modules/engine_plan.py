@@ -690,13 +690,16 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     fix step (`<step>U<n>`: that module edited in place, with its tests, told the frame and the cause), and the step
     waits for it and starts again. A defect in an earlier module is fixed there, not worked around or retried
     forever: live (follow-up 5b4880c0 T6), f00ea97f:T4's `write_risk_check` bound a dict to a JSONB column and every
-    attempt of the batch failed in it. None when no refusal points at another module."""
+    attempt of the batch failed in it. §17.1833 — and when its code hands one finished module's dicts to another that
+    requires a key none of them can carry (`engine_contracts.contract_gaps`), the module that builds those dicts gets
+    the fix step, once per gap. None when nothing points at another module."""
     import json as _json
 
     from sqlalchemy import text as _t
 
     from app.modules import engine_source, node_editor
-    from app.sandbox.engine_tests import callee_defects
+    from app.modules.engine_contracts import contract_gaps
+    from app.sandbox.engine_tests import callee_defects, files_of
     row = (await db.execute(_t(
         "SELECT n.id, n.title, n.prompt_template, n.tool, n.depends_on, n.output_text, j.refined_brief "
         "FROM dag_nodes n JOIN jobs j ON j.id = n.job_id WHERE n.job_id = :j AND n.node_key = :k"),
@@ -717,7 +720,8 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     own = {engine_source.step_module({"prompt_template": row["prompt_template"], "title": row["title"]})} | \
         engine_source._written_modules(str(row["output_text"] or ""))
     owner: dict[str, str] = {}
-    for r in await engine_source.code_rows(db, job_id):          # a finished module and the step that wrote it last
+    rows = await engine_source.code_rows(db, job_id)
+    for r in rows:                                               # a finished module and the step that wrote it last
         if r.get("status") == "done" and r.get("node_key") != node_key:
             for m in engine_source._written_modules(str(r.get("output_text") or "")):
                 owner[m] = str(r["node_key"])
@@ -726,10 +730,53 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
         for d in callee_defects(reason or ""):
             if d["module"] in owner and d["module"] not in own and d not in found.get(d["module"], []):
                 found.setdefault(d["module"], []).append(d)
-    if not found:
+    existing_rows = (await db.execute(_t("SELECT node_key, tool_config FROM dag_nodes WHERE job_id = :j"),
+                                      {"j": job_id})).mappings().all()
+    existing = {r["node_key"] for r in existing_rows}
+    # §17.1833 — and the dicts its code hands one finished module from another that cannot carry a key the second
+    # requires: fixed where those dicts are built, once per gap
+    asked = {str((r["tool_config"] or {}).get("contract")) for r in existing_rows if isinstance(r["tool_config"], dict)}
+    gaps: dict[str, list[dict]] = {}
+    current = {m: c for m, (_p, c, k) in engine_source.current_sources(
+        [r for r in rows if r.get("node_key") != node_key]).items()}
+    for path, code in files_of({**dict(row), "node_key": node_key}).items():
+        if not path.startswith("app/"):
+            continue
+        for g in contract_gaps(code, current):
+            target = g["origin"][0] if len(g["origin"]) == 1 else g["producer"].split(".")[0]
+            g["key"] = f"{g['consumer']}.{g['param']}:{'|'.join('/'.join(m) for m in g['missing'])}"
+            if target in owner and target not in own and g["key"] not in asked:
+                gaps.setdefault(target, []).append(g)
+    if not found and not gaps:
         return None
-    existing = set((await db.execute(_t("SELECT node_key FROM dag_nodes WHERE job_id = :j"), {"j": job_id})).scalars())
     added: list[str] = []
+    for mod, gs in gaps.items():
+        n = 1
+        while f"{node_key}U{n}" in existing:
+            n += 1
+        fid = f"{node_key}U{n}"
+        existing.add(fid)
+        lines = "".join(
+            f"- `{g['consumer']}` requires each item of its `{g['param']}` to carry "
+            + " and ".join(" or ".join(f"`{k}`" for k in m) for m in g["missing"])
+            + f" (it skips or fails an item without); step {node_key} hands it what `{g['producer']}` returns, and "
+            f"every dict this module builds for that carries only {', '.join(f'`{k}`' for k in g['carries'])}.\n"
+            for g in gs)
+        out = await node_editor.insert_node(job_id, {
+            "node_key": fid, "title": f"Fix {mod} (what {node_key} hands on lacks a key)", "tool": "CodeGen",
+            "node_type": "task", "depends_on": [],
+            "tool_config": {"fixes_module": mod, "found_by": node_key, "contract": gs[0]["key"]},
+            "prompt_template": (
+                f"Python module `{mod}.py` -- step {owner[mod]}'s module: edit it in place (the whole file, its public "
+                f"names kept). What it returns is handed on to a function that cannot use it:\n{lines}Make every "
+                "dict it returns carry the key, from where the value really comes from: an id names a saved row -- "
+                "save the item with the finished module that writes that table and carry the id it returns, with "
+                "whatever that write needs; never a made-up value. " + _tests_note(mod)),
+        }, edited_by=edited_by, db=db)
+        if out.get("error"):
+            logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
+            return None
+        added.append(fid)
     for mod, defects in found.items():
         n = 1
         while f"{node_key}U{n}" in existing:
@@ -760,8 +807,9 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     if out2.get("error"):
         logger.warning("upstream_fix_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
         return None
-    logger.warning("engine_upstream_fix job=%s node=%s fixes=%s modules=%s", job_id, node_key, added, sorted(found))
-    return {"node_key": node_key, "fix_steps": added, "modules": sorted(found)}
+    mods = sorted({*found, *gaps})
+    logger.warning("engine_upstream_fix job=%s node=%s fixes=%s modules=%s", job_id, node_key, added, mods)
+    return {"node_key": node_key, "fix_steps": added, "modules": mods}
 
 
 # ── §17.1793 a step too big for one output is split ──────────────────────────────────────────────────────────
