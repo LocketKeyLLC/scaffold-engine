@@ -100,7 +100,8 @@ def _tests_note(mod: str) -> str:
     return (f"In this same step also write `tests/test_{mod}.py`: pytest tests of what `{mod}.py` must do (its "
             "rules, its edge cases, its failure paths). They run before the step passes, with no network or secrets; "
             "`async_session` is a scratch database with this job's tables, so SQL is tested for real (each test starts "
-            "with them empty and inserts the rows it needs); HTTP clients and model calls are mocked.")
+            "with them empty and inserts the rows it needs; never DELETE from them yourself -- an append-only table "
+            "refuses it); HTTP clients and model calls are mocked.")
 
 
 def _carried_prefix(carried: list[str]) -> str | None:
@@ -720,7 +721,9 @@ def _contract_prompt(mod: str, owner: str, found_by: str, gaps: list[dict], call
             f"kept). What it returns is handed on to a function that cannot use it:\n{lines}Make every dict it returns "
             "carry the key, from where the value really comes from: an id names a saved row -- save the item with the "
             "finished module that writes that table and carry the id it returns, with whatever that write needs; never "
-            "a made-up value. Save each item ONCE: an item already saved keeps its row and its id (look it up before "
+            "a made-up value. A value no finished module's function returns (the module listings say what each returns) "
+            "is read in this module with `async_session` + `text` -- never assumed to be in what a function returns. "
+            "Save each item ONCE: an item already saved keeps its row and its id (look it up before "
             "writing), so calling this again -- the next run, a backtest -- writes no second row. "
             + (f"Other finished modules call it and get the same: {', '.join(callers)} -- each must keep working. "
                if callers else "")

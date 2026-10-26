@@ -53,3 +53,62 @@ def test_a_split_steps_entry_tests_may_mock_model_calls():
     text = engine_plan._entry_prompt("paper_b", "paper_b_data", "T6D", "Do it.")
     assert "mock only what reaches outside the engine -- the broker, the network, model calls, the clock." in text
     assert engine_plan._ENTRY_RE.match(text)                         # a re-render still recognises it
+
+
+# ── §17.1837 — a function whose dicts cannot be read shows the query its return is built from ─────────────────
+
+STORE = '''```python
+# app/modules/paper_point_time_store.py
+from sqlalchemy import text
+
+async def get_data_as_of(timestamp, *, db=None):
+    """Return payloads from ingested_item with published_ts <= timestamp."""
+    result = await db.execute(text("SELECT payload FROM ingested_item WHERE published_ts <= :ts ORDER BY id"),
+                              {"ts": timestamp})
+    rows = result.all()
+    return [row[0] for row in rows]
+
+async def get_equity(db, day):
+    result = await db.execute(text("SELECT equity FROM pnl WHERE day = :d"), {"d": day})
+    row = result.first()
+    if row is None:
+        return None
+    return Decimal(str(row[0]))
+
+async def tickers(db):
+    rows = (await db.execute(text("SELECT ticker FROM signal"))).all()
+    out = [r[0] for r in rows]
+    return out
+
+async def ingest(db, items):
+    inserted = 0
+    for it in items:
+        seen = await db.execute(text("SELECT 1 FROM ingested_item WHERE external_id = :e"), {"e": it})
+        inserted += 1
+    return inserted
+```'''
+SHAPE = "`[row[0] for row in rows]` of `SELECT payload FROM ingested_item WHERE published_ts <= :ts ORDER BY id`"
+
+
+def test_the_store_line_says_it_returns_payloads_from_its_query():
+    """Live (5b4880c0 T6U6): the line showed `get_data_as_of(timestamp, *, db)`, and the generator wrote "the
+    point-in-time store always returns the row id" -- then skipped every item for lacking one."""
+    code = STORE.split("```python\n", 1)[1].rsplit("```", 1)[0]
+    api = engine_source._public_api(code)
+    assert f"get_data_as_of(timestamp, *, db) -> {SHAPE}" in api
+    assert "get_equity(db, day) -> `Decimal(str(row[0]))` of `SELECT equity FROM pnl WHERE day = :d`" in api
+    assert "tickers(db) -> `out` of `SELECT ticker FROM signal`" in api                  # built from the rows
+    assert api.endswith("; ingest(db, items)")                                    # a counter: no query note
+    iface = code_interface.python_interface(STORE)
+    assert f"def get_data_as_of(timestamp, *, db=None): ...  # returns {SHAPE} -- Return payloads" in iface
+    defs = engine_source.sibling_definitions([{"node_key": "T13", "output_text": STORE, "title": "",
+                                               "prompt_template": ""}])
+    assert f"async get_data_as_of(timestamp, *, db=…) -> {SHAPE};" in engine_source._render_job_modules(defs, "x")
+
+
+def test_a_contract_fix_reads_what_no_function_returns_and_tests_never_delete():
+    text = engine_plan._contract_prompt("paper_g", "T1F4", "T6", [{
+        "producer": "p.f", "consumer": "c.g", "param": "items", "missing": [["id"]], "carries": ["ticker"]}], [])
+    assert ("A value no finished module's function returns (the module listings say what each returns) is read in "
+            "this module with `async_session` + `text` -- never assumed to be in what a function returns.") in text
+    assert "never DELETE from them yourself -- an append-only table refuses it" in text
