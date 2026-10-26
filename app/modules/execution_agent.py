@@ -2078,7 +2078,16 @@ async def execute_next_node(
                     _grounding_blocks.append(_es.carried_block(
                         _carried, node_snapshot,
                         budget=40000 if tool_lower == "codegen" else settings.max_report_upstream_chars,
-                        rewritten=_es.rewritten_here(_code)))                              # §17.1830
+                        rewritten=_es.rewritten_here(_code),                               # §17.1830
+                        current=_es.current_sources(_code)))                               # §17.1832
+                # §17.1832 — a step that edits a module in place sees that module as it is now
+                _tcf = node.get("tool_config")
+                _tcf = json.loads(_tcf) if isinstance(_tcf, str) else (_tcf or {})
+                if isinstance(_tcf, dict) and _tcf.get("fixes_module"):
+                    _eb = _es.edited_module_block([r for r in _code if r.get("node_key") != node_key],
+                                                  str(_tcf["fixes_module"]))
+                    if _eb:
+                        _grounding_blocks.append(_eb)
             except Exception as exc:
                 logger.warning("carried_code_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)

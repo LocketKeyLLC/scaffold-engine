@@ -135,3 +135,98 @@ async def test_a_fault_in_the_steps_own_module_adds_nothing():
         assert out["status"] == "error" and "exhausted" in out["message"]
     finally:
         await _drop(jid)
+
+
+# ── §17.1832 — a fixed defect is not fixed again; the fix step sees the file it edits ────────────────────────────
+
+
+async def _log(db, jid: str, key: str, message: str, reason: str, at: int) -> None:
+    nid = (await db.execute(text("SELECT id FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+                            {"j": jid, "k": key})).scalar()
+    await db.execute(text("INSERT INTO execution_logs (job_id, node_id, log_level, message, details, created_at) "
+                          "VALUES (:j, :n, 'warning', :m, CAST(:d AS jsonb), now() + make_interval(secs => :at))"),
+                     {"j": jid, "n": nid, "m": message, "d": json.dumps({"reason": reason}), "at": at})
+
+
+@pytest.mark.integration
+async def test_a_defect_its_fix_step_fixed_is_not_fixed_again():
+    """Live (5b4880c0 T6): after T6U1 fixed the bind, each exhaustion re-read the refusals from before it and added
+    T6U2, T6U3, T6U4, T6U5 for the same frame. Only a failure inside the module AFTER the fix adds another."""
+    from app.database import async_session
+    other_test = LIVE.replace("test_real_db_writes_proposal_and_risk_check", "test_valid_long_signal_writes_proposal")
+    async with async_session() as db:
+        jid = await _job(db, [LIVE, other_test])
+    try:
+        async with async_session() as db:
+            out = await retry_failed_node(jid, "T6", db)
+            fix = (await db.execute(text("SELECT prompt_template FROM dag_nodes WHERE job_id = :j AND node_key = "
+                                         "'T6U1'"), {"j": jid})).scalar()
+        assert out["upstream_fix"]["fix_steps"] == ["T6U1"]
+        assert fix.count("paper_audit_trail_writer.py:131 in write_risk_check") == 1      # one line per frame
+        assert "`test_real_db_writes_proposal_and_risk_check`, `test_valid_long_signal_writes_proposal`" in fix
+        async with async_session() as db:                  # the fix finishes; T6 then fails elsewhere, exhausted
+            await db.execute(text("UPDATE dag_nodes SET status = 'done' WHERE job_id = :j AND node_key = 'T6U1'"),
+                             {"j": jid})
+            await db.execute(text("UPDATE dag_nodes SET status = 'failed', retry_count = 3 WHERE job_id = :j "
+                                  "AND node_key = 'T6'"), {"j": jid})
+            await _log(db, jid, "T6U1", "Node T6U1 -> done", "fixed", 1)
+            await _log(db, jid, "T6", "Node T6 -> failed", "tests failed: assert 0 == 1", 2)
+            await db.commit()
+        async with async_session() as db:
+            again = await retry_failed_node(jid, "T6", db)
+        assert "upstream_fix" not in again
+        async with async_session() as db:                  # a NEW failure inside the module, after the fix
+            await db.execute(text("UPDATE dag_nodes SET status = 'failed', retry_count = 3 WHERE job_id = :j "
+                                  "AND node_key = 'T6'"), {"j": jid})
+            await _log(db, jid, "T6", "Node T6 -> failed", LIVE.replace(":131", ":140"), 3)
+            await db.commit()
+        async with async_session() as db:
+            third = await retry_failed_node(jid, "T6", db)
+            fix2 = (await db.execute(text("SELECT prompt_template FROM dag_nodes WHERE job_id = :j AND node_key = "
+                                          "'T6U2'"), {"j": jid})).scalar()
+        assert third["upstream_fix"]["fix_steps"] == ["T6U2"]
+        assert ":140 in write_risk_check" in fix2 and ":131" not in fix2
+    finally:
+        await _drop(jid)
+
+
+def test_a_step_that_edits_a_module_sees_it_as_it_is_now():
+    """Live (5b4880c0): T6U2-T6U4 were told to edit the writer in place and shown only that T6U1 had rewritten it;
+    each wrote a new one, the last with every writer taking one record object."""
+    from app.modules import engine_source as es
+    v1 = WRITER.replace("metrics):", "metrics, data_ts=None):")
+    rows = [{"node_key": "f00ea97f:T4", "status": "done", "title": "w",
+             "prompt_template": "Python module `paper_audit_trail_writer.py`.", "output_text": WRITER},
+            {"node_key": "T6U1", "status": "done", "title": "Fix", "prompt_template": "", "output_text": v1},
+            {"node_key": "T6U2", "status": "failed", "title": "Fix", "prompt_template": "",       # a failed draft
+             "output_text": WRITER.replace("metrics):", "check):")}]
+    block = es.edited_module_block(rows, "paper_audit_trail_writer")
+    assert "(step T6U1)" in block and "metrics, data_ts=None" in block and "check)" not in block
+    assert "keep every public function, class and parameter" in block
+    assert es.edited_module_block(rows, "paper_nothing") == ""
+    line = es.carried_block(rows[:1], {"title": "batch"}, rewritten=es.rewritten_here(rows),
+                            current=es.current_sources(rows))
+    assert "REWRITTEN by this job's step T6U1: use that step's version, not this one; it now has:\n" \
+           "        write_risk_check(*, proposal_id, metrics, data_ts)" in line
+
+
+@pytest.mark.integration
+async def test_this_jobs_own_steps_come_back_in_plan_order():
+    """Live: the name check keeps the last writer of a module; this job's rows came back in heap order and it cited
+    T6U4's writer after T6U5 had finished."""
+    from app.database import async_session
+    from app.modules import engine_source as es
+    async with async_session() as db:
+        jid = await _job(db, [])
+        for k, n in (("T6U5", 23), ("T6U4", 22)):                       # inserted out of plan order
+            await db.execute(text("INSERT INTO dag_nodes (job_id, node_key, title, status, tool, execution_order) "
+                                  "VALUES (:j, :k, :k, 'done', 'CodeGen', :n)"), {"j": jid, "k": k, "n": n})
+        await db.execute(text("UPDATE dag_nodes SET execution_order = 30 WHERE job_id = :j AND node_key = 'T4'"),
+                         {"j": jid})
+        await db.commit()
+    try:
+        async with async_session() as db:
+            keys = [r["node_key"] for r in await es.code_rows(db, jid)]
+        assert keys == ["T6", "T7", "T6U4", "T6U5", "T4"]
+    finally:
+        await _drop(jid)
