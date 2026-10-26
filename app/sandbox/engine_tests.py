@@ -134,9 +134,37 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
 )
 
 
+_MOCK_AWAITED = KNOWN_CAUSES[1][0]
+_AWAIT_EXPR = re.compile(r"\bawait\s+([^\s(]+)\(")
+
+
+def _awaited_mocks(text: str) -> list[str]:
+    """§17.1825 — each call the run awaited on a `MagicMock`, as ``db.close()`` (file:line), from the traceback.
+
+    pytest's short traceback puts the failing source line right above the ``E`` line and its ``path:N: in f``
+    above that. Live (follow-up 5b4880c0 T6, 2026-10-26): the hint named `db.execute`/`db.commit`, the code awaited
+    `db.close()`, and three attempts in a row fixed the named calls and kept the mocked close."""
+    lines = (text or "").splitlines()
+    found: list[str] = []
+    for i, ln in enumerate(lines):
+        if not (ln.lstrip().startswith("E ") and _MOCK_AWAITED.search(ln)) or i < 1:
+            continue
+        m = _AWAIT_EXPR.search(lines[i - 1])
+        if not m:
+            continue
+        where = re.match(r"\s*([\w./-]+\.py:\d+):", lines[i - 2]) if i >= 2 else None
+        item = f"`{m.group(1)}()`" + (f" ({where.group(1)})" if where else "")
+        if item not in found:
+            found.append(item)
+    return found
+
+
 def known_causes(text: str) -> str:
     """§17.1823 — the recognised causes in a failed run's output, one line each (empty when none)."""
     hits = [hint for rx, hint in KNOWN_CAUSES if rx.search(text or "")]
+    if (calls := _awaited_mocks(text)) and KNOWN_CAUSES[1][1] in hits:
+        i = hits.index(KNOWN_CAUSES[1][1])
+        hits[i] += "; this run awaited a `MagicMock` at " + ", ".join(calls)
     return "".join(f"\nCause the engine recognises: {h}." for h in hits)
 
 

@@ -304,6 +304,31 @@ def test_a_recognised_failure_gets_its_cause_and_a_miss_gets_none():
     assert et.known_causes("E   KeyError: 'dict'") == ""
 
 
+# §17.1825 — the live run (follow-up 5b4880c0 T6, 2026-10-26): two tests, the second awaits the mock in `close`.
+LIVE_MOCK_RUN = (
+    "________________ test_run_daily_batch_uses_provided_db_session _________________\n"
+    "app/modules/paper_day_start_equity_recording.py:59: in record_day_start_equity\n"
+    "    result = await db.execute(\n"
+    "E   TypeError: 'MagicMock' object can't be awaited\n"
+    "________________________ test_own_db_session_is_closed _________________________\n"
+    "tests/test_paper_daily_signal_proposal_batch.py:258: in test_own_db_session_is_closed\n"
+    "    await run_daily_batch()\n"
+    "app/modules/paper_daily_signal_proposal_batch.py:297: in run_daily_batch\n"
+    "    await db.close()\n"
+    "E   TypeError: 'MagicMock' object can't be awaited\n"
+    "2 failed, 7 passed in 1.94s")
+
+
+def test_the_mock_cause_names_each_call_the_run_awaited_on_a_magicmock():
+    cause = et.known_causes(LIVE_MOCK_RUN)
+    assert "`db.execute()` (app/modules/paper_day_start_equity_recording.py:59)" in cause
+    assert "`db.close()` (app/modules/paper_daily_signal_proposal_batch.py:297)" in cause
+    assert "run_daily_batch()" not in cause                     # the test's own call is not the awaited mock
+    assert cause.count("Cause the engine recognises") == 1
+    # an awaited line before some OTHER error names nothing
+    assert "awaited a" not in et.known_causes("    await db.close()\nE   KeyError: 'x'\nE   'MagicMock' object can't be awaited")
+
+
 @pytest.mark.asyncio
 async def test_the_sandbox_reason_carries_the_cause():
     run = AsyncMock(return_value=CodeRunResult(ok=False, exit_code=1, stdout=LIVE_JSON, stderr=""))
