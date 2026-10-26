@@ -178,6 +178,46 @@ class TestToolCallRoleCoaxingFallback:
         assert provider.chat_completion.await_count == 2
         assert resp.tool_calls[0].arguments == verdict
 
+    async def test_a_native_reply_that_writes_the_call_as_text_is_the_call(self):
+        """§17.1827 — live 2026-10-26 (job 5b4880c0 T6): the verifier wrote ``record_verification(pass=false, ...)``
+        after its reasoning instead of calling the tool; that is its verdict, and no coaxing call follows."""
+        provider = MagicMock()
+        provider.supports_native_tools = True
+        provider.tool_call = AsyncMock(return_value=_ok(
+            text='Reasoning...</think>record_verification(pass=false, reason="equity is never read", confidence=0.8)'))
+        provider.chat_completion = AsyncMock()
+
+        with patch.object(
+            model_router, "_resolve_role",
+            return_value=("model-x", provider),
+        ):
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "verify"}],
+                tools=[SAMPLE_TOOL],
+                role="model_verifier",
+            )
+
+        assert resp.tool_calls[0].arguments == {"pass": False, "reason": "equity is never read", "confidence": 0.8}
+        provider.chat_completion.assert_not_awaited()
+
+    async def test_a_coaxed_reply_that_writes_the_call_as_text_is_the_call(self):
+        provider = MagicMock()
+        provider.supports_native_tools = False
+        provider.chat_completion = AsyncMock(return_value=_ok(
+            text="record_verification(pass=true, reason='complete', confidence=0.9)"))
+
+        with patch.object(
+            model_router, "_resolve_role",
+            return_value=("model-x", provider),
+        ):
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "verify"}],
+                tools=[SAMPLE_TOOL],
+                role="model_verifier",
+            )
+
+        assert resp.tool_calls[0].arguments == {"pass": True, "reason": "complete", "confidence": 0.9}
+
     async def test_coaxing_chat_failure_propagates_with_role_context(self):
         provider = MagicMock()
         provider.supports_native_tools = False
