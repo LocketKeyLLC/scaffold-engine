@@ -73,7 +73,8 @@ async def test_an_exhausted_step_that_keeps_omitting_is_split_and_starts_again()
         assert d["prompt_template"].startswith("Python module `paper_operator_dashboard_data.py`: the DATA part")
         assert "tests/test_paper_operator_dashboard_data.py" in d["prompt_template"]
         assert v["status"] == "pending" and v["retry_count"] == 0 and list(v["depends_on"]) == ["T22", "T24D"]
-        assert "Import every query and data function from `paper_operator_dashboard_data.py` (step T24D)" in v["prompt_template"]
+        assert "Import every query and data function `paper_operator_dashboard_data.py` (step T24D) has" in v["prompt_template"]
+        assert "written in this module with `async_session` + `text`" in v["prompt_template"]     # §17.1828
         assert list(rows["T25"]["depends_on"]) == ["T24"]                   # dependents keep the step's key
     finally:
         await _drop(jid)
@@ -128,3 +129,48 @@ async def test_the_operator_can_ask_for_the_split_whatever_the_refusals_say():
     finally:
         await _drop(jid)
         await _drop(done)
+
+
+# ── §17.1828 — the entry half writes what the data half lacks; asking again re-renders a split made before ────────
+
+# T6's entry text as the §17.1821 split wrote it (follow-up 5b4880c0, 2026-10-25).
+OLD_ENTRY = ("Python module `paper_daily_signal_proposal_batch.py`: the part of this task that USES the data -- rendering "
+             "/ the exported entry points. Import every query and data function from "
+             "`paper_daily_signal_proposal_batch_data.py` (step T6D); never re-implement them here. The task: Implement "
+             "the batch that runs once a day before US market open and on demand. It writes proposals to the "
+             "append-only audit trail with model and data timestamps. In this same step also write "
+             "`tests/test_paper_daily_signal_proposal_batch.py`: pytest tests of the rendering / entry points (mock "
+             "`paper_daily_signal_proposal_batch_data`'s functions).")
+
+
+@pytest.mark.integration
+async def test_asking_again_re_renders_an_old_split_entry_and_keeps_its_task():
+    from app.database import async_session
+    from app.authz import ROLE_ADMIN, Principal
+    from app.routers.jobs import split_step_endpoint
+    async with async_session() as db:
+        jid = await _job(db, reasons=[], cfg={"split": True})
+        await db.execute(text("UPDATE dag_nodes SET prompt_template = :p WHERE job_id = :j AND node_key = 'T24'"),
+                         {"p": OLD_ENTRY, "j": jid})
+        await db.commit()
+    try:
+        op = Principal(identity="operator", role=ROLE_ADMIN)
+        async with async_session() as db:
+            out = await split_step_endpoint(uuid.UUID(jid), "T24", db=db, principal=op)
+        assert out == {"node_key": "T24", "data_step": "T6D", "data_module": "paper_daily_signal_proposal_batch_data",
+                       "refreshed": True}
+        async with async_session() as db:
+            p = (await db.execute(text("SELECT prompt_template FROM dag_nodes WHERE job_id = :j AND node_key = 'T24'"),
+                                  {"j": jid})).scalar()
+            who = (await db.execute(text("SELECT edited_by FROM dag_node_edits WHERE job_id = :j AND node_key = 'T24' "
+                                         "AND op = 'edit'"), {"j": jid})).scalars().all()
+        assert "never re-implement them here" not in p
+        assert "`paper_daily_signal_proposal_batch_data.py` (step T6D) has; never re-implement those here" in p
+        assert "written in this module with `async_session` + `text`" in p
+        assert "It writes proposals to the append-only audit trail with model and data timestamps." in p   # task kept
+        assert "tests/test_paper_daily_signal_proposal_batch.py" in p and who == ["operator"]
+        async with async_session() as db:                                       # asked once more: nothing to change
+            again = await split_step_endpoint(uuid.UUID(jid), "T24", db=db, principal=op)
+        assert again["refreshed"] is False
+    finally:
+        await _drop(jid)

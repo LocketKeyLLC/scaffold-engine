@@ -692,6 +692,46 @@ _OMISSION_RE = re.compile(r"\b(?:entirely absent|is absent|are absent|was not wr
                           r"deliverable|tests?|file)|required (?:export|deliverable|tests?)[^.]{0,80}\babsent)\b", re.I)
 
 
+def _entry_prompt(own: str, data_mod: str, data_key: str, task: str) -> str:
+    """The text of a split step's entry half.
+
+    §17.1828 — it used to say "import every query and data function from the data module; never re-implement them
+    here", absolutely. Live (follow-up 5b4880c0 T6, 2026-10-26): the data step was finished, the task needed proposals
+    written "with model and data timestamps" and the only writer (an earlier job's ``write_proposal``) takes neither;
+    the verifier failed the attempts that left them out, the name check refused the one that passed them to
+    ``write_proposal``, and the text forbade the query the name check's own advice names. What the data module HAS
+    is imported; what it does not have is written here."""
+    return (
+        f"Python module `{own}.py`: the part of this task that USES the data -- rendering / the exported entry "
+        f"points. Import every query and data function `{data_mod}.py` (step {data_key}) has; never re-implement "
+        f"those here. A query or write the task needs that neither it nor another finished module offers is "
+        f"written in this module with `async_session` + `text` -- never by passing a function parameters it does "
+        f"not take. The task: {task} In this same step also write `tests/test_{own}.py`: pytest tests of the "
+        f"rendering / entry points (mock `{data_mod}`'s functions).")
+
+
+_ENTRY_RE = re.compile(r"^Python module `(?P<own>[\w]+)\.py`: the part of this task that USES the data\b.*?"
+                       r"`(?P<data>[\w]+)\.py` \(step (?P<key>[\w:]+)\).*?The task: (?P<task>.*?) In this same step "
+                       r"also write `tests/", re.S)
+
+
+async def _refresh_split_entry(db, job_id: str, node_key: str, prompt: str, asked_by: str) -> dict | None:
+    """§17.1828 — asked again for a step that is already split: its entry text re-rendered from the current
+    template (the data step and the task kept), so a corrected template reaches a split made before it."""
+    from app.modules import node_editor
+    m = _ENTRY_RE.match(prompt.strip())
+    if not m:
+        return None
+    new = _entry_prompt(m["own"], m["data"], m["key"], m["task"].strip())
+    if new == prompt.strip():
+        return {"node_key": node_key, "data_step": m["key"], "data_module": m["data"], "refreshed": False}
+    out = await node_editor.edit_node(job_id, node_key, {"prompt_template": new}, edited_by=asked_by, db=db)
+    if out.get("error"):
+        logger.warning("split_refresh_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    return {"node_key": node_key, "data_step": m["key"], "data_module": m["data"], "refreshed": True}
+
+
 async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions: int = 2,
                                asked_by: str | None = None) -> dict | None:
     """When a code step written for the engine has used its attempts and its refusals keep saying it LEFT OUT part of
@@ -713,6 +753,8 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
         return None
     brief = row["refined_brief"] if isinstance(row["refined_brief"], dict) else _json.loads(row["refined_brief"] or "{}")
     cfg = row["tool_config"] if isinstance(row["tool_config"], dict) else _json.loads(row["tool_config"] or "{}")
+    if cfg.get("split") and asked_by and engine_source.targets_the_engine(brief):
+        return await _refresh_split_entry(db, job_id, node_key, str(row["prompt_template"] or ""), asked_by)
     if not engine_source.targets_the_engine(brief) or cfg.get("split") or cfg.get("split_from"):
         return None
     reasons = (await db.execute(_t(
@@ -748,11 +790,7 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
     out2 = await node_editor.edit_node(job_id, node_key, {
         "depends_on": [*list(row["depends_on"] or []), data_key],
         "tool_config": {**cfg, "split": True},
-        "prompt_template": (
-            f"Python module `{own}.py`: the part of this task that USES the data -- rendering / the exported entry "
-            f"points. Import every query and data function from `{data_mod}.py` (step {data_key}); never "
-            f"re-implement them here. The task: {task} In this same step also write `tests/test_{own}.py`: pytest "
-            f"tests of the rendering / entry points (mock `{data_mod}`'s functions)."),
+        "prompt_template": _entry_prompt(own, data_mod, data_key, task),
     }, edited_by=asked_by or "engine §17.1793", db=db)
     if out2.get("error"):
         logger.warning("split_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
