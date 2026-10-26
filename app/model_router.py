@@ -35,7 +35,9 @@ from app.providers.base import ModelResponse, Tool, ToolCall
 
 if TYPE_CHECKING:  # §17.1059 — annotation-only; the runtime import lives in the provider seam
     from app.providers.base import LLMProvider
-from app.utils.llm_parsing import parse_json_array, parse_json_object, parse_json_object_for_schema
+from app.utils.llm_parsing import (
+    parse_json_array, parse_json_object, parse_json_object_for_schema, parse_tool_call_text,
+)
 from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.router")
@@ -1143,6 +1145,9 @@ async def _native_first_then_coax(
         ),
         model=model,
     )
+    if tools and resp.success and not resp.tool_calls and (written := _tool_call_in_text(resp.text, tools)):
+        resp.tool_calls = [written]                         # §17.1827 — the model wrote the call as text
+        return resp
     if tools and resp.success and not resp.tool_calls:
         logger.info(
             "tool_call_native_empty_coax_fallback: model=%s role=%s "
@@ -1237,7 +1242,19 @@ async def _tool_call_via_coaxing(
             name=primary.name,
             arguments=parsed,
         )]
+    elif written := _tool_call_in_text(resp.text, tools):
+        resp.tool_calls = [written]                         # §17.1827
     return resp
+
+
+def _tool_call_in_text(text: str | None, tools: list[Tool]) -> ToolCall | None:
+    """§17.1827 — a call of one of ``tools`` the model wrote as text (``name(k=v, ...)``), as a ToolCall."""
+    for tool in tools:
+        args = parse_tool_call_text(text or "", tool.name, tool.input_schema)
+        if isinstance(args, dict):
+            logger.info("tool_call_written_as_text: tool=%s keys=%s", tool.name, sorted(args))
+            return ToolCall(id="text_call_0", name=tool.name, arguments=args)
+    return None
 
 
 async def embed(

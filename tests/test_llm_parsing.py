@@ -5,6 +5,7 @@ from app.utils.llm_parsing import (
     parse_json_array,
     parse_json_object,
     parse_json_object_for_schema,
+    parse_tool_call_text,
     strip_think_tags,
 )
 
@@ -186,3 +187,34 @@ def test_schema_parse_keeps_a_verdict_only_repair_can_close():
     raw = '{"pass": false, "reason": "the batch never writes the data timestamp", "confidence": 0.7'
     assert parse_json_object_for_schema(raw, _VERDICT) == {
         "pass": False, "reason": "the batch never writes the data timestamp", "confidence": 0.7}
+
+
+# ---------------------------------------------------------------------------
+# parse_tool_call_text (§17.1827)
+# ---------------------------------------------------------------------------
+# The live tail (job 5b4880c0 T6, 2026-10-26): reasoning, then the call written as text with a keyword-named arg.
+_WRITTEN_VERDICT = (
+    "Let me analyze this task carefully. The output calls `load_batch_context(timestamp=now, db=db)` and "
+    "`record_verification(pass=true)` would be wrong here.\n\nThat's a bit long but one sentence. Fine.</think>"
+    "record_verification(pass=false, reason=\"The batch reads ctx['equity'] (a key the data layer never returns), "
+    "so it always skips; and \\\"pass=\\\" in a reason (or a comma, ) paren) stays text.\", confidence=0.8)"
+)
+
+
+def test_a_call_written_as_text_is_the_tool_call():
+    args = parse_tool_call_text(_WRITTEN_VERDICT, "record_verification", _VERDICT)
+    assert args["pass"] is False and args["confidence"] == 0.8
+    assert args["reason"].startswith("The batch reads ctx['equity']") and 'pass=' in args["reason"]
+
+
+def test_a_written_call_with_a_dict_argument_and_python_literals():
+    raw = 'Done.\nrecord_verification({"pass": True, "reason": "ok", "confidence": 1})'
+    assert parse_tool_call_text(raw, "record_verification", _VERDICT) == {"pass": True, "reason": "ok", "confidence": 1}
+
+
+def test_a_written_call_must_answer_the_schema_and_be_that_tool():
+    assert parse_tool_call_text("record_verification(rejected=True)", "record_verification", _VERDICT) is None
+    assert parse_tool_call_text("my_record_verification(pass=true, reason='x', confidence=1)",
+                                "record_verification", _VERDICT) is None
+    assert parse_tool_call_text("record_verification(pass=true, reason='x'", "record_verification", _VERDICT) is None
+    assert parse_tool_call_text("no call here", "record_verification", _VERDICT) is None

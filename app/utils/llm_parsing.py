@@ -180,6 +180,116 @@ def parse_json_object_for_schema(raw: str, schema: dict | None):
     return best[1] if best else None
 
 
+_CALL_NAMES = {"true": True, "false": False, "null": None, "True": True, "False": False, "None": None}
+
+
+def _call_span(text: str, open_at: int) -> int | None:
+    """The index just past the ``)`` that closes the ``(`` at ``open_at``, skipping quoted strings."""
+    depth, quote, i = 0, "", open_at
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+_KW_PREFIX = "kw__"
+
+
+def _unkeyword_arg_names(call: str) -> str:
+    """``pass=false`` -> ``kw__pass=false`` at the call's own argument positions (not inside strings), so a
+    keyword-named argument -- the verifier's ``pass`` -- parses as Python."""
+    import keyword
+    out, quote, depth, i, at_arg = [], "", 0, 0, False
+    while i < len(call):
+        ch = call[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(call):
+                out.append(call[i + 1]); i += 1
+            elif ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote, at_arg = ch, False
+        elif ch in "([{":
+            depth += 1
+            at_arg = depth == 1 and ch == "("
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 1:
+            at_arg = True
+        elif at_arg and (ch.isalpha() or ch == "_"):
+            j = i
+            while j < len(call) and (call[j].isalnum() or call[j] == "_"):
+                j += 1
+            word, rest = call[i:j], call[j:].lstrip()
+            if keyword.iskeyword(word) and rest.startswith("=") and not rest.startswith("=="):
+                word = _KW_PREFIX + word
+            out.append(word); i, at_arg = j, False
+            continue
+        elif not ch.isspace():
+            at_arg = False
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _literal(node):
+    import ast
+    if isinstance(node, ast.Name) and node.id in _CALL_NAMES:
+        return _CALL_NAMES[node.id]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [_literal(n) for n in node.elts]
+    if isinstance(node, ast.Dict):
+        return {_literal(k): _literal(v) for k, v in zip(node.keys, node.values, strict=True)}
+    return ast.literal_eval(node)
+
+
+def parse_tool_call_text(raw: str, name: str, schema: dict | None):
+    """§17.1827 — the arguments of a tool call the model wrote as TEXT: ``name(k=v, ...)`` or ``name({...})``.
+
+    Live 2026-10-26 (job 5b4880c0 T6): glm-5.3-flash ended 41k chars of reasoning with
+    ``</think>record_verification(pass=false, reason="...", confidence=0.8)`` -- no native call, no JSON -- and the
+    attempt failed on "verifier produced no tool call", its real reason (a batch that always skips) lost; 12 such
+    verdicts in 14 days. The LAST call of ``name`` in ``raw`` wins; its arguments must answer ``schema`` the way
+    ``parse_json_object_for_schema`` asks (a key of the schema, no foreign key or every required key)."""
+    import ast
+    text = raw or ""
+    at = text.rfind(name + "(")
+    while at >= 0:
+        if at == 0 or not (text[at - 1].isalnum() or text[at - 1] == "_"):
+            end = _call_span(text, at + len(name))
+            if end:
+                try:
+                    call = ast.parse(_unkeyword_arg_names(text[at:end].strip()), mode="eval").body
+                    if isinstance(call, ast.Call) and not call.args:
+                        args = {kw.arg.removeprefix(_KW_PREFIX): _literal(kw.value) for kw in call.keywords if kw.arg}
+                    elif isinstance(call, ast.Call) and len(call.args) == 1 and not call.keywords:
+                        args = _literal(call.args[0])
+                    else:
+                        args = None
+                except (SyntaxError, ValueError, TypeError):
+                    args = None
+                if isinstance(args, dict) and args:
+                    return parse_json_object_for_schema(json.dumps(args, default=str), schema)
+        at = text.rfind(name + "(", 0, at)
+    return None
+
+
 def diagnose_json_object_parse(raw: str) -> dict | None:
     """§17.293 — return diagnostic context for the first ``JSONDecodeError``
     encountered while parsing ``raw`` as a JSON object.
