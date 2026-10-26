@@ -120,6 +120,66 @@ def parse_json_object(raw: str):
     return None
 
 
+def _balanced_object_spans(text: str):
+    """Every balanced ``{...}`` span of ``text`` as ``(start, end)``, nested ones included (one pass, a stack)."""
+    stack: list[int] = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            yield stack.pop(), i + 1
+
+
+def parse_json_object_for_schema(raw: str, schema: dict | None):
+    """§17.1824 — the JSON object in ``raw`` that answers ``schema``: one that carries the schema's own keys.
+
+    ``parse_json_object`` takes the first object it can build, wherever it sits. A coaxed reply that is prose
+    quoting code hands it a stray literal: live 2026-10-26 (job 5b4880c0 T6), the verifier wrote 51k chars of
+    analysis quoting the step's ``metrics={"rejected": True}``, that became its verdict, the "missing 'pass' key"
+    counted as a failed verification and the redraw that was left never ran. Here an object counts only if it
+    has a key of ``schema["properties"]`` and either every key of it is one, or it holds every required key (a
+    quoted ``{"operator_id": .., "reason": ..}`` shares one key with a verdict and is still not one); among those
+    the one with the most required keys, then the most properties, then the last (the answer follows the
+    reasoning) wins. ``None`` when nothing in ``raw`` answers
+    the schema. A schema without properties keeps ``parse_json_object``.
+    """
+    props = set(((schema or {}).get("properties") or {}).keys())
+    if not props:
+        return parse_json_object(raw)
+    required = set((schema or {}).get("required") or ()) & props
+
+    def rank(obj, pos: int):
+        keys = props & obj.keys()
+        if not keys or not (obj.keys() <= props or required <= obj.keys()):
+            return None
+        return (len(required & keys), len(keys), pos)
+
+    whole = parse_json_object(raw)
+    best = None
+    if isinstance(whole, dict) and (r := rank(whole, -1)) is not None:
+        if required <= whole.keys():
+            return whole
+        best = (r, whole)
+    text = raw or ""
+    quoted = tuple(f'"{k}"' for k in props)
+    for start, end in _balanced_object_spans(text):
+        span = text[start:end]
+        if not any(q in span for q in quoted):
+            continue
+        try:
+            obj = json.loads(span)
+        except json.JSONDecodeError:
+            try:
+                obj = repair_json(span, return_objects=True)
+            except Exception:
+                continue
+        if not isinstance(obj, dict) or (r := rank(obj, end)) is None:
+            continue
+        if best is None or r > best[0]:
+            best = (r, obj)
+    return best[1] if best else None
+
+
 def diagnose_json_object_parse(raw: str) -> dict | None:
     """§17.293 — return diagnostic context for the first ``JSONDecodeError``
     encountered while parsing ``raw`` as a JSON object.

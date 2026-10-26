@@ -35,7 +35,7 @@ from app.providers.base import ModelResponse, Tool, ToolCall
 
 if TYPE_CHECKING:  # §17.1059 — annotation-only; the runtime import lives in the provider seam
     from app.providers.base import LLMProvider
-from app.utils.llm_parsing import parse_json_array, parse_json_object
+from app.utils.llm_parsing import parse_json_array, parse_json_object, parse_json_object_for_schema
 from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.router")
@@ -1229,7 +1229,8 @@ async def _tool_call_via_coaxing(
             resp.error = _format_provider_error(resp, role)
         return resp
 
-    parsed = parse_json_object(resp.text or "")
+    # §17.1824 — only an object that carries the tool's own keys is its call; a literal the reply quotes is not.
+    parsed = parse_json_object_for_schema(resp.text or "", primary.input_schema)
     if isinstance(parsed, dict):
         resp.tool_calls = [ToolCall(
             id="coaxed_0",

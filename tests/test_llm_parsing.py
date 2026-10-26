@@ -4,6 +4,7 @@ import pytest
 from app.utils.llm_parsing import (
     parse_json_array,
     parse_json_object,
+    parse_json_object_for_schema,
     strip_think_tags,
 )
 
@@ -133,3 +134,55 @@ def test_parse_object_still_strips_fences_when_raw_invalid():
     # text isn't valid JSON verbatim.
     assert parse_json_object("```json\n{\"a\": 1}\n```") == {"a": 1}
     assert parse_json_object("<think>reasoning</think>{\"ok\": true}") == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# parse_json_object_for_schema (§17.1824)
+# ---------------------------------------------------------------------------
+_VERDICT = {
+    "type": "object",
+    "properties": {"pass": {"type": "boolean"}, "reason": {"type": "string"},
+                   "confidence": {"type": "number"}},
+    "required": ["pass", "reason", "confidence"],
+}
+
+# The shape of the live reply (job 5b4880c0 T6, 2026-10-26): prose that quotes the step's code, no verdict.
+_QUOTING_PROSE = (
+    "Let me analyze this task carefully.\n\nThe batch records a rejection:\n```python\n"
+    "await write_risk_check(\n    proposal_id=proposal_id,\n    passed=False,\n"
+    '    metrics={"rejected": True},\n)\n```\n\nAnd the approval it reads back:\n'
+    '`{"operator_id": "op", "decision": "approved", "reason": ""}`. Hmm, let me'
+)
+
+
+def test_schema_parse_ignores_literals_the_reply_quotes():
+    assert parse_json_object(_QUOTING_PROSE) == {"rejected": True}   # what the coaxed verifier used to get
+    assert parse_json_object_for_schema(_QUOTING_PROSE, _VERDICT) is None
+
+
+def test_schema_parse_takes_the_verdict_after_quoted_code():
+    raw = _QUOTING_PROSE + ' decide.\n\n{"pass": false, "reason": "no timestamps written", "confidence": 0.8}'
+    assert parse_json_object_for_schema(raw, _VERDICT) == {
+        "pass": False, "reason": "no timestamps written", "confidence": 0.8}
+
+
+def test_schema_parse_prefers_the_complete_and_the_last_answer():
+    raw = ('first {"pass": true} then {"pass": false, "reason": "a", "confidence": 0.5}'
+           ' and {"pass": true, "reason": "b", "confidence": 0.9}')
+    assert parse_json_object_for_schema(raw, _VERDICT)["reason"] == "b"
+
+
+def test_schema_parse_keeps_a_partial_answer_of_the_schemas_own_keys():
+    assert parse_json_object_for_schema('{"pass": true}', _VERDICT) == {"pass": True}
+    assert parse_json_object_for_schema('{"pass": true, "reason": "ok", "confidence": 1, "x": 1}', _VERDICT)["x"] == 1
+
+
+def test_schema_parse_without_properties_is_parse_json_object():
+    assert parse_json_object_for_schema('{"a": 1}', {"type": "object"}) == {"a": 1}
+
+
+def test_schema_parse_keeps_a_verdict_only_repair_can_close():
+    """A reply cut off before its closing brace has no balanced span; the repaired whole-text parse is the answer."""
+    raw = '{"pass": false, "reason": "the batch never writes the data timestamp", "confidence": 0.7'
+    assert parse_json_object_for_schema(raw, _VERDICT) == {
+        "pass": False, "reason": "the batch never writes the data timestamp", "confidence": 0.7}
