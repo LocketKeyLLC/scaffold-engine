@@ -258,3 +258,13 @@ def contract_gaps(code: str, modules: dict[str, str]) -> list[dict]:
                             "missing": [sorted(m) for m in missing], "carries": sorted(carries),
                             "origin": sorted(reader.origins)})
     return out
+
+
+def returned_keys(code: str, fname: str) -> list[str]:
+    """§17.1834 — the keys the dicts a module's own function returns can carry, read from that module alone; empty
+    when unreadable (the caller then shows nothing). Live (5b4880c0 T6): `load_batch_context(...) -> dict[str, Any]`
+    reached the batch as its signature and the first docstring line, "Load the equity and order-count context" -- and
+    every attempt read `context["equity"]`, a key it never returns (it returns `day_start_equity`, `orders_today`)."""
+    got = _Reader({"_": code}).returns("_", fname)
+    return sorted(got) if got else []
+
