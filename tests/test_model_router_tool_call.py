@@ -153,6 +153,31 @@ class TestToolCallRoleCoaxingFallback:
         assert resp.success
         assert resp.tool_calls == []
 
+    async def test_coaxing_a_quoted_literal_is_not_the_call_and_the_next_draw_runs(self):
+        """§17.1824 — live 2026-10-26 (job 5b4880c0 T6): the coaxed verifier's prose quoted the step's
+        ``metrics={"rejected": True}``; that became its verdict and stopped the redraws. A literal without the
+        tool's keys is no call, so the next draw is asked."""
+        provider = MagicMock()
+        provider.supports_native_tools = False
+        verdict = {"pass": True, "reason": "complete", "confidence": 0.9}
+        provider.chat_completion = AsyncMock(side_effect=[
+            _ok(text='Let me analyze. It writes `metrics={"rejected": True}` on a refusal. Hmm'),
+            _ok(text=json.dumps(verdict)),
+        ])
+
+        with patch.object(
+            model_router, "_resolve_role",
+            return_value=("model-x", provider),
+        ):
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": "verify"}],
+                tools=[SAMPLE_TOOL],
+                role="model_verifier",
+            )
+
+        assert provider.chat_completion.await_count == 2
+        assert resp.tool_calls[0].arguments == verdict
+
     async def test_coaxing_chat_failure_propagates_with_role_context(self):
         provider = MagicMock()
         provider.supports_native_tools = False
