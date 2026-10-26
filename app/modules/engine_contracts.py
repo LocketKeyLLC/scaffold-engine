@@ -372,21 +372,58 @@ def _own_nodes(fn: ast.AST):
             todo.extend(ast.iter_child_nodes(n))
 
 
+#: what reading a query's result is called: `result.mappings().all()`, `row = result.first()`, `.scalar()`
+_ROW_CALLS = frozenset({"execute", "all", "fetchall", "fetchone", "fetchmany", "first", "one", "one_or_none",
+                        "scalar", "scalars", "scalar_one", "scalar_one_or_none", "mappings"})
+
+
+def query_return(code: str, fname: str) -> str:
+    """§17.1837 — a function whose dicts cannot be read but that runs a query: its return expression and that query,
+    "`[row[0] for row in rows]` of `SELECT payload FROM ingested_item …`"; empty otherwise. Live (5b4880c0 T6U6): the
+    point-in-time store returns each row's payload only, its line showed `get_data_as_of(timestamp, *, db)`, and the
+    generator wrote "the point-in-time store always returns the row id" -- then skipped every item for lacking one."""
+    d = _defs(code)
+    fn = d[0].get(fname) if d else None
+    if fn is None:
+        return ""
+    sql = next((" ".join(c.value.split()) for c in _own_nodes(fn) if isinstance(c, ast.Constant)
+                and isinstance(c.value, str) and c.value.lstrip().upper().startswith("SELECT")), "")
+    # only a return built from the query's rows -- not `return None`, not a counter the function keeps
+    rowish: set[str] = set()
+    nodes = list(_own_nodes(fn))
+    for _ in range(3):                                   # result -> rows -> row, a few hops
+        for n in nodes:
+            if isinstance(n, (ast.Assign, ast.AnnAssign)):
+                v = n.value
+                srcs = {x.attr for x in ast.walk(v) if isinstance(x, ast.Attribute)} if v is not None else set()
+                names = {x.id for x in ast.walk(v) if isinstance(x, ast.Name)} if v is not None else set()
+                if srcs & _ROW_CALLS or names & rowish:
+                    tgts = n.targets if isinstance(n, ast.Assign) else [n.target]
+                    rowish |= {x.id for t in tgts for x in ast.walk(t) if isinstance(x, ast.Name)}
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and \
+                    {x.id for x in ast.walk(n.iter) if isinstance(x, ast.Name)} & rowish:
+                rowish |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+    rets = [ast.unparse(r.value) for r in nodes if isinstance(r, ast.Return) and r.value is not None
+            and ({x.id for x in ast.walk(r.value) if isinstance(x, ast.Name)} & rowish
+                 or {x.attr for x in ast.walk(r.value) if isinstance(x, ast.Attribute)} & _ROW_CALLS)]
+    if not (rets and sql):
+        return ""
+    return f"`{rets[-1][:80]}` of `{sql[:110]}{' …' if len(sql) > 110 else ''}`"
+
+
+def return_note(code: str, fname: str) -> str:
+    """What a function's line says it returns: "{a, b}" (its dicts' keys), or its query's shape, or nothing."""
+    keys = returned_keys(code, fname)
+    return "{" + ", ".join(keys) + "}" if keys else query_return(code, fname)
+
+
 def _returns_hint(code: str, fname: str) -> str:
     """What a function really returns, as far as it can be read: its dict keys, else its return expression and the
     query it runs."""
     keys = returned_keys(code, fname)
     if keys:
         return f"dicts with keys {', '.join(f'`{k}`' for k in keys)}"
-    d = _defs(code)
-    fn = d[0].get(fname) if d else None
-    if fn is None:
-        return ""
-    rets = [ast.unparse(r.value) for r in _own_nodes(fn) if isinstance(r, ast.Return) and r.value is not None]
-    sql = next((" ".join(c.value.split()) for c in _own_nodes(fn) if isinstance(c, ast.Constant)
-                and isinstance(c.value, str) and c.value.lstrip().upper().startswith("SELECT")), "")
-    parts = ([f"`{rets[-1][:80]}`"] if rets else []) + ([f"of `{sql[:120]}`"] if sql else [])
-    return " ".join(parts)
+    return query_return(code, fname)
 
 
 def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:

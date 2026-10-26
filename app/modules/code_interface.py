@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 
-from app.modules.engine_contracts import returned_keys
+from app.modules.engine_contracts import query_return, returned_keys
 from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
 
 
@@ -34,7 +34,9 @@ def _fn(fn: ast.FunctionDef | ast.AsyncFunctionDef, indent: str, code: str = "")
     # §17.1834 — and the keys the dicts it returns carry: a signature says `dict[str, Any]`, a first docstring line
     # can say "the equity" of a dict that has no `equity`
     keys = returned_keys(code, fn.name) if code and not indent else []
-    notes = ([f"returns keys: {', '.join(keys)}"] if keys else []) + ([doc] if doc else [])
+    query = query_return(code, fn.name) if code and not indent and not keys else ""          # §17.1837
+    notes = ([f"returns keys: {', '.join(keys)}"] if keys else []) + ([f"returns {query}"] if query else []) + (
+        [doc] if doc else [])
     out.append(head + (f"  # {' -- '.join(notes)}" if notes else ""))
     return out
 
