@@ -1,0 +1,260 @@
+"""§17.1833 — the keys one finished module hands another.
+
+A step that wires two finished modules together -- ``signals = await load_batch_signals(...)`` then
+``propose_trades(signals, ...)`` -- can only work when the dicts the first returns carry what the second requires. Live
+(follow-up 5b4880c0 T6, 2026-10-26): f00ea97f's ``generate_signals`` returns ``{source, ticker, signal_type, direction,
+rationale, published_ts}`` -- never saved, no id -- and ``propose_trades`` skips every signal without ``signal_id`` (or
+``id``). Nothing in the chain writes a signal row, so every batch proposes nothing, and T6 failed three rounds of
+attempts at a gap no code of its own can close.
+
+Read statically, and only claimed when certain: a key is REQUIRED when the consumer subscripts it, or reads it with
+``.get`` (alternatives joined by ``or``) and gives up on that item -- ``continue`` / ``raise`` / ``return`` -- when it is
+missing. A producer's keys are the union over every return path of the dict literals it builds (through local helpers,
+other finished modules, list comprehensions and lists built by ``append``, and later ``d["k"] = ...``). Any path the
+reader cannot follow makes the producer unknown, and an unknown producer is never reported.
+"""
+from __future__ import annotations
+
+import ast
+
+_MAX_DEPTH = 6
+
+
+def _defs(code: str) -> tuple[dict[str, ast.AST], dict[str, tuple[str, str]]] | None:
+    """A module's top-level functions, and the names it imports from `app.modules.*` (name -> (module, name))."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    funcs: dict[str, ast.AST] = {}
+    imports: dict[str, tuple[str, str]] = {}
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs[n.name] = n
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").startswith("app.modules."):
+            for a in n.names:
+                imports[a.asname or a.name] = (n.module.rsplit(".", 1)[1], a.name)
+    return funcs, imports
+
+
+def _unwrap(e: ast.AST) -> ast.AST:
+    return e.value if isinstance(e, ast.Await) else e
+
+
+def _get_key(e: ast.AST, names: set[str]) -> str | None:
+    """`x.get("k")` / `x.get("k", d)` on one of `names` -> "k"."""
+    if (isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "get"
+            and isinstance(e.func.value, ast.Name) and e.func.value.id in names and e.args
+            and isinstance(e.args[0], ast.Constant) and isinstance(e.args[0].value, str)):
+        return e.args[0].value
+    return None
+
+
+def _gives_up(body: list[ast.stmt]) -> bool:
+    return any(isinstance(s, (ast.Continue, ast.Raise, ast.Return)) for s in body)
+
+
+def required_keys(fn: ast.AST, param: str) -> list[frozenset[str]]:
+    """What a function requires of the dicts in (or of) its parameter `param`: each entry a set of alternatives,
+    any one of which satisfies it."""
+    items = {param}
+    for n in ast.walk(fn):                                   # `for s in signals:` -- each s is one of its dicts
+        if isinstance(n, (ast.For, ast.AsyncFor)) and isinstance(n.iter, ast.Name) and n.iter.id == param \
+                and isinstance(n.target, ast.Name):
+            items.add(n.target.id)
+        elif isinstance(n, ast.comprehension) and isinstance(n.iter, ast.Name) and n.iter.id == param \
+                and isinstance(n.target, ast.Name):
+            items.add(n.target.id)
+    out: list[frozenset[str]] = []
+    for n in ast.walk(fn):
+        if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
+                and n.value.id in items and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
+            out.append(frozenset({n.slice.value}))
+    # `v = s.get("a") or s.get("b")` then `if v is None: continue` (or `if not v:`)
+    gets: dict[str, frozenset[str]] = {}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            parts = n.value.values if isinstance(n.value, ast.BoolOp) and isinstance(n.value.op, ast.Or) \
+                else [n.value]
+            keys = [_get_key(p, items) for p in parts]
+            if keys and all(keys):
+                gets[n.targets[0].id] = frozenset(k for k in keys if k)
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.If) or not _gives_up(n.body):
+            continue
+        t = n.test
+        name = None
+        if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and len(t.ops) == 1 \
+                and isinstance(t.ops[0], ast.Is) and isinstance(t.comparators[0], ast.Constant) \
+                and t.comparators[0].value is None:
+            name = t.left.id
+        elif isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) and isinstance(t.operand, ast.Name):
+            name = t.operand.id
+        if name in gets:
+            out.append(gets[name])
+    return list(dict.fromkeys(out))
+
+
+class _Reader:
+    """The keys a producer's returned dicts can carry, followed across the job's finished modules."""
+
+    def __init__(self, modules: dict[str, str]):
+        self.parsed = {m: d for m, c in modules.items() if (d := _defs(c))}
+        self.origins: set[str] = set()                       # the modules whose dict literals were reached
+
+    def returns(self, mod: str, fname: str, depth: int = 0) -> frozenset[str] | None:
+        if depth > _MAX_DEPTH or mod not in self.parsed:
+            return None
+        funcs, imports = self.parsed[mod]
+        if fname in imports and fname not in funcs:
+            return self.returns(*imports[fname], depth=depth + 1)
+        fn = funcs.get(fname)
+        if fn is None:
+            return None
+        keys: set[str] = set()
+        rets = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value is not None]
+        for r in rets:
+            got = self._expr(mod, fn, r.value, depth)
+            if got is None:
+                return None
+            keys |= got
+        return frozenset(keys)
+
+    def _assigned(self, fn: ast.AST, name: str) -> tuple[list[ast.AST], set[str], list[ast.AST]]:
+        """What `name` is assigned in `fn`, the keys later stored into it, and what is appended to it."""
+        vals: list[ast.AST] = []
+        stored: set[str] = set()
+        appended: list[ast.AST] = []
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name) and t.id == name:
+                        vals.append(n.value)
+                    elif (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == name
+                          and isinstance(t.slice, ast.Constant) and isinstance(t.slice.value, str)):
+                        stored.add(t.slice.value)
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == name and n.value:
+                vals.append(n.value)
+            elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+                  and isinstance(n.func.value, ast.Name) and n.func.value.id == name and len(n.args) == 1):
+                appended.append(n.args[0])
+        return vals, stored, appended
+
+    def _expr(self, mod: str, fn: ast.AST, e: ast.AST, depth: int, index: int | None = None) -> frozenset[str] | None:
+        e = _unwrap(e)
+        if isinstance(e, ast.Constant) and e.value is None:
+            return frozenset()
+        if isinstance(e, ast.Dict):
+            if any(k is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)) for k in e.keys):
+                return None                                  # `**spread` or a computed key: not readable
+            self.origins.add(mod)
+            return frozenset(k.value for k in e.keys)        # type: ignore[union-attr]
+        if isinstance(e, ast.Tuple) and index is not None:
+            return self._expr(mod, fn, e.elts[index], depth) if index < len(e.elts) else None
+        if isinstance(e, (ast.List, ast.Tuple)) and index is None:
+            out: set[str] = set()
+            for x in e.elts:
+                got = self._expr(mod, fn, x, depth)
+                if got is None:
+                    return None
+                out |= got
+            return frozenset(out)
+        if isinstance(e, ast.ListComp):
+            elt, gen = e.elt, e.generators[0]
+            if (isinstance(elt, ast.Subscript) and isinstance(elt.value, ast.Name) and isinstance(gen.target, ast.Name)
+                    and elt.value.id == gen.target.id and isinstance(elt.slice, ast.Constant)
+                    and isinstance(elt.slice.value, int) and isinstance(gen.iter, ast.Name)):
+                return self._name(mod, fn, gen.iter.id, depth, index=elt.slice.value)   # [e[2] for e in weighted]
+            if isinstance(elt, ast.Name) and isinstance(gen.target, ast.Name) and elt.id == gen.target.id \
+                    and isinstance(gen.iter, ast.Name):
+                return self._name(mod, fn, gen.iter.id, depth)                         # [s for s in out]
+            return self._expr(mod, fn, elt, depth)
+        if isinstance(e, ast.Name):
+            return self._name(mod, fn, e.id, depth, index=index)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            return self.returns(mod, e.func.id, depth + 1)
+        if isinstance(e, ast.IfExp):
+            a, b = self._expr(mod, fn, e.body, depth), self._expr(mod, fn, e.orelse, depth)
+            return None if a is None or b is None else a | b
+        return None
+
+    def _name(self, mod: str, fn: ast.AST, name: str, depth: int, index: int | None = None) -> frozenset[str] | None:
+        vals, stored, appended = self._assigned(fn, name)
+        if not vals and not appended:
+            return None                                      # a parameter, a global: not readable
+        out: set[str] = set(stored)
+        for v in vals:
+            if isinstance(v, ast.List) and not v.elts and appended:
+                continue                                     # `out = []` then `out.append(...)`
+            got = self._expr(mod, fn, v, depth, index=index)
+            if got is None:
+                return None
+            out |= got
+        for a in appended:
+            got = self._expr(mod, fn, a, depth, index=index)
+            if got is None:
+                return None
+            out |= got
+        return frozenset(out)
+
+
+def _calls_in(fn: ast.AST, imports: dict[str, tuple[str, str]]):
+    """(producer, consumer, consumer-param position or keyword) for each `v = [await] p(...)` later passed to `c`."""
+    produced: dict[str, tuple[str, str]] = {}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            call = _unwrap(n.value)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in imports:
+                produced[n.targets[0].id] = imports[call.func.id]
+    for n in ast.walk(fn):
+        call = n if isinstance(n, ast.Call) else None
+        if not call or not isinstance(call.func, ast.Name) or call.func.id not in imports:
+            continue
+        for i, a in enumerate(call.args):
+            if isinstance(a, ast.Name) and a.id in produced:
+                yield produced[a.id], imports[call.func.id], i
+        for kw in call.keywords:
+            if kw.arg and isinstance(kw.value, ast.Name) and kw.value.id in produced:
+                yield produced[kw.value.id], imports[call.func.id], kw.arg
+
+
+def _param(fn: ast.AST, where: int | str) -> str | None:
+    a = fn.args                                              # type: ignore[attr-defined]
+    if isinstance(where, int):
+        pos = [*a.posonlyargs, *a.args]
+        return pos[where].arg if where < len(pos) else None
+    return where if any(x.arg == where for x in [*a.posonlyargs, *a.args, *a.kwonlyargs]) else None
+
+
+def contract_gaps(code: str, modules: dict[str, str]) -> list[dict]:
+    """Each place `code` hands one finished module's dicts to another that requires a key none of them can carry:
+    ``{producer, consumer, param, missing, carries, origin}`` (`producer`/`consumer` as ``module.function``; `missing`
+    the required alternatives; `origin` the module whose dict literals the producer returns)."""
+    mine = _defs(code)
+    if not mine:
+        return []
+    funcs, imports = mine
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for fn in funcs.values():
+        for (pmod, pfn), (cmod, cfn), where in _calls_in(fn, imports):
+            cdefs = _defs(modules.get(cmod, ""))
+            cfunc = cdefs[0].get(cfn) if cdefs else None
+            param = _param(cfunc, where) if cfunc else None
+            if not param:
+                continue
+            need = required_keys(cfunc, param)
+            if not need:
+                continue
+            reader = _Reader(modules)
+            carries = reader.returns(pmod, pfn)
+            if carries is None or not carries:
+                continue                                     # unknown -- or nothing literal at all: no claim
+            missing = [alt for alt in need if not alt & carries]
+            key = (pmod, pfn, cmod, cfn, tuple(sorted(map(tuple, map(sorted, missing)))))
+            if missing and key not in seen:
+                seen.add(key)
+                out.append({"producer": f"{pmod}.{pfn}", "consumer": f"{cmod}.{cfn}", "param": param,
+                            "missing": [sorted(m) for m in missing], "carries": sorted(carries),
+                            "origin": sorted(reader.origins)})
+    return out
