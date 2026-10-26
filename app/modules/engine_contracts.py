@@ -112,7 +112,7 @@ class _Reader:
         if fn is None:
             return None
         keys: set[str] = set()
-        rets = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value is not None]
+        rets = [n for n in _own_nodes(fn) if isinstance(n, ast.Return) and n.value is not None]   # not a nested def's
         for r in rets:
             got = self._expr(mod, fn, r.value, depth)
             if got is None:
@@ -268,3 +268,153 @@ def returned_keys(code: str, fname: str) -> list[str]:
     got = _Reader({"_": code}).returns("_", fname)
     return sorted(got) if got else []
 
+
+
+# ── §17.1836 a test does not replace a finished module that never leaves the engine ──────────────────────────
+
+#: what a module imports that reaches outside the engine: the network, a broker, a model, a person, a secret
+_OUTSIDE_LIBS = frozenset({"httpx", "requests", "aiohttp", "urllib", "urllib3", "socket", "ssl", "http", "smtplib",
+                           "websockets", "websocket", "alpaca", "alpaca_trade_api", "openai", "anthropic", "ollama",
+                           "praw", "feedparser", "subprocess", "boto3", "paramiko", "asyncssh"})
+_INSIDE_APP = frozenset({"app.database", "app.config"})
+
+
+def _imports(code: str) -> set[str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            out |= {a.name for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            out.add(n.module)
+    return out
+
+
+def reaches_outside(code: str, job_modules: set[str], modules: dict[str, str] | None = None,
+                    _seen: frozenset[str] = frozenset()) -> bool:
+    """A module that imports a network/broker/model library, or an engine service other than the database and the
+    settings (the model router, the operator's questions, the secrets store) -- itself or through a job module it
+    imports (`modules`): what a test may stand in for. The backtester reaches the broker through the SPY tracker."""
+    for imp in _imports(code):
+        if imp.split(".")[0] in _OUTSIDE_LIBS:
+            return True
+        leaf = imp.rsplit(".", 1)[1] if imp.startswith("app.modules.") else ""
+        if imp.startswith("app.") and imp not in _INSIDE_APP and leaf not in job_modules:
+            return True
+        if leaf in (modules or {}) and leaf not in _seen and reaches_outside(
+                modules[leaf], job_modules, modules, _seen | {leaf}):        # type: ignore[index]
+            return True
+    return False
+
+
+def _origin(modules: dict[str, str], mod: str, name: str, depth: int = 0) -> str | None:
+    """The job module that defines `name` as reached through `mod` (following `from app.modules.x import name`)."""
+    d = _defs(modules.get(mod, "")) if mod in modules else None
+    if not d or depth > _MAX_DEPTH:
+        return None
+    funcs, imports = d
+    if name in funcs:
+        return mod
+    if name in imports:
+        return _origin(modules, *imports[name], depth=depth + 1)
+    try:
+        tree = ast.parse(modules[mod])
+    except SyntaxError:
+        return None
+    if any(isinstance(n, ast.ClassDef) and n.name == name for n in tree.body):
+        return mod
+    return None
+
+
+def _patch_targets(code: str) -> list[tuple[str, str, int]]:
+    """(module, name, line) of each `patch("app.modules.m.name")`, `monkeypatch.setattr("app.modules.m.name", …)`,
+    `patch.object(m, "name")` / `monkeypatch.setattr(m, "name", …)` with `m` a module imported from `app.modules`."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    alias: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "app.modules":
+            alias.update({a.asname or a.name: a.name for a in n.names})
+        elif isinstance(n, ast.Import):
+            alias.update({a.asname: a.name.rsplit(".", 1)[1] for a in n.names
+                          if a.asname and a.name.startswith("app.modules.")})
+    out: list[tuple[str, str, int]] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+        if fname not in ("patch", "setattr", "object") or not n.args:
+            continue
+        a0 = n.args[0]
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
+            parts = a0.value.split(".")
+            if len(parts) == 4:
+                out.append((parts[2], parts[3], n.lineno))
+        elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+              and isinstance(n.args[1].value, str)):
+            out.append((alias[a0.id], n.args[1].value, n.lineno))
+    return sorted(out, key=lambda t: t[2])
+
+
+def _own_nodes(fn: ast.AST):
+    """The nodes of a function's own body -- not of the functions and classes defined inside it."""
+    todo = list(ast.iter_child_nodes(fn))
+    while todo:
+        n = todo.pop()
+        yield n
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            todo.extend(ast.iter_child_nodes(n))
+
+
+def _returns_hint(code: str, fname: str) -> str:
+    """What a function really returns, as far as it can be read: its dict keys, else its return expression and the
+    query it runs."""
+    keys = returned_keys(code, fname)
+    if keys:
+        return f"dicts with keys {', '.join(f'`{k}`' for k in keys)}"
+    d = _defs(code)
+    fn = d[0].get(fname) if d else None
+    if fn is None:
+        return ""
+    rets = [ast.unparse(r.value) for r in _own_nodes(fn) if isinstance(r, ast.Return) and r.value is not None]
+    sql = next((" ".join(c.value.split()) for c in _own_nodes(fn) if isinstance(c, ast.Constant)
+                and isinstance(c.value, str) and c.value.lstrip().upper().startswith("SELECT")), "")
+    parts = ([f"`{rets[-1][:80]}`"] if rets else []) + ([f"of `{sql[:120]}`"] if sql else [])
+    return " ".join(parts)
+
+
+def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.1836 — each test that replaces a function of another finished module of the job that never leaves the
+    engine. Live (5b4880c0 T6U6, 2026-10-26): the generator's tests replaced `get_data_as_of` with a fake "as
+    get_data_as_of would" that returned `"id": row[0]` -- the real one returns only each row's payload -- so the fix
+    read `item.get("id")`, passed the sandbox, and on real data saves nothing and gives every signal `id: None`."""
+    job = set(modules) | own
+    # the step's own modules too: a test patches `load_batch_context` through the module under test, which imports it
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        for mod, name, line in _patch_targets(code):
+            origin = _origin(reach, mod, name) if mod in reach else None
+            if not origin or origin in own or origin not in modules or (origin, name) in seen:
+                continue
+            if reaches_outside(modules[origin], job, reach, frozenset({origin})):
+                continue
+            seen.add((origin, name))
+            hint = _returns_hint(modules[origin], name)
+            found.append(
+                f"`{path}:{line}` replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
+                "a stand-in: call the real one -- against the scratch database, with the rows it reads, when it uses "
+                "one -- so the test sees what it really does"
+                + (f" (it returns {hint})" if hint else "")
+                + ". Mock only what reaches outside the engine -- the broker, the network, model calls, the clock")
+    return found
