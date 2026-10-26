@@ -335,3 +335,49 @@ async def test_the_sandbox_reason_carries_the_cause():
     res = await _check(WITH_TEST, run)
     head = res.reason.split("\n\n", 1)[0]
     assert res.verdict == "fail" and "Cause the engine recognises: a Python dict or list was bound" in head
+
+
+# ── §17.1826 — library frames fold, so every failure of the run reaches the next attempt ─────────────────────
+
+_SA = "/opt/venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py"
+
+
+def _library_frames(n: int) -> str:
+    return "".join(f"{_SA}:{1400 + i}: in _execute_context\n    return self._exec_single_context(\n"
+                   f"           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n" for i in range(n))
+
+
+# The live run's shape (follow-up 5b4880c0 T6, 2026-10-26): a foreign-key error raised through 31 library frames,
+# then a second failure the next attempt never saw.
+LIVE_FK_RUN = (
+    "....FF\n=================================== FAILURES ===================================\n"
+    "___________ test_run_daily_batch_calls_dependencies_and_returns_pass ___________\n"
+    + _library_frames(15)
+    + "asyncpg/protocol/protocol.pyx:205: in bind_execute\n    ???\n"
+    "E   asyncpg.exceptions.ForeignKeyViolationError: insert or update on table \"proposal\" violates foreign key "
+    "constraint \"proposal_signal_id_fkey\"\nE   DETAIL:  Key (signal_id)=(1) is not present in table \"signal\".\n"
+    "The above exception was the direct cause of the following exception:\n"
+    "tests/test_paper_daily_signal_proposal_batch.py:116: in test_run_daily_batch_calls_dependencies_and_returns_pass\n"
+    "    result = await run_daily_batch(db=db)\n"
+    "app/modules/paper_daily_signal_proposal_batch.py:128: in run_daily_batch\n    await write_proposal(\n"
+    + _library_frames(16)
+    + "E   sqlalchemy.exc.IntegrityError: (ForeignKeyViolationError) proposal_signal_id_fkey\n"
+    "___________ test_run_daily_batch_enforces_max_proposals_per_batch ___________\n"
+    "tests/test_paper_daily_signal_proposal_batch.py:171: in test_run_daily_batch_enforces_max_proposals_per_batch\n"
+    "    assert result[\"proposals\"] == 3\nE   assert 0 == 3\n"
+    "=========================== short test summary info ============================\n"
+    "FAILED tests/test_paper_daily_signal_proposal_batch.py::test_run_daily_batch_calls_dependencies_and_returns_pass\n"
+    "FAILED tests/test_paper_daily_signal_proposal_batch.py::test_run_daily_batch_enforces_max_proposals_per_batch\n"
+    "2 failed, 2 passed in 2.84s\n")
+
+
+def test_library_frames_fold_and_the_second_failure_reaches_the_next_attempt():
+    assert len(LIVE_FK_RUN) > 6000                                       # the live run overflowed the budget
+    rep = et._report(LIVE_FK_RUN)
+    assert "E   assert 0 == 3" in rep                                    # the second failure is there now
+    assert "site-packages" not in rep and "protocol.pyx" not in rep
+    assert "  … 16 library frames …" in rep and "^^^^" not in rep
+    for own in ("tests/test_paper_daily_signal_proposal_batch.py:116: in", "    result = await run_daily_batch(db=db)",
+                "app/modules/paper_daily_signal_proposal_batch.py:128: in run_daily_batch", "    await write_proposal(",
+                "E   DETAIL:  Key (signal_id)=(1) is not present in table \"signal\".", "2 failed, 2 passed in 2.84s"):
+        assert own in rep

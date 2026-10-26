@@ -168,12 +168,39 @@ def known_causes(text: str) -> str:
     return "".join(f"\nCause the engine recognises: {h}." for h in hits)
 
 
+#: A traceback frame header that is not the job's code: an installed library, a compiled extension, the stdlib.
+_LIBRARY_FRAME = re.compile(r"^(?:/\S*/(?:site-packages|lib/python3\.\d+)/\S+|\S+\.pyx|<frozen [^>]+>):\d+: in ")
+
+
+def _fold_library_frames(lines: list[str]) -> list[str]:
+    """§17.1826 — each run of library frames (header + its indented source and ``^^^`` lines) as ONE line.
+
+    Live (follow-up 5b4880c0 T6, 2026-10-26): a foreign-key error raised through SQLAlchemy and asyncpg printed 31
+    library frames; they filled the budget and the run's second failure never reached the next attempt. The job's
+    own frames (``tests/…``, ``app/…``) and every ``E`` line are kept as they are."""
+    out: list[str] = []
+    folded = 0
+    for ln in lines:
+        if _LIBRARY_FRAME.match(ln):
+            folded += 1
+            continue
+        if folded and (ln.startswith((" ", "\t")) or ln.lstrip().startswith("^")):
+            continue                                        # the folded frame's source line / its markers
+        if folded:
+            out.append(f"  … {folded} library frame{'s' if folded > 1 else ''} …")
+            folded = 0
+        out.append(ln)
+    if folded:
+        out.append(f"  … {folded} library frame{'s' if folded > 1 else ''} …")
+    return out
+
+
 def _report(text: str, budget: int = 6000) -> str:
     """§17.1817 — a failed test run as the next attempt needs it: every failure's short traceback from the FIRST one
     (often the cause the rest follow from), then pytest's summary. Live (follow-up 5b4880c0 T6, 8-14 of its tests
     failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
     ("- sqlalc..."), so each attempt was redrafted from one failure out of ten."""
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    lines = _fold_library_frames([ln for ln in (text or "").splitlines() if ln.strip()])
     whole = "\n".join(lines)
     if len(whole) <= budget:
         return whole
