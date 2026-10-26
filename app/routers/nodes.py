@@ -185,6 +185,9 @@ async def node_reset(
 ):
     await _guard(db, principal, job_id)
     edited_by = _attributed(principal, body.edited_by if body else None)
+    # §17.1835 — a contract fix step asked again is re-rendered from the current template first
+    from app.modules.engine_plan import refresh_contract_fix
+    await refresh_contract_fix(db, str(job_id), node_key, edited_by or "operator")
     return _dispatch(await node_editor.reset_node(
         job_id, node_key, edited_by=edited_by, db=db,
         cascade=bool(body.cascade) if body else False,      # §17.1284

@@ -174,8 +174,18 @@ async def test_an_exhausted_step_handing_on_a_gap_waits_for_the_module_that_buil
                 "SELECT node_key, status, depends_on, prompt_template, tool_config FROM dag_nodes WHERE job_id = :j"),
                 {"j": jid})).mappings().all()}
         fix = rows["T6U1"]
-        assert fix["tool_config"] == {"fixes_module": "paper_signal_generator", "found_by": "T6",
-                                      "contract": "paper_trade_proposer.propose_trades.signals:id/signal_id"}
+        assert fix["tool_config"] == {
+            "fixes_module": "paper_signal_generator", "found_by": "T6", "owner": "T1F4",
+            "contract": "paper_trade_proposer.propose_trades.signals:id/signal_id",
+            "gaps": [{"producer": "paper_daily_signal_proposal_batch_data.load_batch_signals",
+                      "consumer": "paper_trade_proposer.propose_trades", "param": "signals",
+                      "missing": [["id", "signal_id"]],
+                      "carries": ["direction", "published_ts", "rationale", "signal_type", "source", "ticker"]}]}
+        # §17.1835 — saved once, and the modules that call it named
+        assert "Save each item ONCE: an item already saved keeps its row and its id" in fix["prompt_template"]
+        assert "Other finished modules call it and get the same: `paper_daily_signal_proposal_batch_data` " \
+               "(`generate_signals`) -- each must keep working." in fix["prompt_template"]
+        assert "calls it twice over the same items and finds one row per item" in fix["prompt_template"]
         assert fix["prompt_template"].startswith("Python module `paper_signal_generator.py` -- step T1F4's module")
         assert "`paper_trade_proposer.propose_trades` requires each item of its `signals` to carry `id` or " \
                "`signal_id`" in fix["prompt_template"]
@@ -190,5 +200,51 @@ async def test_an_exhausted_step_handing_on_a_gap_waits_for_the_module_that_buil
         async with async_session() as db:
             again = await retry_failed_node(jid, "T6", db)
         assert "upstream_fix" not in again, again
+    finally:
+        await _drop(jid)
+
+
+# ── §17.1835 — a contract fix step made before the save-once rule is re-rendered when asked again ──────────────
+
+LEGACY = (  # T6U6's text as §17.1833 wrote it (live, 5b4880c0)
+    "Python module `paper_signal_generator.py` -- step T1F4's module: edit it in place (the whole file, its public "
+    "names kept). What it returns is handed on to a function that cannot use it:\n"
+    "- `paper_trade_proposer.propose_trades` requires each item of its `signals` to carry `id` or `signal_id` (it "
+    "skips or fails an item without); step T6 hands it what `paper_daily_signal_proposal_batch_data.load_batch_signals` "
+    "returns, and every dict this module builds for that carries only `direction`, `published_ts`, `rationale`, "
+    "`signal_type`, `source`, `ticker`.\nMake every dict it returns carry the key, from where the value really comes "
+    "from: an id names a saved row -- save the item with the finished module that writes that table and carry the id "
+    "it returns, with whatever that write needs; never a made-up value. In this same step also write "
+    "`tests/test_paper_signal_generator.py`: ...")
+
+
+@pytest.mark.integration
+async def test_a_contract_fix_step_asked_again_is_rerendered_with_the_save_once_rule():
+    from app.database import async_session
+    from app.modules.engine_plan import refresh_contract_fix
+    async with async_session() as db:
+        jid = await _job(db)
+        await db.execute(text(
+            "INSERT INTO dag_nodes (job_id, node_key, title, status, prompt_template, tool, tool_config, execution_order) "
+            "VALUES (:j, 'T6U6', 'Fix', 'done', :p, 'CodeGen', CAST(:c AS jsonb), 9)"),
+            {"j": jid, "p": LEGACY, "c": json.dumps({"fixes_module": "paper_signal_generator", "found_by": "T6",
+                                                      "contract": "paper_trade_proposer.propose_trades.signals:id/signal_id"})})
+        await db.commit()
+    try:
+        async with async_session() as db:
+            out = await refresh_contract_fix(db, jid, "T6U6", "operator")
+            await db.commit()
+        assert out == {"node_key": "T6U6", "refreshed": True}
+        async with async_session() as db:
+            r = (await db.execute(text("SELECT prompt_template, tool_config, status FROM dag_nodes WHERE job_id = :j AND "
+                                       "node_key = 'T6U6'"), {"j": jid})).mappings().first()
+        assert r["prompt_template"].startswith(LEGACY.split("Make every dict")[0])          # the gap kept, read back
+        assert "Save each item ONCE" in r["prompt_template"]
+        assert "`paper_daily_signal_proposal_batch_data` (`generate_signals`)" in r["prompt_template"]
+        assert r["tool_config"]["owner"] == "T1F4" and r["tool_config"]["gaps"][0]["missing"] == [["id", "signal_id"]]
+        assert r["tool_config"]["gaps"][0]["carries"][-1] == "ticker"
+        async with async_session() as db:              # asked again with the text current: unchanged
+            assert await refresh_contract_fix(db, jid, "T6U6", "operator") == {"node_key": "T6U6", "refreshed": False}
+            assert await refresh_contract_fix(db, jid, "T6", "operator") is None              # not a contract step
     finally:
         await _drop(jid)

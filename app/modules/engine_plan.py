@@ -684,6 +684,93 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
 
 # ── §17.1831 a step whose tests fail inside an earlier module gets that module fixed first ──────────────────
 
+_GAP_KEYS = ("producer", "consumer", "param", "missing", "carries")
+
+
+def _callers(current: dict[str, str], mod: str) -> list[str]:
+    """The finished modules that import `mod`, each with what it imports: "`paper_x` (`f`, `g`)"."""
+    import ast as _ast
+    out: list[str] = []
+    for m, code in sorted(current.items()):
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError:
+            continue
+        names = sorted({a.name for n in tree.body if isinstance(n, _ast.ImportFrom) and n.module == f"app.modules.{mod}"
+                        for a in n.names})
+        if names:
+            out.append(f"`{m}` ({', '.join(f'`{x}`' for x in names)})")
+    return out
+
+
+def _contract_prompt(mod: str, owner: str, found_by: str, gaps: list[dict], callers: list[str]) -> str:
+    """§17.1833 — the text of a fix step for a module whose dicts lack a key the function they are handed to requires.
+
+    §17.1835 — and the item is saved ONCE. Live (5b4880c0 T6U6, 2026-10-26): told to "save the item ... and carry the
+    id", the generator saved a new `signal` row for every item on every call -- and the walk-forward backtester calls
+    it once per window, `paper_entry_approval` once per run. The text never said an item already saved keeps its row,
+    nor that other modules call the function. The operator's rule: save once per item; every caller reuses the row."""
+    lines = "".join(
+        f"- `{g['consumer']}` requires each item of its `{g['param']}` to carry "
+        + " and ".join(" or ".join(f"`{k}`" for k in m) for m in g["missing"])
+        + f" (it skips or fails an item without); step {found_by} hands it what `{g['producer']}` returns, and "
+        f"every dict this module builds for that carries only {', '.join(f'`{k}`' for k in g['carries'])}.\n"
+        for g in gaps)
+    return (f"Python module `{mod}.py` -- step {owner}'s module: edit it in place (the whole file, its public names "
+            f"kept). What it returns is handed on to a function that cannot use it:\n{lines}Make every dict it returns "
+            "carry the key, from where the value really comes from: an id names a saved row -- save the item with the "
+            "finished module that writes that table and carry the id it returns, with whatever that write needs; never "
+            "a made-up value. Save each item ONCE: an item already saved keeps its row and its id (look it up before "
+            "writing), so calling this again -- the next run, a backtest -- writes no second row. "
+            + (f"Other finished modules call it and get the same: {', '.join(callers)} -- each must keep working. "
+               if callers else "")
+            + "Its tests include one that calls it twice over the same items and finds one row per item. "
+            + _tests_note(mod))
+
+
+_CONTRACT_HEAD_RE = re.compile(r"^Python module `(?P<mod>\w+)\.py` -- step (?P<owner>[\w:]+)'s module: edit it in "
+                               r"place \(the whole file, its public names kept\)\. What it returns is handed on")
+_CONTRACT_LINE_RE = re.compile(r"^- `(?P<consumer>[\w.]+)` requires each item of its `(?P<param>\w+)` to carry "
+                               r"(?P<alts>.+?) \(it skips or fails an item without\); step (?P<step>[\w:]+) hands it "
+                               r"what `(?P<producer>[\w.]+)` returns, and every dict this module builds for that "
+                               r"carries only (?P<carries>.+?)\.$", re.M)
+
+
+async def refresh_contract_fix(db, job_id: str, node_key: str, asked_by: str) -> dict | None:
+    """§17.1835 — asked again (reset) for a contract fix step: its text re-rendered from the current template and the
+    module's current callers, so a corrected template reaches a fix step made before it. None when the step is not
+    one; the gaps come from its `tool_config`, or -- a step made before they were kept there -- from its own text."""
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source, node_editor
+    row = (await db.execute(_t("SELECT prompt_template, tool_config FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+                            {"j": job_id, "k": node_key})).mappings().first()
+    cfg = (row["tool_config"] if row and isinstance(row["tool_config"], dict) else {}) or {}
+    if not cfg.get("contract"):
+        return None
+    prompt = str(row["prompt_template"] or "")
+    head = _CONTRACT_HEAD_RE.match(prompt)
+    gaps = cfg.get("gaps") or [
+        {"producer": m["producer"], "consumer": m["consumer"], "param": m["param"],
+         "missing": [[k.strip(" `") for k in alt.split(" or ")] for alt in m["alts"].split(" and ")],
+         "carries": [k.strip(" `") for k in m["carries"].split(",")]}
+        for m in _CONTRACT_LINE_RE.finditer(prompt)]
+    mod, owner = cfg.get("fixes_module") or (head and head["mod"]), cfg.get("owner") or (head and head["owner"])
+    if not (gaps and mod and owner and cfg.get("found_by")):
+        return None
+    rows = [r for r in await engine_source.code_rows(db, job_id) if r.get("node_key") != node_key]
+    current = {m: c for m, (_p, c, _k) in engine_source.current_sources(rows).items()}
+    new = _contract_prompt(str(mod), str(owner), str(cfg["found_by"]), gaps, _callers(current, str(mod)))
+    if new == prompt:
+        return {"node_key": node_key, "refreshed": False}
+    out = await node_editor.edit_node(job_id, node_key, {"prompt_template": new, "tool_config": {
+        **cfg, "owner": owner, "gaps": gaps}}, edited_by=asked_by, db=db)
+    if out.get("error"):
+        logger.warning("contract_refresh_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    return {"node_key": node_key, "refreshed": True}
+
+
 async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str = "engine §17.1831") -> dict | None:
     """When a code step written for the engine has used its attempts and its sandbox refusals fail INSIDE another
     finished module -- a fault of that module (`engine_tests.CALLEE_CAUSES`), at its deepest frame -- the module gets a
@@ -756,22 +843,13 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
             n += 1
         fid = f"{node_key}U{n}"
         existing.add(fid)
-        lines = "".join(
-            f"- `{g['consumer']}` requires each item of its `{g['param']}` to carry "
-            + " and ".join(" or ".join(f"`{k}`" for k in m) for m in g["missing"])
-            + f" (it skips or fails an item without); step {node_key} hands it what `{g['producer']}` returns, and "
-            f"every dict this module builds for that carries only {', '.join(f'`{k}`' for k in g['carries'])}.\n"
-            for g in gs)
+        kept = [{k: g[k] for k in _GAP_KEYS} for g in gs]
         out = await node_editor.insert_node(job_id, {
             "node_key": fid, "title": f"Fix {mod} (what {node_key} hands on lacks a key)", "tool": "CodeGen",
             "node_type": "task", "depends_on": [],
-            "tool_config": {"fixes_module": mod, "found_by": node_key, "contract": gs[0]["key"]},
-            "prompt_template": (
-                f"Python module `{mod}.py` -- step {owner[mod]}'s module: edit it in place (the whole file, its public "
-                f"names kept). What it returns is handed on to a function that cannot use it:\n{lines}Make every "
-                "dict it returns carry the key, from where the value really comes from: an id names a saved row -- "
-                "save the item with the finished module that writes that table and carry the id it returns, with "
-                "whatever that write needs; never a made-up value. " + _tests_note(mod)),
+            "tool_config": {"fixes_module": mod, "found_by": node_key, "contract": gs[0]["key"], "owner": owner[mod],
+                            "gaps": kept},
+            "prompt_template": _contract_prompt(mod, owner[mod], node_key, kept, _callers(current, mod)),
         }, edited_by=edited_by, db=db)
         if out.get("error"):
             logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
