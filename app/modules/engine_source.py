@@ -1283,6 +1283,12 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
+    # §17.1836 — its tests do not stand in for a finished module that never leaves the engine
+    from app.modules.engine_contracts import internal_fakes
+    from app.sandbox.engine_tests import files_of
+    _cur = {m: c for m, (_p, c, _k) in current_sources(_others).items()}
+    _own = _written_modules(output) | ({step_module(me)} - {""})
+    found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own)
     return found
 
 
