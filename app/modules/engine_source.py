@@ -773,7 +773,11 @@ def replaces_an_engine_module(output: str, row: dict) -> list[str]:
 async def code_rows(db, job_id: str) -> list[dict]:
     """§17.1811 — the steps whose code this job's code stands on: the finished steps of each job it `builds_on`
     (keyed `<job>:<key>` so they never meet this job's own keys), then this job's own steps, which win any file
-    both write. A follow-up job is written against the modules its earlier job finished, not a guess at them."""
+    both write. A follow-up job is written against the modules its earlier job finished, not a guess at them.
+
+    §17.1832 — this job's own steps in plan order too (they came back in heap order). Live (5b4880c0 T6, 2026-10-26):
+    four steps had rewritten `paper_audit_trail_writer`; the name check, which keeps the last writer, cited T6U4's
+    `write_proposal(proposal)` after T6U5 had finished with `write_proposal(*, signal_id, …)`."""
     from sqlalchemy import text
     rows = (await db.execute(text(
         "SELECT * FROM ("
@@ -787,7 +791,7 @@ async def code_rows(db, job_id: str) -> list[dict]:
         " UNION ALL"
         " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status"
         "   FROM dag_nodes WHERE job_id = :j"
-        ") r ORDER BY src, CASE WHEN src = 0 THEN ord END NULLS LAST, CASE WHEN src = 0 THEN node_key END"),
+        ") r ORDER BY src, ord NULLS LAST, node_key"),
         {"j": job_id})).mappings().all()
     return [{k: v for k, v in dict(r).items() if k not in ("src", "ord")} for r in rows]
 
@@ -861,8 +865,37 @@ def rewritten_here(rows: list[dict]) -> dict[str, str]:
     return out
 
 
+def current_sources(rows: list[dict]) -> dict[str, tuple[str, str, str]]:
+    """§17.1832 — each finished module as it is now: module -> (path, code, step), the last finished writer winning
+    (`code_rows` order: the earlier jobs, then this job's steps in plan order)."""
+    from app.sandbox.engine_tests import files_of, is_test
+    out: dict[str, tuple[str, str, str]] = {}
+    for r in rows:
+        if r.get("status") != "done":
+            continue
+        for path, code in files_of(r).items():
+            if path.startswith("app/") and not is_test(path):
+                out[Path(path).stem] = (path, code, str(r.get("node_key") or ""))
+    return out
+
+
+def edited_module_block(rows: list[dict], module: str) -> str:
+    """§17.1832 — a step that edits a module in place is shown that module as it is now. Live (5b4880c0, 2026-10-26):
+    T6U2-T6U4, each told "edit `paper_audit_trail_writer.py` in place, its public names kept", were shown only that
+    an earlier step had rewritten it -- never its code -- and each wrote a new one: `write_ingested_item`, then every
+    writer taking one record object (`write_proposal(proposal)`), every caller broken."""
+    cur = current_sources(rows).get(module)
+    if not cur:
+        return ""
+    path, code, key = cur
+    return (f"\n\n## The file this step edits: `{path}` as it is now (step {key})\n"
+            "Edit THIS file: keep every public function, class and parameter it has (other modules call them), change "
+            f"only what the task asks.\n```python\n{code}\n```\n")
+
+
 def carried_block(rows: list[dict], node: dict, budget: int = 40000,
-                  rewritten: dict[str, str] | None = None) -> str:
+                  rewritten: dict[str, str] | None = None,
+                  current: dict[str, tuple[str, str, str]] | None = None) -> str:
     """§17.1812 — what a step of a follow-up job is shown of the code its earlier job finished: every file with
     whether it has tests, then the full current source of the modules the step names, then the rest by relevance,
     up to `budget`. Live (follow-up 5b4880c0, 2026-10-25): T1 "Audit existing paper modules" -- an LLM step -- was
@@ -890,8 +923,10 @@ def carried_block(rows: list[dict], node: dict, budget: int = 40000,
     def _line(p: str) -> str:
         stem = Path(p).stem
         if stem in rewritten:
+            # §17.1832 — and the calls it has now (callers were told to "use that step's version" and never shown it)
+            now = _public_api((current or {}).get(stem, ("", "", ""))[1])
             return (f"    {p} (step {files[p][1]}) -- REWRITTEN by this job's step {rewritten[stem]}: use that "
-                    "step's version, not this one\n")
+                    "step's version, not this one" + (f"; it now has:\n        {now}" if now else "") + "\n")
         api = "" if p.startswith("alembic/") else _public_api(files[p][0])
         return (f"    {p} (step {files[p][1]})"
                 + ("" if p.startswith("alembic/") else

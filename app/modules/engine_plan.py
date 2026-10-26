@@ -706,9 +706,14 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     brief = row["refined_brief"] if isinstance(row["refined_brief"], dict) else _json.loads(row["refined_brief"] or "{}")
     if not engine_source.targets_the_engine(brief):
         return None
+    # §17.1832 — only the refusals since its last fix step finished: those before it are the defect already fixed.
+    # Live (5b4880c0 T6, 2026-10-26): T6U1 fixed `write_risk_check`'s JSON bind; T6's next exhaustion re-read the
+    # refusals from before it and added T6U2, then T6U3, T6U4 and T6U5 -- the same fixed frame, five times.
     reasons = (await db.execute(_t(
-        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f"),
-        {"j": job_id, "n": row["id"], "f": "%-> failed"})).scalars().all()
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f "
+        "AND created_at > COALESCE((SELECT max(l.created_at) FROM execution_logs l JOIN dag_nodes u ON u.id = l.node_id "
+        " WHERE u.job_id = :j AND u.tool_config->>'found_by' = :k AND l.message LIKE '%-> done'), '-infinity')"),
+        {"j": job_id, "n": row["id"], "k": node_key, "f": "%-> failed"})).scalars().all()
     own = {engine_source.step_module({"prompt_template": row["prompt_template"], "title": row["title"]})} | \
         engine_source._written_modules(str(row["output_text"] or ""))
     owner: dict[str, str] = {}
@@ -731,7 +736,12 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
             n += 1
         fid = f"{node_key}U{n}"
         existing.add(fid)
-        frames = "".join(f"- `{d['frame']}` (test `{d['test']}`): {d['cause']}\n" for d in defects[:5])
+        by_frame: dict[tuple[str, str], list[str]] = {}       # §17.1832 — one line per frame, its tests named once
+        for d in defects:
+            by_frame.setdefault((d["frame"], d["cause"]), []).append(d["test"])
+        frames = "".join(f"- `{f}` (tests {', '.join(f'`{t}`' for t in tests[:4])}"
+                         f"{f' and {len(tests) - 4} more' if len(tests) > 4 else ''}): {c}\n"
+                         for (f, c), tests in list(by_frame.items())[:5])
         out = await node_editor.insert_node(job_id, {
             "node_key": fid, "title": f"Fix {mod} (found by {node_key}'s tests)", "tool": "CodeGen",
             "node_type": "task", "depends_on": [],
