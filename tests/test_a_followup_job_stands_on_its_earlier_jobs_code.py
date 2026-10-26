@@ -357,3 +357,56 @@ def test_a_step_that_does_not_name_an_earlier_module_may_not_rewrite_it():
     assert found and "paper_audit_trail_writer.py`: that module is step f00ea97f:T4's" in found[0]
     fixer = {**me, "prompt_template": "Fix paper_audit_trail_writer: write_approval takes proposal_id."}
     assert es.writes_a_siblings_module(TWO_FILES["output_text"], fixer, [writer]) == []
+
+
+# ── §17.1830 — each module's public call shapes are on its line; a module this job rewrote is named with its step ──
+
+# The shape of f00ea97f:T5 (live): records and errors first, the client class last -- with a 600-char line the client
+# was cut off before `get_account`.
+CLIENT_LIVE = {"node_key": "f00ea97f:T5", "title": "Implement Alpaca paper client", "description": "", "status": "done",
+               "prompt_template": "Python module `paper_alpaca_paper_client.py`",
+               "output_text": "```python\n# app/modules/paper_alpaca_paper_client.py\n"
+               + "".join(f"class AlpacaRecord{i}:\n    field_with_a_long_name_{i}: str = ''\n" for i in range(60))
+               + "class AlpacaPaperClient:\n    def __init__(self, *, base_url=None):\n        ...\n"
+               "    async def get_account(self):\n        ...\n    async def _request(self, path):\n        ...\n"
+               "def _private():\n    ...\nasync def submit_paper_order(*, symbol, qty, side):\n    ...\n```"}
+RISK_OLD = {"node_key": "f00ea97f:T6", "title": "Implement risk controls", "description": "", "status": "done",
+            "prompt_template": "Python module `paper_risk_control_module.py`",
+            "output_text": "```python\n# app/modules/paper_risk_control_module.py\n"
+                           "def evaluate_proposal(*, symbol, equity):\n    OLD_RISK = 1\n```"}
+RISK_NEW = {"node_key": "T1F3", "title": "Fix risk controls", "description": "", "status": "done",
+            "prompt_template": "Edit paper_risk_control_module in place.",
+            "output_text": "```python\n# app/modules/paper_risk_control_module.py\n"
+                           "def evaluate_proposal(*, ticker, equity):\n    ...\n```"}
+
+
+def test_a_modules_line_carries_its_call_shapes_functions_and_clients_first():
+    out = es.carried_block([CLIENT_LIVE, RISK_OLD], _step("Build daily batch"))
+    line = out.split("paper_alpaca_paper_client.py (step f00ea97f:T5) -- NO test file\n        ", 1)[1].split("\n")[0]
+    assert line.startswith("submit_paper_order(*, symbol, qty, side); AlpacaPaperClient {AlpacaPaperClient(self, *, "
+                           "base_url), get_account(self)}")
+    assert "_request" not in line and "_private" not in line and line.endswith("; …")    # records cut, not the client
+    assert "evaluate_proposal(*, symbol, equity)" in out                               # nobody rewrote it here
+
+
+def test_a_module_this_job_rewrote_is_named_with_its_step_and_not_shown():
+    rewritten = es.rewritten_here([RISK_OLD, RISK_NEW, {**RISK_NEW, "node_key": "T9", "status": "failed"}])
+    assert rewritten == {"paper_risk_control_module": "T1F3"}                          # a failed step rewrote nothing
+    out = es.carried_block([CLIENT_LIVE, RISK_OLD], _step("Build daily batch", "paper_risk_control_module"),
+                           rewritten=rewritten)
+    assert ("app/modules/paper_risk_control_module.py (step f00ea97f:T6) -- REWRITTEN by this job's step T1F3: use "
+            "that step's version, not this one\n") in out
+    assert "evaluate_proposal(*, symbol" not in out and "OLD_RISK" not in out           # neither its names nor its code
+    assert "Every file (2 modules)" in out and "get_account(self)" in out
+
+
+async def test_the_executor_names_in_the_prompt_the_modules_this_job_rewrote():
+    from tests.test_codegen_for_the_engine_reads_the_engine import GROUNDED, LIVE_BRIEF, _run
+    with patch("app.sandbox.engine_tests.check", new=AsyncMock(return_value=SimpleNamespace(
+                verdict="pass", reason="ok", ran=[]))), \
+         patch("app.modules.engine_source.code_rows", new=AsyncMock(return_value=[RISK_OLD, RISK_NEW])), \
+         patch("app.modules.engine_source.job_code", new=AsyncMock(return_value=(set(), set()))), \
+         patch("app.modules.engine_source.engine_findings", new=AsyncMock(return_value=[])):
+        captured, _, _ = await _run(GROUNDED, LIVE_BRIEF)
+    prompt = captured["calls"][0][-1]["content"]
+    assert "REWRITTEN by this job's step T1F3" in prompt and "OLD_RISK" not in prompt, captured.get("raised")

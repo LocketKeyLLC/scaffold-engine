@@ -2072,11 +2072,13 @@ async def execute_next_node(
             try:
                 from app.modules import engine_source as _es
                 async with async_session() as _cbdb:
-                    _carried = [r for r in await _es.code_rows(_cbdb, job_id) if _es.is_carried(r)]
+                    _code = await _es.code_rows(_cbdb, job_id)
+                _carried = [r for r in _code if _es.is_carried(r)]
                 if _carried:
                     _grounding_blocks.append(_es.carried_block(
                         _carried, node_snapshot,
-                        budget=40000 if tool_lower == "codegen" else settings.max_report_upstream_chars))
+                        budget=40000 if tool_lower == "codegen" else settings.max_report_upstream_chars,
+                        rewritten=_es.rewritten_here(_code)))                              # §17.1830
             except Exception as exc:
                 logger.warning("carried_code_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)

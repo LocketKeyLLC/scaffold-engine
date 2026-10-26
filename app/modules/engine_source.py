@@ -823,7 +823,46 @@ def _names_module(leaf: str, text: str, words: set[str]) -> bool:
     return leaf.lower() in text or (len(toks) >= 2 and toks <= words)
 
 
-def carried_block(rows: list[dict], node: dict, budget: int = 40000) -> str:
+def _public_api(code: str, limit: int = 600) -> str:
+    """§17.1830 — a module's public names as call shapes, for its manifest line: ``get_account(self)`` under its
+    class, ``write_proposal(*, signal_id, ticker, …)``. Empty when the code does not parse."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    fns: list[str] = []
+    callers: list[str] = []         # classes with public methods: the client a step calls
+    bare: list[str] = []            # exceptions, records -- named last, so a long list cuts these first
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
+            fns.append(_signature(n).split("def ", 1)[1])
+        elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
+            meths = [m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and not m.name.startswith("_")]
+            init = next((m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and m.name == "__init__"), None)
+            if meths:
+                shown = ([_signature(init).split("def ", 1)[1].replace("__init__", n.name, 1)] if init else []) + [
+                    _signature(m).split("def ", 1)[1] for m in meths]
+                callers.append(n.name + " {" + ", ".join(shown) + "}")
+            else:
+                bare.append(n.name)
+    out = "; ".join(fns + callers + bare)
+    return out if len(out) <= limit else out[:limit].rsplit(";", 1)[0] + "; …"
+
+
+def rewritten_here(rows: list[dict]) -> dict[str, str]:
+    """§17.1830 — the earlier job's modules this job's own finished steps rewrote: module -> that step's key."""
+    out: dict[str, str] = {}
+    for r in rows:
+        if not is_carried(r) and r.get("status") == "done":
+            for m in _written_modules(str(r.get("output_text") or "")):
+                out[m] = str(r.get("node_key") or "")
+    return out
+
+
+def carried_block(rows: list[dict], node: dict, budget: int = 40000,
+                  rewritten: dict[str, str] | None = None) -> str:
     """§17.1812 — what a step of a follow-up job is shown of the code its earlier job finished: every file with
     whether it has tests, then the full current source of the modules the step names, then the rest by relevance,
     up to `budget`. Live (follow-up 5b4880c0, 2026-10-25): T1 "Audit existing paper modules" -- an LLM step -- was
@@ -841,11 +880,27 @@ def carried_block(rows: list[dict], node: dict, budget: int = 40000) -> str:
     words = set(re.findall(r"[a-z0-9]+", text))
     tested = {Path(p).stem.removeprefix("test_") for p in files if is_test(p)}
     mods = [p for p in files if not is_test(p)]
-    manifest = "".join(
-        f"    {p} (step {files[p][1]})"
-        + ("" if p.startswith("alembic/") else
-           f" -- {'tests: tests/test_' + Path(p).stem + '.py' if Path(p).stem in tested else 'NO test file'}") + "\n"
-        for p in mods)
+    # §17.1830 — each module's public call shapes on its line. Live (follow-up 5b4880c0 T6, 2026-10-26): the batch
+    # needs the account's current equity; the only source, f00ea97f:T5's client `get_account()`, was a bare file name
+    # here and its source over the size limit, so five attempts read `context["equity"]`, a key nothing returns.
+    # A module this job's own step rewrote is named with that step and shown no further: its old names (live: the risk
+    # module's `evaluate_proposal(*, symbol, …)`, which T1F3 changed to `ticker`) are not the ones the sandbox runs.
+    rewritten = rewritten or {}
+
+    def _line(p: str) -> str:
+        stem = Path(p).stem
+        if stem in rewritten:
+            return (f"    {p} (step {files[p][1]}) -- REWRITTEN by this job's step {rewritten[stem]}: use that "
+                    "step's version, not this one\n")
+        api = "" if p.startswith("alembic/") else _public_api(files[p][0])
+        return (f"    {p} (step {files[p][1]})"
+                + ("" if p.startswith("alembic/") else
+                   f" -- {'tests: tests/test_' + stem + '.py' if stem in tested else 'NO test file'}")
+                + (f"\n        {api}" if api else "") + "\n")
+    manifest, n_mods = "".join(_line(p) for p in mods), len(mods)
+    job = next(iter(files.values()))[1].split(":")[0]
+    files = {p: v for p, v in files.items() if Path(p).stem.removeprefix("test_") not in rewritten}
+    mods = [p for p in mods if p in files]
     named = [p for p in mods if _names_module(Path(p).stem, text, words)]
     named += [p for p in files if is_test(p) and Path(p).stem.removeprefix("test_") in {Path(n).stem for n in named}]
     # the rest by the step's words each file holds, a word in few files counting most (a word in every file -- "the
@@ -855,11 +910,10 @@ def carried_block(rows: list[dict], node: dict, budget: int = 40000) -> str:
     df = {w: sum(w in h for h in has.values()) for w in want}
     rest = sorted((p for p in files if p not in named),
                   key=lambda p: (-sum(1 / df[w] for w in has[p]), len(files[p][0])))
-    job = next(iter(files.values()))[1].split(":")[0]
     head = (f"\n\n## The code this job builds on (job {job}, finished -- the files as they are now, §17.1812)\n"
             "These files exist. A step that fixes one of them edits it in place: the whole file under the same path, "
             "its public names kept, only what the step asks changed -- never a new module under another name.\n"
-            f"### Every file ({len(mods)} modules)\n{manifest}")
+            f"### Every file ({n_mods} modules)\n{manifest}")
     out, left = [head], budget - len(head)
     shown: list[str] = []
     for p in named + rest:
