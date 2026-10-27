@@ -1291,7 +1291,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own)
     # §17.1841 — nor delete from the job's own tables
     from app.modules.engine_contracts import deletes_in_tests
-    from app.modules.engine_contracts import append_only_tables
+    from app.modules.engine_contracts import append_only_tables, raw_dict_binds
+    found += raw_dict_binds(files_of({**me, "output_text": output}))                 # §17.1843
     found += deletes_in_tests(files_of({**me, "output_text": output}), append_only_tables(others) & set(jobs_own))
     return found
 
