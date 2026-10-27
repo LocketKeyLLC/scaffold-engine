@@ -2118,15 +2118,23 @@ async def execute_next_node(
         # outranked the inventory below it (every guest's firewall on, its own rules file).
         # §17.1567 — nor for a step that FORMATS upstream results: the optimizer rewrote T8's task and dropped
         # the engine's own "formats what came before" / "decide and state" instructions with it.
+        # §17.1845 — the reviewer's refusal is not the optimizer's to rewrite. Live (5b4880c0 T6U10, 2026-10-27):
+        # "`tests/...:28` deletes from `signal`, an append-only table ... Drop it" went in and "Never issue DELETE
+        # statements against append-only tables" came out -- the lines and the fact of the refusal gone -- and four
+        # attempts in a row were refused for the same deletes. It is put back verbatim in front of the rewrite.
+        _fb = _format_reviewer_feedback(node_snapshot)
+        _kept = _fb if _fb and _task_prompt.startswith(_fb) else ""
         if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text
                 and not formats_what_came_before(dict(node) if hasattr(node, "keys") else {})):
             try:
                 opt_result = await optimize_prompt(
-                    prompt=_task_prompt,  # §17.1042 — the task only
+                    prompt=_task_prompt[len(_kept):],  # §17.1042 — the task only
                     skip_verify=True,
                     model_overrides=model_overrides,
                 )
                 _opt_body = opt_result.optimized_prompt
+                if _kept and (_opt_body or "").strip():
+                    _opt_body = _kept + _opt_body
                 # §17.462 — never execute a node with an empty prompt. optimize_prompt
                 # now guards this at the source, but keep a belt-and-suspenders check
                 # on the critical path: a blank optimized prompt (thinking-model empty
