@@ -653,6 +653,9 @@ class Settings(BaseSettings):
     # Replayed with 12k it answered in 4030 and 5831 tokens (a correct FAIL). Think-off does not help this model -- it
     # reasons in visible content instead and starves the same.
     verifier_max_tokens: int = Field(default=12288, ge=512, le=65536)
+    # §17.1844 — the role asked once when the verifier returns no verdict (empty: fail as before). The coder: a
+    # different model from the verifier, and from the one that writes the lab's code (`model_general`).
+    verifier_fallback_role: str = Field(default="model_coder")
     max_retries: int = Field(default=3, ge=0, le=20)
     # §17.428 — deterministic Python-syntax gate for CodeGen node output.
     # Runs before the (lenient) LLM verifier; a fenced ```python block that
