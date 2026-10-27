@@ -788,7 +788,7 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     from sqlalchemy import text as _t
 
     from app.modules import engine_source, node_editor
-    from app.modules.engine_contracts import contract_gaps
+    from app.modules.engine_contracts import contract_gaps, payload_gaps
     from app.sandbox.engine_tests import callee_defects, files_of
     row = (await db.execute(_t(
         "SELECT n.id, n.title, n.prompt_template, n.tool, n.depends_on, n.output_text, j.refined_brief "
@@ -837,15 +837,72 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
             g["key"] = f"{g['consumer']}.{g['param']}:{'|'.join('/'.join(m) for m in g['missing'])}"
             if target in owner and target not in own and g["key"] not in asked:
                 gaps.setdefault(target, []).append(g)
-    if not found and not gaps:
+    # §17.1840 — and the kinds of item one finished module writes into a JSON column that another can never take a
+    # field it requires from: the writers record it, then the reader reads it
+    pgaps = [g for g in payload_gaps(current)
+             if not any(a.startswith(f"payload:{g['table']}.{g['column']}:{g['by']}={g['kind']}:{g['field']}:")
+                        for a in asked)
+             and all(w in owner and w not in own for w in g["writers"])
+             and g["reader"].split(".")[0] in owner and g["reader"].split(".")[0] not in own]
+    if not found and not gaps and not pgaps:
         return None
     added: list[str] = []
-    for mod, gs in gaps.items():
+
+    def _next_key() -> str:
         n = 1
         while f"{node_key}U{n}" in existing:
             n += 1
-        fid = f"{node_key}U{n}"
-        existing.add(fid)
+        existing.add(f"{node_key}U{n}")
+        return f"{node_key}U{n}"
+
+    for g in pgaps:
+        contract = f"payload:{g['table']}.{g['column']}:{g['by']}={g['kind']}:{g['field']}"
+        key = g["field"] if g["field"] in g["reads"] or not g["reads"] else g["reads"][0]
+        rmod, rfn = g["reader"].split(".")
+        took = (f"from {', '.join(f'`{k}`' for k in g['reads'])}" if g["reads"] else "from nothing (it gives every one "
+                "an empty one)")
+        wsteps: list[str] = []
+        for wmod, wkeys in sorted(g["writers"].items()):
+            fid = _next_key()
+            out = await node_editor.insert_node(job_id, {
+                "node_key": fid, "title": f"Fix {wmod} (its {g['kind']} items lack {key})", "tool": "CodeGen",
+                "node_type": "task", "depends_on": [],
+                "tool_config": {"fixes_module": wmod, "found_by": node_key, "contract": f"{contract}:{wmod}",
+                                "owner": owner[wmod]},
+                "prompt_template": (
+                    f"Python module `{wmod}.py` -- step {owner[wmod]}'s module: edit it in place (the whole file, its "
+                    f"public names kept). The `{g['kind']}` items it writes into `{g['table']}.{g['column']}` carry "
+                    f"{', '.join(f'`{k}`' for k in wkeys)} -- and `{g['reader']}` ({rmod}) takes an item's "
+                    f"`{g['field']}` {took}, so every one of them is dropped where `{g['field']}` is required. Record "
+                    f"`{key}` in each item's {g['column']}, read from the item's own data (the document or record it "
+                    "came from) -- never made up; an item that truly has none gets none. Keep every key it writes "
+                    "now. " + _tests_note(wmod)),
+            }, edited_by=edited_by, db=db)
+            if out.get("error"):
+                logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
+                return None
+            wsteps.append(fid)
+            added.append(fid)
+        if key not in g["reads"]:
+            fid = _next_key()
+            out = await node_editor.insert_node(job_id, {
+                "node_key": fid, "title": f"Fix {rmod} (read {g['kind']} items' {key})", "tool": "CodeGen",
+                "node_type": "task", "depends_on": wsteps,
+                "tool_config": {"fixes_module": rmod, "found_by": node_key, "contract": f"{contract}:{rmod}",
+                                "owner": owner[rmod]},
+                "prompt_template": (
+                    f"Python module `{rmod}.py` -- step {owner[rmod]}'s module: edit it in place (the whole file, its "
+                    f"public names kept). `{rfn}` takes a `{g['kind']}` item's `{g['field']}` {took}; its writers "
+                    f"({', '.join(f'`{w}`' for w in sorted(g['writers']))}) now record it in the item's "
+                    f"`{g['column']}` under `{key}` -- read it from there for `{g['kind']}` items, and keep every "
+                    "other kind's rule. " + _tests_note(rmod)),
+            }, edited_by=edited_by, db=db)
+            if out.get("error"):
+                logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)
+                return None
+            added.append(fid)
+    for mod, gs in gaps.items():
+        fid = _next_key()
         kept = [{k: g[k] for k in _GAP_KEYS} for g in gs]
         out = await node_editor.insert_node(job_id, {
             "node_key": fid, "title": f"Fix {mod} (what {node_key} hands on lacks a key)", "tool": "CodeGen",
@@ -859,11 +916,7 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
             return None
         added.append(fid)
     for mod, defects in found.items():
-        n = 1
-        while f"{node_key}U{n}" in existing:
-            n += 1
-        fid = f"{node_key}U{n}"
-        existing.add(fid)
+        fid = _next_key()
         by_frame: dict[tuple[str, str], list[str]] = {}       # §17.1832 — one line per frame, its tests named once
         for d in defects:
             by_frame.setdefault((d["frame"], d["cause"]), []).append(d["test"])
@@ -888,7 +941,10 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     if out2.get("error"):
         logger.warning("upstream_fix_edit_failed job=%s node=%s err=%s", job_id, node_key, out2)
         return None
-    mods = sorted({*found, *gaps})
+    mods = sorted({*found, *gaps, *(w for g in pgaps for w in g["writers"]),
+                   *(g["reader"].split(".")[0] for g in pgaps if (g["field"] if g["field"] in g["reads"]
+                                                                 or not g["reads"] else g["reads"][0])
+                     not in g["reads"])})
     logger.warning("engine_upstream_fix job=%s node=%s fixes=%s modules=%s", job_id, node_key, added, mods)
     return {"node_key": node_key, "fix_steps": added, "modules": mods}
 
