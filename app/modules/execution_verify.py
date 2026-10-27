@@ -92,6 +92,35 @@ async def _run_verification(
     §17.89 Pattern 3 — dispatch via ``role=`` so the configured
     ``MODEL_VERIFIER_PROVIDER`` is honored.
     """
+    status, reason, confidence = await _verify_once(messages, role=role, overrides=overrides)
+    # §17.1844 — a verifier that returns no verdict has not judged the output: one other model is asked before
+    # the step is failed on it. Live (5b4880c0 T6U8, 2026-10-27): the attempt passed every engine check and the
+    # sandbox; glm-5.3-flash spent its whole 12,288-token budget deliberating in six draws and the step failed on
+    # "verifier produced no tool call" -- its last attempt, so the fix step failed (7 of 526 failures in 7 days).
+    fallback = settings.verifier_fallback_role
+    if reason in _NO_VERDICT and fallback and fallback != role:
+        logger.warning("verifier_fallback role=%s -> %s reason=%s", role, fallback, reason)
+        try:
+            status, reason, confidence = await _verify_once(messages, role=fallback, overrides=None)
+        except Exception as exc:                        # noqa: BLE001 — a bad fallback role leaves the verdict as is
+            logger.warning("verifier_fallback_failed role=%s err=%r", fallback, exc)
+            return status, reason, confidence
+        if reason in _NO_VERDICT:
+            reason = f"{reason} (and from the fallback verifier, {get_model(fallback, None)})"
+    return status, reason, confidence
+
+
+#: the verdicts that are no verdict: the model never judged the output
+_NO_VERDICT = frozenset({"verifier produced no tool call", "verifier arguments not an object",
+                         "verifier response missing 'pass' key"})
+
+
+async def _verify_once(
+    messages: list[dict],
+    *,
+    role: str,
+    overrides: dict | None,
+) -> tuple[Literal["pass", "fail"], str, float]:
     # Cache lookup key needs a concrete model tag, not a role — the same role
     # can resolve to different tags via overrides. Resolution is cheap (dict
     # lookup) and the result is stable for the call.
