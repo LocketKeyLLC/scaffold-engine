@@ -26,7 +26,7 @@ def _session(db):
     return f
 
 
-async def _run(optimize_enabled: bool):
+async def _run(optimize_enabled: bool, retry: dict | None = None):
     from app.modules import execution_agent as xa
     db = AsyncMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
     job = AsyncMock(return_value={"id": "job-1", "status": "running",
@@ -35,7 +35,7 @@ async def _run(optimize_enabled: bool):
         "id": "node-2", "node_key": "T2", "title": "Write the analysis", "tool": "LLM",  # not a format step: §17.1567 skips the optimizer for those
         "prompt_template": "Write the analysis from T1's findings.", "domain": None,
         "depends_on": ["T1"], "assigned_model": None, "retry_count": 0,
-        "last_verification_reason": None})
+        "last_verification_reason": None, **(retry or {})})
     captured = {}
 
     async def chat(messages, **kw):
@@ -79,3 +79,16 @@ async def test_with_the_optimizer_off_the_raw_assembly_is_unchanged():
     assert not opt.called
     assert prompt.startswith("## Upstream Node Outputs")
     assert "Write the analysis from T1's findings." in prompt and prompt.rstrip().endswith("GROUND-TRUTH-BETA")
+
+
+async def test_a_retrys_refusal_reaches_the_model_verbatim_and_never_the_optimizer():
+    """§17.1845 — live (5b4880c0 T6U10): "`tests/...:28` deletes from `signal`, an append-only table ... Drop it" went
+    into the optimizer and came out "Never issue DELETE statements against append-only tables"; four attempts in a
+    row were refused for the same deletes."""
+    why = "`tests/test_x.py:28` deletes from `signal`, an append-only table: ... Drop it"
+    prompt, opt, _ = await _run(optimize_enabled=True, retry={"retry_count": 1, "last_verification_reason": why})
+    sent = opt.call_args.kwargs["prompt"]
+    assert why not in sent and "Reviewer feedback" not in sent
+    assert "Write the analysis from T1's findings." in sent
+    assert f"The previous attempt was rejected by the verifier. Reason:\n  {why}" in prompt
+    assert prompt.index("Reviewer feedback") < prompt.index("OPTIMIZED-TASK-BODY")
