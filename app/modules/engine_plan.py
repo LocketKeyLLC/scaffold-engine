@@ -998,6 +998,63 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     return {"node_key": node_key, "fix_steps": added, "modules": mods}
 
 
+# ── §17.1848 a code step that keeps repeating one refusal runs its next round on the other code model ──────────
+
+#: the kinds of engine refusal a round can repeat -- one per line of a §17.1749 refusal
+_REFUSAL_KINDS = (("stand-in", re.compile(r"\breplaces `\w+` \(`\w+`, a finished module that never leaves")),
+                  ("delete", re.compile(r"\bdeletes from `\w+`, an append-only table")),
+                  ("dict bind", re.compile(r"\bbinds a dict to `:\w+` through `text\(\)`")),
+                  ("missing name", re.compile(r"\bhas no (?:parameter|attribute|name) `|\bnot written yet\b")),
+                  ("syntax", re.compile(r"Python-syntax gate")))
+
+
+async def switch_code_model(db, job_id: str, node_key: str, *, asked_by: str = "engine §17.1848") -> dict | None:
+    """When a CodeGen step has used its attempts and at least two of its last round's refusals are the same kind of
+    engine refusal, its next round runs on the other code model (`model_coder` <-> `model_general`), with fresh
+    attempts. Live (follow-up 5b4880c0 T6, 2026-10-27): deepseek-v4-pro (pinned by the planner) stood in for a finished
+    data module in its tests in every attempt of four rounds -- through exact refusals (§17.1836, verbatim since
+    §17.1845) and the list of what may be mocked (§17.1839). Operator choice: switch the model. Once per step: a step
+    that already switched is left to the next escalation. None when it does not apply."""
+    import json as _json
+
+    from sqlalchemy import text as _t
+
+    from app.config import get_model
+    from app.modules import node_editor
+    row = (await db.execute(_t("SELECT id, tool, assigned_model, tool_config, max_retries FROM dag_nodes "
+                               "WHERE job_id = :j AND node_key = :k"), {"j": job_id, "k": node_key})).mappings().first()
+    if not row or str(row["tool"] or "").lower() != "codegen":
+        return None
+    cfg = row["tool_config"] if isinstance(row["tool_config"], dict) else _json.loads(row["tool_config"] or "{}")
+    if cfg.get("model_switched_from"):
+        return None
+    reasons = (await db.execute(_t(
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f "
+        "ORDER BY created_at DESC LIMIT :m"),
+        {"j": job_id, "n": row["id"], "f": "%-> failed", "m": int(row["max_retries"] or 3) + 1})).scalars().all()
+    counts: dict[str, int] = {}
+    for r in reasons:
+        for kind, rx in _REFUSAL_KINDS:
+            if rx.search(r or ""):
+                counts[kind] = counts.get(kind, 0) + 1
+    repeated = sorted(k for k, n in counts.items() if n >= 2)
+    if not repeated:
+        return None
+    current = str(row["assigned_model"] or "").strip() or get_model("model_coder", None)
+    coder, general = get_model("model_coder", None), get_model("model_general", None)
+    other = coder if current != coder else general
+    if not other or other == current:
+        return None
+    out = await node_editor.edit_node(job_id, node_key, {
+        "assigned_model": other, "tool_config": {**cfg, "model_switched_from": current, "switched_for": repeated}},
+        edited_by=asked_by, db=db)
+    if out.get("error"):
+        logger.warning("model_switch_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    logger.warning("engine_model_switch job=%s node=%s %s -> %s for=%s", job_id, node_key, current, other, repeated)
+    return {"node_key": node_key, "from": current, "to": other, "for": repeated}
+
+
 # ── §17.1793 a step too big for one output is split ──────────────────────────────────────────────────────────
 
 #: a refusal that says the step left out a part of its OWN task
