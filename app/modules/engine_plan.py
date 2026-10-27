@@ -731,12 +731,64 @@ def _contract_prompt(mod: str, owner: str, found_by: str, gaps: list[dict], call
             + _tests_note(mod))
 
 
+def _payload_writer_prompt(mod: str, owner: str, pw: dict) -> str:
+    """§17.1840 — the text of a fix step for a module whose items lack a field another module requires of them.
+
+    §17.1842 — the field is the item's OWN. Live (5b4880c0 T6U8, 2026-10-27): told to record `ticker` "read from the
+    item's own data", the 13F ingester recorded the filer's ticker -- the fund manager's (BRK.A for Berkshire's 13F) --
+    on a filing about the securities it holds: every 13F signal would trade the manager. The verifier passed it. The
+    operator's rule: an item about no single one gets none."""
+    took = (f"from {', '.join(f'`{k}`' for k in pw['reads'])}" if pw["reads"] else "from nothing (it gives every one an "
+            "empty one)")
+    return (f"Python module `{mod}.py` -- step {owner}'s module: edit it in place (the whole file, its public names "
+            f"kept). The `{pw['kind']}` items it writes into `{pw['table']}.{pw['column']}` carry "
+            f"{', '.join(f'`{k}`' for k in pw['keys'])} -- and `{pw['reader']}` ({pw['reader'].split('.')[0]}) takes "
+            f"an item's `{pw['field']}` {took}, so every one of them is dropped where `{pw['field']}` is required. "
+            f"Record `{pw['key']}` in each item's {pw['column']}: the {pw['field']} of the very thing the item is "
+            "about, read from the item's own data (the document or record it came from) -- never one of whoever filed "
+            "or published it, nor of something it merely mentions, and never made up. An item about no single one "
+            f"(several, or none) gets none. Keep every key it writes now. " + _tests_note(mod))
+
+
+_PAYLOAD_WRITER_RE = re.compile(
+    r"^Python module `(?P<mod>\w+)\.py` -- step (?P<owner>[\w:]+)'s module: edit it in place \(the whole file, its "
+    r"public names kept\)\. The `(?P<kind>[\w.-]+)` items it writes into `(?P<table>\w+)\.(?P<column>\w+)` carry "
+    r"(?P<keys>.+?) -- and `(?P<reader>[\w.]+)` \(\w+\) takes an item's `(?P<field>\w+)` (?P<took>from .+?), so "
+    r"every one of them is dropped where `\w+` is required\. Record `(?P<key>\w+)`", re.S)
+
+
 _CONTRACT_HEAD_RE = re.compile(r"^Python module `(?P<mod>\w+)\.py` -- step (?P<owner>[\w:]+)'s module: edit it in "
                                r"place \(the whole file, its public names kept\)\. What it returns is handed on")
 _CONTRACT_LINE_RE = re.compile(r"^- `(?P<consumer>[\w.]+)` requires each item of its `(?P<param>\w+)` to carry "
                                r"(?P<alts>.+?) \(it skips or fails an item without\); step (?P<step>[\w:]+) hands it "
                                r"what `(?P<producer>[\w.]+)` returns, and every dict this module builds for that "
                                r"carries only (?P<carries>.+?)\.$", re.M)
+
+
+async def _refresh_payload_writer(db, job_id: str, node_key: str, prompt: str, cfg: dict,
+                                  asked_by: str) -> dict | None:
+    """§17.1842 — a payload writer's fix step asked again: its text re-rendered from the current template (the gap from
+    its `tool_config`, or read back from the text of a step made before it was kept there)."""
+    from app.modules import node_editor
+    pw = cfg.get("payload_writer")
+    m = _PAYLOAD_WRITER_RE.match(prompt)
+    if not pw and m:
+        took = m["took"]
+        pw = {"table": m["table"], "column": m["column"], "kind": m["kind"], "field": m["field"],
+              "reader": m["reader"], "keys": [k.strip(" `") for k in m["keys"].split(",")], "key": m["key"],
+              "reads": [] if took.startswith("from nothing") else [k.strip(" `") for k in took[5:].split(",")]}
+    if not pw or not m and not cfg.get("owner"):
+        return None
+    mod, owner = cfg.get("fixes_module") or m["mod"], cfg.get("owner") or m["owner"]       # type: ignore[index]
+    new = _payload_writer_prompt(str(mod), str(owner), pw)
+    if new == prompt:
+        return {"node_key": node_key, "refreshed": False}
+    out = await node_editor.edit_node(job_id, node_key, {"prompt_template": new, "tool_config": {
+        **cfg, "owner": owner, "payload_writer": pw}}, edited_by=asked_by, db=db)
+    if out.get("error"):
+        logger.warning("payload_refresh_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    return {"node_key": node_key, "refreshed": True}
 
 
 async def refresh_contract_fix(db, job_id: str, node_key: str, asked_by: str) -> dict | None:
@@ -751,6 +803,8 @@ async def refresh_contract_fix(db, job_id: str, node_key: str, asked_by: str) ->
     cfg = (row["tool_config"] if row and isinstance(row["tool_config"], dict) else {}) or {}
     if not cfg.get("contract"):
         return None
+    if str(cfg["contract"]).startswith("payload:"):                       # §17.1842 — a payload writer's fix
+        return await _refresh_payload_writer(db, job_id, node_key, str(row["prompt_template"] or ""), cfg, asked_by)
     prompt = str(row["prompt_template"] or "")
     head = _CONTRACT_HEAD_RE.match(prompt)
     gaps = cfg.get("gaps") or [
@@ -864,19 +918,14 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
         wsteps: list[str] = []
         for wmod, wkeys in sorted(g["writers"].items()):
             fid = _next_key()
+            pw = {"table": g["table"], "column": g["column"], "kind": g["kind"], "field": g["field"],
+                  "reader": g["reader"], "reads": g["reads"], "keys": wkeys, "key": key}
             out = await node_editor.insert_node(job_id, {
                 "node_key": fid, "title": f"Fix {wmod} (its {g['kind']} items lack {key})", "tool": "CodeGen",
                 "node_type": "task", "depends_on": [],
                 "tool_config": {"fixes_module": wmod, "found_by": node_key, "contract": f"{contract}:{wmod}",
-                                "owner": owner[wmod]},
-                "prompt_template": (
-                    f"Python module `{wmod}.py` -- step {owner[wmod]}'s module: edit it in place (the whole file, its "
-                    f"public names kept). The `{g['kind']}` items it writes into `{g['table']}.{g['column']}` carry "
-                    f"{', '.join(f'`{k}`' for k in wkeys)} -- and `{g['reader']}` ({rmod}) takes an item's "
-                    f"`{g['field']}` {took}, so every one of them is dropped where `{g['field']}` is required. Record "
-                    f"`{key}` in each item's {g['column']}, read from the item's own data (the document or record it "
-                    "came from) -- never made up; an item that truly has none gets none. Keep every key it writes "
-                    "now. " + _tests_note(wmod)),
+                                "owner": owner[wmod], "payload_writer": pw},
+                "prompt_template": _payload_writer_prompt(wmod, owner[wmod], pw),
             }, edited_by=edited_by, db=db)
             if out.get("error"):
                 logger.warning("upstream_fix_insert_failed job=%s node=%s err=%s", job_id, node_key, out)

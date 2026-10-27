@@ -147,7 +147,13 @@ async def test_the_engines_findings_refuse_the_stand_in():
     jid = str(uuid.uuid4())
     brief = {"title": "lab", "description": "Add a paper-trading research lab to the scaffold engine's own codebase."}
     fake = ('```python\n# tests/test_paper_signal_generator.py\nasync def test_x(monkeypatch):\n'
-            '    monkeypatch.setattr("app.modules.paper_signal_generator.get_data_as_of", None)\n```')
+            '    monkeypatch.setattr("app.modules.paper_signal_generator.get_data_as_of", None)\n'
+            '    await db.execute(text("DELETE FROM ingested_item"))\n```')
+    migration = ('```python\n# alembic/versions/0010_lab.py\ndef upgrade():\n'
+                 '    op.execute("CREATE TABLE ingested_item (id serial PRIMARY KEY, payload json)")\n'
+                 '    for table in ("ingested_item",):\n'
+                 '        op.execute(f"CREATE TRIGGER t BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW '
+                 'EXECUTE FUNCTION forbid_mutation();")\n```')
     output = f"```python\n{GENERATOR}```\n\n{fake}"
     async with async_session() as db:
         await db.execute(text("INSERT INTO jobs (id, title, status, refined_brief) VALUES (:id, 'lab', 'running', "
@@ -155,6 +161,7 @@ async def test_the_engines_findings_refuse_the_stand_in():
         for i, (k, st, prompt, out) in enumerate([
                 ("T13", "done", "Python module `paper_point_time_store.py`.",
                  f"```python\n# app/modules/paper_point_time_store.py\n{STORE}```"),
+                ("T3", "done", "The audit-trail migration.", migration),
                 ("T6U6", "running", "Python module `paper_signal_generator.py`.", None)]):
             await db.execute(text(
                 "INSERT INTO dag_nodes (job_id, node_key, title, status, prompt_template, output_text, tool, "
@@ -166,6 +173,8 @@ async def test_the_engines_findings_refuse_the_stand_in():
             found = await engine_source.engine_findings(db, jid, "T6U6", output)
         assert any(f.startswith("`tests/test_paper_signal_generator.py:3` replaces `get_data_as_of` "
                                 "(`paper_point_time_store`") for f in found), found
+        assert any(f.startswith("`tests/test_paper_signal_generator.py:4` deletes from `ingested_item`, an "
+                                "append-only table") for f in found), found                      # §17.1841
     finally:
         async with async_session() as db:
             await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})

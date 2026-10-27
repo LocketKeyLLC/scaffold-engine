@@ -210,7 +210,9 @@ async def test_an_exhausted_step_gets_the_writers_and_the_reader_fixed_once():
         assert ("The `reddit` items it writes into `ingested_item.payload` carry `author`, `title`, `url` -- and "
                 "`paper_signal_generator._normalize_item` (paper_signal_generator) takes an item's `ticker` from "
                 "`asset_ticker`, `symbol`, `ticker`") in reddit["prompt_template"]
-        assert "Record `ticker` in each item's payload, read from the item's own data" in reddit["prompt_template"]
+        assert "Record `ticker` in each item's payload: the ticker of the very thing the item is about" \
+            in reddit["prompt_template"]
+        assert reddit["tool_config"]["payload_writer"]["keys"] == ["author", "title", "url"]
         assert (f13["tool_config"]["fixes_module"], edgar["tool_config"]["fixes_module"]) == (
             "paper_13f_holdings_ingestion", "paper_edgar_form_4_ingestion")
         assert "takes an item's `ticker` from nothing" in edgar["prompt_template"]
@@ -225,5 +227,93 @@ async def test_an_exhausted_step_gets_the_writers_and_the_reader_fixed_once():
         async with async_session() as db:
             again = await retry_failed_node(jid, "T9", db)
         assert "upstream_fix" not in again, again
+    finally:
+        await _drop(jid)
+
+
+# ── §17.1841 — a test never deletes from the job's append-only tables ────────────────────────────────────────────
+
+MIGRATION = '''```python
+# alembic/versions/0010_paper_audit_trail.py
+def upgrade():
+    for table in ("ingested_item", "signal"):
+        op.execute(f"""
+            CREATE TRIGGER trg_no_update_delete_{table}
+            BEFORE UPDATE OR DELETE ON {table}
+            FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+        """)
+    op.execute("CREATE TABLE notes (id int)")
+```'''
+
+
+def test_a_cleanup_delete_from_an_append_only_table_is_refused_and_a_refusal_test_is_not():
+    """Live (5b4880c0 T6U7 x3): told "never DELETE from them yourself", every attempt emptied `ingested_item` in a
+    fixture and every test errored at setup (`append-only table: ingested_item`)."""
+    from app.modules.engine_contracts import append_only_tables, deletes_in_tests
+    tables = append_only_tables([MIGRATION])
+    assert tables == {"ingested_item", "signal"}
+    tests = {"tests/test_r.py": '''import pytest
+from sqlalchemy import text
+
+@pytest.fixture(autouse=True)
+async def clean(db):
+    await db.execute(text("DELETE FROM ingested_item"))
+    await db.execute(text("DELETE FROM notes"))
+
+async def test_refused(db):
+    with pytest.raises(Exception):
+        await db.execute(text("DELETE FROM signal WHERE id = 1"))
+'''}
+    found = deletes_in_tests(tests, tables)
+    assert found == ["`tests/test_r.py:6` deletes from `ingested_item`, an append-only table: with rows in it the "
+                     "DELETE fails, and without them it does nothing -- the sandbox empties this job's tables before "
+                     "every test. Drop it; insert only the rows the test needs"]
+    assert deletes_in_tests({"app/modules/x.py": 'q = "DELETE FROM ingested_item"'}, tables) == []   # not a test
+
+
+# ── §17.1842 — a payload writer's fix records the item's OWN field, and is re-rendered when asked again ────────────
+
+LEGACY_13F = (  # T6U8's text as §17.1840 wrote it (live)
+    "Python module `paper_13f_holdings_ingestion.py` -- step f00ea97f:T8's module: edit it in place (the whole file, "
+    "its public names kept). The `sec_edgar` items it writes into `ingested_item.payload` carry `holdings` -- and "
+    "`paper_signal_generator._normalize_item` (paper_signal_generator) takes an item's `ticker` from nothing (it gives "
+    "every one an empty one), so every one of them is dropped where `ticker` is required. Record `ticker` in each "
+    "item's payload, read from the item's own data (the document or record it came from) -- never made up; an item "
+    "that truly has none gets none. Keep every key it writes now. In this same step also write ...")
+
+
+@pytest.mark.integration
+async def test_a_payload_writer_fix_asked_again_says_the_field_is_the_items_own():
+    """Live (5b4880c0 T6U8): the 13F ingester recorded the filer's -- the fund manager's -- ticker on a filing about
+    the securities it holds."""
+    from app.database import async_session
+    from app.modules.engine_plan import refresh_contract_fix
+    async with async_session() as db:
+        jid = await _job(db)
+        await db.execute(text(
+            "INSERT INTO dag_nodes (job_id, node_key, title, status, prompt_template, tool, tool_config, execution_order) "
+            "VALUES (:j, 'T6U8', 'Fix', 'done', :p, 'CodeGen', CAST(:c AS jsonb), 20)"),
+            {"j": jid, "p": LEGACY_13F, "c": json.dumps({
+                "fixes_module": "paper_13f_holdings_ingestion", "found_by": "T6", "owner": "f00ea97f:T8",
+                "contract": "payload:ingested_item.payload:source=sec_edgar:ticker:paper_13f_holdings_ingestion"})})
+        await db.commit()
+    try:
+        async with async_session() as db:
+            out = await refresh_contract_fix(db, jid, "T6U8", "operator")
+            await db.commit()
+        assert out == {"node_key": "T6U8", "refreshed": True}
+        async with async_session() as db:
+            r = (await db.execute(text("SELECT prompt_template, tool_config FROM dag_nodes WHERE job_id = :j AND "
+                                       "node_key = 'T6U8'"), {"j": jid})).mappings().first()
+        assert r["prompt_template"].startswith(LEGACY_13F.split(" Record `ticker`")[0])
+        assert ("Record `ticker` in each item's payload: the ticker of the very thing the item is about, read from the "
+                "item's own data (the document or record it came from) -- never one of whoever filed or published it, "
+                "nor of something it merely mentions, and never made up. An item about no single one (several, or "
+                "none) gets none.") in r["prompt_template"]
+        assert r["tool_config"]["payload_writer"] == {
+            "table": "ingested_item", "column": "payload", "kind": "sec_edgar", "field": "ticker",
+            "reader": "paper_signal_generator._normalize_item", "keys": ["holdings"], "key": "ticker", "reads": []}
+        async with async_session() as db:
+            assert await refresh_contract_fix(db, jid, "T6U8", "operator") == {"node_key": "T6U8", "refreshed": False}
     finally:
         await _drop(jid)

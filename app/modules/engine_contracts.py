@@ -934,3 +934,71 @@ def payload_gaps(modules: dict[str, str]) -> list[dict]:
                                     "reader": f"{mod}.{reader.name}", "reads": sorted(reads),  # type: ignore[attr-defined]
                                     "writers": {w["module"]: sorted(w["keys"]) for w in ws}})
     return out
+
+
+# ── §17.1841 a test never deletes from the job's tables ──────────────────────────────────────────────────────────
+
+_DELETE_RE = re.compile(r"\bDELETE\s+FROM\s+(\w+)|\bTRUNCATE\s+(?:TABLE\s+)?(\w+)", re.I)
+
+
+_APPEND_ONLY_RE = re.compile(r"BEFORE\s+(?:UPDATE\s+OR\s+)?DELETE(?:\s+OR\s+UPDATE)?\s+ON\s+(\{?\w+\}?)", re.I)
+
+
+def append_only_tables(codes: list[str]) -> set[str]:
+    """The tables a job's migrations put a row trigger on that refuses DELETE: `BEFORE UPDATE OR DELETE ON t`, or the
+    tables a loop applies `... ON {table}` to (the loop's string tuple)."""
+    out: set[str] = set()
+    for code in codes:
+        for m in _APPEND_ONLY_RE.finditer(code):
+            name = m[1]
+            if not name.startswith("{"):
+                out.add(name)
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                for blk in re.findall(r"```python\n(.*?)```", code, re.S):
+                    try:
+                        tree = ast.parse(blk)
+                        break
+                    except SyntaxError:
+                        continue
+                else:
+                    continue
+            var = name.strip("{}")
+            for f in ast.walk(tree):
+                if isinstance(f, ast.For) and isinstance(f.target, ast.Name) and f.target.id == var and isinstance(
+                        f.iter, (ast.Tuple, ast.List)):
+                    out |= {e.value for e in f.iter.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return out
+
+
+def deletes_in_tests(files: dict[str, str], tables: set[str]) -> list[str]:
+    """§17.1841 — each test file statement that deletes from one of the job's own tables. Live (5b4880c0 T6U7 x3,
+    T6U9, T6U6, 2026-10-26/27): told "never DELETE from them yourself -- an append-only table refuses it", attempt
+    after attempt still emptied `ingested_item` in an autouse fixture and every test errored at setup -- the sandbox
+    empties the job's tables before each test already."""
+    found: list[str] = []
+    for path, code in sorted(files.items()):
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        expected: set[int] = set()                                  # inside `with pytest.raises(...)`: the test
+        for w in ast.walk(tree):                                    # that the table refuses it -- not a cleanup
+            if isinstance(w, (ast.With, ast.AsyncWith)) and any(
+                    isinstance(i.context_expr, ast.Call) and isinstance(i.context_expr.func, ast.Attribute)
+                    and i.context_expr.func.attr == "raises" for i in w.items):
+                expected |= {id(x) for x in ast.walk(w)}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in expected:
+                for m in _DELETE_RE.finditer(n.value):
+                    t = m[1] or m[2]
+                    if t in tables:
+                        found.append(f"`{path}:{n.lineno}` deletes from `{t}`, an append-only table: with rows in it "
+                                     "the DELETE fails, and without them it does nothing -- the sandbox empties this "
+                                     "job's tables before every test. Drop it; insert only the rows the test needs")
+                        break
+    return found
