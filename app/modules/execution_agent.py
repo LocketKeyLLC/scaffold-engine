@@ -2090,14 +2090,14 @@ async def execute_next_node(
                     # §17.1849 — and a passing test that runs the modules it must run through for real
                     from app.modules.engine_contracts import real_data_examples
                     from app.sandbox.engine_tests import files_of as _files_of
-                    _others = [r for r in _code if r.get("node_key") != node_key and r.get("status") == "done"]
-                    _tests: dict[str, str] = {}
-                    for _r in _others:
-                        _tests.update({p: c for p, c in _files_of(_r).items() if p.startswith("tests/")})
+                    _rx_rows = [r for r in _code if r.get("node_key") != node_key and r.get("status") == "done"]
+                    _rx_tests: dict[str, str] = {}
+                    for _r in _rx_rows:
+                        _rx_tests.update({p: c for p, c in _files_of(_r).items() if p.startswith("tests/")})
                     _rx = real_data_examples(
                         " ".join(str(node_snapshot.get(k) or "") for k in ("title", "prompt_template")),
                         _es._written_modules(str(node.get("output_text") or "")) | ({_es.step_module(node_snapshot)} - {""}),
-                        {m: c for m, (_p, c, _k) in _es.current_sources(_others).items()}, _tests)
+                        {m: c for m, (_p, c, _k) in _es.current_sources(_rx_rows).items()}, _rx_tests)
                     if _rx:
                         _grounding_blocks.append(_rx)
                 # §17.1832 — a step that edits a module in place sees that module as it is now
