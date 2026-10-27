@@ -555,8 +555,9 @@ class _Eval:
     """Values of expressions in one module, followed through local assignments, local functions and the call sites of
     a function's parameters: each a string constant (`("s", "reddit")`) or a dict's keys (`("k", frozenset)`)."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, dumps_is_text: bool = False):
         self.tree = ast.parse(code)
+        self.dumps_is_text = dumps_is_text                     # §17.1843 — `json.dumps(x)` read as the text it is
         self.funcs = {n.name: n for n in self.tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
     def _assigned(self, fn: ast.AST, name: str) -> list[ast.AST]:
@@ -591,9 +592,14 @@ class _Eval:
             return [("s", e.value)]
         if isinstance(e, ast.Dict):
             if any(k is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)) for k in e.keys):
-                return None
+                # §17.1843 — still a dict, whatever its keys: for "is a dict bound", that is all that matters
+                return [("k", frozenset(), None, fn, env)] if self.dumps_is_text else None
             return [("k", frozenset(k.value for k in e.keys), e, fn, env)]           # type: ignore[union-attr]
+        if self.dumps_is_text and isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "dict":
+            return [("k", frozenset(), None, fn, env)]                                # `dict(raw)`
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "dumps" and e.args:
+            if self.dumps_is_text:
+                return [("s", "")]
             return self.value(fn, e.args[0], env, depth + 1)                         # json.dumps(x)
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in self.funcs:
             callee = self.funcs[e.func.id]
@@ -613,7 +619,7 @@ class _Eval:
                 return None
             out = []
             for b in base:
-                if b[0] != "k" or e.slice.value not in b[1]:
+                if b[0] != "k" or b[2] is None or e.slice.value not in b[1]:
                     return None
                 d, dfn, denv = b[2], b[3], b[4]
                 v = d.values[[k.value for k in d.keys].index(e.slice.value)]
@@ -1001,4 +1007,45 @@ def deletes_in_tests(files: dict[str, str], tables: set[str]) -> list[str]:
                                      "the DELETE fails, and without them it does nothing -- the sandbox empties this "
                                      "job's tables before every test. Drop it; insert only the rows the test needs")
                         break
+    return found
+
+
+# ── §17.1843 a dict is never bound to a column through text() ────────────────────────────────────────────────
+
+def raw_dict_binds(files: dict[str, str]) -> list[str]:
+    """Each statement in a step's modules that binds a Python dict as a parameter of `text()` SQL. Live (5b4880c0
+    T6U8 x2, 2026-10-27; and f00ea97f:T4's writer, §17.1831): the 13F ingester bound its payload dict to `:payload`
+    -- `invalid input for query argument $4: {'holdings': ...}` -- in every real run; the sandbox's hint said to bind
+    `json.dumps(value)` with `CAST(:payload AS json)`, and the attempts kept the bind. Read statically through the
+    module's helpers and call sites; a value it cannot read is no claim."""
+    found: list[str] = []
+    for path, code in sorted(files.items()):
+        if not path.startswith("app/"):
+            continue
+        try:
+            ev = _Eval(code, dumps_is_text=True)
+        except SyntaxError:
+            continue
+        for fn in ev.funcs.values():
+            for call in (n for n in _own_nodes(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                         and n.func.attr == "execute" and len(n.args) >= 2):
+                sql = _sql_of(call, fn) or ""
+                if not re.match(r"\s*(INSERT|UPDATE)\b", sql, re.I):
+                    continue
+                bad: set[str] = set()
+                for env in ev.envs(fn):
+                    pmap = ev.value(fn, _unwrap(call.args[1]), env)
+                    if not pmap or len(pmap) != 1 or pmap[0][0] != "k" or pmap[0][2] is None:
+                        continue
+                    d, dfn, denv = pmap[0][2], pmap[0][3], pmap[0][4]
+                    for k, v in zip(d.keys, d.values, strict=True):
+                        if k is None:
+                            continue
+                        got = ev.value(dfn, v, denv)
+                        if got and any(g[0] == "k" for g in got) and f":{k.value}" in sql:   # type: ignore[union-attr]
+                            bad.add(k.value)                                                 # type: ignore[union-attr]
+                for k in sorted(bad):
+                    found.append(f"`{path}:{call.lineno}` binds a dict to `:{k}` through `text()`: asyncpg takes JSON "
+                                 f"only as text -- bind `json.dumps(...)` and write `CAST(:{k} AS json)` (or `jsonb`, "
+                                 "the column's own type) in the SQL")
     return found

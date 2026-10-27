@@ -154,7 +154,9 @@ async def test_the_engines_findings_refuse_the_stand_in():
                  '    for table in ("ingested_item",):\n'
                  '        op.execute(f"CREATE TRIGGER t BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW '
                  'EXECUTE FUNCTION forbid_mutation();")\n```')
-    output = f"```python\n{GENERATOR}```\n\n{fake}"
+    binds = ("```python\n# app/modules/paper_signal_saver.py\nfrom sqlalchemy import text\n\nasync def save(db, item):\n"
+             "    await db.execute(text(\"INSERT INTO signal (payload) VALUES (:payload)\"), {\"payload\": {\"a\": 1}})\n```")
+    output = f"```python\n{GENERATOR}```\n\n{fake}\n\n{binds}"
     async with async_session() as db:
         await db.execute(text("INSERT INTO jobs (id, title, status, refined_brief) VALUES (:id, 'lab', 'running', "
                               "CAST(:b AS jsonb))"), {"id": jid, "b": json.dumps(brief)})
@@ -175,6 +177,8 @@ async def test_the_engines_findings_refuse_the_stand_in():
                                 "(`paper_point_time_store`") for f in found), found
         assert any(f.startswith("`tests/test_paper_signal_generator.py:4` deletes from `ingested_item`, an "
                                 "append-only table") for f in found), found                      # §17.1841
+        assert any(f.startswith("`app/modules/paper_signal_saver.py:5` binds a dict to `:payload`") for f in found), \
+            found                                                                                     # §17.1843
     finally:
         async with async_session() as db:
             await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})

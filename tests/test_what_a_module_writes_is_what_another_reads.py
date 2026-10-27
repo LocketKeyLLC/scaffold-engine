@@ -317,3 +317,25 @@ async def test_a_payload_writer_fix_asked_again_says_the_field_is_the_items_own(
             assert await refresh_contract_fix(db, jid, "T6U8", "operator") == {"node_key": "T6U8", "refreshed": False}
     finally:
         await _drop(jid)
+
+
+# ── §17.1843 — a dict is never bound to a column through text() ──────────────────────────────────────────────
+
+def test_a_dict_bound_through_text_is_refused_wherever_it_comes_from():
+    """Live (5b4880c0 T6U8 x2): the 13F ingester bound its payload dict to `:payload` in every real run; the sandbox
+    hint said `json.dumps` + `CAST`, and the attempts kept the bind."""
+    from app.modules.engine_contracts import raw_dict_binds
+    f13 = {"app/modules/paper_13f_holdings_ingestion.py": THIRTEEN_F}
+    assert raw_dict_binds(f13) == [
+        "`app/modules/paper_13f_holdings_ingestion.py:13` binds a dict to `:payload` through `text()`: asyncpg takes "
+        "JSON only as text -- bind `json.dumps(...)` and write `CAST(:payload AS json)` (or `jsonb`, the column's own "
+        "type) in the SQL"]                                                    # through the helper's call site
+    assert raw_dict_binds({"app/modules/paper_edgar_form_4_ingestion.py": EDGAR}) == []   # json.dumps: text
+    assert raw_dict_binds({"tests/test_x.py": THIRTEEN_F}) == []              # a module's code, not a test's
+    spread = FINRA.replace('{"payload": {"release": 1, **fields}}', '{"payload": {"release": 1, **fields}}')
+    assert [f.split(" binds")[0] for f in raw_dict_binds({"app/modules/f.py": spread})] == ["`app/modules/f.py:4`"]
+    raw = ("from sqlalchemy import text\n\nasync def w(db, raw):\n    await db.execute(text(\"UPDATE t SET p = :p\"), "
+           "{\"p\": dict(raw)})\n")
+    assert [f.split(" binds")[0] for f in raw_dict_binds({"app/modules/r.py": raw})] == ["`app/modules/r.py:4`"]
+    read = raw.replace("UPDATE t SET p = :p", "SELECT * FROM t WHERE p = :p")
+    assert raw_dict_binds({"app/modules/r.py": read}) == []                   # a read binds nothing into a column
