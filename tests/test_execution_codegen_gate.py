@@ -130,3 +130,14 @@ def test_format_reason_names_block_line_and_message():
     assert "block 1" in reason
     assert "line" in reason
     assert "```python" in reason  # tells the model how to re-emit
+
+
+def test_an_await_outside_an_async_function_is_a_syntax_finding():
+    """§17.1847 — live (5b4880c0 T6): two attempts' tests had `result = await db.execute(...)` in a plain `def`;
+    `ast.parse` accepts it, the import does not, and each reached the sandbox."""
+    from app.modules.execution_codegen_gate import check_python_syntax
+    out = "```python\ndef test_x(db):\n    result = await db.execute('SELECT 1')\n```"
+    found = check_python_syntax(out)
+    assert len(found) == 1 and found[0].lineno == 2 and "await" in found[0].message
+    ok = "```python\nasync def test_x(db):\n    result = await db.execute('SELECT 1')\n```"
+    assert check_python_syntax(ok) == []

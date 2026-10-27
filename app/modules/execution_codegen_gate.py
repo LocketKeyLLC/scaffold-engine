@@ -4,14 +4,14 @@ The LLM verifier (``execution_verify.VERIFY_SYSTEM``) is a lenient
 presence-checker — "PASS if the output contains what the task requested,
 even partially". For code that bar cannot catch output that does not even
 parse. This module adds a cheap, dependency-free, deterministic check: pull
-the Python fenced blocks out of a CodeGen node's output and ``ast.parse``
+the Python fenced blocks out of a CodeGen node's output and compiles (§17.1847; was ``ast.parse``)
 each one. A SyntaxError is an unambiguous failure no operator wants shipped.
 
 Design (all pure functions — the caller in ``execute_next_node`` owns the
 fail-open posture and the ``verify_status`` downgrade, mirroring the
 §17.376/§17.377 validation-citation guard):
 
-- Python-only. ``ast.parse`` is stdlib and free; other languages need
+- Python-only. ``compile`` is stdlib and free; other languages need
   toolchains. Non-Python fences and unlabeled fences are skipped, never
   failed — a CodeGen node emitting JS/SQL/Go is not this gate's business.
 - Signature stubs pass. ``def merge(a, b): ...`` is valid Python (``...``
@@ -24,7 +24,6 @@ gate malfunction can never block a node — only a genuine SyntaxError can.
 """
 from __future__ import annotations
 
-import ast
 import re
 from dataclasses import dataclass
 
@@ -75,7 +74,10 @@ def check_python_syntax(output: str) -> list[SyntaxFinding]:
         if lang not in PYTHON_LANGS:
             continue
         try:
-            ast.parse(code)
+            # §17.1847 — compiled, not only parsed: `await` outside an async function, a top-level `return`, a
+            # misplaced `nonlocal` parse fine and fail at import. Live (5b4880c0 T6, 2026-10-27): two attempts' tests
+            # had `result = await db.execute(...)` in a plain `def`; each reached the sandbox and failed there.
+            compile(code, "<codegen block>", "exec", dont_inherit=True)
         except SyntaxError as e:
             findings.append(
                 SyntaxFinding(
@@ -101,7 +103,7 @@ def format_syntax_reason(findings: list[SyntaxFinding]) -> str:
         return ""
     lines = [
         "§17.428 Python-syntax gate: the generated code does not parse "
-        "(ast.parse raised SyntaxError). Fixing the requested feature is "
+        "(compiling it raised SyntaxError). Fixing the requested feature is "
         "not enough — the output must be syntactically valid Python.",
         "",
     ]
