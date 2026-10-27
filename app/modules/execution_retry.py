@@ -116,6 +116,14 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
                 return {"status": "reset", "node_key": node_key, "retry_count": 0, "upstream_fix": fixed}
         except Exception as exc:                          # noqa: BLE001 — the step stays failed as before
             logger.warning("fix_upstream_defect_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # §17.1848 — a code step that keeps repeating one kind of refusal runs its next round on the other model
+        try:
+            from app.modules.engine_plan import switch_code_model
+            switched = await switch_code_model(db, job_id, node_key)
+            if switched:
+                return {"status": "reset", "node_key": node_key, "retry_count": 0, "model_switch": switched}
+        except Exception as exc:                          # noqa: BLE001 — the step stays failed as before
+            logger.warning("switch_code_model_failed job=%s node=%s err=%r", job_id, node_key, exc)
         # §17.1793 — a code step for the engine that keeps leaving out part of its own task is split in two and
         # starts again (fresh attempts), before any other escalation
         try:
