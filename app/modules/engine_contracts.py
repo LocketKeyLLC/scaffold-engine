@@ -466,6 +466,22 @@ _KIND = (("app.model_router", "a model call"), ("openai", "a model call"), ("ant
          ("requests", "the network"), ("aiohttp", "the network"), ("urllib", "the network"), ("socket", "the network"))
 
 
+def _first_use(tree: ast.AST, name: str) -> str:
+    """§17.1846 — the statement where a module first calls `name`, so a stand-in returns what it is used as. Live
+    (5b4880c0 T6, 2026-10-27): told to mock `generate_json`, the test's stand-in returned one value where the proposer
+    unpacks two (`ValueError: not enough values to unpack (expected 2, got 1)`)."""
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for st in ast.walk(fn):
+            if isinstance(st, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Return)) and any(
+                    isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == name
+                    for c in ast.walk(st)):
+                text = " ".join(ast.unparse(st).split())
+                return text if len(text) <= 120 else text[:117] + "..."
+    return ""
+
+
 def outside_points(modules: dict[str, str]) -> list[str]:
     """Each job module that leaves the engine itself, with the names it does it through, as patch targets:
     "`paper_trade_proposer`: `app.modules.paper_trade_proposer.generate_json` (a model call)". Live (5b4880c0 T6,
@@ -483,7 +499,9 @@ def outside_points(modules: dict[str, str]) -> list[str]:
                 src = n.module
                 kind = next((k for p, k in _KIND if src == p or src.startswith(p + ".")), None)
                 if kind:
-                    pts += [f"`app.modules.{mod}.{a.asname or a.name}` ({kind})" for a in n.names]
+                    pts += [f"`app.modules.{mod}.{a.asname or a.name}` ({kind}"
+                            + (f"; used as `{use}`" if (use := _first_use(tree, a.asname or a.name)) else "") + ")"
+                            for a in n.names]
             elif isinstance(n, ast.Import):
                 for a in n.names:
                     kind = next((k for p, k in _KIND if a.name == p or a.name.startswith(p + ".")), None)

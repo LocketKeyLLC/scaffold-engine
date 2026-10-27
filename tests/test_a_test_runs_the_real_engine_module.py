@@ -203,3 +203,13 @@ def test_a_code_step_is_shown_exactly_what_it_may_mock():
     block = outside_block(mods)
     assert block.startswith("\n\n## Where this job's modules leave the engine (§17.1839)\nA test mocks these names")
     assert outside_block({"paper_point_time_store": STORE}) == ""                    # nothing leaves: no block
+
+
+def test_each_mock_point_shows_what_it_is_used_as():
+    """§17.1846 — live (5b4880c0 T6): the stand-in for `generate_json` returned one value; the proposer unpacks two."""
+    from app.modules.engine_contracts import outside_points
+    proposer = ("from app.model_router import generate_json\n\nasync def _rationale(prompt):\n"
+                "    parsed, _resp = await generate_json(prompt, SCHEMA, role='model_general')\n    return parsed\n")
+    assert outside_points({"paper_trade_proposer": proposer}) == [
+        "- `paper_trade_proposer`: `app.modules.paper_trade_proposer.generate_json` (a model call; used as "
+        "`parsed, _resp = await generate_json(prompt, SCHEMA, role='model_general')`)"]
