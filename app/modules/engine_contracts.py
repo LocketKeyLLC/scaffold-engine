@@ -455,3 +455,48 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
                 + (f" (it returns {hint})" if hint else "")
                 + ". Mock only what reaches outside the engine -- the broker, the network, model calls, the clock")
     return found
+
+
+# ── §17.1839 what a test may mock: the exact names through which the job's modules leave the engine ────────────
+
+_KIND = (("app.model_router", "a model call"), ("openai", "a model call"), ("anthropic", "a model call"),
+         ("ollama", "a model call"), ("alpaca", "the broker"), ("app.modules.operator_ask", "the operator"),
+         ("app.modules.runner_secrets", "a secret"), ("websockets", "the network"), ("httpx", "the network"),
+         ("requests", "the network"), ("aiohttp", "the network"), ("urllib", "the network"), ("socket", "the network"))
+
+
+def outside_points(modules: dict[str, str]) -> list[str]:
+    """Each job module that leaves the engine itself, with the names it does it through, as patch targets:
+    "`paper_trade_proposer`: `app.modules.paper_trade_proposer.generate_json` (a model call)". Live (5b4880c0 T6,
+    2026-10-26): told to mock only model calls, the batch could not see that `propose_trades` calls the model through
+    `generate_json`, and three of four attempts stood in for the data module, the risk check and the equity record."""
+    out: list[str] = []
+    for mod in sorted(modules):
+        try:
+            tree = ast.parse(modules[mod])
+        except SyntaxError:
+            continue
+        pts: list[str] = []
+        for n in tree.body:
+            if isinstance(n, ast.ImportFrom) and n.module and not n.level:
+                src = n.module
+                kind = next((k for p, k in _KIND if src == p or src.startswith(p + ".")), None)
+                if kind:
+                    pts += [f"`app.modules.{mod}.{a.asname or a.name}` ({kind})" for a in n.names]
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    kind = next((k for p, k in _KIND if a.name == p or a.name.startswith(p + ".")), None)
+                    if kind:
+                        pts.append(f"`app.modules.{mod}.{(a.asname or a.name).split('.')[0]}` ({kind})")
+        if pts:
+            out.append(f"- `{mod}`: " + ", ".join(dict.fromkeys(pts)))
+    return out
+
+
+def outside_block(modules: dict[str, str]) -> str:
+    pts = outside_points(modules)
+    if not pts:
+        return ""
+    return ("\n\n## Where this job's modules leave the engine (§17.1839)\nA test mocks these names -- patched where the "
+            "module uses them -- and nothing else; every other finished module runs for real against the scratch "
+            "database.\n" + "\n".join(pts) + "\n")

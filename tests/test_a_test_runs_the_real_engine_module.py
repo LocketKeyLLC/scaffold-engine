@@ -170,3 +170,23 @@ async def test_the_engines_findings_refuse_the_stand_in():
         async with async_session() as db:
             await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
             await db.commit()
+
+
+# ── §17.1839 — the names through which the job's modules leave the engine, as patch targets ───────────────────
+
+def test_a_code_step_is_shown_exactly_what_it_may_mock():
+    """Live (5b4880c0 T6): told to mock only model calls, the batch could not see that `propose_trades` calls the
+    model through `generate_json`; three of four attempts stood in for internal modules instead."""
+    from app.modules.engine_contracts import outside_block, outside_points
+    proposer = ("from app.model_router import generate_json\nfrom app.modules.paper_risk_control_module import "
+                "evaluate_proposal\n\nasync def propose_trades(signals):\n    return []\n")
+    client = "import httpx\nfrom app.modules.runner_secrets import values_for\n\nclass AlpacaPaperClient:\n    pass\n"
+    mods = {**MODULES, "paper_trade_proposer": proposer, "paper_alpaca_paper_client": client,
+            "paper_risk_control_module": "def evaluate_proposal(**k):\n    return True\n"}
+    assert outside_points(mods) == [
+        "- `paper_alpaca_paper_client`: `app.modules.paper_alpaca_paper_client.httpx` (the network), "
+        "`app.modules.paper_alpaca_paper_client.values_for` (a secret)",
+        "- `paper_trade_proposer`: `app.modules.paper_trade_proposer.generate_json` (a model call)"]
+    block = outside_block(mods)
+    assert block.startswith("\n\n## Where this job's modules leave the engine (§17.1839)\nA test mocks these names")
+    assert outside_block({"paper_point_time_store": STORE}) == ""                    # nothing leaves: no block

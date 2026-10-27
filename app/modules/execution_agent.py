@@ -2080,6 +2080,13 @@ async def execute_next_node(
                         budget=40000 if tool_lower == "codegen" else settings.max_report_upstream_chars,
                         rewritten=_es.rewritten_here(_code),                               # §17.1830
                         current=_es.current_sources(_code)))                               # §17.1832
+                # §17.1839 — and, for a code step, the names through which the job's modules leave the engine
+                if tool_lower == "codegen":
+                    from app.modules.engine_contracts import outside_block
+                    _ob = outside_block({m: c for m, (_p, c, _k) in _es.current_sources(
+                        [r for r in _code if r.get("node_key") != node_key]).items()})
+                    if _ob:
+                        _grounding_blocks.append(_ob)
                 # §17.1832 — a step that edits a module in place sees that module as it is now
                 _tcf = node.get("tool_config")
                 _tcf = json.loads(_tcf) if isinstance(_tcf, str) else (_tcf or {})

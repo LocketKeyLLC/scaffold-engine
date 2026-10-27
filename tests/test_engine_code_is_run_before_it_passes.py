@@ -38,6 +38,24 @@ def test_each_block_lands_at_its_header_or_the_steps_own_module():
     assert list(et.files_of(migration)) == ["alembic/versions/0010_lab.py"]    # §17.1783: applied to the scratch db
 
 
+def test_a_block_headed_with_another_kind_of_file_is_never_the_steps_module():
+    """§17.1838 — live (5b4880c0 T6, 2026-10-26): the output's third block, a self-verdict headed
+    `# verifier_response.json` in a python fence, became the step's module -- 480 chars of JSON over the 12,181-char
+    batch -- and the sandbox failed it at `name 'true' is not defined`."""
+    batch = {"node_key": "T6", "prompt_template": "Python module `paper_batch.py`.", "output_text": (
+        "```python\n# app/modules/paper_batch.py\nasync def run():\n    return 1\n```\n\n"
+        "```python\n# tests/test_paper_batch.py\ndef test_x():\n    assert True\n```\n\n"
+        "```python\n# verifier_response.json\n{\n    \"pass\": true\n}\n```")}
+    got = et.files_of(batch)
+    assert sorted(got) == ["app/modules/paper_batch.py", "tests/test_paper_batch.py"]
+    assert "async def run()" in got["app/modules/paper_batch.py"]
+    later = {**batch, "output_text": batch["output_text"].replace("# verifier_response.json\n", "")}
+    assert "async def run()" in et.files_of(later)["app/modules/paper_batch.py"]   # unnamed never replaces named
+    first = {**batch, "output_text": "```python\n# verdict.json\n{\"pass\": true}\n```\n\n"
+                                     "```python\nasync def run():\n    return 1\n```"}
+    assert "async def run()" in et.files_of(first)["app/modules/paper_batch.py"]   # the JSON takes no slot
+
+
 def _ok(stdout="1 passed"):
     return CodeRunResult(ok=True, exit_code=0, stdout=stdout)
 
