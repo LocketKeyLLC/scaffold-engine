@@ -1289,6 +1289,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     _cur = {m: c for m, (_p, c, _k) in current_sources(_others).items()}
     _own = _written_modules(output) | ({step_module(me)} - {""})
     found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own)
+    # §17.1850 — and it reads only keys a finished function returns
+    from app.modules.engine_contracts import unreturned_reads
+    found += unreturned_reads(files_of({**me, "output_text": output}), _cur)
     # §17.1841 — nor delete from the job's own tables
     from app.modules.engine_contracts import deletes_in_tests
     from app.modules.engine_contracts import append_only_tables, raw_dict_binds

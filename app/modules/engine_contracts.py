@@ -1112,3 +1112,137 @@ def real_data_examples(step_text: str, own: set[str], modules: dict[str, str], t
     return ("\n\n## How this job's tests run its finished modules for real (§17.1849)\nThese tests pass in the sandbox: "
             "they insert the rows the modules read and call the real functions. Follow the same pattern -- never a "
             "stand-in for these modules.\n" + "".join(out))
+
+
+# ── §17.1850 a step reads only keys a finished function returns ─────────────────────────────────────────────
+
+def _reads_of(fn: ast.AST, name: str) -> list[tuple[str, int]]:
+    """Each `name.get("k", …)` / `name["k"]` read in a function's own body: (key, line), in source order."""
+    out: list[tuple[str, int]] = []
+    for n in _own_nodes(fn):
+        k = _get_key(n, {name})
+        if (k is None and isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
+                and n.value.id == name and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
+            k = n.slice.value
+        if k is not None:
+            out.append((k, n.lineno))
+    return sorted(out, key=lambda kl: kl[1])
+
+
+def unreturned_keys(code: str, modules: dict[str, str]) -> list[dict]:
+    """§17.1850 — each key `code` reads from what a finished module's function returns that the function never
+    returns: ``{producer, var, key, carries, line}``. Live (5b4880c0 T6, 2026-10-28): ``context = await
+    load_batch_context(...)`` then ``equity=context.get("equity")`` -- it returns ``{day_start_equity, orders_today}``,
+    the proposer got None and crashed in the sandbox. Read as §17.1833 reads: a name bound once to ``[await] f(...)``
+    of an imported finished function whose dict keys the reader can follow; an unknown producer is never reported."""
+    mine = _defs(code)
+    if not mine:
+        return []
+    funcs, imports = mine
+    reader = _Reader(modules)
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for fn in funcs.values():
+        bound: dict[str, int] = {}
+        a = fn.args                                              # type: ignore[attr-defined]
+        for p in [*a.posonlyargs, *a.args, *a.kwonlyargs, *([a.vararg] if a.vararg else []),
+                  *([a.kwarg] if a.kwarg else [])]:
+            bound[p.arg] = 1
+        produced: dict[str, tuple[str, str]] = {}
+        for n in _own_nodes(fn):
+            if isinstance(n, (ast.Assign, ast.AnnAssign)):
+                tgts = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in tgts:
+                    for x in ast.walk(t):
+                        if isinstance(x, ast.Name):
+                            bound[x.id] = bound.get(x.id, 0) + 1
+                if len(tgts) == 1 and isinstance(tgts[0], ast.Name) and n.value is not None:
+                    call = _unwrap(n.value)
+                    if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in imports:
+                        produced[tgts[0].id] = imports[call.func.id]
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+                for x in ast.walk(n.target):
+                    if isinstance(x, ast.Name):
+                        bound[x.id] = bound.get(x.id, 0) + 1
+            elif isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+                bound[n.target.id] = bound.get(n.target.id, 0) + 1
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for item in n.items:
+                    for x in ast.walk(item.optional_vars) if item.optional_vars is not None else ():
+                        if isinstance(x, ast.Name):
+                            bound[x.id] = bound.get(x.id, 0) + 1
+        for var, (pmod, pfn) in produced.items():
+            if bound.get(var, 0) != 1:
+                continue                                         # bound again: not followed
+            carries = reader.returns(pmod, pfn)
+            if not carries:
+                continue                                         # unknown, or no dict literal at all: no claim
+            for key, line in _reads_of(fn, var):
+                if key in carries or (pmod, pfn, key) in seen:
+                    continue
+                seen.add((pmod, pfn, key))
+                out.append({"producer": f"{pmod}.{pfn}", "var": var, "key": key, "carries": sorted(carries),
+                            "line": line})
+    return out
+
+
+def _names_class(ann: ast.AST, cname: str) -> bool:
+    return any(isinstance(x, ast.Name) and x.id == cname for x in ast.walk(ann))
+
+
+def _key_lives(modules: dict[str, str], key: str) -> str:
+    """Where the finished modules hold `key`, as far as it can be read: a class field -- and the public functions or
+    methods annotated to return that class -- or a function returning dicts with it. What a public call hands back
+    comes first, a bare field last. Empty when nothing holds it."""
+    parts: list[tuple[int, str]] = []
+    reader = _Reader(modules)
+    for mod, code in sorted(modules.items()):
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for c in tree.body:
+            if not isinstance(c, ast.ClassDef):
+                continue
+            fields = {n.target.id for n in c.body if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+            fields |= {t.attr for m in c.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       for n in ast.walk(m) if isinstance(n, ast.Assign) for t in n.targets
+                       if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"}
+            if key not in fields:
+                continue
+            returners: list[str] = []
+            for owner in tree.body:
+                if isinstance(owner, ast.ClassDef):
+                    for m in owner.body:
+                        if (isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.returns is not None
+                                and not m.name.startswith("_") and _names_class(m.returns, c.name)):
+                            returners.append(f"`{owner.name}.{m.name}()`")
+                elif (isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) and owner.returns is not None
+                      and not owner.name.startswith("_") and _names_class(owner.returns, c.name)):
+                    returners.append(f"`{mod}.{owner.name}()`")
+            parts.append((0 if returners else 2, f"`{key}` is a field of `{c.name}` (`{mod}`)"
+                          + (f", returned by {', '.join(returners[:3])}" if returners else "")))
+        funcs = reader.parsed[mod][0] if mod in reader.parsed else {}
+        for fname in funcs:
+            if fname.startswith("_"):
+                continue
+            got = reader.returns(mod, fname)
+            if got and key in got:
+                parts.append((1, f"`{mod}.{fname}()` returns dicts with it"))
+    return "; ".join(p for _r, p in sorted(parts, key=lambda rp: rp[0])[:3])
+
+
+def unreturned_reads(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1850 — the refusal for each key a step's files read from a finished function's return that it never
+    returns: the keys it does return, and where the key lives when a finished module holds it."""
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.endswith(".py"):
+            continue
+        for g in unreturned_keys(code, modules):
+            pmod, pfn = g["producer"].split(".", 1)
+            lives = _key_lives(modules, g["key"])
+            found.append(f"`{path}:{g['line']}` reads `{g['key']}` from what `{pfn}` (`{pmod}`) returns, and it "
+                         f"returns dicts with keys {', '.join(f'`{k}`' for k in g['carries'])} -- never `{g['key']}`"
+                         + (f". {lives}" if lives else ""))
+    return found
