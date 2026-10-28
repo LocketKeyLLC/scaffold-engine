@@ -463,6 +463,78 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
     return found
 
 
+# ── §17.1856 a patch target names what the module has ───────────────────────────────────────────────────────
+
+def _top_names(code: str) -> tuple[list[str], list[str]]:
+    """A module's top-level names: (what it defines -- functions, classes, assigned names; what it imports)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return [], []
+    defined: list[str] = []
+    imported: list[str] = []
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.append(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                defined += [x.id for x in ast.walk(t) if isinstance(x, ast.Name)]
+        elif isinstance(n, ast.ImportFrom) and n.module != "__future__":
+            imported += [a.asname or a.name for a in n.names]
+        elif isinstance(n, ast.Import):
+            imported += [a.asname or a.name.split(".")[0] for a in n.names]
+    return defined, imported
+
+
+def _inserts_of(code: str) -> list[str]:
+    """The tables a module's own functions INSERT INTO."""
+    d = _defs(code)
+    if not d:
+        return []
+    out: set[str] = set()
+    for fn in d[0].values():
+        for call in (n for n in _own_nodes(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "execute"):
+            parts = _insert_parts(_sql_of(call, fn) or "")
+            if parts:
+                out.add(parts[0].lower())
+    return sorted(out)
+
+
+def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.1856 — each test that patches a name on a job module that has no such name. Live (5b4880c0 T5, 2026-10-28):
+    `patch("app.modules.paper_operator_approval_gate.write_approval")` -- the gate writes `approval` itself with its
+    own SQL and never imports `write_approval` (`paper_audit_trail_writer` defines it); the sandbox raised
+    "AttributeError: module … does not have the attribute 'write_approval'" and the attempt was spent."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        for mod, name, line in _patch_targets(code):
+            if mod not in reach or (mod, name) in seen:
+                continue
+            defined, imported = _top_names(reach[mod])
+            if name in defined or name in imported:
+                continue
+            seen.add((mod, name))
+            public = [n for n in defined if not n.startswith("_")]
+            where = [m for m, c in sorted(modules.items()) if name in _top_names(c)[0]]
+            inserts = _inserts_of(reach[mod])
+            found.append(
+                f"`{path}:{line}` patches `{name}` on `{mod}`, which has no such name (it has "
+                f"{', '.join(public[:12]) or 'nothing public'}; it imports {', '.join(imported[:12]) or 'nothing'}) -- "
+                "the sandbox raises AttributeError"
+                + (f". `{name}` is defined in `{where[0]}`, which `{mod}` never imports: patching it anywhere changes "
+                   f"nothing `{mod}` does" if where else "")
+                + (f" -- `{mod}` writes {', '.join(f'`{t}`' for t in inserts)} itself: call it and read the rows it "
+                   "wrote" if inserts else "")
+                + ". Patch a name where the code looks it up, and only what reaches outside the engine")
+    return found
+
+
 # ── §17.1839 what a test may mock: the exact names through which the job's modules leave the engine ────────────
 
 _KIND = (("app.model_router", "a model call"), ("openai", "a model call"), ("anthropic", "a model call"),
