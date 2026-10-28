@@ -427,7 +427,8 @@ def _returns_hint(code: str, fname: str) -> str:
     return query_return(code, fname)
 
 
-def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str],
+                   fks: dict[str, dict[str, str]] | None = None) -> list[str]:
     """§17.1836 — each test that replaces a function of another finished module of the job that never leaves the
     engine. Live (5b4880c0 T6U6, 2026-10-26): the generator's tests replaced `get_data_as_of` with a fake "as
     get_data_as_of would" that returned `"id": row[0]` -- the real one returns only each row's payload -- so the fix
@@ -450,16 +451,14 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
             seen.add((origin, name))
             hint = _returns_hint(modules[origin], name)
             # §17.1852 — and WHICH rows: the tables the real one reads (followed through the job's modules) and the
-            # finished writers that insert them, so "insert the rows it reads" is an instruction, not a hope
-            reads = reads_tables(modules, origin, name)
-            writers = writers_for(modules, reads) if reads else []
+            # finished writers that insert them, so "insert the rows it reads" is an instruction, not a hope;
+            # §17.1853 — parents first, along the job's foreign keys
             found.append(
                 f"`{path}:{line}` replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
                 "a stand-in: call the real one -- against the scratch database, with the rows it reads, when it uses "
                 "one -- so the test sees what it really does"
                 + (f" (it returns {hint})" if hint else "")
-                + (f" -- it reads {', '.join(f'`{t}`' for t in sorted(reads))}: insert those rows first"
-                   + (f", with {', '.join(writers[:3])}" if writers else "") if reads else "")
+                + rows_clause(modules, reads_tables(modules, origin, name), fks)
                 + ". Mock only what reaches outside the engine -- the broker, the network, model calls, the clock")
     return found
 
@@ -1423,6 +1422,62 @@ def writers_for(modules: dict[str, str], tables: set[str]) -> list[str]:
                     out.append(f"`{fname}({_plain_args(fn)})` (`{mod}`)")
                     break
     return out
+
+
+def seed_order(fks: dict[str, dict[str, str]], tables: set[str], hops: int = 6) -> tuple[list[str], list[str]]:
+    """§17.1853 — the tables to fill so each of `tables` takes a row, parents first, and the foreign keys that order
+    them (`child.col → parent.id`, child → parent, at most `hops` up). Live (5b4880c0 T6, 2026-10-28): the test called
+    the named writer, `write_order(approval_id=1, …)`, and the scratch database refused the row -- no `approval` row;
+    `approval` needs a `proposal`, which needs a `signal`, which needs an `ingested_item`."""
+    parents: dict[str, set[str]] = {}
+    edges: list[str] = []
+    frontier = sorted(tables)
+    for hop in range(hops + 1):
+        nxt: list[str] = []
+        for t in frontier:
+            if t in parents:
+                continue
+            parents[t] = set()
+            if hop == hops:
+                continue                                         # the budget's edge: seeded, its parents not followed
+            for col, ref in sorted((fks.get(t) or {}).items()):
+                p = ref.split(".")[0]
+                if p == t:
+                    continue                                     # a self-reference orders nothing
+                parents[t].add(p)
+                edges.append(f"{t}.{col} → {ref}")
+                nxt.append(p)
+        frontier = nxt
+        if not frontier:
+            break
+    order: list[str] = []
+    while parents:
+        ready = sorted(t for t, ps in parents.items() if not ps & parents.keys()) or sorted(parents)[:1]
+        for t in ready:                                          # `or`: a cycle, broken at the first name
+            order.append(t)
+            del parents[t]
+    return order, edges
+
+
+def rows_clause(modules: dict[str, str], reads: set[str], fks: dict[str, dict[str, str]] | None = None) -> str:
+    """§17.1852 — "-- it reads `pnl`: insert those rows first, with `w(…)` (`mod`)"; §17.1853 — and when a table it
+    reads has foreign keys, the parent rows first, in order, each with its finished writer or, where none stays
+    inside the engine (live: every `ingested_item` writer is an ingester that fetches from the network), an INSERT."""
+    if not reads:
+        return ""
+    head = f" -- it reads {', '.join(f'`{t}`' for t in sorted(reads))}"
+    order, edges = seed_order(fks or {}, reads)
+    if not edges:
+        writers = writers_for(modules, reads)
+        return head + ": insert those rows first" + (f", with {', '.join(writers[:3])}" if writers else "")
+    steps = []
+    for t in order:
+        w = writers_for(modules, {t})
+        steps.append(f"`{t}` with {' or '.join(w[:2])}" if w else
+                     f"`{t}` by an INSERT through `async_session` + `text` (no finished writer stays inside the "
+                     "engine; its columns are in this job's tables above)")
+    return (head + f"; the scratch database enforces {', '.join(edges)}, so insert in this order: " + "; ".join(steps)
+            + " -- each child row takes the id its parent's writer returned, never a made-up one")
 
 
 def stand_in_findings(findings: list[str]) -> list[str]:

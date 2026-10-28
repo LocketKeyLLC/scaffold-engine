@@ -139,7 +139,14 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"'MagicMock' object can't be awaited|object MagicMock can't be used in 'await' expression"),
      "an awaited call was mocked with `MagicMock`: use `AsyncMock` for anything the code awaits (`db.execute`, "
      "`db.commit`, a client's coroutine methods) -- or test against the scratch database instead of a fake session"),
+    # §17.1853 — live (5b4880c0 T6, 2026-10-28): `write_order(approval_id=1, …)` with no `approval` row
+    (re.compile(r"violates foreign key constraint"),
+     "a row was inserted with a foreign key to a parent row that does not exist: insert the parent row first -- with "
+     "its writer in the job's modules, or an INSERT -- and pass the id it returned, never a made-up one"),
 )
+
+
+_MISSING_PARENT = re.compile(r'Key \((\w+)\)=\((.*?)\) is not present in table "(\w+)"')
 
 
 _MOCK_AWAITED = KNOWN_CAUSES[1][0]
@@ -207,6 +214,9 @@ def known_causes(text: str) -> str:
     if (calls := _awaited_mocks(text)) and KNOWN_CAUSES[1][1] in hits:
         i = hits.index(KNOWN_CAUSES[1][1])
         hits[i] += "; this run awaited a `MagicMock` at " + ", ".join(calls)
+    if KNOWN_CAUSES[2][1] in hits and (gone := list(dict.fromkeys(
+            f"`{c}`={v} has no `{t}` row" for c, v, t in _MISSING_PARENT.findall(text or "")))):
+        hits[hits.index(KNOWN_CAUSES[2][1])] += "; this run: " + ", ".join(gone)       # §17.1853
     return "".join(f"\nCause the engine recognises: {h}." for h in hits)
 
 

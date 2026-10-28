@@ -1278,8 +1278,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own),
-                                               engine_schema.foreign_keys_in_code(others))
+    _fks = engine_schema.foreign_keys_in_code(others)
+    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own), _fks)
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
@@ -1288,7 +1288,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.sandbox.engine_tests import files_of
     _cur = {m: c for m, (_p, c, _k) in current_sources(_others).items()}
     _own = _written_modules(output) | ({step_module(me)} - {""})
-    found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own)
+    found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own, fks=_fks)     # §17.1853 parents
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
     found += unreturned_reads(files_of({**me, "output_text": output}), _cur)
