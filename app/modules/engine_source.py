@@ -1386,8 +1386,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     _own = _written_modules(output) | ({step_module(me)} - {""})
     found += internal_fakes(files_of({**me, "output_text": output}), _cur, _own, fks=_fks)     # §17.1853 parents
     # §17.1856 — and a patch target names what the module has
-    from app.modules.engine_contracts import unknown_patch_targets
+    from app.modules.engine_contracts import made_up_parent_ids, runs_secrets_for_real, unknown_patch_targets
     found += unknown_patch_targets(files_of({**me, "output_text": output}), _cur, _own)
+    # §17.1857 — a test mocks the secret a module reads; §17.1858 — and never writes a child row with a made-up id
+    found += runs_secrets_for_real(files_of({**me, "output_text": output}), _cur, _own)
+    found += made_up_parent_ids(files_of({**me, "output_text": output}), _cur, _fks)
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
     found += unreturned_reads(files_of({**me, "output_text": output}), _cur)

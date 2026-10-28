@@ -143,7 +143,19 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"violates foreign key constraint"),
      "a row was inserted with a foreign key to a parent row that does not exist: insert the parent row first -- with "
      "its writer in the job's modules, or an INSERT -- and pass the id it returned, never a made-up one"),
+    # §17.1857 — live (5b4880c0 T5 and T8, 2026-10-28): the EDGAR ingester and the broker client ran for real
+    (re.compile(r"Missing operator secret|SecretsMissingError|Missing \w[\w ]* secrets?:"),
+     "the code ran for real and asked for an operator secret the sandbox does not have: patch `values_for` where the "
+     "module looks it up (`app.modules.<module>.values_for`) to return a test value for each name it reads"),
+    # §17.1858 — live (5b4880c0 T5, 2026-10-28): `approval` written with no `proposal_id`
+    (re.compile(r"violates not-null constraint"),
+     "a row was written without a column that has no default: the test passes it -- for an `_id` column, the id the "
+     "parent's writer returned"),
 )
+
+
+_MISSING_SECRET = re.compile(r"Missing operator secret (\w+)|Missing [\w ]*secrets?: ([\w, ]+)")
+_NULL_COLUMN = re.compile(r'null value in column "(\w+)" of relation "(\w+)"')
 
 
 _MISSING_PARENT = re.compile(r'Key \((\w+)\)=\((.*?)\) is not present in table "(\w+)"')
@@ -217,6 +229,13 @@ def known_causes(text: str) -> str:
     if KNOWN_CAUSES[2][1] in hits and (gone := list(dict.fromkeys(
             f"`{c}`={v} has no `{t}` row" for c, v, t in _MISSING_PARENT.findall(text or "")))):
         hits[hits.index(KNOWN_CAUSES[2][1])] += "; this run: " + ", ".join(gone)       # §17.1853
+    if KNOWN_CAUSES[3][1] in hits and (names := list(dict.fromkeys(
+            n for a, b in _MISSING_SECRET.findall(text or "") for n in ([a] if a else [x.strip() for x in b.split(",")])
+            if n))):
+        hits[hits.index(KNOWN_CAUSES[3][1])] += "; this run: " + ", ".join(f"`{n}`" for n in names)   # §17.1857
+    if KNOWN_CAUSES[4][1] in hits and (cols := list(dict.fromkeys(
+            f"`{t}.{c}` was null" for c, t in _NULL_COLUMN.findall(text or "")))):
+        hits[hits.index(KNOWN_CAUSES[4][1])] += "; this run: " + ", ".join(cols)        # §17.1858
     return "".join(f"\nCause the engine recognises: {h}." for h in hits)
 
 
