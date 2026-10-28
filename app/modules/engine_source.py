@@ -116,8 +116,89 @@ def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return f"{'async ' if isinstance(fn, ast.AsyncFunctionDef) else ''}def {fn.name}({', '.join(names)})"
 
 
-def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
-    """§17.1756 — what a call to this function must look like."""
+def _str_items(v: ast.AST) -> list[str] | None:
+    """§17.1855 — the string members of a literal collection: a dict's keys, a set/list/tuple's elements, or those
+    wrapped in `frozenset(...)` / `set(...)` / `tuple(...)` / `list(...)`; None when any member is not a string."""
+    if (isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in ("frozenset", "set", "tuple", "list")
+            and len(v.args) == 1 and not v.keywords):
+        v = v.args[0]
+    items = list(v.keys) if isinstance(v, ast.Dict) else v.elts if isinstance(v, (ast.Set, ast.List, ast.Tuple)) else None
+    if not items:
+        return None
+    out: list[str] = []
+    for e in items:
+        if not (isinstance(e, ast.Constant) and isinstance(e.value, str)):
+            return None
+        out.append(e.value)
+    return out
+
+
+def _local_functions(tree: ast.Module) -> dict[str, ast.AST]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def module_values(tree: ast.Module) -> dict[str, list[str]]:
+    """§17.1855 — each module-level name bound to a literal collection of strings, with its members (a dict's keys)."""
+    out: dict[str, list[str]] = {}
+    for n in tree.body:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        items = _str_items(n.value) if targets and getattr(n, "value", None) is not None else None
+        if items:
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = items
+    return out
+
+
+def _param_values(fn: ast.FunctionDef | ast.AsyncFunctionDef, consts: dict[str, list[str]] | None,
+                  local: dict[str, ast.AST] | None = None, _depth: int = 0) -> dict[str, list[str]]:
+    """§17.1855 — the only values a parameter takes, read from the function's own refusal: `if p not in X: raise …`
+    or `assert p in X`, X a literal collection of strings (or `.keys()` of one) or a module constant bound to one.
+    Live (5b4880c0 T5, 2026-10-28): `ingest_finra_file` refuses `source not in PARSERS` -- `short_interest`,
+    `ats_volume` -- and three attempts' tests passed `source="test"`, then `"finra"`; the step was shown the
+    signature and the docstring, never the values. A parameter handed straight to a function of the same module
+    (`local`) inherits that function's values (live: `ingest_finra_files(*, source, …)` passes it on), two hops."""
+    params = {x.arg for x in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs}
+    out: dict[str, list[str]] = {}
+
+    def members(c: ast.AST) -> list[str] | None:
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "keys" and not c.args:
+            c = c.func.value
+        return (consts or {}).get(c.id) if isinstance(c, ast.Name) else _str_items(c)
+
+    for n in ast.walk(fn):
+        if isinstance(n, ast.If) and any(isinstance(b, ast.Raise) for b in n.body):
+            test, op = n.test, ast.NotIn
+        elif isinstance(n, ast.Assert):
+            test, op = n.test, ast.In
+        else:
+            continue
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], op)
+                and isinstance(test.left, ast.Name) and test.left.id in params):
+            continue
+        vals = members(test.comparators[0])
+        if vals and test.left.id not in out:
+            out[test.left.id] = vals
+    if local and _depth < 2:
+        for n in ast.walk(fn):
+            callee = local.get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+            if callee is None or callee is fn:
+                continue
+            theirs = _param_values(callee, consts, local, _depth + 1)
+            if not theirs:
+                continue
+            pos = [x.arg for x in callee.args.posonlyargs + callee.args.args]
+            handed = [(pos[i], a) for i, a in enumerate(n.args) if i < len(pos)] + [(k.arg, k.value) for k in n.keywords if k.arg]
+            for their_param, a in handed:
+                if isinstance(a, ast.Name) and a.id in params and a.id not in out and their_param in theirs:
+                    out[a.id] = theirs[their_param]
+    return out
+
+
+def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef, consts: dict[str, list[str]] | None = None,
+                local: dict[str, ast.AST] | None = None) -> dict:
+    """§17.1756 — what a call to this function must look like. §17.1855 — `values`: the only values a parameter
+    takes, where the function itself refuses others."""
     a = fn.args
     pos = [x.arg for x in a.posonlyargs + a.args]
     n_def = len(a.defaults)
@@ -132,7 +213,7 @@ def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
     return {"async": isinstance(fn, ast.AsyncFunctionDef) and not agen, "pos": pos, "required_pos": required_pos,
             "posonly": [x.arg for x in a.posonlyargs], "kwonly": kwonly, "kw_required": kw_required,
             "varargs": a.vararg is not None, "varkw": a.kwarg is not None, "kinds": kinds,
-            "returns_tuple": _is_tuple_annotation(fn.returns)}
+            "values": _param_values(fn, consts, local), "returns_tuple": _is_tuple_annotation(fn.returns)}
 
 
 def _is_tuple_annotation(ann: ast.AST | None) -> bool:
@@ -263,10 +344,15 @@ def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
 
 
 def _shape_signature(name: str, shape: dict) -> str:
-    """`write_order(*, proposal_id, approval_id, broker_order_id=…)` from a call shape (§17.1785)."""
+    """`write_order(*, proposal_id, approval_id, broker_order_id=…)` from a call shape (§17.1785); §17.1855 -- a
+    parameter that takes only certain values shows them: `ingest_finra_file(source:short_interest|ats_volume, *, db)`."""
     req = set(shape.get("required_pos") or []) | set(shape.get("kw_required") or [])
-    pos = [p if p in req else f"{p}=…" for p in shape.get("pos") or []]
-    kw = [p if p in req else f"{p}=…" for p in shape.get("kwonly") or []]
+    vals = shape.get("values") or {}
+
+    def _p(p: str) -> str:
+        return p + (":" + "|".join(vals[p]) if p in vals else "")
+    pos = [_p(p) if p in req else f"{_p(p)}=…" for p in shape.get("pos") or []]
+    kw = [_p(p) if p in req else f"{_p(p)}=…" for p in shape.get("kwonly") or []]
     parts = pos + (["*args"] if shape.get("varargs") else (["*"] if kw else [])) + kw + (["**kwargs"] if shape.get("varkw") else [])
     return f"{'async ' if shape.get('async') else ''}{name}({', '.join(parts)})"
 
@@ -294,6 +380,14 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
         if want and got and got not in want:
             out.append(f"{label}: `{param}` is `{' | '.join(sorted(want))}`; it was given a `{got}`"
                        + (f" (`{val.id}`)" if isinstance(val, ast.Name) else ""))
+    # §17.1855 — a literal the function itself refuses (live: `ingest_finra_file(source="test", …)`)
+    vals = shape.get("values") or {}
+    for param, val in given:
+        if isinstance(val, ast.Name) and consts and val.id in consts:
+            val = consts[val.id]
+        if param in vals and isinstance(val, ast.Constant) and isinstance(val.value, str) and val.value not in vals[param]:
+            out.append(f"{label}: `{param}` is one of {', '.join('`' + v + '`' for v in vals[param])}; "
+                       f"it was given `{val.value!r}`")
     if shape["async"] and coroutine_misused:
         out.append(f"{label} is `async def` in the engine: `await` it (called bare, it returns a coroutine, not a result)")
     if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
@@ -403,10 +497,11 @@ def module_index() -> dict[str, dict]:
         public: list[str] = []
         values: list[str] = []
         funcs: dict[str, dict] = {}
+        _consts, _local = module_values(tree), _local_functions(tree)   # §17.1855
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(node.name)
-                funcs[node.name] = _call_shape(node)
+                funcs[node.name] = _call_shape(node, _consts, _local)
                 if not node.name.startswith("_"):
                     public.append(_signature(node))
             elif isinstance(node, ast.ClassDef):
@@ -553,18 +648,19 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                 continue
             a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}})
             names, defined, funcs, classes = a["names"], a["defined"], a["funcs"], a["classes"]
+            _consts, _local = module_values(tree), _local_functions(tree)       # §17.1855
             for n in tree.body:
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     names.add(n.name)
                     defined.add(n.name)
-                    funcs[n.name] = _call_shape(n)
+                    funcs[n.name] = _call_shape(n, _consts, _local)
                     if not n.name.startswith("_"):                       # §17.1834 — what its dicts carry
                         from app.modules.engine_contracts import return_note
                         a.setdefault("returns", {})[n.name] = return_note(code, n.name)        # §17.1837
                 elif isinstance(n, ast.ClassDef):
                     names.add(n.name)
                     defined.add(n.name)
-                    classes[n.name] = _class_shape(n)                     # §17.1798
+                    classes[n.name] = _class_shape(n, _consts)            # §17.1798
                 elif isinstance(n, (ast.Assign, ast.AnnAssign)):
                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
                         ids = {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
@@ -584,7 +680,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     return out
 
 
-def _class_shape(c: ast.ClassDef) -> dict:
+def _class_shape(c: ast.ClassDef, consts: dict[str, list[str]] | None = None) -> dict:
     """§17.1798 — a class's public surface: how it is built, its public methods (without `self`), and the fields of a
     data class. Live (job f00ea97f T25): the module index showed module-level functions only, so the whole
     `AlpacaPaperClient` API (get_account, get_position, list_orders, get_latest_trade) was invisible and the
@@ -597,7 +693,7 @@ def _class_shape(c: ast.ClassDef) -> dict:
     for x in c.body:
         if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
             deco = {getattr(d, "id", None) or getattr(d, "attr", None) for d in x.decorator_list}
-            sh = _call_shape(x)
+            sh = _call_shape(x, consts)
             if "staticmethod" not in deco:
                 for k in ("pos", "required_pos", "posonly"):
                     sh[k] = sh[k][1:] if sh[k] and sh[k][0] in ("self", "cls") else sh[k]
@@ -622,7 +718,7 @@ def _class_shape(c: ast.ClassDef) -> dict:
     if init is None and is_dc:
         names = [n for n, _ in ann]
         init = {"async": False, "pos": names, "required_pos": [n for n, has in ann if not has], "posonly": [],
-                "kwonly": [], "kw_required": [], "varargs": False, "varkw": False, "kinds": {},
+                "kwonly": [], "kw_required": [], "varargs": False, "varkw": False, "kinds": {}, "values": {},
                 "returns_tuple": False}
     return {"init": init, "methods": methods, "fields": fields, "props": props, "dataclass": is_dc}
 
@@ -1630,7 +1726,8 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             lines.append(f"    {mod}: " + "; ".join(sigs))
     if not lines:
         return ""
-    out = "### This job's modules (written -- their public functions, exact signatures)\n" + "\n".join(lines) + "\n"
+    out = ("### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only "
+           "`a` or `b` -- the function refuses the rest)\n" + "\n".join(lines) + "\n")
     return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
 
 

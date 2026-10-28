@@ -1282,16 +1282,21 @@ def _said(code: str) -> list[tuple[str, str]]:
         tree = ast.parse(code)
     except SyntaxError:
         return []
+    from app.modules.engine_source import _local_functions, _param_values, module_values
+    consts, local = module_values(tree), _local_functions(tree)
     out: list[tuple[str, str]] = []
 
     def add(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         doc = " ".join((ast.get_docstring(fn) or "").split())
-        if not doc or fn.name.startswith("_"):
+        # §17.1855 — the values a parameter takes come first, so the cut at `per` never drops them
+        vals = "; ".join(f"`{p}` is one of {', '.join('`' + v + '`' for v in vs)}"
+                         for p, vs in _param_values(fn, consts, local).items())
+        if not (doc or vals) or fn.name.startswith("_"):
             return
         args = ast.unparse(fn.args)
         if owner:
             args = re.sub(r"^self(?:, |$)", "", args)
-        out.append((f"{owner + '.' if owner else ''}{fn.name}({args})", doc))
+        out.append((f"{owner + '.' if owner else ''}{fn.name}({args})", f"{vals} -- {doc}" if vals and doc else vals or doc))
 
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
