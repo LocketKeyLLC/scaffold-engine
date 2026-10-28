@@ -137,7 +137,7 @@ async def test_a_stand_in_costs_a_redraw_and_the_loop_stops_when_clean_or_on_ano
                             "app/modules/paper_daily_signal_proposal_batch.py": BATCH}, MODULES, OWN)
     assert len(fakes) == 2
 
-    async def ask(path, refusal):
+    async def ask(path, refusal, current):
         asked.append((path, refusal))
         return f"```python\n{REAL}```"
 
@@ -150,7 +150,7 @@ async def test_a_stand_in_costs_a_redraw_and_the_loop_stops_when_clean_or_on_ano
     # still faked after every try: the latest output and its findings come back, `tries` asks spent
     asked.clear()
 
-    async def still(path, refusal):
+    async def still(path, refusal, current):
         asked.append((path, refusal))
         return f"```python\n{FAKED}```"
 
@@ -166,13 +166,54 @@ async def test_a_stand_in_costs_a_redraw_and_the_loop_stops_when_clean_or_on_ano
     out, left = await redraw_faked_tests(OUT, mixed, ask=ask, check=check)
     assert (out, left) == (OUT, mixed)
 
-    async def nothing(path, refusal):
+    async def nothing(path, refusal, current):
         return ""
 
     out, left = await redraw_faked_tests(OUT, fakes, ask=nothing, check=check)
     assert (out, left) == (OUT, fakes)
     out, left = await redraw_faked_tests(OUT, [], ask=ask, check=check)
     assert (out, left) == (OUT, [])
+
+
+# §17.1854 — the live shape (5b4880c0 T6, 2026-10-28): the first redraw fixes half, the second must start from it
+HALF = '''# tests/test_paper_daily_signal_proposal_batch.py
+from unittest.mock import AsyncMock, patch
+
+async def test_x():
+    with patch("app.modules.paper_daily_signal_proposal_batch.load_batch_signals", new=AsyncMock(return_value=[])):
+        pass
+'''
+
+
+@pytest.mark.asyncio
+async def test_the_second_redraw_is_shown_the_first_redraws_file_not_the_attempts():
+    fakes = internal_fakes({"tests/test_paper_daily_signal_proposal_batch.py": FAKED,
+                            "app/modules/paper_daily_signal_proposal_batch.py": BATCH}, MODULES, OWN)
+    shown: list[str] = []
+    answers = iter([f"```python\n{HALF}```", f"```python\n{REAL}```"])
+
+    async def ask(path, refusal, current):
+        shown.append(current)
+        return next(answers)
+
+    async def check(output):
+        files = {"tests/test_paper_daily_signal_proposal_batch.py":
+                 output.split("# tests/test_paper_daily_signal_proposal_batch.py", 1)[1].split("```", 1)[0],
+                 "app/modules/paper_daily_signal_proposal_batch.py": BATCH}
+        return internal_fakes(files, MODULES, OWN)
+
+    out, left = await redraw_faked_tests(OUT, fakes, ask=ask, check=check, tries=2)
+    assert left == [] and REAL in out
+    assert len(shown) == 2
+    assert shown[0] == OUT                                                      # the first ask: the attempt
+    assert HALF.strip() in shown[1] and FAKED not in shown[1] and BATCH in shown[1]   # the second: the first redraw
+    # and the executor's ask puts that candidate, not the attempt's output, in the assistant turn
+    import inspect
+
+    from app.modules import execution_agent
+    src = inspect.getsource(execution_agent)
+    ask_src = src.split("async def _ask_tests(_path: str, _refusal: str, _current: str)", 1)[1].split("async def _check_tests", 1)[0]
+    assert '{"role": "assistant", "content": _current}' in ask_src and '"content": output' not in ask_src
 
 
 async def _aret(v):
