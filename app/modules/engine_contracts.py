@@ -1083,10 +1083,7 @@ def real_data_examples(step_text: str, own: set[str], modules: dict[str, str], t
     rounds stood in for `load_batch_signals` / `load_batch_context` rather than insert the `ingested_item` rows the
     real chain turns into signals -- a test neither had seen done; T6U10's generator tests do exactly that."""
     job = set(modules)
-    named = {m for m in job - own if re.search(rf"\b{re.escape(m)}\b", step_text)}
-    targets = set(named)
-    for m in named:
-        targets |= _job_imports(modules[m], job) - own
+    targets = step_targets(step_text, own, modules)
     if not targets:
         return ""
     scored: list[tuple[int, int, str]] = []
@@ -1246,3 +1243,92 @@ def unreturned_reads(files: dict[str, str], modules: dict[str, str]) -> list[str
                          f"returns dicts with keys {', '.join(f'`{k}`' for k in g['carries'])} -- never `{g['key']}`"
                          + (f". {lives}" if lives else ""))
     return found
+
+
+# ── §17.1851 a step reads what the finished functions it runs through say they do ─────────────────────────────
+
+def step_targets(step_text: str, own: set[str], modules: dict[str, str], ran: set[str] = frozenset()) -> set[str]:
+    """The finished modules a step runs through: the ones its text names, the ones its earlier attempts imported
+    (`ran`, §17.1851 -- a retry clears the attempt's output, so the engine keeps what it imported), and the job
+    modules all of those import. Never the step's own."""
+    job = set(modules)
+    direct = {m for m in job - own if re.search(rf"\b{re.escape(m)}\b", step_text)} | ((set(ran) & job) - own)
+    targets = set(direct)
+    for m in direct:
+        targets |= _job_imports(modules[m], job) - own
+    return targets
+
+
+def module_imports(output: str) -> list[str]:
+    """The `app.modules.*` leaves a step's output imports, across its Python blocks -- recorded with a refused
+    attempt (§17.1851) so the next attempt is shown what those modules' functions say they do."""
+    from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
+    out: set[str] = set()
+    for lang, code in extract_code_blocks(output or ""):
+        if lang in PYTHON_LANGS:
+            out |= {i.rsplit(".", 1)[1] for i in _imports(code) if i.startswith("app.modules.")}
+    return sorted(out)
+
+
+def _said(code: str) -> list[tuple[str, str]]:
+    """Each public function, and each public method of a public class, with what its docstring says: (signature,
+    docstring with its whitespace folded). Source order; nothing for a function that says nothing."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    out: list[tuple[str, str]] = []
+
+    def add(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        doc = " ".join((ast.get_docstring(fn) or "").split())
+        if not doc or fn.name.startswith("_"):
+            return
+        args = ast.unparse(fn.args)
+        if owner:
+            args = re.sub(r"^self(?:, |$)", "", args)
+        out.append((f"{owner + '.' if owner else ''}{fn.name}({args})", doc))
+
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            add("", n)
+        elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
+            for m in n.body:
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    add(n.name, m)
+    return out
+
+
+def contracts_block(step_text: str, own: set[str], modules: dict[str, str], ran: set[str] = frozenset(),
+                    budget: int = 8000, per: int = 700) -> str:
+    """§17.1851 — what the finished functions this step runs through say they do: each public function's whole
+    docstring, the module's own contract. Live (5b4880c0 T6, 2026-10-28): the proposer reached the step as one line,
+    its signature and returned keys; its docstring -- "Proposals that fail risk checks are recorded in the audit
+    trail as rejected proposals with a reason, and are not returned" -- never did, and the step's test asserted one
+    proposal back for a risk-rejected trade. The modules the step names or ran through first, then what they import."""
+    job = set(modules)
+    direct = {m for m in job - own if re.search(rf"\b{re.escape(m)}\b", step_text)} | ((set(ran) & job) - own)
+    targets = step_targets(step_text, own, modules, ran)
+    if not targets:
+        return ""
+    # breadth-first across the modules (direct ones first): each module's first functions before any module's
+    # fifteenth -- live, the broker client's twenty documented methods would have spent the budget before the
+    # proposer's one function
+    per_mod = [[(mod, sig, doc) for sig, doc in _said(modules[mod])] for mod in sorted(direct) + sorted(targets - direct)]
+    lines: list[str] = []
+    for i in range(max((len(x) for x in per_mod), default=0)):
+        for said in per_mod:
+            if i < len(said):
+                mod, sig, doc = said[i]
+                lines.append(f"- `{mod}.{sig}`: {doc if len(doc) <= per else doc[:per].rsplit(' ', 1)[0] + ' …'}")
+    if not lines:
+        return ""
+    head = ("\n\n## What the finished functions this step runs through say they do (§17.1851)\nEach line is that "
+            "module's own contract -- what the function takes, what it returns, and what it does NOT return. The code "
+            "and its tests follow it: a test asserts what the function says it does, never the opposite.\n")
+    out = head
+    for line in lines:
+        if len(out) + len(line) + 1 > budget:
+            out += "- …\n"
+            break
+        out += line + "\n"
+    return out
