@@ -1168,6 +1168,15 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
 _system_for_tool = system_for_tool
 
 
+#: §17.1815 — the run-log window since the step itself last changed (shared by prior_refusals and prior_imports)
+_SINCE_THE_STEP_CHANGED = (
+    "AND l.created_at > COALESCE((SELECT max(e.created_at) FROM dag_node_edits e JOIN dag_nodes d "
+    "  ON d.job_id = e.job_id AND d.node_key = e.node_key WHERE d.id = CAST(:n AS uuid) "
+    "  AND (e.op IN ('replan', 'restore') OR (e.op = 'edit' "
+    "       AND COALESCE(e.after, '{}'::jsonb) ?| array['prompt_template', 'tool', 'tool_config']))), "
+    "  '-infinity') ")
+
+
 async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[str]:
     """§17.1779 — the distinct reasons this step's earlier attempts were refused, oldest first (from the run log).
     §17.1815 — only since the step itself last CHANGED (its prompt, tool or tool config edited, or a replan/restore):
@@ -1178,12 +1187,7 @@ async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[
     rows = (await db.execute(text(
         "SELECT l.details->>'reason' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
         "AND l.message LIKE :failed AND l.details->>'reason' IS NOT NULL "
-        "AND l.created_at > COALESCE((SELECT max(e.created_at) FROM dag_node_edits e JOIN dag_nodes d "
-        "  ON d.job_id = e.job_id AND d.node_key = e.node_key WHERE d.id = CAST(:n AS uuid) "
-        "  AND (e.op IN ('replan', 'restore') OR (e.op = 'edit' "
-        "       AND COALESCE(e.after, '{}'::jsonb) ?| array['prompt_template', 'tool', 'tool_config']))), "
-        "  '-infinity') "
-        "ORDER BY l.created_at"),
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
         {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
     seen: list[str] = []
     keys: set[str] = set()
@@ -1194,6 +1198,32 @@ async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[
             keys.add(k)
             seen.append(r)
     return seen[-limit:]
+
+
+def _ec_module_imports(output: str) -> list[str]:
+    from app.modules.engine_contracts import module_imports
+    try:
+        return module_imports(output)
+    except Exception:                                    # never let the log line fail the node
+        return []
+
+
+async def prior_imports(db, job_id: str, node_id: str) -> list[str]:
+    """§17.1851 — the job modules this step's earlier attempts imported, over the same window as `prior_refusals`
+    (since the step itself last changed): a retry clears the attempt's output, so this is how the next attempt is
+    shown what the functions it ran through say they do."""
+    rows = (await db.execute(text(
+        "SELECT l.details->>'imports' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'imports' IS NOT NULL "
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
+    out: set[str] = set()
+    for r in rows:
+        try:
+            out |= {str(m) for m in json.loads(r or "[]")}
+        except (TypeError, ValueError):
+            continue
+    return sorted(out)
 
 
 def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
@@ -1946,6 +1976,10 @@ async def execute_next_node(
                 node_snapshot["prior_refusals"] = await prior_refusals(db, job_id, str(node_id))
             except Exception as exc:
                 logger.warning("prior_refusals_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
+            try:                                                    # §17.1851
+                node_snapshot["prior_imports"] = await prior_imports(db, job_id, str(node_id))
+            except Exception as exc:
+                logger.warning("prior_imports_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router
@@ -2058,11 +2092,17 @@ async def execute_next_node(
                         _done = [r for r in await _es.code_rows(_esdb, job_id)      # §17.1811
                                  if r.get("status") == "done" and r.get("node_key") != node_key]
                     from app.modules import engine_schema as _esch
+                    from app.modules.engine_contracts import step_targets as _step_targets
                     _grounding_blocks.append(_es.block_for(
                         node_snapshot, _own_mods,
                         tables=_esch.tables_in_code([str(r.get("output_text") or "") for r in _done]),
                         written=set(_es.sibling_definitions(_done)),          # §17.1787
                         modules=_es.sibling_definitions(_done),               # §17.1796
+                        first=_step_targets(                                  # §17.1851
+                            " ".join(str(node_snapshot.get(k) or "") for k in ("title", "prompt_template")),
+                            {_es.step_module(node_snapshot)} - {""},
+                            {m: c for m, (_p, c, _k) in _es.current_sources(_done).items()},
+                            set(node_snapshot.get("prior_imports") or [])),
                         fks=_esch.foreign_keys_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1789
                         rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1794
             except Exception as exc:
@@ -2100,6 +2140,15 @@ async def execute_next_node(
                         {m: c for m, (_p, c, _k) in _es.current_sources(_rx_rows).items()}, _rx_tests)
                     if _rx:
                         _grounding_blocks.append(_rx)
+                    # §17.1851 — and what the finished functions it runs through say they do
+                    from app.modules.engine_contracts import contracts_block
+                    _cb = contracts_block(
+                        " ".join(str(node_snapshot.get(k) or "") for k in ("title", "prompt_template")),
+                        _es._written_modules(str(node.get("output_text") or "")) | ({_es.step_module(node_snapshot)} - {""}),
+                        {m: c for m, (_p, c, _k) in _es.current_sources(_rx_rows).items()},
+                        set(node_snapshot.get("prior_imports") or []))
+                    if _cb:
+                        _grounding_blocks.append(_cb)
                 # §17.1832 — a step that edits a module in place sees that module as it is now
                 _tcf = node.get("tool_config")
                 _tcf = json.loads(_tcf) if isinstance(_tcf, str) else (_tcf or {})
@@ -2826,7 +2875,10 @@ async def execute_next_node(
         await _log_execution(
             db, job_id, node_id, "info" if verified else "warning",
             f"Node '{title}' -> {final_status}",
-            {"model": exec_model, "confidence": confidence, "reason": reason},
+            {"model": exec_model, "confidence": confidence, "reason": reason,
+             # §17.1851 — and the job modules the attempt imported: a retry clears its output, and the next attempt
+             # is shown what those modules' functions say they do
+             "imports": _ec_module_imports(str(output or ""))},
         )
         if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes

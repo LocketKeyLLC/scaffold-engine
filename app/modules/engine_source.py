@@ -1599,13 +1599,16 @@ def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None
                "is never made up: it is the `RETURNING id` of the row the test inserted)\n" if rules else ""))
 
 
-def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000) -> str:
+def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, first: set[str] | None = None) -> str:
     """§17.1796 — the public functions of every module this job has written, with exact signatures, one line each.
     Live (job f00ea97f T25, the integration step over ~20 modules): attempt after attempt guessed
     `ingest_congressional_trades`, `fetch_13f_holdings`, `generate_signals(as_of=…)`; the refusal's "it has" list was
     16 names sorted alphabetically -- in a module of constants, only constants."""
     lines: list[str] = []
-    for mod in sorted(defs):
+    # §17.1851 — the modules the step runs through lead, so the cut at `budget` drops the others. Live (5b4880c0 T6):
+    # 21 modules, alphabetical, cut after 18 -- the proposer, the risk module and the signal generator never shown.
+    lead = sorted(set(first or ()) & set(defs))
+    for mod in lead + [m for m in sorted(defs) if m not in lead]:
         if mod == own:
             continue
         rk = defs[mod].get("returns") or {}
@@ -1651,8 +1654,9 @@ def missing_test_file(output: str, step_text: str) -> str | None:
 
 def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000, tables: dict | None = None,
               written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None,
-              modules: dict[str, dict] | None = None) -> str:
-    """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042)."""
+              modules: dict[str, dict] | None = None, first: set[str] | None = None) -> str:
+    """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042).
+    `first`: the job modules the step runs through (§17.1851) -- they lead the job-modules list."""
     index = module_index()
     layout: dict[str, list[str]] = {}
     for mod in index:
@@ -1686,7 +1690,7 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
         "### Modules every change uses\n" + "".join(_render_module(m) for m in _CORE),
     ]
     if modules:
-        jm = _render_job_modules(modules, own)
+        jm = _render_job_modules(modules, own, first=first)
         if jm:
             parts.insert(1, jm)
     if tables:
