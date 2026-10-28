@@ -83,8 +83,9 @@ async def test_x(monkeypatch):
         "`tests/test_paper_signal_generator.py:7` replaces `get_data_as_of` (`paper_point_time_store`, a finished "
         "module that never leaves the engine) with a stand-in: call the real one -- against the scratch database, with "
         "the rows it reads, when it uses one -- so the test sees what it really does (it returns `[row[0] for row in "
-        "rows]` of `SELECT payload FROM ingested_item WHERE published_ts <= :ts ORDER BY id`). Mock only what reaches "
-        "outside the engine -- the broker, the network, model calls, the clock"]
+        "rows]` of `SELECT payload FROM ingested_item WHERE published_ts <= :ts ORDER BY id`) -- it reads "
+        "`ingested_item`: insert those rows first. Mock only what reaches outside the engine -- the broker, the "
+        "network, model calls, the clock"]                                           # §17.1852 names the rows
 
 
 def test_every_way_of_naming_the_target_is_read_and_a_dict_returner_names_its_keys():

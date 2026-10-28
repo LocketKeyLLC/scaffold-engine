@@ -2608,6 +2608,40 @@ async def execute_next_node(
                     # engine's history, and no sample value or note handing its unfinished work on
                     async with async_session() as _esdb:
                         _refs = await _es.engine_findings(_esdb, job_id, node_key, output)
+                    # §17.1852 — a stand-in in the tests, and nothing else wrong: the module passed every check, so
+                    # the test file is asked for again, alone, with the module in hand and the rows to insert named
+                    # -- before this attempt is spent on it
+                    from app.modules import engine_contracts as _ec
+                    if _refs and _ec.stand_in_findings(_refs) == _refs:
+                        async def _ask_tests(_path: str, _refusal: str) -> str:
+                            _r = await asyncio.wait_for(chat_until_nonempty(
+                                model_router.chat,
+                                [{"role": "system", "content": _system_for_tool(tool)},
+                                 {"role": "user", "content": exec_prompt},
+                                 {"role": "assistant", "content": output},
+                                 {"role": "user", "content": (
+                                     "Your tests stand in for finished modules of this job; this step requires tests "
+                                     "that run through them for real. The verifier refused:\n" + _refusal +
+                                     f"\nWrite only `{_path}` again: one ```python block whose first line is "
+                                     f"`# {_path}`. Keep every test. Remove each stand-in named above; before the "
+                                     "call, insert the rows the real function reads (named above -- with the finished "
+                                     "writer named, or `INSERT INTO` through `text`), then call the real function and "
+                                     "assert on what it returns and the rows it wrote. Mock only what reaches outside "
+                                     "the engine -- the broker, the network, model calls, the clock.")}],
+                                {"role": exec_role, "overrides": exec_overrides},
+                                temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
+                                label=f"node-tests-redraw {node_key}", think_off_rescue=True),
+                                timeout=settings.node_timeout_seconds)
+                            return (_r.text or "").strip() if getattr(_r, "success", False) else ""
+
+                        async def _check_tests(_cand: str) -> list[str]:
+                            async with async_session() as _cdb:
+                                return await _es.engine_findings(_cdb, job_id, node_key, _cand)
+
+                        _before = len(_refs)
+                        output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests)
+                        (logger.info if not _refs else logger.warning)(
+                            "engine_tests_redrawn: node='%s' stand_ins=%d left=%d", title, _before, len(_refs))
                     if _refs:
                         engine_reason = _es.unresolved_reason(_refs)
                     # §17.1788 — the steps whose modules this one imports become its dependencies

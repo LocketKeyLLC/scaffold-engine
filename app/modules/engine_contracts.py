@@ -449,11 +449,17 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
                 continue
             seen.add((origin, name))
             hint = _returns_hint(modules[origin], name)
+            # §17.1852 — and WHICH rows: the tables the real one reads (followed through the job's modules) and the
+            # finished writers that insert them, so "insert the rows it reads" is an instruction, not a hope
+            reads = reads_tables(modules, origin, name)
+            writers = writers_for(modules, reads) if reads else []
             found.append(
                 f"`{path}:{line}` replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
                 "a stand-in: call the real one -- against the scratch database, with the rows it reads, when it uses "
                 "one -- so the test sees what it really does"
                 + (f" (it returns {hint})" if hint else "")
+                + (f" -- it reads {', '.join(f'`{t}`' for t in sorted(reads))}: insert those rows first"
+                   + (f", with {', '.join(writers[:3])}" if writers else "") if reads else "")
                 + ". Mock only what reaches outside the engine -- the broker, the network, model calls, the clock")
     return found
 
@@ -1332,3 +1338,141 @@ def contracts_block(step_text: str, own: set[str], modules: dict[str, str], ran:
             break
         out += line + "\n"
     return out
+
+
+# ── §17.1852 a stand-in in the tests costs a test redraw, not the attempt ───────────────────────────────────
+
+def _from_tables(sql: str) -> set[str]:
+    """The tables a SELECT reads: each `FROM t` / `JOIN t` that is a table, not a CTE or a function's FROM."""
+    from app.modules import engine_schema as _sch
+    ctes = {m.group(1) for m in _sch._CTE.finditer(sql)}
+    out: set[str] = set()
+    for m in _sch._FROM.finditer(sql):
+        if _sch._FN_FROM.search(sql[:m.start()]):
+            continue
+        t = m.group(m.lastindex)                                 # the identifier (after an optional schema)
+        if t and t not in ctes:
+            out.add(t.lower())
+    return out
+
+
+def reads_tables(modules: dict[str, str], mod: str, name: str, depth: int = 0,
+                 _seen: set[tuple[str, str]] | None = None) -> set[str]:
+    """The tables `mod.name` reads, itself or through the job functions it calls (local, or imported from another
+    job module), up to a few hops. Live (5b4880c0 T6): `load_batch_context` reads `pnl` through
+    `get_day_start_equity`; `load_batch_signals` reads `ingested_item` through `generate_signals` -> `get_data_as_of`."""
+    seen = _seen if _seen is not None else set()
+    if depth > _MAX_DEPTH or (mod, name) in seen:
+        return set()
+    seen.add((mod, name))
+    d = _defs(modules.get(mod, "")) if mod in modules else None
+    if not d:
+        return set()
+    funcs, imports = d
+    fn = funcs.get(name)
+    if fn is None:
+        return reads_tables(modules, *imports[name], depth + 1, seen) if name in imports else set()
+    out: set[str] = set()
+    for n in _own_nodes(fn):
+        # SQL only -- never a docstring's "read from the point-in-time store" (live: `the`, `an`, `point`)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _is_query(n.value):
+            out |= _from_tables(n.value)
+        elif isinstance(n, ast.Call):
+            callee = n.func.id if isinstance(n.func, ast.Name) else None
+            if callee and callee != name and (callee in funcs or callee in imports):
+                out |= reads_tables(modules, mod, callee, depth + 1, seen)
+    return out
+
+
+def _is_query(s: str) -> bool:
+    return s.lstrip().upper().startswith(("SELECT", "WITH", "UPDATE", "DELETE", "INSERT"))
+
+
+def _plain_args(fn: ast.AST) -> str:
+    """A signature without annotations: `db, cik, *, equity, as_of_ts=…`."""
+    a = fn.args                                                  # type: ignore[attr-defined]
+    pos = [*a.posonlyargs, *a.args]
+    defaults = len(a.defaults)
+    out = [p.arg + ("=…" if i >= len(pos) - defaults else "") for i, p in enumerate(pos)]
+    if a.vararg:
+        out.append("*" + a.vararg.arg)
+    elif a.kwonlyargs:
+        out.append("*")
+    out += [k.arg + ("=…" if d is not None else "") for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=True)]
+    if a.kwarg:
+        out.append("**" + a.kwarg.arg)
+    return ", ".join(out)
+
+
+def writers_for(modules: dict[str, str], tables: set[str]) -> list[str]:
+    """The public job functions that insert into any of `tables` and never leave the engine (a test can call them in
+    the sandbox; an ingester that fetches from the network cannot): "`write_x(*, a, b)` (`mod`)", module order."""
+    out: list[str] = []
+    job = set(modules)
+    for mod, code in sorted(modules.items()):
+        d = _defs(code)
+        if not d or reaches_outside(code, job, modules):
+            continue
+        for fname, fn in d[0].items():
+            if fname.startswith("_"):
+                continue
+            for call in (n for n in _own_nodes(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                         and n.func.attr == "execute"):
+                parts = _insert_parts(_sql_of(call, fn) or "")
+                if parts and parts[0].lower() in tables:
+                    out.append(f"`{fname}({_plain_args(fn)})` (`{mod}`)")
+                    break
+    return out
+
+
+def stand_in_findings(findings: list[str]) -> list[str]:
+    """The §17.1836 findings among `findings`: a test file's stand-in for a finished module."""
+    return [f for f in findings if f.startswith("`tests/") and " with a stand-in: " in f]
+
+
+def _finding_path(finding: str) -> str:
+    return finding[1:].split(":", 1)[0]
+
+
+def replace_file_block(output: str, path: str, block: str) -> str:
+    """`output` with the fenced Python block headed `# path` replaced by `block` (a fenced block, or bare code that
+    is then fenced); appended when there is none."""
+    from app.modules.execution_codegen_gate import PYTHON_LANGS
+    new = block.strip()
+    if not new.startswith("```"):
+        new = f"```python\n{new}\n```"
+    fence = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
+    for m in fence.finditer(output or ""):
+        if m.group(1).lower() not in PYTHON_LANGS:
+            continue
+        first = m.group(2).lstrip().splitlines()[0] if m.group(2).strip() else ""
+        hm = re.match(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b", first)
+        if hm and (hm.group(1) == path or hm.group(1) == path.rsplit("/", 1)[-1]):
+            return output[:m.start()] + new + output[m.end():]
+    return (output or "").rstrip() + "\n\n" + new
+
+
+async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2) -> tuple[str, list[str]]:
+    """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal)`
+    -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0 T6, four
+    rounds on two models): three of four attempts were refused for stand-ins in the tests and nothing else -- the
+    module itself had passed every check -- and each refusal cost the whole attempt. Returns the output to carry on
+    with and its findings: empty when the redraw came clean; the latest otherwise (a redraw that brought a finding of
+    another kind stops the loop -- that one gets the ordinary refusal)."""
+    for _ in range(max(0, tries)):
+        fakes = stand_in_findings(findings)
+        if not findings or fakes != findings:
+            break
+        paths = {_finding_path(f) for f in fakes}
+        if len(paths) != 1:
+            break
+        path = paths.pop()
+        new_file = await ask(path, "\n".join(f"  - {f}" for f in findings))
+        if not (new_file or "").strip():
+            break
+        candidate = replace_file_block(output, path, new_file)
+        findings = await check(candidate)
+        output = candidate
+        if not findings:
+            break
+    return output, findings
