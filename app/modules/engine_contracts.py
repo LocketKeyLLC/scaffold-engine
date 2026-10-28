@@ -1067,3 +1067,48 @@ def raw_dict_binds(files: dict[str, str]) -> list[str]:
                                  f"only as text -- bind `json.dumps(...)` and write `CAST(:{k} AS json)` (or `jsonb`, "
                                  "the column's own type) in the SQL")
     return found
+
+
+# ── §17.1849 a code step is shown a passing test that runs the modules it must run through for real ─────────────
+
+def _job_imports(code: str, job: set[str]) -> set[str]:
+    return {i.rsplit(".", 1)[1] for i in _imports(code) if i.startswith("app.modules.") and i.rsplit(".", 1)[1] in job}
+
+
+def real_data_examples(step_text: str, own: set[str], modules: dict[str, str], tests: dict[str, str],
+                       budget: int = 16000) -> str:
+    """The finished test files that run the modules this step's code must run through -- the ones its text names
+    and the job modules those import -- against the scratch database: each inserts real rows (`INSERT INTO`) and
+    stands in for no finished module that never leaves the engine. Live (5b4880c0 T6, 2026-10-27): two models in five
+    rounds stood in for `load_batch_signals` / `load_batch_context` rather than insert the `ingested_item` rows the
+    real chain turns into signals -- a test neither had seen done; T6U10's generator tests do exactly that."""
+    job = set(modules)
+    named = {m for m in job - own if re.search(rf"\b{re.escape(m)}\b", step_text)}
+    targets = set(named)
+    for m in named:
+        targets |= _job_imports(modules[m], job) - own
+    if not targets:
+        return ""
+    scored: list[tuple[int, int, str]] = []
+    for path, code in tests.items():
+        if not path.startswith("tests/") or "INSERT INTO" not in code.upper():
+            continue
+        hit = _job_imports(code, job) & targets
+        if not hit or internal_fakes({path: code}, modules, set()):
+            continue
+        scored.append((-len(hit), len(code), path))
+    out: list[str] = []
+    left = budget
+    for _neg, size, path in sorted(scored):
+        if size > left:
+            continue
+        out.append(f"### `{path}` (passing; runs {', '.join(f'`{m}`' for m in sorted(_job_imports(tests[path], job) & targets))} "
+                   f"for real)\n```python\n{tests[path]}\n```\n")
+        left -= size
+        if len(out) == 2:
+            break
+    if not out:
+        return ""
+    return ("\n\n## How this job's tests run its finished modules for real (§17.1849)\nThese tests pass in the sandbox: "
+            "they insert the rows the modules read and call the real functions. Follow the same pattern -- never a "
+            "stand-in for these modules.\n" + "".join(out))

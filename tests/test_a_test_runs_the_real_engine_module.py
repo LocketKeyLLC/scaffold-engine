@@ -213,3 +213,32 @@ def test_each_mock_point_shows_what_it_is_used_as():
     assert outside_points({"paper_trade_proposer": proposer}) == [
         "- `paper_trade_proposer`: `app.modules.paper_trade_proposer.generate_json` (a model call; used as "
         "`parsed, _resp = await generate_json(prompt, SCHEMA, role='model_general')`)"]
+
+
+# ── §17.1849 — a code step is shown a passing test that runs the modules it must run through for real ────────────
+
+def test_a_step_is_shown_the_passing_real_data_tests_of_the_modules_it_runs_through():
+    """Live (5b4880c0 T6): two models in five rounds stood in for the data module rather than insert the rows the real
+    chain turns into signals; T6U10's generator tests do exactly that."""
+    from app.modules.engine_contracts import real_data_examples
+    data = "from app.modules.paper_signal_generator import generate_signals\n\nasync def load_batch_signals(*, ts, db=None):\n    return await generate_signals(ts, db=db)\n"
+    gen = "from app.modules.paper_point_time_store import get_data_as_of\n\nasync def generate_signals(ts, *, db=None):\n    return []\n"
+    mods = {"paper_batch_data": data, "paper_signal_generator": gen, "paper_point_time_store": STORE,
+            "paper_other": "def x():\n    return 1\n"}
+    real = ("from sqlalchemy import text\nfrom app.modules.paper_signal_generator import generate_signals\n\n"
+            "async def test_real(db):\n    await db.execute(text(\"INSERT INTO ingested_item (source, payload) VALUES "
+            "('news', '{}')\"))\n    assert await generate_signals(None, db=db) == []\n")
+    faked = real.replace("async def test_real(db):\n", "async def test_real(db, monkeypatch):\n    monkeypatch.setattr("
+                         "\"app.modules.paper_signal_generator.get_data_as_of\", None)\n")
+    no_rows = "from app.modules.paper_signal_generator import generate_signals\n\ndef test_x():\n    pass\n"
+    other = real.replace("paper_signal_generator import generate_signals", "paper_other import x")
+    tests = {"tests/test_real.py": real, "tests/test_faked.py": faked, "tests/test_no_rows.py": no_rows,
+             "tests/test_other.py": other}
+    block = real_data_examples("Python module `paper_batch.py`: uses `paper_batch_data.py` (step T6D).",
+                               {"paper_batch"}, mods, tests)
+    assert block.startswith("\n\n## How this job's tests run its finished modules for real (§17.1849)\n")
+    assert "### `tests/test_real.py` (passing; runs `paper_signal_generator` for real)" in block
+    for left_out in ("test_faked.py", "test_no_rows.py", "test_other.py"):
+        assert left_out not in block
+    assert real_data_examples("Python module `paper_batch.py`.", {"paper_batch"}, mods, tests) == ""   # names none
+    assert real_data_examples("uses `paper_batch_data.py`", {"paper_batch"}, mods, tests, budget=10) == ""
