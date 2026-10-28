@@ -2613,12 +2613,14 @@ async def execute_next_node(
                     # -- before this attempt is spent on it
                     from app.modules import engine_contracts as _ec
                     if _refs and _ec.stand_in_findings(_refs) == _refs:
-                        async def _ask_tests(_path: str, _refusal: str) -> str:
+                        async def _ask_tests(_path: str, _refusal: str, _current: str) -> str:
+                            # §17.1854 — the assistant turn is the output the refusal is about (the current candidate),
+                            # never the attempt's original: a second redraw must see the first redraw's file
                             _r = await asyncio.wait_for(chat_until_nonempty(
                                 model_router.chat,
                                 [{"role": "system", "content": _system_for_tool(tool)},
                                  {"role": "user", "content": exec_prompt},
-                                 {"role": "assistant", "content": output},
+                                 {"role": "assistant", "content": _current},
                                  {"role": "user", "content": (
                                      "Your tests stand in for finished modules of this job; this step requires tests "
                                      "that run through them for real. The verifier refused:\n" + _refusal +

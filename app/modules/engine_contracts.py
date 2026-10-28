@@ -1508,12 +1508,17 @@ def replace_file_block(output: str, path: str, block: str) -> str:
 
 
 async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2) -> tuple[str, list[str]]:
-    """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal)`
-    -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0 T6, four
-    rounds on two models): three of four attempts were refused for stand-ins in the tests and nothing else -- the
-    module itself had passed every check -- and each refusal cost the whole attempt. Returns the output to carry on
-    with and its findings: empty when the redraw came clean; the latest otherwise (a redraw that brought a finding of
-    another kind stops the loop -- that one gets the ordinary refusal)."""
+    """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal,
+    output)` -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0
+    T6, four rounds on two models): three of four attempts were refused for stand-ins in the tests and nothing else --
+    the module itself had passed every check -- and each refusal cost the whole attempt. Returns the output to carry
+    on with and its findings: empty when the redraw came clean; the latest otherwise (a redraw that brought a finding
+    of another kind stops the loop -- that one gets the ordinary refusal).
+
+    §17.1854 — `ask` is handed the output the refusal is about: the CURRENT candidate. Live (5b4880c0 T6, 2026-10-28,
+    the §17.1853 round): the executor's ask showed the model the attempt's original file, so the second redraw read a
+    refusal whose line numbers belonged to the first redraw's file next to the file it had started from, and gave that
+    original back -- five stand-ins, then two, then the same five."""
     for _ in range(max(0, tries)):
         fakes = stand_in_findings(findings)
         if not findings or fakes != findings:
@@ -1522,7 +1527,7 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
         if len(paths) != 1:
             break
         path = paths.pop()
-        new_file = await ask(path, "\n".join(f"  - {f}" for f in findings))
+        new_file = await ask(path, "\n".join(f"  - {f}" for f in findings), output)
         if not (new_file or "").strip():
             break
         candidate = replace_file_block(output, path, new_file)
