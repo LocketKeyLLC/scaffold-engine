@@ -279,5 +279,38 @@ async def test_a_mix_of_test_file_findings_costs_a_redraw_and_a_module_finding_s
     assert "_ec.stand_in_findings(_refs) == _refs" not in src
 
 
+# §17.1861 — a call-shape finding names its file and line, so in a test file it is a test-file finding. Live
+# (5b4880c0 T5, 2026-10-29): attempt 2 was spent on two `handle_approval_answer(…)`: `answer` is `dict`; it was given
+# a `str` -- both in the test file, neither saying so, so the §17.1859 redraw could not take them.
+GATE_ROW = {"node_key": "T16", "status": "done", "title": "gate", "prompt_template": "", "output_text":
+            "```python\n# app/modules/paper_operator_approval_gate.py\n"
+            "async def handle_approval_answer(job_id, node_key, answer: dict, payload):\n    return {}\n```"}
+
+
+def test_a_call_shape_finding_in_a_test_file_names_it_and_counts_as_a_test_file_finding():
+    from app.modules import engine_source as es
+    defs = es.sibling_definitions([GATE_ROW])
+    test = ('```python\n# tests/test_paper_twelve_modules.py\n'
+            'from app.modules.paper_operator_approval_gate import handle_approval_answer\n\n'
+            'async def test_x():\n    await handle_approval_answer("j", "k", "yes", {})\n```')
+    found = es.sibling_refs(test, defs)
+    assert found == ["`tests/test_paper_twelve_modules.py:5` calls `handle_approval_answer(…)`: `answer` is `dict`; it "
+                     "was given a `str` -- the signature is `async handle_approval_answer(job_id, node_key, answer, "
+                     "payload)` (`paper_operator_approval_gate`, step T16)"]
+    assert findings_in_tests(found) == found
+    # the step's own module: named too, but not a test-file finding; a block with no path: as before
+    mod = test.replace("# tests/test_paper_twelve_modules.py", "# app/modules/paper_runner.py")
+    assert es.sibling_refs(mod, defs)[0].startswith("`app/modules/paper_runner.py:5` calls `handle_approval_answer(…)`")
+    assert findings_in_tests(es.sibling_refs(mod, defs)) == []
+    bare = test.replace("# tests/test_paper_twelve_modules.py\n", "")
+    assert es.sibling_refs(bare, defs)[0].startswith("`handle_approval_answer(…)`: `answer` is `dict`")
+    # the engine's own functions, the same way (the §17.1761 live shape, in a test file)
+    eng = ('```python\n# tests/test_paper_x.py\nfrom app.modules.decision_pause import frame_decision\n\n'
+           'async def test_y(node):\n    await frame_decision(node, brief="b", upstream={"proposal": 1})\n```')
+    hit = [f for f in es.unresolved_refs(eng) if "`upstream` is `str`" in f]
+    assert hit and hit[0].startswith("`tests/test_paper_x.py:5` calls `frame_decision(…)`: `upstream` is `str`; it was given a `dict`")
+    assert findings_in_tests(hit) == hit
+
+
 async def _aret(v):
     return v

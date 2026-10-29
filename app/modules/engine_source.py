@@ -357,6 +357,15 @@ def _shape_signature(name: str, shape: dict) -> str:
     return f"{'async ' if shape.get('async') else ''}{name}({', '.join(parts)})"
 
 
+def _at(code: str, n: ast.AST) -> str:
+    """§17.1861 — "`tests/x.py:304` calls " when the block declares its path, else "": a call-shape finding names
+    the file and line of the call, so one in a test file is a test-file finding (§17.1859) and costs a redraw.
+    Live (5b4880c0 T5, 2026-10-29): attempt 2 was spent on two findings, both `handle_approval_answer(…)`:
+    `answer` is `dict`; it was given a `str`, both in the test file, neither saying so."""
+    p = _header_path(code)
+    return f"`{p}:{n.lineno}` calls " if p else ""
+
+
 def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
                      consts: dict | None = None) -> list[str]:
     """§17.1756 — a call to an engine function that cannot work as written. §17.1785 — each finding ends with the
@@ -792,7 +801,7 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                 if not shape:
                     continue
                 for m in _call_mismatches(n, fname, shape, id(n) in misused):
-                    m = m.replace("in the engine", f"in `{leaf}`")
+                    m = _at(code, n) + m.replace("in the engine", f"in `{leaf}`")          # §17.1861
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
     return found
@@ -1187,9 +1196,9 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                 if target:
                     mod, fname = target
                     for m in _call_mismatches(n, fname, index[mod]["funcs"][fname], id(n) in misused, consts):
-                        note(m)
+                        note(_at(code, n) + m)                                              # §17.1861
                     for m in _domain_mismatches(n, mod, fname, index[mod]["funcs"][fname], consts):
-                        note(m)
+                        note(_at(code, n) + m)
             for m in _tuples_used_whole(tree, engine_funcs, engine_mods, index):
                 note(m)
         if not settings_aliases:
