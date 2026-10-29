@@ -1876,6 +1876,20 @@ def replace_file_block(output: str, path: str, block: str) -> str:
     return (output or "").rstrip() + "\n\n" + new
 
 
+def drop_file_block(output: str, path: str) -> str:
+    """§17.1860 — `output` without the fenced Python block headed `# path` (unchanged when there is none)."""
+    from app.modules.execution_codegen_gate import PYTHON_LANGS
+    fence = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
+    for m in fence.finditer(output or ""):
+        if m.group(1).lower() not in PYTHON_LANGS:
+            continue
+        first = m.group(2).lstrip().splitlines()[0] if m.group(2).strip() else ""
+        hm = re.match(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b", first)
+        if hm and hm.group(1) == path:
+            return (output[:m.start()].rstrip() + "\n\n" + output[m.end():].lstrip()).strip() + "\n"
+    return output
+
+
 async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2) -> tuple[str, list[str]]:
     """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal,
     output)` -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0

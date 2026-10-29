@@ -1379,6 +1379,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
+    found += misnamed_required_tests(output, " ".join(str(me.get(k) or "") for k in ("title", "prompt_template")))
     # §17.1836 — its tests do not stand in for a finished module that never leaves the engine
     from app.modules.engine_contracts import internal_fakes
     from app.sandbox.engine_tests import files_of
@@ -1749,10 +1750,47 @@ def missing_test_file(output: str, step_text: str) -> str | None:
         return None
     path = m.group(1)
     for _lang, code in extract_code_blocks(output or ""):
-        first = code.lstrip().splitlines()[0] if code.strip() else ""
-        if path in first or (path.rsplit("/", 1)[-1] in first and first.lstrip().startswith("#")):
+        h = _header_path(code)
+        # §17.1860 — the exact path (or its bare file name), never a near miss. Live (5b4880c0 T5, the kimi round,
+        # 2026-10-29): `# tests/test_test_paper_twelve_modules.py` contained the required name and passed as it
+        if h and (h == path or h == path.rsplit("/", 1)[-1]):
             return None
     return path
+
+
+def _header_path(code: str) -> str:
+    """The path a code block's first line declares (`# tests/test_x.py`), or ""."""
+    first = code.lstrip().splitlines()[0] if code.strip() else ""
+    m = re.match(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b", first)
+    return m.group(1) if m else ""
+
+
+def misnamed_test_file(output: str, step_text: str) -> str | None:
+    """§17.1860 — a test block the output wrote at a near miss of the path this step requires (the required file
+    itself absent): `tests/test_test_paper_twelve_modules.py` for `tests/test_paper_twelve_modules.py`."""
+    m = _REQUIRED_TESTS_RE.search(step_text or "")
+    if not m or missing_test_file(output, step_text) is None:
+        return None
+    want = m.group(1)
+    stem = want.rsplit("/", 1)[-1][5:-3]                           # tests/test_<stem>.py
+    for _lang, code in extract_code_blocks(output or ""):
+        h = _header_path(code)
+        base = h.rsplit("/", 1)[-1]
+        if h and h != want and base.startswith("test") and base.endswith(".py") \
+                and (stem in base or (base[5:-3] and base[5:-3] in stem)):
+            return h
+    return None
+
+
+def misnamed_required_tests(output: str, step_text: str) -> list[str]:
+    """§17.1860 — the refusal when the required test file is still at a near miss (the §17.1801 ask did not mend
+    it): a module-kind finding, so the attempt takes the ordinary refusal."""
+    mis = misnamed_test_file(output, step_text)
+    if not mis:
+        return []
+    want = _REQUIRED_TESTS_RE.search(step_text or "").group(1)      # type: ignore[union-attr]
+    return [f"This step requires its tests at `{want}` -- that exact path -- and the output wrote `{mis}` instead: "
+            f"the block's first line is `# {want}`"]
 
 
 def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000, tables: dict | None = None,
