@@ -2610,9 +2610,10 @@ async def execute_next_node(
                         _refs = await _es.engine_findings(_esdb, job_id, node_key, output)
                     # §17.1852 — a stand-in in the tests, and nothing else wrong: the module passed every check, so
                     # the test file is asked for again, alone, with the module in hand and the rows to insert named
-                    # -- before this attempt is spent on it
+                    # -- before this attempt is spent on it. §17.1859 — every finding that is about the test file's
+                    # own lines (a patch of a name the module lacks, a module run into a secret, a made-up id, …)
                     from app.modules import engine_contracts as _ec
-                    if _refs and _ec.stand_in_findings(_refs) == _refs:
+                    if _refs and _ec.findings_in_tests(_refs) == _refs:
                         async def _ask_tests(_path: str, _refusal: str, _current: str) -> str:
                             # §17.1854 — the assistant turn is the output the refusal is about (the current candidate),
                             # never the attempt's original: a second redraw must see the first redraw's file
@@ -2622,14 +2623,18 @@ async def execute_next_node(
                                  {"role": "user", "content": exec_prompt},
                                  {"role": "assistant", "content": _current},
                                  {"role": "user", "content": (
-                                     "Your tests stand in for finished modules of this job; this step requires tests "
-                                     "that run through them for real. The verifier refused:\n" + _refusal +
+                                     "Your module passed every check; your test file did not. The verifier refused "
+                                     "these lines of it:\n" + _refusal +
                                      f"\nWrite only `{_path}` again: one ```python block whose first line is "
-                                     f"`# {_path}`. Keep every test. Remove each stand-in named above; before the "
-                                     "call, insert the rows the real function reads (named above -- with the finished "
-                                     "writer named, or `INSERT INTO` through `text`), then call the real function and "
-                                     "assert on what it returns and the rows it wrote. Mock only what reaches outside "
-                                     "the engine -- the broker, the network, model calls, the clock.")}],
+                                     f"`# {_path}`. Keep every test. Fix each line named above as it says: a stand-in "
+                                     "for a finished module becomes a call to the real one (insert the rows it reads "
+                                     "first, with the writer named, or `INSERT INTO` through `text`, and assert on "
+                                     "what it returns and the rows it wrote); a patch names only a name the module "
+                                     "has, where the code looks it up; a module that reads an operator secret gets "
+                                     "`values_for` patched on that module with a test value; a child row takes the id "
+                                     "its parent's writer returned, never a number; no DELETE from the job's tables; "
+                                     "JSON columns take `json.dumps` with a CAST. Mock only what reaches outside the "
+                                     "engine -- the broker, the network, model calls, the clock.")}],
                                 {"role": exec_role, "overrides": exec_overrides},
                                 temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
                                 label=f"node-tests-redraw {node_key}", think_off_rescue=True),
@@ -2643,7 +2648,7 @@ async def execute_next_node(
                         _before = len(_refs)
                         output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests)
                         (logger.info if not _refs else logger.warning)(
-                            "engine_tests_redrawn: node='%s' stand_ins=%d left=%d", title, _before, len(_refs))
+                            "engine_tests_redrawn: node='%s' test_findings=%d left=%d", title, _before, len(_refs))
                     if _refs:
                         engine_reason = _es.unresolved_reason(_refs)
                     # §17.1788 — the steps whose modules this one imports become its dependencies
