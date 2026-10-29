@@ -104,7 +104,8 @@ def test_the_values_a_function_refuses_others_for_are_read_from_its_own_check():
 def test_a_literal_the_function_refuses_is_refused_before_the_sandbox():
     defs = es.sibling_definitions([ROW])
     found = es.sibling_refs(_step('ingest_finra_file(source="test", db=db, client=client)'), defs)
-    assert found == [f"`ingest_finra_file(…)`: `source` is one of `short_interest`, `ats_volume`; it was given `'test'` "
+    assert found == [f"`app/modules/paper_finra_runner.py:7` calls `ingest_finra_file(…)`: `source` is one of "
+                     f"`short_interest`, `ats_volume`; it was given `'test'` "
                      f"-- the signature is `{SIG}` (`paper_finra_data_ingestion`, step T4)"], found
     assert es.sibling_refs(_step('ingest_finra_file(source="ats_volume", db=db, client=client)'), defs) == []
     assert es.sibling_refs(_step('ingest_finra_file("short_interest", db=db, client=client)'), defs) == []
