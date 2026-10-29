@@ -181,7 +181,7 @@ def test_the_live_approval_step_is_shown_the_decision_pause():
                               "engine's existing approve-before-run runner-step pattern."}
     assert [c["name"] for c in es.capabilities_for(t14)][0] == "operator approval (approve-before-run)"
     b = es.block_for(t14)
-    assert "async def open_decision_job(db, *, title, decisions, owner, on_answer, start)" in b     # §17.1764
+    assert "async def open_decision_job(db, *, title: str, decisions: list, owner: str | None, on_answer: str | None, start: bool)" in b     # §17.1764
     assert "never input()" in b
 
 
@@ -221,7 +221,7 @@ def test_the_live_unawaited_coroutine_is_refused():
     found = [f for f in es.unresolved_refs(LIVE_T14) if "given a" not in f and "executor's own half" not in f]
     assert len(found) == 1 and found[0].startswith(
         "`frame_decision(…)` is `async def` in the engine: `await` it (called bare, it returns a coroutine, not a result)")
-    assert found[0].endswith("the signature is `async frame_decision(node, *, brief=…, upstream=…)`")   # §17.1785
+    assert found[0].endswith("the signature is `async frame_decision(node: dict, *, brief: str = …, upstream: str = …)`")   # §17.1785
 
 
 @pytest.mark.parametrize("ok", [
@@ -295,7 +295,7 @@ def test_the_test_tooling_list_matches_requirements_dev():
 def test_the_block_shows_the_real_engine():
     b = es.block_for({"title": "Implement news signal client", "prompt_template": "Fetch news via SearXNG."},
                      SIBLINGS)
-    assert "async def values_for(db, wanted)" in b                       # real signature, read from the source
+    assert "async def values_for(db, wanted: list)" in b                       # real signature, read from the source
     assert "names: engine, async_session" in b                           # a module-level name, not only defs
     assert "def get_searxng_client()" in b
     assert "app.modules: " in b and "runner_secrets" in b                 # the package layout

@@ -222,7 +222,7 @@ def test_agent():
 def test_the_live_approval_calls_are_refused_for_the_kinds_they_pass():
     found = [f for f in es.unresolved_refs(T14_APPROVAL) if "given a" in f]
     assert any(f.startswith("`frame_decision(…)`: `upstream` is `str`; it was given a `dict`")
-               and "the signature is `async frame_decision(node, *, brief=…, upstream=…)`" in f for f in found)
+               and "the signature is `async frame_decision(node: dict, *, brief: str = …, upstream: str = …)`" in f for f in found)
     assert any("park_awaiting_decision" in f and "`node` is `dict`" in f and "APPROVAL_NODE_KEY" in f for f in found)
 
 
@@ -334,7 +334,7 @@ def test_the_live_proposal_call_is_refused_for_role_model_fallback_and_tuple():
     text = "\n".join(found)
     assert "never both" in text
     assert "'research' is not one" in text
-    assert "`fallback` is `None | str`; it was given a `bool`" in text
+    assert "`fallback` is `str | None`; it was given a `bool`" in text
     assert "`generate_json` returns a tuple" in text
     assert "'alpaca_paper_api_key' is not one" in text and "ALPACA_PAPER_SECRET" not in text
 
@@ -706,7 +706,7 @@ def test_the_block_indexes_the_jobs_modules_with_signatures():
     defs = es.sibling_definitions([T4_ROW, T10_STREAM])
     b = es.block_for(T6_ROW, set(), modules=defs)
     assert "### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only " \
-           "`a` or `b` -- the function refuses the rest)" in b
+           "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a literal of another kind is refused)" in b
     assert "    alpaca_stream: async start_stream(callback)" in b
     assert "    paper_audit_trail_writer: async write_signal(**kwargs)" in b
     assert b.index("This job's modules") < b.index("### Conventions")
@@ -775,8 +775,8 @@ def test_the_index_shows_a_modules_public_classes():
     r = es._render_job_modules(es.sibling_definitions([T5_CLIENT]), "other")
     line = [x for x in r.splitlines() if "paper_alpaca_paper_client" in x][0]
     assert "class AlpacaAccount(equity, cash, _raw=…)" in line                              # §17.1803 its constructor
-    assert ("class AlpacaPaperClient(*, base_url=…) {build(symbol, qty), async get_account(), "
-            "async get_latest_trade(symbol); read-only: ready}") in line                    # §17.1803
+    assert ("class AlpacaPaperClient(*, base_url: str = …) {build(symbol, qty), async get_account(), "
+            "async get_latest_trade(symbol: str); read-only: ready}") in line                    # §17.1803
     assert "AlpacaPaperClientError" not in line and "_request" not in line
 
 
