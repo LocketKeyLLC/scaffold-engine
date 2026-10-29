@@ -749,6 +749,115 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
     return found
 
 
+# ── §17.1863 a secret named by a constant is mocked by its name ─────────────────────────────────
+
+def _values_for_mocks(code: str) -> list[tuple[str, int, list[str] | None]]:
+    """(module, line, keys) of each patch of `values_for` on a job module (or on `runner_secrets`) in a test file:
+    `keys` are the string keys of the literal dict the stand-in returns -- `AsyncMock(return_value={…})`,
+    `patch(…, return_value={…})`, `lambda …: {…}` -- or None when the test returns something the engine cannot read."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    alias: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "app.modules":
+            alias.update({a.asname or a.name: a.name for a in n.names})
+        elif isinstance(n, ast.Import):
+            alias.update({a.asname: a.name.rsplit(".", 1)[1] for a in n.names
+                          if a.asname and a.name.startswith("app.modules.")})
+
+    def _dict_keys(v: ast.AST | None) -> list[str] | None:
+        if isinstance(v, ast.Lambda):
+            v = v.body
+        if isinstance(v, ast.Dict):
+            return [k.value for k in v.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        return None
+
+    def _keys_of(mock: ast.AST | None, kws: list[ast.keyword]) -> list[str] | None:
+        rv = next((k.value for k in kws if k.arg == "return_value"), None)
+        if rv is None and isinstance(mock, ast.Call):
+            rv = next((k.value for k in mock.keywords if k.arg == "return_value"), None)
+        if rv is None and isinstance(mock, ast.Lambda):
+            rv = mock
+        return _dict_keys(rv)
+
+    out: list[tuple[str, int, list[str] | None]] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call) or not n.args:
+            continue
+        f = n.func
+        fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+        if fname not in ("patch", "setattr", "object"):
+            continue
+        a0 = n.args[0]
+        mod: str | None = None
+        rest = n.args[1:]
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
+            parts = a0.value.split(".")
+            if len(parts) == 4 and parts[3] == "values_for":
+                mod = parts[2]
+        elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+              and n.args[1].value == "values_for"):
+            mod, rest = alias[a0.id], n.args[2:]
+        if mod is None:
+            continue
+        mock = next((k.value for k in n.keywords if k.arg == "new"), rest[0] if rest else None)
+        out.append((mod, n.lineno, _keys_of(mock, n.keywords)))
+    return sorted(out, key=lambda t: t[1])
+
+
+def wrong_secret_mocks(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.1863 — each `values_for` stand-in whose literal return dict lacks a secret the functions the test runs
+    read through that module. Live (5b4880c0 T5, 2026-10-29, attempt 2): the test patched `values_for` on the 13F
+    ingester to return `{"SEC_USER_AGENT": …}` -- a guess from the constant's name `SEC_USER_AGENT_SECRET`, whose
+    value is `SEC_CONTACT_EMAIL`; the module read `secrets.get(SEC_USER_AGENT_SECRET)` and refused to run. The
+    §17.1857 gate saw the patch and said nothing; the index never named the secret."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        mocks = _values_for_mocks(code)
+        if not mocks:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        scopes = _scopes(tree)
+        calls = _test_calls(code)
+        for mod, line, keys in mocks:
+            if keys is None or (mod != "runner_secrets" and mod not in reach):
+                continue
+            sc = _scope_of(scopes, line)
+            in_scope = [(m, f) for m, f, ln in calls if m in reach and (not sc.startswith("test") or _scope_of(scopes, ln) == sc)]
+            need: dict[str, str] = {}                     # secret -> the function that reads it
+            for m, f in in_scope:
+                for secret, reader in secrets_read(reach, m, f).items():
+                    if secret and (reader == mod or mod == "runner_secrets"):
+                        need.setdefault(secret, f)
+            missing = sorted(s for s in need if s not in keys)
+            if not missing:
+                continue
+            consts: dict[str, str] = {}
+            if mod in reach:
+                try:
+                    consts = {v: k for k, v in _str_consts(ast.parse(reach[mod])).items()}
+                except SyntaxError:
+                    pass
+            named = ", ".join(f"`{s}`" + (f" (the value of its constant `{consts[s]}`)" if s in consts else "")
+                              for s in missing)
+            found.append(
+                f"`{path}:{line}` patches `values_for` on `{mod}` to return "
+                + (", ".join(f"`{k}`" for k in keys) if keys else "no key")
+                + f"; `{need[missing[0]]}` reads {named} and refuses to run without it -- return a test value under "
+                + ("that name" if len(missing) == 1 else "those names") + ": `{"
+                + ", ".join(f'"{s}": …' for s in missing) + "}`")
+    return found
+
+
 # ── §17.1858 a made-up parent id is refused before the sandbox ──────────────────────────────────────────────
 
 def _writes_table(fn: ast.AST) -> str | None:

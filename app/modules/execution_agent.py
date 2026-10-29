@@ -2656,7 +2656,8 @@ async def execute_next_node(
                                      "first, with the writer named, or `INSERT INTO` through `text`, and assert on "
                                      "what it returns and the rows it wrote); a patch names only a name the module "
                                      "has, where the code looks it up; a module that reads an operator secret gets "
-                                     "`values_for` patched on that module with a test value; a child row takes the id "
+                                     "`values_for` patched on that module, returning a test value under each secret's "
+                                     "own name (the index shows them as `[secrets: …]`); a child row takes the id "
                                      "its parent's writer returned, never a number; no DELETE from the job's tables; "
                                      "JSON columns take `json.dumps` with a CAST. Mock only what reaches outside the "
                                      "engine -- the broker, the network, model calls, the clock.")}],
