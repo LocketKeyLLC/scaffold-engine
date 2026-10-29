@@ -935,14 +935,14 @@ async def code_rows(db, job_id: str) -> list[dict]:
     rows = (await db.execute(text(
         "SELECT * FROM ("
         " SELECT 0 AS src, d.execution_order AS ord, left(d.job_id::text, 8) || ':' || d.node_key AS node_key,"
-        "        d.title, d.description, d.prompt_template, d.output_text, d.status"
+        "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id"
         "   FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
         "        CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on'"
         "             ELSE '[]'::jsonb END) AS b(prior)"
         "   JOIN dag_nodes d ON d.job_id::text = b.prior"
         "  WHERE j.id = :j AND d.status = 'done' AND d.output_text IS NOT NULL"
         " UNION ALL"
-        " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status"
+        " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status, id"
         "   FROM dag_nodes WHERE job_id = :j"
         ") r ORDER BY src, ord NULLS LAST, node_key"),
         {"j": job_id})).mappings().all()
@@ -1445,6 +1445,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
     found += misnamed_required_tests(output, " ".join(str(me.get(k) or "") for k in ("title", "prompt_template")))
+    # §17.1864 — a retry keeps every test its earlier attempts wrote
+    from app.modules.engine_contracts import dropped_tests
+    if me.get("node_id"):                       # the row's own id (`code_rows`); a fake row without one: no history
+        from app.modules.execution_agent import prior_tests
+        found += dropped_tests(output, await prior_tests(db, job_id, str(me["node_id"])))
     # §17.1836 — its tests do not stand in for a finished module that never leaves the engine
     from app.modules.engine_contracts import internal_fakes
     from app.sandbox.engine_tests import files_of
@@ -1924,6 +1929,12 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
         jt = _render_job_tables(tables, fks, rules)
         if jt:
             parts.insert(1, jt)              # near the top: the block is cut at `budget`, the schema must survive
+    prior = node.get("prior_tests") or {}
+    if isinstance(prior, dict) and any(prior.values()):
+        # §17.1864 — the tests the step's earlier attempts wrote: a retry keeps every one (live: 23, 11, 6, 5)
+        parts.insert(1, "### Tests your earlier attempts wrote (keep every one, by name -- fix the ones the sandbox "
+                        "named, never drop them)\n" + "".join(
+                            f"    {path}: {', '.join(names)}\n" for path, names in sorted(prior.items()) if names))
     caps = capabilities_for(node)
     if caps:
         parts.append("### The engine's own way to do what this step names\n" + "".join(_render_capability(c) for c in caps))
