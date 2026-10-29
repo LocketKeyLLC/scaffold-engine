@@ -1854,6 +1854,16 @@ def stand_in_findings(findings: list[str]) -> list[str]:
     return [f for f in findings if f.startswith("`tests/") and " with a stand-in: " in f]
 
 
+def findings_in_tests(findings: list[str]) -> list[str]:
+    """§17.1859 — the findings that are about a test file's own lines: a stand-in (§17.1836), a patch of a name the
+    module lacks (§17.1856), a module run into a secret (§17.1857), a made-up parent id (§17.1858), a DELETE from an
+    append-only table (§17.1841), a dict bound to a JSON column (§17.1843), a key the function never returns
+    (§17.1850). Each is fixed in the test file alone, the module untouched. Live (5b4880c0 T5, kimi round,
+    2026-10-29): attempt 2 had seven findings, all of these kinds, the module clean -- and was spent, because the
+    redraw admitted stand-ins only; attempt 3 was spent on ONE."""
+    return [f for f in findings if f.startswith("`tests/")]
+
+
 def _finding_path(finding: str) -> str:
     return finding[1:].split(":", 1)[0]
 
@@ -1889,7 +1899,7 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
     refusal whose line numbers belonged to the first redraw's file next to the file it had started from, and gave that
     original back -- five stand-ins, then two, then the same five."""
     for _ in range(max(0, tries)):
-        fakes = stand_in_findings(findings)
+        fakes = findings_in_tests(findings)                     # §17.1859 — every test-file finding, not stand-ins only
         if not findings or fakes != findings:
             break
         paths = {_finding_path(f) for f in fakes}

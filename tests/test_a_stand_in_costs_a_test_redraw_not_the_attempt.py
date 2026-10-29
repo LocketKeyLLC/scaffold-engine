@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from app.modules.engine_contracts import (internal_fakes, reads_tables, redraw_faked_tests, replace_file_block,
-                                          stand_in_findings, writers_for)
+                                          stand_in_findings, findings_in_tests, writers_for)
 
 STORE = '''from sqlalchemy import text
 
@@ -157,7 +157,7 @@ async def test_a_stand_in_costs_a_redraw_and_the_loop_stops_when_clean_or_on_ano
     out, left = await redraw_faked_tests(OUT, fakes, ask=still, check=lambda o: _aret(fakes), tries=2)
     assert left == fakes and len(asked) == 2
     # a redraw that brings a finding of another kind stops the loop with that finding
-    other = ["`tests/test_paper_daily_signal_proposal_batch.py:9` binds a dict to `:payload`"]
+    other = ["`app/modules/paper_daily_signal_proposal_batch.py:9` binds a dict to `:payload`"]   # §17.1859: module-side
     asked.clear()
     out, left = await redraw_faked_tests(OUT, fakes, ask=ask, check=lambda o: _aret(other), tries=2)
     assert left == other and len(asked) == 1 and REAL in out
@@ -214,6 +214,69 @@ async def test_the_second_redraw_is_shown_the_first_redraws_file_not_the_attempt
     src = inspect.getsource(execution_agent)
     ask_src = src.split("async def _ask_tests(_path: str, _refusal: str, _current: str)", 1)[1].split("async def _check_tests", 1)[0]
     assert '{"role": "assistant", "content": _current}' in ask_src and '"content": output' not in ask_src
+
+
+# §17.1859 — every test-file finding costs a redraw. Live (5b4880c0 T5, kimi round, 2026-10-29): attempt 2's seven
+# findings were five stand-ins and two patches of names the modules lack, the module clean; attempt 3's one finding
+# was a test running the order executor into the broker's secrets. Each spent the attempt.
+LIVE_MIXED = [
+    "`tests/test_paper_twelve_modules.py:534` replaces `load_batch_signals` (`paper_daily_signal_proposal_batch_data`, a "
+    "finished module that never leaves the engine) with a stand-in: call the real one",
+    "`tests/test_paper_twelve_modules.py:627` patches `execute_order` on `paper_operator_approval_gate`, which has no "
+    "such name (it has logger, APPROVAL_MODULE, request_approval, handle_approval_answer; it imports logging)",
+    "`tests/test_paper_twelve_modules.py:572` runs `execute_order` (`paper_order_executor`) for real, and it reads the "
+    "operator secrets `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` through `values_for` (`paper_alpaca_paper_client`)",
+    "`tests/test_paper_twelve_modules.py:5` writes `signal` through `write_signal(…)` with a made-up id: "
+    "`signal.ingested_item_id`=1 references `ingested_item.id`",
+    "`tests/test_paper_twelve_modules.py:4` deletes from `ingested_item`, an append-only table: with rows in it the "
+    "DELETE fails",
+    "`tests/test_paper_twelve_modules.py:9` binds a dict to `:payload` through `text()`: asyncpg takes JSON only as text",
+    "`tests/test_paper_twelve_modules.py:12` reads `prices` from what `get_spy_benchmark` (`paper_spy_benchmark_tracker`) "
+    "returns, and it returns dicts with keys `end_date` -- never `prices`",
+]
+MODULE_KIND = [
+    "`handle_approval_answer(…)`: `answer` is `dict`; it was given a `str` -- the signature is `async "
+    "handle_approval_answer(job_id, node_key, answer, payload)` (`paper_operator_approval_gate`, step f00ea97f:T16)",
+    "`app/modules/paper_execution_entry_point.py:208` reads `operator_id` from what `request_approval` returns",
+    "`SELECT … ticker … FROM fill`: `fill` has no column `ticker`",
+]
+
+
+def test_every_kind_of_test_file_finding_is_one_and_a_module_finding_is_not():
+    assert findings_in_tests(LIVE_MIXED) == LIVE_MIXED
+    assert findings_in_tests(MODULE_KIND) == []
+    assert findings_in_tests(LIVE_MIXED + MODULE_KIND) == LIVE_MIXED
+    assert stand_in_findings(LIVE_MIXED) == LIVE_MIXED[:1]                        # §17.1852's narrower set stands
+
+
+@pytest.mark.asyncio
+async def test_a_mix_of_test_file_findings_costs_a_redraw_and_a_module_finding_still_stops_it():
+    asked: list[str] = []
+
+    async def ask(path, refusal, current):
+        asked.append(refusal)
+        return f"```python\n{REAL}```"
+
+    async def clean(output):
+        return [] if REAL in output else LIVE_MIXED
+
+    out, left = await redraw_faked_tests(OUT, LIVE_MIXED, ask=ask, check=clean)
+    assert left == [] and REAL in out and len(asked) == 1
+    assert asked[0] == "\n".join(f"  - {f}" for f in LIVE_MIXED)
+    # one finding, not a stand-in (live attempt 3): still a redraw, not the attempt
+    out, left = await redraw_faked_tests(OUT, LIVE_MIXED[2:3], ask=ask, check=clean)
+    assert left == [] and len(asked) == 2
+    # a module-kind finding among them: the ordinary refusal, nothing asked
+    asked.clear()
+    out, left = await redraw_faked_tests(OUT, LIVE_MIXED + MODULE_KIND[:1], ask=ask, check=clean)
+    assert (out, left) == (OUT, LIVE_MIXED + MODULE_KIND[:1]) and asked == []
+    # and the executor gates on the wide set
+    import inspect
+
+    from app.modules import execution_agent
+    src = inspect.getsource(execution_agent)
+    assert "if _refs and _ec.findings_in_tests(_refs) == _refs:" in src
+    assert "_ec.stand_in_findings(_refs) == _refs" not in src
 
 
 async def _aret(v):
