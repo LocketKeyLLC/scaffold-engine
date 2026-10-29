@@ -798,6 +798,40 @@ def test_a_required_test_file_left_out_is_named():
     assert es.missing_test_file(MODULE_ONLY + "\n\n" + other, ENTRY_STEP) == "tests/test_paper_entry_execution.py"
 
 
+# ── §17.1860 a required test path is exact (live 5b4880c0 T5, the kimi round: `tests/test_test_paper_twelve_modules.py`)
+
+def test_a_near_miss_of_the_required_test_path_is_not_it_and_is_named():
+    from app.modules.engine_contracts import drop_file_block
+    doubled = TESTS_ONLY.replace("# tests/test_paper_entry_execution.py", "# tests/test_test_paper_entry_execution.py")
+    out = MODULE_ONLY + "\n\n" + doubled
+    assert es.missing_test_file(out, ENTRY_STEP) == "tests/test_paper_entry_execution.py"      # was accepted before
+    assert es.misnamed_test_file(out, ENTRY_STEP) == "tests/test_test_paper_entry_execution.py"
+    short = TESTS_ONLY.replace("# tests/test_paper_entry_execution.py", "# tests/test_paper_entry.py")
+    assert es.misnamed_test_file(MODULE_ONLY + "\n\n" + short, ENTRY_STEP) == "tests/test_paper_entry.py"
+    bare = TESTS_ONLY.replace("# tests/test_paper_entry_execution.py", "# test_paper_entry_execution.py")
+    assert es.missing_test_file(MODULE_ONLY + "\n\n" + bare, ENTRY_STEP) is None               # the bare file name
+    assert es.misnamed_test_file(MODULE_ONLY + "\n\n" + TESTS_ONLY, ENTRY_STEP) is None         # exact: nothing
+    other = TESTS_ONLY.replace("test_paper_entry_execution.py", "test_other.py")
+    assert es.misnamed_test_file(MODULE_ONLY + "\n\n" + other, ENTRY_STEP) is None             # not a near miss
+    assert es.misnamed_test_file(MODULE_ONLY, "Python module `paper_x.py`.") is None
+    assert es.misnamed_required_tests(out, ENTRY_STEP) == [
+        "This step requires its tests at `tests/test_paper_entry_execution.py` -- that exact path -- and the output "
+        "wrote `tests/test_test_paper_entry_execution.py` instead: the block's first line is "
+        "`# tests/test_paper_entry_execution.py`"]
+    assert es.misnamed_required_tests(MODULE_ONLY + "\n\n" + TESTS_ONLY, ENTRY_STEP) == []
+    # the misnamed block is dropped once the required one is in hand; the module stays
+    dropped = drop_file_block(out, "tests/test_test_paper_entry_execution.py")
+    assert MODULE_ONLY in dropped and "test_test_" not in dropped
+    assert drop_file_block(out, "tests/nope.py") == out
+    # the wiring: the names gate refuses it, and the §17.1801 ask names both paths and drops the near miss
+    import inspect
+
+    from app.modules import execution_agent
+    assert "misnamed_required_tests(output" in inspect.getsource(es.engine_findings)
+    src = inspect.getsource(execution_agent)
+    assert "_mis = _es_t.misnamed_test_file(output" in src and "output = drop_file_block(output, _mis)" in src
+
+
 @pytest.mark.asyncio
 async def test_the_executor_asks_for_the_missing_tests_and_checks_the_whole():
     from tests.test_codegen_for_the_engine_reads_the_engine import LIVE_BRIEF, _run
