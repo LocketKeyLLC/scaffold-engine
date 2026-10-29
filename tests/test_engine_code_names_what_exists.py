@@ -706,7 +706,7 @@ def test_the_block_indexes_the_jobs_modules_with_signatures():
     defs = es.sibling_definitions([T4_ROW, T10_STREAM])
     b = es.block_for(T6_ROW, set(), modules=defs)
     assert "### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only " \
-           "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a literal of another kind is refused)" in b
+           "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a literal of another kind is refused; `[secrets: A, B]` means the function reads those operator secrets through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`)" in b
     assert "    alpaca_stream: async start_stream(callback)" in b
     assert "    paper_audit_trail_writer: async write_signal(**kwargs)" in b
     assert b.index("This job's modules") < b.index("### Conventions")

@@ -661,6 +661,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     rewrite of `paper_audit_trail_writer.py`; its `write_approval` was credited to T6D's data module, the check told T6
     the data module "has write_approval", and T6's import of it failed in the sandbox twice."""
     out: dict[str, dict] = {}
+    codes: dict[str, str] = {}                  # §17.1863 -- each module's source, for the secrets its functions read
     for r in rows:
         first = step_module(r)
         acc: dict[str, dict] = {}
@@ -677,6 +678,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
             mod = head.group(2) if head else first
             if not mod:
                 continue
+            codes[mod] = code
             a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}})
             names, defined, funcs, classes = a["names"], a["defined"], a["funcs"], a["classes"]
             _consts, _local = module_values(tree), _local_functions(tree)       # §17.1855
@@ -708,6 +710,27 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
         for mod, a in acc.items():
             out[mod] = {"node": r.get("node_key"), **a,
                         "ctors": {k: v["init"] for k, v in a["classes"].items() if v.get("init")}}     # §17.1803
+    # §17.1863 — the operator secrets each public function (and class) reads through `values_for`, itself or through
+    # the job functions it calls, by the secret's own name: shown next to its signature, so a test's `values_for`
+    # stand-in returns each by that name. Live (5b4880c0 T5): the 13F ingester names its secret only through a
+    # constant, `SEC_USER_AGENT_SECRET = "SEC_CONTACT_EMAIL"`; the test returned `{"SEC_USER_AGENT": …}`.
+    from app.modules.engine_contracts import secrets_read
+    for mod, a in out.items():
+        sec: dict[str, list[str]] = {}
+        for f in a["funcs"]:
+            if not f.startswith("_"):
+                names = sorted(k for k in secrets_read(codes, mod, f) if k)
+                if names:
+                    sec[f] = names
+        for c, shape in a["classes"].items():
+            if not c.startswith("_"):
+                names = {k for k in secrets_read(codes, mod, c) if k}
+                for m in shape.get("methods") or {}:
+                    names |= {k for k in secrets_read(codes, mod, f"{c}.{m}") if k}
+                if names:
+                    sec[c] = sorted(names)
+        if sec:
+            a["secrets"] = sec
     return out
 
 
@@ -967,11 +990,15 @@ def _public_api(code: str, limit: int = 600) -> str:
     fns: list[str] = []
     callers: list[str] = []         # classes with public methods: the client a step calls
     bare: list[str] = []            # exceptions, records -- named last, so a long list cuts these first
-    from app.modules.engine_contracts import return_note
+    from app.modules.engine_contracts import return_note, secrets_read
+
+    def _sec(name: str) -> str:                   # §17.1863 -- the secrets it reads within this module
+        names = sorted(k for k in secrets_read({"_": code}, "_", name) if k)
+        return f" [secrets: {', '.join(names)}]" if names else ""
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
             note = return_note(code, n.name)                            # §17.1834, §17.1837
-            fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else ""))
+            fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else "") + _sec(n.name))
         elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
             meths = [m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and not m.name.startswith("_")]
@@ -1429,6 +1456,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += unknown_patch_targets(files_of({**me, "output_text": output}), _cur, _own)
     # §17.1857 — a test mocks the secret a module reads; §17.1858 — and never writes a child row with a made-up id
     found += runs_secrets_for_real(files_of({**me, "output_text": output}), _cur, _own)
+    # §17.1863 — and a `values_for` stand-in returns each secret by its own name
+    from app.modules.engine_contracts import wrong_secret_mocks
+    found += wrong_secret_mocks(files_of({**me, "output_text": output}), _cur, _own)
     found += made_up_parent_ids(files_of({**me, "output_text": output}), _cur, _fks)
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
@@ -1755,8 +1785,11 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             continue
         if mod in lead:
             n_lead = len(lines) + 1
-        rk = defs[mod].get("returns") or {}
-        sigs = [_shape_signature(f, sh) + (f" -> {rk[f]}" if rk.get(f) else "")       # §17.1834, §17.1837
+        rk, sk = defs[mod].get("returns") or {}, defs[mod].get("secrets") or {}
+
+        def _sec(name: str) -> str:              # §17.1863 -- `[secrets: SEC_CONTACT_EMAIL]`
+            return f" [secrets: {', '.join(sk[name])}]" if sk.get(name) else ""
+        sigs = [_shape_signature(f, sh) + (f" -> {rk[f]}" if rk.get(f) else "") + _sec(f)   # §17.1834, §17.1837
                 for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
         for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
             if cname.startswith("_") or cname.endswith(("Error", "Exception")):
@@ -1765,9 +1798,9 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             if c.get("props"):
                 inner += ("; " if inner else "") + "read-only: " + ", ".join(c["props"])
             if c["init"]:
-                sigs.append(f"class {_shape_signature(cname, c['init'])}" + (f" {{{inner}}}" if inner else ""))
+                sigs.append(f"class {_shape_signature(cname, c['init'])}" + (f" {{{inner}}}" if inner else "") + _sec(cname))
             elif c["methods"] or c.get("props"):
-                sigs.append(f"class {cname}() {{{inner}}}")
+                sigs.append(f"class {cname}() {{{inner}}}" + _sec(cname))
             elif c["fields"]:
                 sigs.append(f"class {cname} {{fields: {', '.join(c['fields'])}}}")
         if sigs:
@@ -1776,7 +1809,8 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
         return ""
     head = ("### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only "
             "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a "
-            "literal of another kind is refused)\n")
+            "literal of another kind is refused; `[secrets: A, B]` means the function reads those operator secrets "
+            "through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`)\n")
     # §17.1862 — the modules the step runs through are never cut: the budget bounds the rest. Live (5b4880c0 T5):
     # the signatures grew their kinds and the cut at 6000 fell after 13 of 21 -- the step's own targets among the lost.
     n_lead = min(n_lead, len(lines))
