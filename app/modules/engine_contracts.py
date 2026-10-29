@@ -535,6 +535,292 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
     return found
 
 
+# ── §17.1857 a test mocks the secret a module reads ──────────────────────────────────────────────────────────
+
+def _test_calls(code: str) -> list[tuple[str, str, int]]:
+    """(module, function, line) of each call in a test file to a name imported from a job module -- `from
+    app.modules.m import f` then `f(…)`, or `from app.modules import m` / `import app.modules.m as m` then `m.f(…)`."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    names: dict[str, tuple[str, str]] = {}
+    mods: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("app.modules."):
+            names.update({a.asname or a.name: (n.module.rsplit(".", 1)[1], a.name) for a in n.names})
+        elif isinstance(n, ast.ImportFrom) and n.module == "app.modules":
+            mods.update({a.asname or a.name: a.name for a in n.names})
+        elif isinstance(n, ast.Import):
+            mods.update({a.asname or a.name: a.name.rsplit(".", 1)[1] for a in n.names
+                         if a.name.startswith("app.modules.") and a.name.count(".") == 2})
+    out: list[tuple[str, str, int]] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if isinstance(f, ast.Name) and f.id in names:
+            out.append((*names[f.id], n.lineno))
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in mods:
+            out.append((mods[f.value.id], f.attr, n.lineno))
+    return out
+
+
+def _str_consts(tree: ast.Module) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for n in tree.body:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        v = getattr(n, "value", None)
+        if targets and isinstance(v, ast.Constant) and isinstance(v.value, str):
+            out.update({t.id: v.value for t in targets if isinstance(t, ast.Name)})
+    return out
+
+
+_SECRET_HOPS = 12
+
+
+def secrets_read(modules: dict[str, str], mod: str, name: str, depth: int = 0,
+                 _seen: set[tuple[str, str]] | None = None, patched: frozenset[tuple[str, str]] = frozenset()) -> dict[str, str]:
+    """§17.1857 — the operator secrets `mod.name` reads through `values_for`, itself or through the job functions it
+    calls: secret name -> the module that reads it ("" for a name the code computes). `name` is a function, a class
+    (its constructor) or `Class.method`; a (module, name) in `patched` is a stand-in the test put there, so the chain
+    stops at it. Live (5b4880c0 T5, 2026-10-28): `ingest_form_4_filings` reads `SEC_CONTACT_EMAIL`;
+    `AlpacaPaperClient.from_secrets` reads `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`."""
+    seen = _seen if _seen is not None else set()
+    # deeper than the table walker: live (T8), view -> tracker -> `_fetch_spy_prices` -> `client.get_bars` ->
+    # `_request` -> `_ensure_credentials` -> `_get_credentials` -> `values_for` is eight hops; `seen` stops cycles
+    if depth > _SECRET_HOPS or (mod, name) in seen or mod not in modules or (mod, name.split(".")[0]) in patched:
+        return {}
+    seen.add((mod, name))
+    d = _defs(modules[mod])
+    if not d:
+        return {}
+    funcs, imports = d
+    try:
+        tree = ast.parse(modules[mod])
+    except SyntaxError:
+        return {}
+    cls_name, _dot, meth = name.partition(".")
+    cls = next((c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls_name), None)
+    node = funcs.get(name) if not meth else None
+    if node is None and cls is not None:
+        node = next((m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and m.name == (meth or "__init__")), None)
+        if node is None:
+            return {}
+    if node is None:
+        if cls_name not in imports:
+            return {}
+        m2, n2 = imports[cls_name]
+        return secrets_read(modules, m2, n2 + (f".{meth}" if meth else ""), depth, seen, patched)   # an import: no hop
+    consts = _str_consts(tree)
+    classes = {c.name for c in tree.body if isinstance(c, ast.ClassDef)}
+    out: dict[str, str] = {}
+    nodes = list(_own_nodes(node))
+    # the lists bound in the body first: `_own_nodes` walks a stack, so a later statement comes before an earlier one
+    local_lists: dict[str, list] = {n.targets[0].id: n.value.elts for n in nodes
+                                    if isinstance(n, ast.Assign) and len(n.targets) == 1
+                                    and isinstance(n.targets[0], ast.Name) and isinstance(n.value, (ast.List, ast.Tuple))}
+
+    def _class_of(v: ast.AST) -> str | None:
+        """`Class(…)` / `await Class.m(…)` -> Class, when it is a job class (imported or of this module)."""
+        v = _unwrap(v)
+        f = v.func if isinstance(v, ast.Call) else None
+        c = f.id if isinstance(f, ast.Name) else f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
+        return c if c and (c in imports or c in classes) else None
+    # the instances bound in the body: `client = AlpacaPaperClient(…)`, then `client.get_bars(…)` (live, T8's view
+    # through the SPY tracker: `_request` -> `_ensure_credentials` -> `_get_credentials` -> `values_for`)
+    bound: dict[str, str] = {n.targets[0].id: c for n in nodes
+                             if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                             and (c := _class_of(n.value))}
+    for n in nodes:
+        if not isinstance(n, ast.Call):
+            continue
+        callee = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else ""
+        if isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id in bound:
+            for k, v in secrets_read(modules, mod, f"{bound[n.func.value.id]}.{callee}", depth + 1, seen, patched).items():
+                out.setdefault(k, v)                                                   # `instance.method(…)`
+            continue
+        if meth and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id == "self":
+            for k, v in secrets_read(modules, mod, f"{cls_name}.{callee}", depth + 1, seen, patched).items():
+                out.setdefault(k, v)                                                   # `self.method(…)`
+            continue
+        if callee == "values_for":
+            wanted = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "wanted"), None)
+            elts = wanted.elts if isinstance(wanted, (ast.List, ast.Tuple)) else \
+                local_lists.get(wanted.id, []) if isinstance(wanted, ast.Name) else []
+            for e in elts:
+                if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                    out.setdefault(e.value, mod)
+                elif isinstance(e, ast.Name) and e.id in consts:
+                    out.setdefault(consts[e.id], mod)
+                else:
+                    out.setdefault("", mod)
+            if not elts:
+                out.setdefault("", mod)
+        elif isinstance(n.func, ast.Name) and callee != name and (callee in funcs or callee in imports
+                                                                   or any(isinstance(c, ast.ClassDef) and c.name == callee
+                                                                          for c in tree.body)):
+            for k, v in secrets_read(modules, mod, callee, depth + 1, seen, patched).items():
+                out.setdefault(k, v)
+        elif isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) \
+                and n.func.value.id != cls_name and (n.func.value.id in imports or any(
+                    isinstance(c, ast.ClassDef) and c.name == n.func.value.id for c in tree.body)):
+            for k, v in secrets_read(modules, mod, f"{n.func.value.id}.{callee}", depth + 1, seen, patched).items():
+                out.setdefault(k, v)                                                   # `Class.method(…)`
+    return out
+
+
+def _scopes(tree: ast.Module) -> list[tuple[int, int, str]]:
+    """(first line incl. decorators, last line, name) of every function in a test file."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = min([n.lineno] + [d.lineno for d in n.decorator_list])
+            out.append((first, n.end_lineno or n.lineno, n.name))
+    return out
+
+
+def _scope_of(scopes: list[tuple[int, int, str]], line: int) -> str:
+    """The innermost function a line is in ("" at module level)."""
+    inner = [s for s in scopes if s[0] <= line <= s[1]]
+    return min(inner, key=lambda s: s[1] - s[0])[2] if inner else ""
+
+
+def _expects_a_raise(tree: ast.Module) -> list[tuple[int, int]]:
+    """The line ranges of `with pytest.raises(…)` blocks: a call there is meant to fail before it does its work."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.With, ast.AsyncWith)) and any(
+                isinstance(i.context_expr, ast.Call) and (getattr(i.context_expr.func, "attr", None) or
+                                                          getattr(i.context_expr.func, "id", None)) == "raises"
+                for i in n.items):
+            out.append((n.lineno, n.end_lineno or n.lineno))
+    return out
+
+
+def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.1857 — each test that runs a job function (or builds a job class) that reads an operator secret, in a
+    test file that patches `values_for` nowhere. Live (5b4880c0 T5, 2026-10-28, two rounds): the EDGAR ingester ran
+    for real and the sandbox refused -- "Missing operator secret SEC_CONTACT_EMAIL; refusing to run" -- and T8's
+    operator view built the broker client for real -- "Missing Alpaca paper trading secrets"; the §17.1839 block
+    names `values_for` as a mock point, and neither test used it."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        scopes, raises = _scopes(tree), _expects_a_raise(tree)
+        # a patch counts for the test function it is in (its decorators too); one outside any test -- a fixture, a
+        # helper, module level -- for the whole file. Live (5b4880c0 T8): other tests patched the SPY tracker, the
+        # one at line 457 ran it for real; a file-wide set would have hidden it
+        by_scope: dict[str, set[tuple[str, str]]] = {}
+        for m, name, ln in _patch_targets(code):
+            sc = _scope_of(scopes, ln)
+            by_scope.setdefault(sc if sc.startswith("test") else "", set()).add((m, name))
+        seen: set[tuple[str, str]] = set()
+        for mod, fname, line in _test_calls(code):
+            if mod not in reach or (mod, fname) in seen or any(a <= line <= b for a, b in raises):
+                continue
+            patched = frozenset(by_scope.get("", set()) | by_scope.get(_scope_of(scopes, line), set()))
+            # `values_for` patched on the module that reads it, or on `runner_secrets` itself (every reader) -- live
+            # (5b4880c0 T5, attempt 4): patched on the 13F and Reddit ingesters, not on the EDGAR one it also ran
+            covered = {m for m, name in patched if name == "values_for"}
+            secrets = secrets_read(reach, mod, fname, patched=patched)
+            readers = sorted(set(secrets.values()) - covered) if "runner_secrets" not in covered else []
+            if not readers:
+                continue
+            seen.add((mod, fname))
+            named = sorted(s for s, r in secrets.items() if s and r in readers)
+            found.append(
+                f"`{path}:{line}` runs `{fname}` (`{mod}`) for real, and it reads the operator secret"
+                + (f"{'s' if len(named) > 1 else ''} {', '.join(f'`{s}`' for s in named)}" if named else "s it needs")
+                + f" through `values_for` ({', '.join(f'`{r}`' for r in readers)}) -- the sandbox has no secrets, "
+                "so the code refuses to run (§17.1776). Patch "
+                + ", ".join(f"`app.modules.{r}.values_for`" for r in readers)
+                + " (where the module looks it up) to return a test value for each name"
+                + (f" ({', '.join(f'`{s}`' for s in named)})" if named else "")
+                + "; mock the network it then reaches as well")
+    return found
+
+
+# ── §17.1858 a made-up parent id is refused before the sandbox ──────────────────────────────────────────────
+
+def _writes_table(fn: ast.AST) -> str | None:
+    """The table a function's first INSERT targets."""
+    for call in (n for n in _own_nodes(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "execute"):
+        parts = _insert_parts(_sql_of(call, fn) or "")
+        if parts:
+            return parts[0].lower()
+    return None
+
+
+def made_up_parent_ids(files: dict[str, str], modules: dict[str, str],
+                       fks: dict[str, dict[str, str]] | None) -> list[str]:
+    """§17.1858 — each test that writes a child row with a literal number for a foreign key: through a finished
+    writer (`write_order(approval_id=1, …)`) or its own `INSERT INTO signal (ingested_item_id, …) VALUES (1, …)`.
+    Live (5b4880c0 T6 and T5, 2026-10-28, three sandbox runs): the scratch database refused each -- "Key
+    (approval_id)=(1) is not present in table approval" -- after the clause had said "never a made-up one"."""
+    if not fks:
+        return []
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+
+    def say(path: str, line: int, table: str, col: str, val, how: str) -> None:
+        parent = fks[table][col]
+        order, _edges = seed_order(fks, {table})
+        steps = _seed_steps(modules, [t for t in order if t != table])
+        found.append(
+            f"`{path}:{line}` writes `{table}` {how} with a made-up id: `{table}.{col}`={val!r} references `{parent}`, "
+            "and the scratch database refuses it (no such row) -- insert the parent rows first, in this order: "
+            + "; ".join(steps) + " -- and pass the id each writer returned")
+
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        calls = {(m, f, ln) for m, f, ln in _test_calls(code)}
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            hit = next(((m, f) for (m, f, ln) in calls if ln == n.lineno), None)
+            if not hit or hit[0] not in reach:
+                continue
+            d = _defs(reach[hit[0]])
+            fn = d[0].get(hit[1]) if d else None
+            table = _writes_table(fn) if fn is not None else None
+            if not table or table not in fks:
+                continue
+            pos = [x.arg for x in fn.args.posonlyargs + fn.args.args]          # type: ignore[attr-defined]
+            given = [(pos[i], a) for i, a in enumerate(n.args) if i < len(pos)] + [(k.arg, k.value) for k in n.keywords if k.arg]
+            for param, val in given:
+                if param in fks[table] and isinstance(val, ast.Constant) and isinstance(val.value, int) \
+                        and not isinstance(val.value, bool):
+                    say(path, n.lineno, table, param, val.value, f"through `{hit[1]}(…)`")
+                    break
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and _is_query(n.value):
+                parts = _insert_parts(n.value)
+                if not parts or parts[0].lower() not in fks:
+                    continue
+                table, cols, vals = parts[0].lower(), [c.lower() for c in parts[1]], parts[2]
+                for c, v in zip(cols, vals, strict=False):
+                    if c in fks[table] and re.fullmatch(r"\d+", v):
+                        say(path, n.lineno, table, c, int(v), "with its own INSERT")
+                        break
+    return found
+
+
 # ── §17.1839 what a test may mock: the exact names through which the job's modules leave the engine ────────────
 
 _KIND = (("app.model_router", "a model call"), ("openai", "a model call"), ("anthropic", "a model call"),
@@ -1547,14 +1833,20 @@ def rows_clause(modules: dict[str, str], reads: set[str], fks: dict[str, dict[st
     if not edges:
         writers = writers_for(modules, reads)
         return head + ": insert those rows first" + (f", with {', '.join(writers[:3])}" if writers else "")
+    return (head + f"; the scratch database enforces {', '.join(edges)}, so insert in this order: "
+            + "; ".join(_seed_steps(modules, order))
+            + " -- each child row takes the id its parent's writer returned, never a made-up one")
+
+
+def _seed_steps(modules: dict[str, str], order: list[str]) -> list[str]:
+    """Each table with its finished writer, or an INSERT where no writer stays inside the engine."""
     steps = []
     for t in order:
         w = writers_for(modules, {t})
         steps.append(f"`{t}` with {' or '.join(w[:2])}" if w else
                      f"`{t}` by an INSERT through `async_session` + `text` (no finished writer stays inside the "
                      "engine; its columns are in this job's tables above)")
-    return (head + f"; the scratch database enforces {', '.join(edges)}, so insert in this order: " + "; ".join(steps)
-            + " -- each child row takes the id its parent's writer returned, never a made-up one")
+    return steps
 
 
 def stand_in_findings(findings: list[str]) -> list[str]:
