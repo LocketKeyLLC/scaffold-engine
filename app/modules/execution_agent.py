@@ -1424,6 +1424,52 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
         )
         return f"Knowledge base search failed: {e}"
 
+async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
+                                   exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
+                                   node_key: str) -> str:
+    """§17.1801 — code for the engine that left out its required test file is asked for that file alone, once, with
+    the module in hand. §17.1860 — a near miss of the required path is not it: the ask names both, and the misnamed
+    block goes once the required one is in hand (live: `tests/test_test_paper_twelve_modules.py`). Returns the output
+    with the file appended, or unchanged when nothing was owed or the draw failed."""
+    try:
+        from app.modules import engine_source as _es_t
+        _step = str(node_snapshot.get("prompt_template") or "")
+        _need = (_es_t.missing_test_file(output, _step)
+                 if _es_t.targets_the_engine(brief if isinstance(brief, dict) else {}) else None)
+        if not _need:
+            return output
+        _mis = _es_t.misnamed_test_file(output, _step)
+        _tresp = await asyncio.wait_for(chat_until_nonempty(
+            model_router.chat,
+            [{"role": "system", "content": _system_for_tool(tool)},
+             {"role": "user", "content": exec_prompt},
+             {"role": "assistant", "content": output},
+             {"role": "user", "content": (
+                 (f"Your answer wrote `{_mis}`; this step requires `{_need}` -- that exact path. "
+                  if _mis else f"Your answer left out `{_need}`, which this step requires. ")
+                 + f"Write only that file now: one ```python block whose first line is `# {_need}` -- pytest "
+                 "tests of the module above (its rules, its edge cases, its failure paths), using only names "
+                 "the module and this job's modules define.")}],
+            {"role": exec_role, "overrides": exec_overrides},
+            temperature=0.4, max_tokens=gen_budget, draws=settings.node_generation_max_draws,
+            label=f"node-tests {node_key}", think_off_rescue=True),
+            timeout=settings.node_timeout_seconds)
+        _tests = (_tresp.text or "").strip() if getattr(_tresp, "success", False) else ""
+        if _tests and _es_t.missing_test_file(_tests, _need) is None:
+            if _mis:
+                from app.modules.engine_contracts import drop_file_block
+                output = drop_file_block(output, _mis)
+                logger.info("engine_test_path_refused job=%s node=%s wrote=%s required=%s", job_id, node_key,
+                            _mis, _need)
+            output = output.rstrip() + "\n\n" + _tests
+            logger.info("engine_tests_completed job=%s node=%s file=%s", job_id, node_key, _need)
+        else:
+            logger.warning("engine_tests_not_completed job=%s node=%s file=%s", job_id, node_key, _need)
+    except Exception as exc:
+        logger.warning("engine_tests_completion_failed node=%s err=%r", node_key, exc)
+    return output
+
+
 # ---------------------------------------------------------------------------
 
 async def execute_next_node(
@@ -2493,44 +2539,13 @@ async def execute_next_node(
         logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
 
     # §17.1801 — code for the engine that left out its required test file is asked for that file alone, once, with
-    # the module in hand -- before any gate spends a check or the attempt is lost on the omission
+    # the module in hand -- before any gate spends a check or the attempt is lost on the omission (§17.1860 moved the
+    # draw into `_complete_required_tests`: its one more branch put `execute_next_node` past pyright's limit)
     if (tool or "").lower() == "codegen" and output:
-        try:
-            from app.modules import engine_source as _es_t
-            _need = (_es_t.missing_test_file(output, str(node_snapshot.get("prompt_template") or ""))
-                     if _es_t.targets_the_engine(brief if isinstance(brief, dict) else {}) else None)
-            if _need:
-                # §17.1860 — a near miss of the required path is not it: the ask names both, and the misnamed block
-                # goes once the required one is in hand (live: `tests/test_test_paper_twelve_modules.py`)
-                _mis = _es_t.misnamed_test_file(output, str(node_snapshot.get("prompt_template") or ""))
-                _tresp = await asyncio.wait_for(chat_until_nonempty(
-                    model_router.chat,
-                    [{"role": "system", "content": _system_for_tool(tool)},
-                     {"role": "user", "content": exec_prompt},
-                     {"role": "assistant", "content": output},
-                     {"role": "user", "content": (
-                         (f"Your answer wrote `{_mis}`; this step requires `{_need}` -- that exact path. "
-                          if _mis else f"Your answer left out `{_need}`, which this step requires. ")
-                         + f"Write only that file now: one ```python block whose first line is `# {_need}` -- pytest "
-                         "tests of the module above (its rules, its edge cases, its failure paths), using only names "
-                         "the module and this job's modules define.")}],
-                    {"role": exec_role, "overrides": exec_overrides},
-                    temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
-                    label=f"node-tests {node_key}", think_off_rescue=True),
-                    timeout=settings.node_timeout_seconds)
-                _tests = (_tresp.text or "").strip() if getattr(_tresp, "success", False) else ""
-                if _tests and _es_t.missing_test_file(_tests, _need) is None:
-                    if _mis:
-                        from app.modules.engine_contracts import drop_file_block
-                        output = drop_file_block(output, _mis)
-                        logger.info("engine_test_path_refused job=%s node=%s wrote=%s required=%s", job_id, node_key,
-                                    _mis, _need)
-                    output = output.rstrip() + "\n\n" + _tests
-                    logger.info("engine_tests_completed job=%s node=%s file=%s", job_id, node_key, _need)
-                else:
-                    logger.warning("engine_tests_not_completed job=%s node=%s file=%s", job_id, node_key, _need)
-        except Exception as exc:
-            logger.warning("engine_tests_completion_failed node=%s err=%r", node_key, exc)
+        output = await _complete_required_tests(
+            output, tool=tool, node_snapshot=node_snapshot, brief=brief, exec_prompt=exec_prompt,
+            exec_role=exec_role, exec_overrides=exec_overrides, gen_budget=_gen_budget,
+            job_id=job_id, node_key=node_key)
 
     verify_status: Literal["pass", "fail", "skipped"]
     # §17.1235 — a step that says, in its own words, that it cannot be carried
