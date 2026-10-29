@@ -2148,7 +2148,8 @@ async def execute_next_node(
                             " ".join(str(node_snapshot.get(k) or "") for k in ("title", "prompt_template")),
                             {_es.step_module(node_snapshot)} - {""},
                             {m: c for m, (_p, c, _k) in _es.current_sources(_done).items()},
-                            set(node_snapshot.get("prior_imports") or [])),
+                            set(node_snapshot.get("prior_imports") or []),
+                            tested=_es.tested_modules(_done)),                  # §17.1862
                         fks=_esch.foreign_keys_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1789
                         rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1794
             except Exception as exc:

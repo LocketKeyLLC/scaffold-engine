@@ -1610,15 +1610,22 @@ def unreturned_reads(files: dict[str, str], modules: dict[str, str]) -> list[str
 
 # ── §17.1851 a step reads what the finished functions it runs through say they do ─────────────────────────────
 
-def step_targets(step_text: str, own: set[str], modules: dict[str, str], ran: set[str] = frozenset()) -> set[str]:
+def step_targets(step_text: str, own: set[str], modules: dict[str, str], ran: set[str] = frozenset(),
+                 tested: set[str] | None = None) -> set[str]:
     """The finished modules a step runs through: the ones its text names, the ones its earlier attempts imported
     (`ran`, §17.1851 -- a retry clears the attempt's output, so the engine keeps what it imported), and the job
-    modules all of those import. Never the step's own."""
+    modules all of those import; a test step naming none of them, the modules without a test (`tested` known, §17.1862).
+    Never the step's own."""
     job = set(modules)
     direct = {m for m in job - own if re.search(rf"\b{re.escape(m)}\b", step_text)} | ((set(ran) & job) - own)
     targets = set(direct)
     for m in direct:
         targets |= _job_imports(modules[m], job) - own
+    # §17.1862 — a step that writes a test file and names no module of the job tests the ones that have none: they
+    # lead. Live (5b4880c0 T5 "tests for each of the twelve untested modules identified in T1"): the block led
+    # alphabetically and was cut at its budget after 18 of 21; the approval gate the step had to test was never shown.
+    if not direct and tested is not None and re.search(r"\btests/test_\w+\.py\b", step_text or ""):
+        targets |= job - own - set(tested)
     return targets
 
 

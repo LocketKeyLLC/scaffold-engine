@@ -236,7 +236,7 @@ LIVE_MIXED = [
 ]
 MODULE_KIND = [
     "`handle_approval_answer(…)`: `answer` is `dict`; it was given a `str` -- the signature is `async "
-    "handle_approval_answer(job_id, node_key, answer, payload)` (`paper_operator_approval_gate`, step f00ea97f:T16)",
+    "handle_approval_answer(job_id, node_key, answer: dict, payload)` (`paper_operator_approval_gate`, step f00ea97f:T16)",
     "`app/modules/paper_execution_entry_point.py:208` reads `operator_id` from what `request_approval` returns",
     "`SELECT … ticker … FROM fill`: `fill` has no column `ticker`",
 ]
@@ -295,7 +295,7 @@ def test_a_call_shape_finding_in_a_test_file_names_it_and_counts_as_a_test_file_
             'async def test_x():\n    await handle_approval_answer("j", "k", "yes", {})\n```')
     found = es.sibling_refs(test, defs)
     assert found == ["`tests/test_paper_twelve_modules.py:5` calls `handle_approval_answer(…)`: `answer` is `dict`; it "
-                     "was given a `str` -- the signature is `async handle_approval_answer(job_id, node_key, answer, "
+                     "was given a `str` -- the signature is `async handle_approval_answer(job_id, node_key, answer: dict, "
                      "payload)` (`paper_operator_approval_gate`, step T16)"]
     assert findings_in_tests(found) == found
     # the step's own module: named too, but not a test-file finding; a block with no path: as before
