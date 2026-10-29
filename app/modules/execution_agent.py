@@ -1208,6 +1208,34 @@ def _ec_module_imports(output: str) -> list[str]:
         return []
 
 
+def _ec_written_tests(output: str) -> dict[str, list[str]]:
+    from app.modules.engine_contracts import written_tests
+    try:
+        return written_tests(output)
+    except Exception:                                    # never let the log line fail the node
+        return {}
+
+
+async def prior_tests(db, job_id: str, node_id: str) -> dict[str, list[str]]:
+    """§17.1864 — the tests this step's earlier attempts wrote, by test file, over the same window as
+    `prior_refusals`: a retry clears the attempt's output, and the next attempt must keep every one of them. Live
+    (5b4880c0 T5, 2026-10-29): 23 tests, then 11, 6, 5 across four attempts, the passing ones dropped with the rest."""
+    rows = (await db.execute(text(
+        "SELECT l.details->>'tests' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'tests' IS NOT NULL "
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        try:
+            for path, names in (json.loads(r or "{}") or {}).items():
+                seen = out.setdefault(str(path), [])
+                seen.extend(str(n) for n in names if str(n) not in seen)
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
 async def prior_imports(db, job_id: str, node_id: str) -> list[str]:
     """§17.1851 — the job modules this step's earlier attempts imported, over the same window as `prior_refusals`
     (since the step itself last changed): a retry clears the attempt's output, so this is how the next attempt is
@@ -2026,6 +2054,10 @@ async def execute_next_node(
                 node_snapshot["prior_imports"] = await prior_imports(db, job_id, str(node_id))
             except Exception as exc:
                 logger.warning("prior_imports_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
+            try:                                                    # §17.1864
+                node_snapshot["prior_tests"] = await prior_tests(db, job_id, str(node_id))
+            except Exception as exc:
+                logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router
@@ -2945,7 +2977,9 @@ async def execute_next_node(
             {"model": exec_model, "confidence": confidence, "reason": reason,
              # §17.1851 — and the job modules the attempt imported: a retry clears its output, and the next attempt
              # is shown what those modules' functions say they do
-             "imports": _ec_module_imports(str(output or ""))},
+             "imports": _ec_module_imports(str(output or "")),
+             # §17.1864 — and the tests it wrote, by file: the next attempt keeps every one
+             "tests": _ec_written_tests(str(output or ""))},
         )
         if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes

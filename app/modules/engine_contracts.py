@@ -749,6 +749,53 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
     return found
 
 
+# ── §17.1864 a retry keeps every test ───────────────────────────────────────────────────────────
+
+_TEST_PATH_RE = re.compile(r"^\s*#\s*(tests/\S+\.py)\s*$")
+
+
+def written_tests(output: str) -> dict[str, list[str]]:
+    """The test functions each test file of an output defines, by path: module-level and in classes, in source
+    order. Recorded with a refused attempt (§17.1864), so the next attempt is held to them."""
+    from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
+    out: dict[str, list[str]] = {}
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS or not code.strip():
+            continue
+        m = _TEST_PATH_RE.match(code.lstrip().splitlines()[0])
+        if not m:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        names = [n.name for n in sorted((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                         and n.name.startswith("test")), key=lambda n: n.lineno)]
+        if names:
+            out.setdefault(m.group(1), []).extend(n for n in names if n not in out.get(m.group(1), []))
+    return out
+
+
+def dropped_tests(output: str, prior: dict[str, list[str]] | None) -> list[str]:
+    """§17.1864 — each test file of an output that lacks a test, by name, that this step's earlier attempts wrote.
+    Live (5b4880c0 T5, 2026-10-29, the §17.1863 round): the redraws kept every test (23, 23, 23; 11, 11; 6, 6; 5, 5)
+    and each RETRY dropped them -- 23 tests, then 11 (13 dropped), 6, 5 -- the ones the sandbox had passed among
+    them. A smaller file passes more easily and tests less. A test-file finding: a redraw, not the attempt."""
+    if not prior:
+        return []
+    have = written_tests(output)
+    found: list[str] = []
+    for path, names in sorted(prior.items()):
+        gone = [n for n in names if n not in set(have.get(path, []))]
+        if not gone:
+            continue
+        found.append(
+            f"`{path}` dropped {len(gone)} of the {len(names)} tests your earlier attempts wrote: "
+            + ", ".join(f"`{n}`" for n in gone)
+            + " -- keep every test by name; fix the ones the sandbox named, never drop them")
+    return found
+
+
 # ── §17.1863 a secret named by a constant is mocked by its name ─────────────────────────────────
 
 def _values_for_mocks(code: str) -> list[tuple[str, int, list[str] | None]]:
