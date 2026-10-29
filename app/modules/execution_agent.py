@@ -2500,22 +2500,31 @@ async def execute_next_node(
             _need = (_es_t.missing_test_file(output, str(node_snapshot.get("prompt_template") or ""))
                      if _es_t.targets_the_engine(brief if isinstance(brief, dict) else {}) else None)
             if _need:
+                # §17.1860 — a near miss of the required path is not it: the ask names both, and the misnamed block
+                # goes once the required one is in hand (live: `tests/test_test_paper_twelve_modules.py`)
+                _mis = _es_t.misnamed_test_file(output, str(node_snapshot.get("prompt_template") or ""))
                 _tresp = await asyncio.wait_for(chat_until_nonempty(
                     model_router.chat,
                     [{"role": "system", "content": _system_for_tool(tool)},
                      {"role": "user", "content": exec_prompt},
                      {"role": "assistant", "content": output},
                      {"role": "user", "content": (
-                         f"Your answer left out `{_need}`, which this step requires. Write only that file now: one "
-                         f"```python block whose first line is `# {_need}` -- pytest tests of the module above (its "
-                         "rules, its edge cases, its failure paths), using only names the module and this job's "
-                         "modules define.")}],
+                         (f"Your answer wrote `{_mis}`; this step requires `{_need}` -- that exact path. "
+                          if _mis else f"Your answer left out `{_need}`, which this step requires. ")
+                         + f"Write only that file now: one ```python block whose first line is `# {_need}` -- pytest "
+                         "tests of the module above (its rules, its edge cases, its failure paths), using only names "
+                         "the module and this job's modules define.")}],
                     {"role": exec_role, "overrides": exec_overrides},
                     temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
                     label=f"node-tests {node_key}", think_off_rescue=True),
                     timeout=settings.node_timeout_seconds)
                 _tests = (_tresp.text or "").strip() if getattr(_tresp, "success", False) else ""
                 if _tests and _es_t.missing_test_file(_tests, _need) is None:
+                    if _mis:
+                        from app.modules.engine_contracts import drop_file_block
+                        output = drop_file_block(output, _mis)
+                        logger.info("engine_test_path_refused job=%s node=%s wrote=%s required=%s", job_id, node_key,
+                                    _mis, _need)
                     output = output.rstrip() + "\n\n" + _tests
                     logger.info("engine_tests_completed job=%s node=%s file=%s", job_id, node_key, _need)
                 else:
