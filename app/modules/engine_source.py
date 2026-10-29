@@ -103,14 +103,29 @@ def _dotted(path: Path) -> str:
     return ".".join(parts)
 
 
+def _kind_note(ann: ast.AST | None) -> str:
+    """§17.1862 — ": dict" / ": str | None": the kind a parameter takes, exactly as §17.1761 checks a call against it,
+    so a step is shown what the gate refuses on. Live (5b4880c0 T5, every round on both models): the index read
+    `handle_approval_answer(job_id, node_key, answer, payload)`; the tests passed a string for `answer`; the gate
+    refused "`answer` is `dict`; it was given a `str`" -- the annotation was never shown. Empty when the
+    annotation is one the gate does not read."""
+    k = _kinds(ann)
+    return ": " + _kinds_text(k) if k else ""
+
+
+def _kinds_text(k: frozenset[str] | set[str]) -> str:
+    """`dict | None`, `float | int`: one spelling for a signature and for the finding that checks a call against it."""
+    return " | ".join(sorted(k, key=lambda x: (x == "None", x)))
+
+
 def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     a = fn.args
-    names = [x.arg for x in a.posonlyargs + a.args]
+    names = [x.arg + _kind_note(x.annotation) for x in a.posonlyargs + a.args]
     if a.vararg:
         names.append("*" + a.vararg.arg)
     elif a.kwonlyargs:
         names.append("*")
-    names += [x.arg for x in a.kwonlyargs]
+    names += [x.arg + _kind_note(x.annotation) for x in a.kwonlyargs]
     if a.kwarg:
         names.append("**" + a.kwarg.arg)
     return f"{'async ' if isinstance(fn, ast.AsyncFunctionDef) else ''}def {fn.name}({', '.join(names)})"
@@ -345,14 +360,21 @@ def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
 
 def _shape_signature(name: str, shape: dict) -> str:
     """`write_order(*, proposal_id, approval_id, broker_order_id=…)` from a call shape (§17.1785); §17.1855 -- a
-    parameter that takes only certain values shows them: `ingest_finra_file(source:short_interest|ats_volume, *, db)`."""
+    parameter that takes only certain values shows them: `ingest_finra_file(source:short_interest|ats_volume, *, db)`;
+    §17.1862 -- one the gate checks the kind of shows it: `handle_approval_answer(job_id, node_key, answer: dict, …)`."""
     req = set(shape.get("required_pos") or []) | set(shape.get("kw_required") or [])
     vals = shape.get("values") or {}
+    kinds = shape.get("kinds") or {}
 
     def _p(p: str) -> str:
-        return p + (":" + "|".join(vals[p]) if p in vals else "")
-    pos = [_p(p) if p in req else f"{_p(p)}=…" for p in shape.get("pos") or []]
-    kw = [_p(p) if p in req else f"{_p(p)}=…" for p in shape.get("kwonly") or []]
+        if p in vals:
+            return p + ":" + "|".join(vals[p])
+        return p + (": " + _kinds_text(kinds[p]) if p in kinds else "")      # §17.1862
+
+    def _d(p: str) -> str:              # with a default: `n=…`, `n: str = …`
+        return _p(p) if p in req else _p(p) + (" = …" if p in kinds and p not in vals else "=…")
+    pos = [_d(p) for p in shape.get("pos") or []]
+    kw = [_d(p) for p in shape.get("kwonly") or []]
     parts = pos + (["*args"] if shape.get("varargs") else (["*"] if kw else [])) + kw + (["**kwargs"] if shape.get("varkw") else [])
     return f"{'async ' if shape.get('async') else ''}{name}({', '.join(parts)})"
 
@@ -387,7 +409,7 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
     for param, val in given:
         want, got = kinds.get(param), _literal_kind(val, consts)
         if want and got and got not in want:
-            out.append(f"{label}: `{param}` is `{' | '.join(sorted(want))}`; it was given a `{got}`"
+            out.append(f"{label}: `{param}` is `{_kinds_text(want)}`; it was given a `{got}`"
                        + (f" (`{val.id}`)" if isinstance(val, ast.Name) else ""))
     # §17.1855 — a literal the function itself refuses (live: `ingest_finra_file(source="test", …)`)
     vals = shape.get("values") or {}
@@ -987,6 +1009,13 @@ def current_sources(rows: list[dict]) -> dict[str, tuple[str, str, str]]:
             if path.startswith("app/") and not is_test(path):
                 out[Path(path).stem] = (path, code, str(r.get("node_key") or ""))
     return out
+
+
+def tested_modules(rows: list[dict]) -> set[str]:
+    """§17.1862 — the modules that have a test file among the finished rows (`tests/test_<module>.py`)."""
+    from app.sandbox.engine_tests import files_of, is_test
+    return {Path(p).stem.removeprefix("test_") for r in rows if r.get("status") == "done"
+            for p in files_of(r) if is_test(p)}
 
 
 def edited_module_block(rows: list[dict], module: str) -> str:
@@ -1720,9 +1749,12 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
     # §17.1851 — the modules the step runs through lead, so the cut at `budget` drops the others. Live (5b4880c0 T6):
     # 21 modules, alphabetical, cut after 18 -- the proposer, the risk module and the signal generator never shown.
     lead = sorted(set(first or ()) & set(defs))
+    n_lead = 0                                  # §17.1862 -- the lines the lead modules took: never cut
     for mod in lead + [m for m in sorted(defs) if m not in lead]:
         if mod == own:
             continue
+        if mod in lead:
+            n_lead = len(lines) + 1
         rk = defs[mod].get("returns") or {}
         sigs = [_shape_signature(f, sh) + (f" -> {rk[f]}" if rk.get(f) else "")       # §17.1834, §17.1837
                 for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
@@ -1742,9 +1774,20 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             lines.append(f"    {mod}: " + "; ".join(sigs))
     if not lines:
         return ""
-    out = ("### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only "
-           "`a` or `b` -- the function refuses the rest)\n" + "\n".join(lines) + "\n")
-    return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
+    head = ("### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only "
+            "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a "
+            "literal of another kind is refused)\n")
+    # §17.1862 — the modules the step runs through are never cut: the budget bounds the rest. Live (5b4880c0 T5):
+    # the signatures grew their kinds and the cut at 6000 fell after 13 of 21 -- the step's own targets among the lost.
+    n_lead = min(n_lead, len(lines))
+    keep = "".join(ln + "\n" for ln in lines[:n_lead])
+    rest = "".join(ln + "\n" for ln in lines[n_lead:])
+    out = head + keep + rest
+    if len(out) <= budget:
+        return out
+    room = max(budget - len(head) - len(keep), 0)
+    cut = rest[:room].rsplit("\n", 1)[0] if room else ""
+    return head + keep + (cut + "\n" if cut.strip() else "") + "    …\n"
 
 
 _REQUIRED_TESTS_RE = re.compile(r"\b(tests/test_\w+\.py)\b")
