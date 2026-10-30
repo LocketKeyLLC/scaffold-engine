@@ -155,6 +155,12 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"violates not-null constraint"),
      "a row was written without a column that has no default: the test passes it -- for an `_id` column, the id the "
      "parent's writer returned"),
+    # §17.1870 — live (5b4880c0 T5, 2026-10-30): the finished FINRA ingester calls `paper_audit_trail_writer.write`,
+    # which does not exist -- its tests failed inside the module, three attempts running, and nothing could fix it there
+    (re.compile(r"AttributeError: module 'app\.modules\.\w+' has no attribute '\w+'|NameError: name '\w+' is not defined"),
+     "a finished module reaches for a name that does not exist (a module's missing attribute, an undefined name): that "
+     "module is at fault, not the test -- when it is another step's module, the job gets a fix step for it and this "
+     "step waits"),
 )
 
 
@@ -192,7 +198,7 @@ def _awaited_mocks(text: str) -> list[str]:
 
 #: §17.1831 — the recognised causes that are the fault of the function that raised them (a dict bound to a JSON
 #: column is the binder's bug), not of the test that called it (an awaited `MagicMock` is the test's).
-CALLEE_CAUSES = (KNOWN_CAUSES[0],)
+CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5])                     # §17.1870 -- and a name the module lacks
 _SECTION_RE = re.compile(r"^_{3,} (\S.*?) _{3,}$")
 _APP_FRAME_RE = re.compile(r"^(app/modules/(\w+)\.py):(\d+): in (\w+)$")
 
