@@ -1173,19 +1173,30 @@ class _Fakes:
 class _Val:
     """A fake as the module will see it: a literal of some kind, a mock of some kind, or unknown; with the test's
     name and attribute path it came through, so a use can look up what the test set there."""
-    __slots__ = ("kind", "mock", "node", "root", "path", "line", "rv", "scope")
+    __slots__ = ("kind", "mock", "node", "root", "path", "line", "rv", "scope", "hops")
 
     def __init__(self, kind: str | None = None, mock: str | None = None, node: ast.AST | None = None,
                  root: str | None = None, path: tuple[str, ...] = (), line: int = 0, rv: ast.AST | None = None,
-                 scope: "_Fakes | None" = None):
+                 scope: "_Fakes | None" = None, hops: int = 0):
         self.kind, self.mock, self.node, self.root, self.path, self.line, self.rv = kind, mock, node, root, path, line, rv
         self.scope = scope                       # §17.1869 -- the scope a value came from (a def's own bindings)
+        self.hops = hops                         # §17.1873 -- how many resolutions deep this value was reached
 
 
-_RESOLVE_HOPS = 8
+_RESOLVE_HOPS = 24
 
 
 def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
+    """§17.1873 — every value carries its depth, and `_step` resolves a `return_value` from THAT depth: a mock whose
+    `__aenter__` returns itself (`client.__aenter__ = AsyncMock(return_value=client)`, the usual `async with` fake)
+    used to re-enter `_resolve` with a fresh budget on every hop and never end. Live (5b4880c0 T5 a1/a2, 2026-10-30):
+    `engine_source_gate_error … RecursionError`, every gate silent, two attempts spent in the sandbox unchecked."""
+    out = _resolve_at(e, fakes, before, _hops)
+    out.hops = max(out.hops, _hops)
+    return out
+
+
+def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
     e = _unwrap(e)
     if _hops > _RESOLVE_HOPS:
         return _Val()
@@ -1307,7 +1318,7 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             rv = next((r.value for r in ast.walk(member) if isinstance(r, ast.Return) and r.value is not None), None)
             return _Val(mock="async method" if isinstance(member, ast.AsyncFunctionDef) else "method", node=member,
                         line=member.lineno, rv=rv, scope=val.scope)
-        return _resolve(member, val.scope or fakes, 10 ** 9)
+        return _resolve(member, val.scope or fakes, 10 ** 9, val.hops + 1)
     if val.mock in ("def", "async def", "method", "async method"):           # §17.1869 a function the test wrote
         if what != "call":
             return _Val()
@@ -1322,34 +1333,43 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             return _Val(kind="None", node=val.node, line=val.line)
         inner = _Fakes([x for x in ast.walk(val.node) if isinstance(x, ast.stmt)], None, fakes.is_async) \
             if isinstance(val.node, (ast.FunctionDef, ast.AsyncFunctionDef)) else _Fakes([], None, fakes.is_async)
+        # §17.1873 — a name the def binds itself is its own: the caller's binding of the same name is not merged in.
+        # Live (5b4880c0 T5 a1/a2): `def _fake_async_client(): client = MagicMock(); …; return client` and the test's
+        # `client = _fake_async_client(…)` -- the caller's later line won `last("client")`, resolved to the call, into
+        # the def, to its `client` again, without end (RecursionError, every gate silent, the sandbox ran unchecked)
+        own_names = set(inner.bound)
         for k, v in fakes.bound.items():
-            inner.bound.setdefault(k, []).extend(v)
+            if k not in own_names:
+                inner.bound.setdefault(k, []).extend(v)
         for k, v in fakes.chains.items():
-            inner.chains.setdefault(k, []).extend(v)
-        out = _resolve(val.rv, inner, 10 ** 9)
+            if not (k and k[0] in own_names):
+                inner.chains.setdefault(k, []).extend(v)
+        out = _resolve(val.rv, inner, 10 ** 9, val.hops + 1)
         out.scope = out.scope or inner
         return out
     if not val.mock:
         return _Val()
     fk = val.scope or fakes
     path = val.path + ((arg,) if what == "attr" else ("return_value",))     # type: ignore[operator]
+    entering = bool(val.path) and val.path[-1] in ("__aenter__", "__aexit__")
+    if what == "call" and arg and val.mock == "MagicMock" and not entering:
+        # §17.1873 — awaited, a MagicMock fails whatever its `return_value` (measured: `await MagicMock(return_value=x)()`
+        # is a TypeError); the chain and `return_value` hops below used to come first and follow the value instead
+        return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
     if val.root and (v := fk.chain((val.root, *path), before)) is not None:
-        out = _resolve(v, fk, before)
+        out = _resolve(v, fk, before, val.hops + 1)
         if out.root is None:
             out.root, out.path = val.root, path
         out.scope = out.scope or val.scope
         return out
     if what == "call" and val.rv is not None:                                # `MagicMock(return_value=x)` called
-        out = _resolve(val.rv, fk, before)
+        out = _resolve(val.rv, fk, before, val.hops + 1)
         if out.root is None:
             out.root, out.path = val.root, path
         out.scope = out.scope or val.scope
         return out
-    entering = bool(val.path) and val.path[-1] in ("__aenter__", "__aexit__")
     if what == "call" and entering:                                           # entering either kind: an AsyncMock
         return _Val(mock="AsyncMock", node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
-    if what == "call" and val.mock == "MagicMock" and arg:
-        return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
     if what == "call" and val.mock == "AsyncMock" and not arg:                # a coroutine, never awaited
         return _Val(kind="coroutine-mock", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
     return _Val(mock=val.mock, node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)

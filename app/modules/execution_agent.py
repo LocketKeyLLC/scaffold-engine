@@ -2738,7 +2738,12 @@ async def execute_next_node(
                     except Exception as exc:
                         logger.warning("engine_dependency_adopt_failed node='%s' error=%r", title, exc)
             except Exception as exc:
-                logger.warning("engine_source_gate_error: node='%s' error=%r", title, exc)
+                # §17.1873 — loud, with the frame: a silent gate sends the attempt to the sandbox unchecked
+                import traceback as _tb
+                _at = next((f"{fr.filename.rsplit('/', 1)[-1]}:{fr.lineno} in {fr.name}"
+                            for fr in reversed(_tb.extract_tb(exc.__traceback__)) if "/app/" in fr.filename), "?")
+                logger.error("engine_source_gate_error: node='%s' error=%r at=%s -- every §17.1749+ check skipped",
+                             title, exc, _at)
         # §17.1765 — and it is RUN: its tests, or an import of its module, in the engine-test sandbox with this job's
         # finished modules written in. A skip (sandbox off / unreachable / another engine) is logged, never a pass.
         engine_test_reason: str | None = None
