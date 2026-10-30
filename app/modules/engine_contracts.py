@@ -3072,7 +3072,8 @@ def drop_file_block(output: str, path: str) -> str:
     return output
 
 
-async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2) -> tuple[str, list[str]]:
+async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2,
+                             tests_only: bool = False) -> tuple[str, list[str]]:
     """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal,
     output)` -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0
     T6, four rounds on two models): three of four attempts were refused for stand-ins in the tests and nothing else --
@@ -3084,11 +3085,17 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
     the §17.1853 round): the executor's ask showed the model the attempt's original file, so the second redraw read a
     refusal whose line numbers belonged to the first redraw's file next to the file it had started from, and gave that
     original back -- five stand-ins, then two, then the same five."""
+    # §17.1874 — `tests_only`: the output is test files and nothing else, so EVERY finding is about a test file,
+    # whatever its prefix. Live (5b4880c0 T5 a1, 2026-10-30): 68 test-file findings and one `SELECT … ticker … FROM
+    # fill` (a schema finding, no path: the test's own SQL) -- no redraw, the attempt spent on a refusal the redraw
+    # answers; the file is the output's one test file.
+    from app.sandbox.engine_tests import files_of, is_test
+    test_paths = sorted(p for p in files_of({"output_text": output}) if is_test(p))
     for _ in range(max(0, tries)):
-        fakes = findings_in_tests(findings)                     # §17.1859 — every test-file finding, not stand-ins only
+        fakes = findings if tests_only and len(test_paths) == 1 else findings_in_tests(findings)   # §17.1859
         if not findings or fakes != findings:
             break
-        paths = {_finding_path(f) for f in fakes}
+        paths = {_finding_path(f) for f in findings_in_tests(fakes)} or set(test_paths)
         if len(paths) != 1:
             break
         path = paths.pop()

@@ -245,7 +245,8 @@ def test_executor_wiring():
     serial = inspect.getsource(ea.execute_all_nodes)
     assert "await _hands_on_peek(node, job_id)" in serial and 'status in ("stale", "needs_approval")' in serial
     par = inspect.getsource(ea._run_parallel_frontier)
-    assert "exclude=held" in par and 'status == "needs_approval"' in par and "held.add(" in par
+    assert "_claim_frontier(job_id, free, held)" in par and 'status == "needs_approval"' in par and "held.add(" in par
+    assert "exclude=held" in inspect.getsource(ea._claim_frontier)         # §17.1874 -- the claim moved, held with it
     claim = inspect.getsource(ea._claim_ready_nodes_sql)
     assert "AND NOT (n.node_key = ANY(:exclude))" in claim
     seam = inspect.getsource(ea.execute_next_node)
