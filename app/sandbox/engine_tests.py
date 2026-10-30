@@ -199,7 +199,11 @@ def _awaited_mocks(text: str) -> list[str]:
 #: §17.1831 — the recognised causes that are the fault of the function that raised them (a dict bound to a JSON
 #: column is the binder's bug), not of the test that called it (an awaited `MagicMock` is the test's).
 CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5])                     # §17.1870 -- and a name the module lacks
-_SECTION_RE = re.compile(r"^_{3,} (\S.*?) _{3,}$")
+#: §17.1871 — pytest pads a failure's header to the terminal width with underscores: a long test name gets ONE on
+#: each side. Live (5b4880c0 T5, 2026-10-30 04:16 UTC): `_ TestOperatorApprovalGate.test_handle_…_write_order _`
+#: did not open a section, two failures merged, and the FINRA module's missing name was pinned on the next test's
+#: deepest frame (`paper_audit_trail_writer.py:32 in write_signal`) -- a fix step for a module with nothing to fix.
+_SECTION_RE = re.compile(r"^_+ (\S.*?) _+$")
 _APP_FRAME_RE = re.compile(r"^(app/modules/(\w+)\.py):(\d+): in (\w+)$")
 
 
@@ -276,7 +280,7 @@ def _fold_library_frames(lines: list[str]) -> list[str]:
     return out
 
 
-_FAILURE_HEAD = re.compile(r"^_{3,} (\S.*?) _{3,}$")
+_FAILURE_HEAD = re.compile(r"^_+ (\S.*?) _+$")                            # §17.1871 -- one underscore is enough
 
 
 def _failure_index(lines: list[str], limit: int = 80) -> list[str]:

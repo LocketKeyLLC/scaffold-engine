@@ -1142,6 +1142,17 @@ class _Fakes:
                 for item in n.items:
                     if isinstance(item.optional_vars, ast.Name) and isinstance(item.context_expr, ast.Call):
                         self.bound.setdefault(item.optional_vars.id, []).append((n.lineno, item.context_expr))
+        # §17.1871 — a name bound to another mock's attribute chain is an alias: what the test sets on it is set on
+        # that chain. Live (5b4880c0 T5, 2026-10-30): `mock_client = mock_client_cls.return_value` then
+        # `mock_client.submit_order = AsyncMock(…)` -- read as an unconfigured MagicMock, six false refusals.
+        for alias_name, hits in list(self.bound.items()):
+            for _ln, v in hits:
+                chain = _call_chain(v) if isinstance(v, ast.Attribute) else None
+                if not chain or len(chain) < 2:
+                    continue
+                for key, vals in list(self.chains.items()):
+                    if key[0] == alias_name and len(key) > 1:
+                        self.chains.setdefault((*chain, *key[1:]), []).extend(vals)
         if fn is not None:                                   # `@patch(…)` decorators fill the trailing parameters
             a = fn.args                                      # type: ignore[attr-defined]
             params = [x.arg for x in a.posonlyargs + a.args if x.arg not in ("self", "cls")]
@@ -1493,6 +1504,65 @@ def _result_uses(code: str, matches, local_of=None) -> dict | None:
     return root if root["called"] else None
 
 
+def _use_sites(code: str, owner: str, name: str) -> set[str]:
+    """§17.1871 — the functions of a module in which a patched name's call result is bound."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    dotted = f"{owner}.{name}" if owner else name
+    out: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in _own_nodes(fn):
+            call = None
+            if isinstance(n, ast.Assign):
+                call = _unwrap(n.value)
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                call = next((_unwrap(i.context_expr) for i in n.items), None)
+            if isinstance(call, ast.Call) and ast.unparse(call.func) == dotted:
+                out.add(fn.name)
+    return out
+
+
+def _default_for(code: str, fname: str) -> str | None:
+    """§17.1871 — the parameter `fname` stands in for when it is not given: `getter = http_get or _default_http_get`
+    -> "http_get". None when the function is reached any other way. Live (5b4880c0 T5, 2026-10-30): a test handed
+    `http_get=` and also patched `httpx.AsyncClient`, which only `_default_http_get` calls -- refused for a fake the
+    tested path never touches."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    param: str | None = None
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or fn.name == fname:
+            continue
+        a = fn.args
+        params = {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+        for n in _own_nodes(fn):
+            if not (isinstance(n, ast.Name) and n.id == fname and isinstance(n.ctx, ast.Load)):
+                continue
+            # `p or fname` / `fname if p is None else p` / `p if p is not None else fname`
+            parent = next((x for x in ast.walk(fn) if any(c is n for c in ast.iter_child_nodes(x))), None)
+            ok = False
+            if isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.Or) and parent.values[-1] is n \
+                    and isinstance(parent.values[0], ast.Name) and parent.values[0].id in params:
+                ok, cand = True, parent.values[0].id
+            elif isinstance(parent, ast.IfExp):
+                names = [x.id for x in ast.walk(parent.test) if isinstance(x, ast.Name) and x.id in params]
+                ok, cand = bool(names), (names[0] if names else None)
+            elif isinstance(parent, ast.Call) and parent.func is n:
+                continue                                     # a direct call: not a default
+            if not ok:
+                return None
+            if param is not None and param != cand:
+                return None
+            param = cand
+    return param
+
+
 def _target_uses(code: str, owner: str, name: str) -> dict | None:
     """What a module does with what a patched name returns: `values_for(…)`, `httpx.AsyncClient(…)`, or
     `self.meth(…)` inside class `owner`."""
@@ -1678,6 +1748,14 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
             if fn is not None and any(fn.lineno <= a and b <= (fn.end_lineno or b) and any(
                     isinstance(c, ast.Call) and a <= c.lineno <= b for c in _own_nodes(fn)) for a, b in raises):
                 continue                                     # §17.1870 -- a call of this test is meant to raise first
+            # §17.1871 — a name used only as the default for a parameter this test passes is never reached
+            if fn is not None and (sites := _use_sites(reach[mod], owner, name)):
+                params = {_default_for(reach[mod], site) for site in sites}
+                if None not in params and params:
+                    given = {k.arg for m_, f_, ln in _test_calls(code) if m_ == mod and fn.lineno <= ln <= (fn.end_lineno or ln)
+                             for c in _own_nodes(fn) if isinstance(c, ast.Call) and c.lineno == ln for k in c.keywords}
+                    if params <= given:
+                        continue
             if name == "async_session" and not owner:
                 # §17.1869 — the session itself is never patched: the sandbox's is real (live: 19 patches of it on
                 # eight modules in one file, each an `async def` the module cannot `async with`)

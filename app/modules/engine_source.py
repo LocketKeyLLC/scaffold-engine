@@ -522,10 +522,14 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
 
     hops: list[tuple[ast.AST, dict | None, list[tuple[str, dict]]]] = []
     returns: list[tuple[dict, dict]] = []
+    consumed: set[int] = set()                           # §17.1871 -- an expression read through its statement once
     for n in _own_statements(fn):
         if id(n) in skip:
             continue
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            # read once: visited again as a bare expression after `raw = raw.decode()` rebinds `raw` to its own
+            # result, the call would hang a second `decode()` under the first (live: `raw{decode()->{decode()}}`)
+            consumed.update(id(x) for x in (n.value, getattr(n.value, "value", None)) if x is not None)
             node = node_of(n.value)
             if node is not None:
                 names[n.targets[0].id] = node
@@ -544,7 +548,7 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             node = node_of(n.value)
             if node is not None:
                 returns.append((node, result))
-        elif isinstance(n, (ast.Attribute, ast.Call, ast.Subscript)):
+        elif isinstance(n, (ast.Attribute, ast.Call, ast.Subscript)) and id(n) not in consumed:
             node_of(n)
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and local and n.func.id in local
                 and local[n.func.id] is not fn and n.func.id not in _seen and _depth < _USE_HOPS):
