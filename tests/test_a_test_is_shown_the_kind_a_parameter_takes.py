@@ -70,7 +70,8 @@ def test_the_leading_modules_survive_the_budget_cut():
     shown = [ln.split(":")[0].strip() for ln in out.splitlines()[1:] if ln.startswith("    ") and ln.strip() != "…"]
     assert shown[:2] == ["m09", "m11"] and out.rstrip().endswith("…")
     assert "f9_5(a: dict, b: str, *, c: int = …)" in out and "f11_5(" in out     # whole lines, not cut mid-way
-    assert len(out) < 900 + 600                                                  # the rest is what the budget bounds
+    head = out.index("\n") + 1                                                   # §17.1876 the legend is not budgeted
+    assert len(out) - head < 900 + 60                                            # the rest is what the budget bounds
     assert es._render_job_modules(defs, "", budget=900, first=set()).count("\n") < out.count("\n") + 3
 
 

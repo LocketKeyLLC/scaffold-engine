@@ -101,7 +101,7 @@ async def test_magic_response():
         "`__aenter__()` returns a fake whose `get()` returns a fake whose `json()` returns a coroutine (line 7): an "
         "`AsyncMock` method called without `await` (every attribute of an `AsyncMock` is one), and the module reads it as "
         "a dict -- make that object a `MagicMock` (its plain calls answer at once; give the methods the module awaits an "
-        "`AsyncMock` each) -- give it what the module uses: `AsyncClient()->{async with -> {get()->{json(): dict}}}`",
+        "`AsyncMock` each) -- give it what the module uses: `AsyncClient()->{async with -> {get()->{json(): dict{data}}}}`",
     ], found
 
 
@@ -147,11 +147,11 @@ async def test_sync_get():
         "`tests/test_paper_twelve_modules.py:17` hands `fetch_disclosures(…)` `client` = a fake whose `get` is `get(…)` "
         "(line 14), which has no parameter `params`, `timeout` (it takes url); the module passes `params=`, `timeout=` "
         "-- accept what the module passes (`*args, **kwargs` is enough) -- give it what the module uses: "
-        "`client{get()->{json(): dict, raise_for_status()}}`",
+        "`client{get()->{json(): dict{results}, raise_for_status()}}`",
         "`tests/test_paper_twelve_modules.py:29` patches `AsyncClient` on `httpx` with a fake whose call returns a "
         "`FakeClient` instance (line 26), which has no `__aenter__`, and the module enters it with `async with` -- it "
         "needs `async def __aenter__(self): return self` and `async def __aexit__(self, *exc): pass` -- give it what the "
-        "module uses: `AsyncClient()->{async with -> {get()->{json(): dict}}}`",
+        "module uses: `AsyncClient()->{async with -> {get()->{json(): dict{data}}}}`",
     ], found
     # the sync `get` awaited is not followed (a plain def's result awaited: unknown); `test_fits` passes
 
