@@ -501,6 +501,96 @@ def _inserts_of(code: str) -> list[str]:
     return sorted(out)
 
 
+def _settings_patches(path: str, code: str, modules: dict[str, str]) -> list[str]:
+    """§17.1876 — each `patch("app.config.settings.X", …)` / `patch.object(settings, "X", …)` of a field the engine's
+    settings do not have: `patch` raises AttributeError before the test body runs. Live (5b4880c0 T5 a4, 2026-10-30):
+    `patch("app.config.settings.REDDIT_MAX_POSTS", 10)` three times -- the field is `reddit_max_posts`."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    bound = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "app.config"
+             for a in n.names if a.name == "settings"}
+    targets: list[tuple[str, int]] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call) or not n.args:
+            continue
+        f = n.func
+        fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+        if fname not in ("patch", "setattr", "object"):
+            continue
+        a0 = n.args[0]
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.config.settings."):
+            parts = a0.value.split(".")
+            if len(parts) == 4:
+                targets.append((parts[3], n.lineno))
+        elif (isinstance(a0, ast.Name) and a0.id in bound and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+              and isinstance(n.args[1].value, str)):
+            targets.append((n.args[1].value, n.lineno))
+    if not targets:
+        return []
+    from app.config import settings
+    fields = list(getattr(type(settings), "model_fields", {}) or dir(settings))
+    out: list[str] = []
+    for name, line in sorted(targets, key=lambda t: t[1]):
+        if hasattr(settings, name):
+            continue
+        like = [f for f in fields if f.lower() == name.lower()]
+        reads = sorted({a.attr for m in modules.values() for a in ast.walk(_tree_or_empty(m))
+                        if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name) and a.value.id == "settings"})
+        out.append(f"`{path}:{line}` patches `{name}` on `app.config.settings`, which has no such field -- `patch` raises "
+                   "AttributeError before the test body runs"
+                   + (f"; the field is `{like[0]}`" if like else
+                      f"; the job's modules read {', '.join(f'`settings.{r}`' for r in reads[:8])}" if reads else ""))
+    return out
+
+
+def _tree_or_empty(code: str) -> ast.AST:
+    try:
+        return ast.parse(code)
+    except SyntaxError:
+        return ast.Module(body=[], type_ignores=[])
+
+
+def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[str]:
+    """§17.1876 — each `patch("app.modules.m.httpx")` of a whole library on a module that catches that library's
+    exceptions: every class on the mock is a mock, and `except (httpx.HTTPError, …)` raises `TypeError: catching
+    classes that do not inherit from BaseException is not allowed`. Live (5b4880c0 T5 a2, 2026-10-30): three reddit
+    tests, the module's own network fault path. The name it leaves the engine through is the thing to patch."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    out: list[str] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call) or not n.args:
+            continue
+        f = n.func
+        fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+        a0 = n.args[0]
+        if fname not in ("patch", "setattr") or not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
+            continue
+        parts = a0.value.split(".")
+        if len(parts) != 4 or parts[:2] != ["app", "modules"] or parts[2] not in reach:
+            continue
+        mod, lib = parts[2], parts[3]
+        mtree = _tree_or_empty(reach[mod])
+        if lib not in {a.asname or a.name for i in mtree.body if isinstance(i, ast.Import) for a in i.names}:
+            continue
+        caught = sorted({ast.unparse(x) for h in ast.walk(mtree) if isinstance(h, ast.ExceptHandler) and h.type is not None
+                         for x in (h.type.elts if isinstance(h.type, ast.Tuple) else [h.type])
+                         if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == lib})
+        if not caught:
+            continue
+        used = sorted({x.func.attr for x in ast.walk(mtree) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+                       and isinstance(x.func.value, ast.Name) and x.func.value.id == lib and x.func.attr not in caught})
+        out.append(f"`{path}:{n.lineno}` patches `{lib}` whole on `{mod}`: every class on it becomes a mock, and the "
+                   f"module's `except ({', '.join(caught)})` then fails with `TypeError: catching classes that do not "
+                   "inherit from BaseException is not allowed` -- patch only the name it leaves the engine through"
+                   + (f" (`app.modules.{mod}.{lib}.{used[0]}`)" if used else ""))
+    return out
+
+
 def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
     """§17.1856 — each test that patches a name on a job module that has no such name. Live (5b4880c0 T5, 2026-10-28):
     `patch("app.modules.paper_operator_approval_gate.write_approval")` -- the gate writes `approval` itself with its
@@ -550,6 +640,8 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
                    "wrote" if inserts else "")
                 + late_note
                 + ". Patch a name where the code looks it up, and only what reaches outside the engine")
+        found += _settings_patches(path, code, modules)                   # §17.1876
+        found += _whole_library_patches(path, code, reach)                 # §17.1876
     return found
 
 
@@ -1476,6 +1568,11 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
                        else f"calls `.{needs[0]}` on it" if needs[0].endswith("()") else f"reads `.{needs[0]}` from it"))
         if uses["as"] == "dict" and val.kind in ("list", "tuple", "str", "int", "float", "bool", "set", "None"):
             return f"{done}{_CANNOT[val.kind]}{at}, which the module reads as a dict (`.get(…)` / `[\"key\"]`)"
+        if val.kind == "dict" and uses.get("keys") and isinstance(val.node, ast.Dict) and val.node.keys:  # §17.1876
+            lit = [k.value for k in val.node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            if len(lit) == len(val.node.keys) and not set(lit) & set(uses["keys"]):
+                return (f"{done}a dict with keys {', '.join(f'`{k}`' for k in lit)}{at}, which the module reads for "
+                        f"{' / '.join(f'`{k}`' for k in sorted(uses['keys']))} -- none of them is there")
         return None
     if not val.mock:
         return None
@@ -2021,6 +2118,147 @@ def unknown_result_attributes(files: dict[str, str], modules: dict[str, str]) ->
                        f"no `{n.attr}` -- it has {', '.join(f'`{a}`' for a in sorted(a for a in have if not a.startswith('_'))) or 'no public attribute'}")
                 if msg not in found:
                     found.append(msg)
+    return found
+
+
+# ── §17.1876 a result is what its annotation says; every name a test uses is bound ─────────────────────────────
+
+_COLLECTIONS = frozenset({"list", "dict", "set", "tuple"})
+_SCALARS = frozenset({"int", "float", "bool", "Decimal"})
+_BUILTIN_KINDS = {"dict": "dict", "list": "list", "set": "set", "tuple": "tuple", "int": "int", "float": "float",
+                  "str": "str", "bool": "bool"}
+
+
+def _result_misuse(n: ast.Name, par: ast.AST | None, kinds: frozenset[str]) -> tuple[str, str] | None:
+    """(what the test does with the result, what the function returns instead) for a use its annotation refutes."""
+    from app.modules.engine_source import _kinds_text as _kt
+    real = kinds - {"None"}
+
+    def _kinds_text(k: frozenset[str]) -> str:                   # with its article: "an `int`", "a `list`"
+        t = _kt(k)
+        return ("an " if t[:1] in "aeiou" else "a ") + f"`{t}`"
+    text = " ".join(ast.unparse(par).split()) if par is not None else n.id
+    text = text if len(text) <= 70 else text[:67] + "…"
+    if kinds == {"None"}:
+        if isinstance(par, ast.Compare) and len(par.ops) == 1 and isinstance(par.ops[0], (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)) \
+                and any(isinstance(c, ast.Constant) and c.value is None for c in (par.left, *par.comparators)):
+            return None
+        return (f"uses `{n.id}` (`{text}`)", "nothing (`-> None`) -- assert on what it did (the rows it wrote, the mock "
+                "it called), never on its result")
+    if not real:
+        return None
+    if isinstance(par, ast.Compare) and len(par.ops) == 1:
+        other = par.comparators[0] if par.left is n else par.left
+        numeric = isinstance(other, ast.Constant) and type(other.value) in (int, float)
+        if numeric and real <= _COLLECTIONS:
+            return (f"compares `{n.id}` (`{text}`)", f"{_kinds_text(kinds)} -- compare `len({n.id})`, or read its items")
+        if numeric and real <= {"str"}:
+            return (f"compares `{n.id}` (`{text}`)", f"{_kinds_text(kinds)} -- compare `len({n.id})`, or its text")
+    if isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and par.func.id == "isinstance" and len(par.args) == 2 \
+            and par.args[0] is n and isinstance(par.args[1], ast.Name) and par.args[1].id in _BUILTIN_KINDS \
+            and _BUILTIN_KINDS[par.args[1].id] not in kinds and not (par.args[1].id == "float" and "int" in kinds):
+        return (f"asserts `{text}` on `{n.id}`", f"{_kinds_text(kinds)}, never a `{par.args[1].id}`")
+    if isinstance(par, ast.Subscript) and par.value is n and real <= _SCALARS:
+        return (f"subscripts `{n.id}` (`{text}`)", f"{_kinds_text(kinds)}, which has no items")
+    if isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and par.func.id == "len" and par.args \
+            and par.args[0] is n and real <= _SCALARS:
+        return (f"measures `{n.id}` (`{text}`)", f"{_kinds_text(kinds)}, which has no length")
+    return None
+
+
+def wrong_result_uses(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1876 — each test that uses what a job function returns as something its annotation says it is not: the
+    result of a `-> None` function asserted on at all; a list or dict compared with a number; `isinstance(r, dict)`
+    on a list; an int subscripted. Live (5b4880c0 T5, 2026-10-30, a3/a4): eleven tests asserted
+    `isinstance(result, dict)` on `handle_approval_answer(…)`, which returns nothing; `ingest_news_for_ticker(…) >= 0`
+    on a list; `ingest_form_4_for_tickers(…) >= 0` on a dict -- sixteen sandbox failures, every one readable here."""
+    from app.modules.engine_source import _kinds
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            # each name's bindings in source order: a use is governed by the latest one above it (None: not a result)
+            binds: dict[str, list[tuple[int, tuple[str, str, frozenset[str]] | None]]] = {}
+            for n in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Assign) and len(x.targets) == 1
+                             and isinstance(x.targets[0], ast.Name)), key=lambda x: x.lineno):
+                info = None
+                call = _unwrap(n.value)
+                if isinstance(call, ast.Call) and (mod := by_line.get((call.lineno, _call_name(call)))) and mod in reach:
+                    d = _defs(reach[mod])
+                    target = d[0].get(_call_name(call)) if d else None
+                    kinds = _kinds(getattr(target, "returns", None)) if target is not None else None
+                    if kinds:
+                        info = (mod, _call_name(call), kinds)
+                binds.setdefault(n.targets[0].id, []).append((n.lineno, info))
+            if not any(i for b in binds.values() for _, i in b):
+                continue
+            parents = {id(c): p for p in ast.walk(fn) for c in ast.iter_child_nodes(p)}
+            for n in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Name) and x.id in binds
+                             and isinstance(x.ctx, ast.Load)), key=lambda x: x.lineno):
+                prior = [i for ln, i in binds[n.id] if ln < n.lineno]
+                if not prior or prior[-1] is None:
+                    continue
+                mod, f, kinds = prior[-1]
+                bad = _result_misuse(n, parents.get(id(n)), kinds)
+                if not bad:
+                    continue
+                msg = f"`{path}:{n.lineno}` {bad[0]}, what `{f}(…)` (`{mod}`) returns -- and `{f}` returns {bad[1]}"
+                if msg not in found:
+                    found.append(msg)
+    return found
+
+
+def undefined_test_names(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1876 — each name a test file uses and never binds (imports, defines, assigns, takes as a parameter): a
+    NameError the instant the test runs, read with `symtable`, the compiler's own scoping (a file with a star import
+    is left alone). Live (5b4880c0 T5 a4, 2026-10-30): `ingest_13f_holdings(…)` twice, its import dropped in a
+    redraw; the sandbox blamed "a finished module reaches for a name that does not exist"."""
+    import builtins
+    import symtable
+    known_base = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__loader__", "__package__",
+                                       "__builtins__", "__path__", "__annotations__", "__debug__"}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+            top = symtable.symtable(code, path, "exec")
+        except SyntaxError:
+            continue
+        if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
+            continue
+        known = known_base | {s.get_name() for s in top.get_symbols() if s.is_assigned() or s.is_imported() or s.is_parameter()}
+        missing: set[str] = set()
+
+        def walk(t: symtable.SymbolTable) -> None:
+            for s in t.get_symbols():
+                name = s.get_name()
+                if not s.is_referenced() or name in known or s.is_assigned() or s.is_imported() or s.is_parameter() \
+                        or s.is_free() or (t.get_type() == "class" and s.is_local()):
+                    continue
+                missing.add(name)
+            for c in t.get_children():
+                walk(c)
+        walk(top)
+        if not missing:
+            continue
+        where = {name: [m for m, c in sorted(modules.items()) if name in _top_names(c)[0]] for name in missing}
+        for n in sorted((x for x in ast.walk(tree) if isinstance(x, ast.Name) and x.id in missing
+                         and isinstance(x.ctx, ast.Load)), key=lambda x: x.lineno):
+            msg = (f"`{path}:{n.lineno}` uses `{n.id}`, which the file never imports or defines -- `NameError` the "
+                   "instant the test runs"
+                   + (f"; `from app.modules.{where[n.id][0]} import {n.id}`" if where[n.id] else ""))
+            if msg not in found:
+                found.append(msg)
     return found
 
 

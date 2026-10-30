@@ -66,14 +66,14 @@ def test_the_index_names_the_secrets_a_function_reads_by_their_own_names():
         "priced": ["ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"]}              # through another module's class
     assert defs["paper_alpaca_paper_client"]["secrets"] == {"AlpacaPaperClient": ["ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"]}
     r = es._render_job_modules(defs, "")
-    assert "ingest_13f_holdings(cik: str, *, db, client) [secrets: SEC_CONTACT_EMAIL]" in r
+    assert "ingest_13f_holdings(cik: str, *, db, client) -> int [secrets: SEC_CONTACT_EMAIL]" in r
     assert "async priced(db) [secrets: ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY]" in r
     assert "parse_rows(rows);" in r and "parse_rows(rows) [" not in r
     assert "class AlpacaPaperClient(*, base_url: str = …) {async get_account(db)} [secrets: ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY]" in r
     assert "`[secrets: A, B]` means the function reads those operator secrets through `values_for`" in r
     # the carried inventory too, for what the module reads itself
     api = es._public_api(HOLDINGS)
-    assert "ingest_13f_holdings(cik: str, *, db, client) [secrets: SEC_CONTACT_EMAIL]" in api
+    assert "ingest_13f_holdings(cik: str, *, db, client) -> int [secrets: SEC_CONTACT_EMAIL]" in api
     assert "parse_rows(rows)" in api and "parse_rows(rows) [" not in api
 
 

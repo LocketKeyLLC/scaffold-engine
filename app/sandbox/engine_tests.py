@@ -157,7 +157,10 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "parent's writer returned"),
     # §17.1870 — live (5b4880c0 T5, 2026-10-30): the finished FINRA ingester calls `paper_audit_trail_writer.write`,
     # which does not exist -- its tests failed inside the module, three attempts running, and nothing could fix it there
-    (re.compile(r"AttributeError: module 'app\.modules\.\w+' has no attribute '\w+'|NameError: name '\w+' is not defined"),
+    # §17.1876 — a NameError counts only when it is raised in a module's own frame: a test's own undefined name
+    # (live a4: `ingest_13f_holdings`, its import dropped) is the test's fault and is refused before the sandbox now
+    (re.compile(r"AttributeError: module 'app\.modules\.\w+' has no attribute '\w+'"
+                r"|app/modules/\w+\.py:\d+: in \w+\n(?:[^\n]*\n){1,2}E\s+NameError: name '\w+' is not defined"),
      "a finished module reaches for a name that does not exist (a module's missing attribute, an undefined name): that "
      "module is at fault, not the test -- when it is another step's module, the job gets a fix step for it and this "
      "step waits"),

@@ -398,7 +398,12 @@ _USE_HOPS = 3
 
 
 def _new_use() -> dict:
-    return {"attrs": set(), "calls": {}, "called": None, "as": None}
+    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": set()}
+
+
+def _read_keys_text(u: dict) -> str:
+    """§17.1876 — `{results|data|filings}`: the keys a value read as a dict is read for (`.get("k")`, `["k"]`)."""
+    return "{" + "|".join(sorted(u.get("keys") or ())) + "}" if u.get("as") == "dict" and u.get("keys") else ""
 
 
 def _merge_uses(dst: dict, src: dict) -> None:
@@ -417,6 +422,7 @@ def _merge_uses(dst: dict, src: dict) -> None:
         dst["called"]["await"] = dst["called"]["await"] or src["called"]["await"]
         _merge_uses(dst["called"]["then"], src["called"]["then"])
     dst["as"] = dst["as"] or src["as"]
+    dst["keys"] = (dst.get("keys") or set()) | (src.get("keys") or set())                      # §17.1876
 
 
 def _uses_empty(u: dict) -> bool:
@@ -486,6 +492,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 if (f.attr in _DICT_READS and 1 <= len(e.args) <= 2 and not e.keywords and not awaited) \
                         or (f.attr in ("keys", "items", "values") and not e.args):     # `await client.get(u)`: a call
                     base["as"] = base["as"] or "dict"
+                    if e.args and isinstance(e.args[0], ast.Constant) and isinstance(e.args[0].value, str):
+                        base.setdefault("keys", set()).add(e.args[0].value)              # §17.1876 `.get("results")`
                     return None
                 c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno,
                                                       "sig": (0, frozenset())})
@@ -517,6 +525,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             if base is not None:
                 base["as"] = base["as"] or ("dict" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str)
                                             else "list" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int) else None)
+                if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str):
+                    base.setdefault("keys", set()).add(e.slice.value)                     # §17.1876 `["results"]`
             return None
         return None
 
@@ -591,7 +601,7 @@ def _uses_text(u: dict, _depth: int = 0) -> str:
         t = m + "()"
         then = info["then"]
         if then["as"] and _uses_empty({**then, "as": None}):
-            t += ": " + then["as"]
+            t += ": " + then["as"] + _read_keys_text(then)
         elif not _uses_empty(then) and _depth < 3:
             t += "->" + _uses_text(then, _depth + 1)
         parts.append(t)
@@ -599,7 +609,7 @@ def _uses_text(u: dict, _depth: int = 0) -> str:
     if len(parts) > 6:
         parts = parts[:6] + ["…"]
     if not parts:
-        return ": " + u["as"] if u["as"] else ""
+        return ": " + u["as"] + _read_keys_text(u) if u["as"] else ""
     return "{" + ", ".join(parts) + "}"
 
 
@@ -773,6 +783,21 @@ def _kinds(ann: ast.AST | None) -> frozenset[str] | None:
     if isinstance(ann, ast.Name) and ann.id in _KIND_NAMES:
         return frozenset({_KIND_NAMES[ann.id]} | _KIND_ALSO.get(ann.id, set()))
     return None
+
+
+def _return_kind_note(fn: ast.AST) -> str:
+    """§17.1876 — `None`, `list`, `dict | None`, `FetchResult`: what a function's annotation says it returns, shown
+    when its return lines say nothing more (no dict keys, no query). Live (5b4880c0 T5, 2026-10-30, a3/a4): eleven
+    tests asserted `isinstance(result, dict)` on `handle_approval_answer(…)`, which is `-> None`; two compared
+    `ingest_news_for_ticker(…)`, a list, with a number -- the index had shown no return at all."""
+    ann = getattr(fn, "returns", None)
+    if ann is None:
+        return ""
+    k = _kinds(ann)
+    if k:
+        return _kinds_text(k)
+    from app.modules.engine_contracts import _returned_class
+    return _returned_class(fn) or ""
 
 
 def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
@@ -1218,7 +1243,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                         a["call_imports"][n.name] = ci
                     if not n.name.startswith("_"):                       # §17.1834 — what its dicts carry
                         from app.modules.engine_contracts import return_note
-                        a.setdefault("returns", {})[n.name] = return_note(code, n.name)        # §17.1837
+                        a.setdefault("returns", {})[n.name] = return_note(code, n.name) or _return_kind_note(n)  # §17.1837/1876
                 elif isinstance(n, ast.ClassDef):
                     names.add(n.name)
                     defined.add(n.name)
@@ -1569,7 +1594,7 @@ def _public_api(code: str, limit: int = 600) -> str:
         return f" [secrets: {', '.join(names)}]" if names else ""
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
-            note = return_note(code, n.name)                            # §17.1834, §17.1837
+            note = return_note(code, n.name) or _return_kind_note(n)   # §17.1834, §17.1837, §17.1876
             fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else "") + _sec(n.name)
                        + (" [own session]" if _opens_own_session(n) else "")              # §17.1866
                        + (f" [imports at call time: {', '.join(ci)}]" if (ci := _call_time_imports(n)) else ""))  # §17.1875
@@ -2051,6 +2076,10 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
+    # §17.1876 — a result is used as what its annotation says it is; every name a test uses is bound
+    from app.modules.engine_contracts import undefined_test_names, wrong_result_uses
+    found += wrong_result_uses(files_of({**me, "output_text": output}), _cur)
+    found += undefined_test_names(files_of({**me, "output_text": output}), _cur)
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request
     found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)
@@ -2413,16 +2442,20 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             "`[own session]` means it opens its own `async_session()` and sees only rows the test has committed -- "
             "`await db.commit()` after inserting the parent rows, before calling it; "
             "`[imports at call time: app.modules.x.f]` means it reaches `f` through `app.modules.x` when called -- "
-            "patch it THERE (`patch(\"app.modules.x.f\")`), never on this module, which has no such name)\n")
+            "patch it THERE (`patch(\"app.modules.x.f\")`), never on this module, which has no such name; "
+            "`-> None` means it returns nothing -- assert on what it did, never on its result; `-> list` / `-> int` is the "
+            "kind it returns, `-> {a, b}` its dict's keys; `dict{k|q}` after `json():` names the keys it reads from that "
+            "dict -- a fake dict with none of them is refused)\n")
     # §17.1862 — the modules the step runs through are never cut: the budget bounds the rest. Live (5b4880c0 T5):
     # the signatures grew their kinds and the cut at 6000 fell after 13 of 21 -- the step's own targets among the lost.
     n_lead = min(n_lead, len(lines))
     keep = "".join(ln + "\n" for ln in lines[:n_lead])
     rest = "".join(ln + "\n" for ln in lines[n_lead:])
     out = head + keep + rest
-    if len(out) <= budget:
+    # §17.1876 — the legend is fixed text: the budget bounds the module lines, never the sentence that explains them
+    if len(keep) + len(rest) <= budget:
         return out
-    room = max(budget - len(head) - len(keep), 0)
+    room = max(budget - len(keep), 0)
     cut = rest[:room].rsplit("\n", 1)[0] if room else ""
     return head + keep + (cut + "\n" if cut.strip() else "") + "    …\n"
 

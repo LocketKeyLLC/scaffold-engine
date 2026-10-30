@@ -80,7 +80,7 @@ def test_the_index_shows_the_keys_a_dict_parameter_is_read_for_and_who_opens_a_s
     defs = _defs()
     out = es._render_job_modules(defs, "")
     assert ("handle_approval_answer(job_id: str, node_key: str, answer: dict{approved, note}, "
-            "payload: dict{proposal{proposal_id}, proposal_id}) [own session]") in out
+            "payload: dict{proposal{proposal_id}, proposal_id}) -> None [own session]") in out
     assert "request_approval(proposal: dict{proposal_id}, *, db=…)" in out and "act(payload: dict{proposal_id})" in out
     assert "write_signal(*, ingested_item_id: int, ticker: str)" in out
     assert "`[own session]` means it opens its own `async_session()` and sees only rows the test has committed" in out

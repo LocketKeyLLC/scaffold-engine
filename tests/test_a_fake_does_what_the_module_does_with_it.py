@@ -109,7 +109,7 @@ def test_the_index_shows_what_a_function_does_with_a_parameter():
     # the result of `_fetch_json` is read as a dict by its caller, so `json()` is `: dict`; the `aclose()` under
     # `if own_client …` acts on the module's own client, never on a fake, and is not shown
     assert es._shape_signature("fetch_disclosures", _shape(CONGRESS, "fetch_disclosures")) == \
-        "async fetch_disclosures(client{get()->{json(): dict, raise_for_status()}} = …, *, max_requests: int = …)"
+        "async fetch_disclosures(client{get()->{json(): dict{data|results}, raise_for_status()}} = …, *, max_requests: int = …)"
     # a parameter with a kind, a value set or keys keeps that rendering; `db` is never described
     sh = _shape(CONGRESS, "fetch_disclosures")
     assert "max_requests" not in sh["uses"] and "client" in sh["uses"]
@@ -148,7 +148,7 @@ async def test_list():
         "`http_get()->{raise_for_status(), text}`",
         "`tests/test_paper_twelve_modules.py:18` hands `fetch_disclosures(…)` `client` = a fake whose `get()` returns a fake "
         "whose `json()` returns a list (line 15), which the module reads as a dict (`.get(…)` / `[\"key\"]`) -- give it "
-        "what the module uses: `client{get()->{json(): dict, raise_for_status()}}`",
+        "what the module uses: `client{get()->{json(): dict{data|results}, raise_for_status()}}`",
     ]
     assert findings_in_tests(found) == found                                   # §17.1859: a redraw, not the attempt
 
@@ -265,7 +265,7 @@ def test_the_index_follows_a_client_stored_on_self_and_one_entered_with_async_wi
     u = _target_uses(MODULES2["paper_alpaca_paper_client"], "httpx", "AsyncClient")
     assert es._uses_text(u) == "()->{request()->{json()}}"
     u = _target_uses(MODULES2["paper_news_ingestion"], "httpx", "AsyncClient")
-    assert es._uses_text(u) == "()->{async with -> {get()->{json(): dict, raise_for_status()}}}"
+    assert es._uses_text(u) == "()->{async with -> {get()->{json(): dict{results}, raise_for_status()}}}"
 
 
 def test_a_monkeypatched_async_def_for_a_class_is_a_coroutine_where_the_module_calls_it():
@@ -311,10 +311,10 @@ async def test_news_lambda_literal(monkeypatch):
         "`tests/test_paper_twelve_modules.py:19` patches `AsyncClient` on `httpx` with a fake whose call returns a coroutine "
         "(line 17): the fake is `async def`, and the module calls it as a plain function, then enters it with `async with` "
         "-- make the fake a plain `def` (or a `MagicMock`) returning the object -- give it what the module uses: "
-        "`AsyncClient()->{async with -> {get()->{json(): dict, raise_for_status()}}}`",
+        "`AsyncClient()->{async with -> {get()->{json(): dict{results}, raise_for_status()}}}`",
         "`tests/test_paper_twelve_modules.py:32` patches `AsyncClient` on `httpx` with a fake whose call returns a dict "
         "(line 32), and the module enters it with `async with` -- give it what the module uses: "
-        "`AsyncClient()->{async with -> {get()->{json(): dict, raise_for_status()}}}`",
+        "`AsyncClient()->{async with -> {get()->{json(): dict{results}, raise_for_status()}}}`",
     ], found
     # the plain `def` returning a MagicMock that enters as itself, with an `AsyncMock` `get`, passes (a bare
     # `MagicMock()` would not: `async with` hands the module `m.__aenter__.return_value`, a fresh MagicMock whose
