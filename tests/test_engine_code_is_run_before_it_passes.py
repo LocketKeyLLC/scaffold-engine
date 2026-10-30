@@ -285,8 +285,9 @@ def _pytest_out(n: int = 12) -> str:
 def test_the_report_keeps_the_first_failure_and_the_summary():
     out = _pytest_out()
     assert len(out) > 6000                                           # over the limit: something must go
-    rep = et._report(out)
+    rep = et._report(out, budget=6000)                               # §17.1869 -- the default is 9000 now
     assert len(rep) <= 6000
+    assert rep.startswith("Every failure, one line each") and "test_case_11: E   ValueError" in rep   # §17.1869
     assert "E   ValueError: cause number 0" in rep and "E   ValueError: cause number 1" in rep   # the first ones
     assert "12 failed, 2 passed" in rep and "short test summary info" in rep
     assert "cause number 0" not in et._tail(out)                     # what the old tail kept: not the first

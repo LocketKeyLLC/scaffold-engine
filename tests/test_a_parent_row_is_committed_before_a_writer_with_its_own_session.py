@@ -109,9 +109,27 @@ async def test_refuse():
     assert ('`tests/test_paper_twelve_modules.py:8` calls `act(…)`: `payload` is read for `proposal_id` '
             '(as `["proposal_id"]`, which raises without it) -- the dict given has `proposal` and no `proposal_id`') in found[1]
     assert findings_in_tests(found) == found                                   # §17.1859: a redraw, not the attempt
-    # the key under `proposal` only reaches a column through `.get`: a dict that carries it passes
-    ok = test.replace('{"id": 7, "ticker": "SPY"}', '{"proposal_id": 7}').replace('{"proposal": {"proposal_id": 7}}', '{"proposal_id": 7}')
+    # the key under `proposal` only reaches a column through `.get`: a dict that carries it (the id a writer returned,
+    # never a number -- §17.1869) passes
+    ok = test.replace('{"id": 7, "ticker": "SPY"}', '{"proposal_id": pid}').replace('{"proposal": {"proposal_id": 7}}', '{"proposal_id": pid}')
+    ok = ok.replace("async def test_refuse():\n", "async def test_refuse():\n    pid = await write_proposal(signal_id=1, ticker='SPY')\n")
     assert es.sibling_refs("```python\n" + ok + "```", _defs(), fks=FKS, rules={}) == []
+
+
+def test_a_number_under_a_key_written_to_a_foreign_key_is_a_made_up_id():
+    """§17.1869 — live (5b4880c0 T5, 2026-10-30): `handle_approval_answer(…, {"proposal": {"proposal_id": 1}, …})`
+    reached the sandbox and the scratch database refused `approval.proposal_id`=1."""
+    test = '''# tests/test_paper_twelve_modules.py
+from app.modules import paper_operator_approval_gate
+
+async def test_refuse():
+    await paper_operator_approval_gate.handle_approval_answer("j", "n", {"approved": False}, {"proposal": {"proposal_id": 1}, "proposal_id": 1})
+'''
+    found = es.sibling_refs("```python\n" + test + "```", _defs(), fks=FKS, rules={})
+    assert len(found) == 1 and found[0].startswith(
+        '`tests/test_paper_twelve_modules.py:5` calls `handle_approval_answer(…)`: `payload`["proposal"]["proposal_id"] is '
+        "written to `approval.proposal_id`, which references `proposal`; it was given the number 1 -- a made-up id the "
+        "scratch database refuses: pass the id its parent's writer returned"), found
 
 
 def _files(test: str) -> dict[str, str]:

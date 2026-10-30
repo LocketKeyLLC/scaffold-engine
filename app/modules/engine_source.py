@@ -468,6 +468,9 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
         e = e.value if isinstance(e, ast.Await) else e
         if isinstance(e, ast.Name):
             return names.get(e.id)
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id == "self" \
+                and f"self.{e.attr}" in names:                                   # §17.1869 `self._client`
+            return names[f"self.{e.attr}"]
         if isinstance(e, ast.BoolOp):                    # `getter = http_get or _default_http_get`
             return next((b for v in e.values if (b := node_of(v)) is not None), None)
         if isinstance(e, ast.Call):
@@ -521,6 +524,15 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 names[n.targets[0].id] = node
         elif isinstance(n, (ast.For, ast.AsyncFor)) and (b := node_of(n.iter)) is not None:
             b["as"] = b["as"] or "list"
+        elif isinstance(n, (ast.With, ast.AsyncWith)):   # §17.1869 `async with X() as c:` enters what X() returns
+            for item in n.items:
+                b = node_of(item.context_expr)
+                if b is None:
+                    continue
+                enter = "__aenter__" if isinstance(n, ast.AsyncWith) else "__enter__"
+                c = b["calls"].setdefault(enter, {"await": isinstance(n, ast.AsyncWith), "then": _new_use(), "line": n.lineno})
+                if isinstance(item.optional_vars, ast.Name):
+                    names[item.optional_vars.id] = c["then"]
         elif isinstance(n, ast.Return) and n.value is not None and result is not None:
             node = node_of(n.value)
             if node is not None:
@@ -560,11 +572,16 @@ def _uses_text(u: dict, _depth: int = 0) -> str:
         t = _uses_text(then, _depth + 1) if not _uses_empty(then) else ""
         return "()" + ("->" + (t[2:] if t.startswith(": ") else t) if t else "")
     for m, info in sorted(u["calls"].items()):
+        if m in ("__aenter__", "__enter__"):               # §17.1869 rendered as what it is
+            then = info["then"]
+            t = ("async with" if m == "__aenter__" else "with") + (" -> " + _uses_text(then, _depth + 1) if not _uses_empty(then) and _depth < 3 else "")
+            parts.append(t)
+            continue
         t = m + "()"
         then = info["then"]
         if then["as"] and _uses_empty({**then, "as": None}):
             t += ": " + then["as"]
-        elif not _uses_empty(then) and _depth < 2:
+        elif not _uses_empty(then) and _depth < 3:
             t += "->" + _uses_text(then, _depth + 1)
         parts.append(t)
     parts += sorted(u["attrs"])
@@ -830,8 +847,15 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
             v = given[key]
             v = consts[v.id] if isinstance(v, ast.Name) and consts and v.id in consts else v
             want, got = info.get("kinds"), _literal_kind(v, consts)
+            table, _, col = (info.get("to") or "").partition(".")
+            parent = (fks or {}).get(table, {}).get(col) if info.get("to") else None
             if want and got and got not in want:
                 out.append(f'{label}: {where}["{key}"] is `{_kinds_text(want)}`; it was given a `{got}`')
+            elif parent and isinstance(v, ast.Constant) and isinstance(v.value, int) and not isinstance(v.value, bool):
+                # §17.1869 — a made-up id under a dict key (live: `{"proposal": {"proposal_id": 1}}` into the gate)
+                out.append(f'{label}: {where}["{key}"] is written to `{info["to"]}`, which references '
+                           f'`{parent.split(".")[0]}`; it was given the number {v.value} -- a made-up id the scratch '
+                           "database refuses: pass the id its parent's writer returned")
             elif info.get("sub") and isinstance(v, ast.Dict):
                 out += _dict_mismatches(label, f'{where}["{key}"]', v, info["sub"], consts, fks, rules)
             continue
@@ -2334,6 +2358,34 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
 
 
 _REQUIRED_TESTS_RE = re.compile(r"\b(tests/test_\w+\.py)\b")
+
+
+def test_syntax_findings(output: str) -> list[str]:
+    """§17.1869 — each Python block headed with a test path that does not compile, as a test-file finding (§17.1859:
+    a redraw, not the attempt): "`tests/x.py:555` does not compile: invalid syntax (`async def def test_…`)". Live
+    (5b4880c0 T5, 2026-10-30 01:31 UTC): attempt 4's 72-test file had `async def def` on one line; the §17.428 gate
+    refused the whole attempt -- the last one -- for a typo the redraw mends in a minute."""
+    from app.modules.execution_codegen_gate import check_python_syntax
+    blocks = extract_code_blocks(output or "")
+    out: list[str] = []
+    for f in check_python_syntax(output or ""):
+        code = blocks[f.block_index - 1][1] if 0 < f.block_index <= len(blocks) else ""
+        path = _header_path(code)
+        if not path.startswith("tests/"):
+            continue
+        out.append(f"`{path}:{f.lineno or 0}` does not compile: {f.message}"
+                   + (f" (`{f.text.strip()}`)" if f.text else "") + " -- fix that line; the file must compile")
+    return out
+
+
+def syntax_only_in_tests(output: str) -> bool:
+    """§17.1869 — whether every block that fails to compile is a test file (then the attempt is not spent on it)."""
+    from app.modules.execution_codegen_gate import check_python_syntax
+    blocks = extract_code_blocks(output or "")
+    found = check_python_syntax(output or "")
+    return bool(found) and all(
+        _header_path(blocks[f.block_index - 1][1] if 0 < f.block_index <= len(blocks) else "").startswith("tests/")
+        for f in found)
 
 
 def missing_test_file(output: str, step_text: str) -> str | None:
