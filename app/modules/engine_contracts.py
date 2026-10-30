@@ -3352,7 +3352,89 @@ def drop_file_block(output: str, path: str) -> str:
     return output
 
 
-async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 2,
+_LINE_REFS = re.compile(r"`tests/[^`\s]+:(\d+)`|\(line (\d+)\)")
+
+
+def _finding_lines(findings: list[str]) -> list[int]:
+    """§17.1877 — every line a finding names in the test file: its own `tests/x.py:N` and each `(line N)` (a helper
+    the fake came through)."""
+    return sorted({int(a or b) for f in findings for a, b in _LINE_REFS.findall(f)})
+
+
+_DROPPED_RE = re.compile(r"^`tests/[^`]+` dropped \d+ of the \d+ tests[^:]*: (.*?)(?: -- |$)")
+
+
+def _dropped_names(finding: str) -> list[str]:
+    """§17.1877 — the test names a §17.1864 dropped-tests finding lists; [] for any other finding."""
+    m = _DROPPED_RE.match(finding)
+    return re.findall(r"`([^`]+)`", m.group(1)) if m else []
+
+
+def _top_spans(code: str) -> list[tuple[str, int, int]]:
+    """(name, first line -- decorators included, last line) of each top-level function and class of `code`."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    out: list[tuple[str, int, int]] = []
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.append((n.name, min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno or n.lineno))
+    return out
+
+
+def definitions_at(code: str, lines: list[int]) -> list[str]:
+    """§17.1877 — the top-level definitions of `code` (a test, a test class, a helper) that hold any of `lines`."""
+    return [name for name, a, b in _top_spans(code) if any(a <= ln <= b for ln in lines)]
+
+
+def splice_definitions(code: str, new: str) -> str | None:
+    """§17.1877 — `code` with each top-level function or class of `new` put in place of its namesake, a new name
+    appended, and an import `new` has that `code` lacks inserted after the last import; everything else byte for
+    byte as it was. None when `new` does not parse or defines nothing. Live (5b4880c0 T5, 2026-10-30, the §17.1876
+    round): asked for the whole 97-test file again, the redraws rewrote 1,935 lines for five findings, dropped two
+    tests, and once returned the identical file; a redraw that returns the definitions it was asked for cannot."""
+    new = (new or "").strip()
+    if new.startswith("```"):
+        new = new.split("\n", 1)[1] if "\n" in new else ""
+        new = new.rsplit("```", 1)[0]
+    try:
+        ntree = ast.parse(new)
+    except SyntaxError:
+        return None
+    defs = [n for n in ntree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    if not defs:
+        return None
+    lines = code.splitlines()
+    spans = {name: (a, b) for name, a, b in _top_spans(code)}
+    nlines = new.splitlines()
+    pieces: list[tuple[int, int, str]] = []
+    appended: list[str] = []
+    for n in defs:
+        start = min([n.lineno] + [d.lineno for d in n.decorator_list])
+        text = "\n".join(nlines[start - 1:(n.end_lineno or n.lineno)])
+        if n.name in spans:
+            pieces.append((*spans[n.name], text))
+        else:
+            appended.append(text)
+    try:
+        body = ast.parse(code).body
+    except SyntaxError:
+        body = []
+    have = {ast.unparse(x) for x in body if isinstance(x, (ast.Import, ast.ImportFrom))}
+    imports = [ast.unparse(x) for x in ntree.body if isinstance(x, (ast.Import, ast.ImportFrom)) and ast.unparse(x) not in have]
+    for a, b, text in sorted(pieces, key=lambda t: -t[0]):
+        lines[a - 1:b] = text.splitlines()
+    if appended:
+        lines += ["", ""] + "\n\n\n".join(appended).splitlines()
+    if imports:
+        last = max((x.end_lineno or x.lineno for x in body if isinstance(x, (ast.Import, ast.ImportFrom))), default=0)
+        at = last if last else (1 if lines and lines[0].startswith("#") else 0)
+        lines[at:at] = imports
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tries: int = 4,
                              tests_only: bool = False) -> tuple[str, list[str]]:
     """§17.1852 — while every finding is a stand-in in one test file, ask for that file alone (`ask(path, refusal,
     output)` -> the file) and check the result (`check(output)` -> findings), at most `tries` times. Live (5b4880c0
@@ -3364,27 +3446,61 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
     §17.1854 — `ask` is handed the output the refusal is about: the CURRENT candidate. Live (5b4880c0 T6, 2026-10-28,
     the §17.1853 round): the executor's ask showed the model the attempt's original file, so the second redraw read a
     refusal whose line numbers belonged to the first redraw's file next to the file it had started from, and gave that
-    original back -- five stand-ins, then two, then the same five."""
+    original back -- five stand-ins, then two, then the same five.
+
+    §17.1877 — an `ask` that takes `only=` is asked for the DEFINITIONS the findings name (when they are few against
+    the file), and its answer is spliced in by name (`splice_definitions`); the whole file only otherwise. A pass
+    whose findings were all "does not compile" is not counted; an answer identical to the file ends the loop, as does
+    a pass that leaves as many findings as it found. Live (5b4880c0 T5, 2026-10-30, 22:01–22:18 UTC): 1 (syntax) ->
+    69 -> 5, 56 -> 5, 120 -> 6, 109 -> 2 -> 2 (the identical file) -- two whole-file passes each, none to the sandbox."""
     # §17.1874 — `tests_only`: the output is test files and nothing else, so EVERY finding is about a test file,
     # whatever its prefix. Live (5b4880c0 T5 a1, 2026-10-30): 68 test-file findings and one `SELECT … ticker … FROM
     # fill` (a schema finding, no path: the test's own SQL) -- no redraw, the attempt spent on a refusal the redraw
     # answers; the file is the output's one test file.
+    import inspect
+
     from app.sandbox.engine_tests import files_of, is_test
+    by_name = "only" in inspect.signature(ask).parameters
     test_paths = sorted(p for p in files_of({"output_text": output}) if is_test(p))
-    for _ in range(max(0, tries)):
+    passes = asks = 0
+    while passes < max(0, tries) and asks <= max(0, tries) and findings:   # one uncounted syntax pass at most
+        asks += 1
         fakes = findings if tests_only and len(test_paths) == 1 else findings_in_tests(findings)   # §17.1859
-        if not findings or fakes != findings:
+        if fakes != findings:
             break
         paths = {_finding_path(f) for f in findings_in_tests(fakes)} or set(test_paths)
         if len(paths) != 1:
             break
         path = paths.pop()
-        new_file = await ask(path, "\n".join(f"  - {f}" for f in findings), output)
+        code = files_of({"output_text": output}).get(path, "")
+        only: list[str] | None = None
+        # a dropped test (§17.1864, no line) is a definition to write anew; any other finding without a line
+        # (the file's own SQL, a module-side finding that slipped through) keeps the whole-file ask
+        dropped = [n for f in findings for n in _dropped_names(f)]
+        if by_name and all(_LINE_REFS.search(f) or _dropped_names(f) for f in findings):
+            names = definitions_at(code, _finding_lines(findings))
+            names += [d for d in dropped if d not in names]
+            if names and (len(names) - len(dropped)) * 2 <= len(_top_spans(code)):   # few against the file
+                only = names
+        refusal = "\n".join(f"  - {f}" for f in findings)
+        new_file = await (ask(path, refusal, output, only=only) if by_name else ask(path, refusal, output))
         if not (new_file or "").strip():
             break
-        candidate = replace_file_block(output, path, new_file)
+        if only:
+            spliced = splice_definitions(code, new_file)
+            if spliced is None:
+                break
+            candidate = replace_file_block(output, path, spliced)
+        else:
+            candidate = replace_file_block(output, path, new_file)
+        if candidate == output:
+            break
+        syntax_pass = all("does not compile" in f for f in findings)
+        before = len(findings)
         findings = await check(candidate)
         output = candidate
-        if not findings:
-            break
+        if not syntax_pass:
+            passes += 1
+            if len(findings) >= before:
+                break
     return output, findings

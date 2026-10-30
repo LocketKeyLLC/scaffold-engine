@@ -2708,9 +2708,20 @@ async def execute_next_node(
                     # own lines (a patch of a name the module lacks, a module run into a secret, a made-up id, …)
                     from app.modules import engine_contracts as _ec
                     if _refs and _ec.findings_in_tests(_refs) == _refs:
-                        async def _ask_tests(_path: str, _refusal: str, _current: str) -> str:
+                        async def _ask_tests(_path: str, _refusal: str, _current: str,
+                                             only: list[str] | None = None) -> str:
                             # §17.1854 — the assistant turn is the output the refusal is about (the current candidate),
                             # never the attempt's original: a second redraw must see the first redraw's file
+                            # §17.1877 — `only`: the definitions the findings name, asked for alone and spliced in by
+                            # name -- a whole-file rewrite of 97 tests churned 1,935 lines, dropped tests, repeated itself
+                            _what = (f"\nWrite again ONLY these definitions of `{_path}`, each complete with its decorators, "
+                                     f"in one ```python block and nothing else (no file header, no other test): "
+                                     + ", ".join(f"`{n}`" for n in only) +
+                                     ". Everything else in the file stays exactly as it is -- do not repeat it. A helper "
+                                     "or an import the fix needs goes in the same block. Fix each line named above as it "
+                                     "says: a stand-in ") if only else (
+                                     f"\nWrite only `{_path}` again: one ```python block whose first line is "
+                                     f"`# {_path}`. Keep every test. Fix each line named above as it says: a stand-in ")
                             _r = await asyncio.wait_for(chat_until_nonempty(
                                 model_router.chat,
                                 [{"role": "system", "content": _system_for_tool(tool)},
@@ -2718,9 +2729,7 @@ async def execute_next_node(
                                  {"role": "assistant", "content": _current},
                                  {"role": "user", "content": (
                                      "Your module passed every check; your test file did not. The verifier refused "
-                                     "these lines of it:\n" + _refusal +
-                                     f"\nWrite only `{_path}` again: one ```python block whose first line is "
-                                     f"`# {_path}`. Keep every test. Fix each line named above as it says: a stand-in "
+                                     "these lines of it:\n" + _refusal + _what +
                                      "for a finished module becomes a call to the real one (insert the rows it reads "
                                      "first, with the writer named, or `INSERT INTO` through `text`, and assert on "
                                      "what it returns and the rows it wrote); a patch names only a name the module "
