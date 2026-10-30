@@ -575,6 +575,31 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
     return dict(claimed) if claimed else None
 
 
+_CLAIM_TRIES = 3
+
+
+async def _claim_frontier(job_id: str, free: int, held: set[str]) -> list[dict]:
+    """§17.1874 — the frontier's claim, retried over a transient database error. Live (5b4880c0 T5 a4, 2026-10-30
+    17:29 UTC): the asyncpg connect handshake (2 s cap, §17.179) timed out once while the sandbox was busy on the same
+    Postgres; the TimeoutError left `_run_parallel_frontier`, `execute_all_nodes` cleaned up and the JOB went to
+    `failed` -- the step's fourth attempt and every pending step after it lost to one slow connect."""
+    from sqlalchemy.exc import DBAPIError
+    for attempt in range(1, _CLAIM_TRIES + 1):
+        try:
+            async with async_session() as db:
+                claimed = await _claim_ready_nodes(db, job_id, free, exclude=held)
+                if claimed:                                   # §17.1119 — heartbeat
+                    await touch(db, job_id, reason="node_claim")
+                    await db.commit()
+            return claimed
+        except (TimeoutError, OSError, DBAPIError) as exc:
+            if attempt == _CLAIM_TRIES:
+                raise
+            logger.warning("frontier_claim_retry: job=%s try=%d/%d error=%r", job_id, attempt, _CLAIM_TRIES, exc)
+            await asyncio.sleep(2.0 * attempt)
+    return []
+
+
 async def _claim_ready_nodes(
     db: AsyncSession, job_id: str, limit: int, exclude: set[str] | None = None,
 ) -> list[dict]:
@@ -2723,7 +2748,11 @@ async def execute_next_node(
                                 return _es.test_syntax_findings(_cand) + await _es.engine_findings(_cdb, job_id, node_key, _cand)
 
                         _before = len(_refs)
-                        output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests)
+                        from app.sandbox.engine_tests import files_of as _fo, is_test as _is_test
+                        _tests_only = bool(_fo({"output_text": output})) and all(
+                            _is_test(p) for p in _fo({"output_text": output}))             # §17.1874
+                        output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests,
+                                                                     tests_only=_tests_only)
                         (logger.info if not _refs else logger.warning)(
                             "engine_tests_redrawn: node='%s' test_findings=%d left=%d", title, _before, len(_refs))
                     if _refs:
@@ -4504,11 +4533,7 @@ async def _run_parallel_frontier(
             # 1. Refill the frontier up to the cap.
             free = cap - len(inflight)
             if free > 0:
-                async with async_session() as db:
-                    claimed = await _claim_ready_nodes(db, job_id, free, exclude=held)
-                    if claimed:                                   # §17.1119 — heartbeat
-                        await touch(db, job_id, reason="node_claim")
-                        await db.commit()
+                claimed = await _claim_frontier(job_id, free, held)
                 for n in claimed:
                     yield _sse("node_start", {
                         "job_id": job_id, "node_key": n["node_key"],

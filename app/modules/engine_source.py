@@ -1371,10 +1371,17 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 own = list(_own_nodes(fn))
                 local_consts[id(fn)] = _literal_bindings(own)
                 owner.update({id(x): id(fn) for x in own if isinstance(x, ast.Call)})
+        # §17.1874 — a call the test expects to raise is meant to fail before any write: the row a parent key points
+        # at is not required of it. Live (5b4880c0 T5 a2/a3, 2026-10-30): every finding left after the redraws was
+        # `execute_order(approval)` under `with pytest.raises(ValueError):` -- "`approval` is read for `approval_id`"
+        # -- seven, then ten; the §17.1870 exemption covered the fakes gate only.
+        from app.modules.engine_contracts import _expects_a_raise
+        raises = _expects_a_raise(tree)
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
             consts = {**mod_consts, **local_consts.get(owner.get(id(n), 0), {})}
+            in_raise = any(a <= n.lineno <= b for a, b in raises)
             target = None
             if isinstance(n.func, ast.Name) and n.func.id in imported:
                 target = imported[n.func.id]
@@ -1391,6 +1398,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 if not shape:
                     continue
                 for m in _call_mismatches(n, fname, shape, id(n) in misused, consts, fks, rules):
+                    if in_raise and ("is read for `" in m or "a made-up id the scratch database refuses" in m):
+                        continue                                                           # §17.1874
                     m = _at(code, n) + m.replace("in the engine", f"in `{leaf}`")          # §17.1861
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
