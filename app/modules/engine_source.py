@@ -603,6 +603,21 @@ def _uses_text(u: dict, _depth: int = 0) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+def _call_time_imports(fn: ast.AST) -> list[str]:
+    """§17.1875 — the names a function imports inside its own body, as `module.name` (`from app.modules.gt_extractor
+    import search_searxng` -> `app.modules.gt_extractor.search_searxng`; `import httpx` -> `httpx`): the code looks
+    them up on THEIR module at call time, never on this one. Live (5b4880c0 T5, 2026-10-30, four attempts, eight
+    redraws): the news ingester reaches SearXNG through such an import; the test patched `httpx` on it every time."""
+    from app.modules.engine_contracts import _own_nodes
+    out: list[str] = []
+    for n in _own_nodes(fn):
+        if isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+            out += [f"{n.module}.{a.name}" for a in n.names]
+        elif isinstance(n, ast.Import):
+            out += [a.name for a in n.names]
+    return sorted(set(out))
+
+
 def _opens_own_session(fn: ast.AST) -> bool:
     """§17.1866 — a function that opens its own `async_session()` (no session parameter): it sees only rows the
     caller has committed."""
@@ -1188,7 +1203,8 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
             if not mod:
                 continue
             codes[mod] = code
-            a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}, "own_session": set()})
+            a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}, "own_session": set(),
+                                     "call_imports": {}})
             names, defined, funcs, classes = a["names"], a["defined"], a["funcs"], a["classes"]
             _consts, _local = module_values(tree), _local_functions(tree)       # §17.1855
             for n in tree.body:
@@ -1198,6 +1214,8 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                     funcs[n.name] = _call_shape(n, _consts, _local)
                     if _opens_own_session(n):                                # §17.1866
                         a["own_session"].add(n.name)
+                    if (ci := _call_time_imports(n)):                       # §17.1875
+                        a["call_imports"][n.name] = ci
                     if not n.name.startswith("_"):                       # §17.1834 — what its dicts carry
                         from app.modules.engine_contracts import return_note
                         a.setdefault("returns", {})[n.name] = return_note(code, n.name)        # §17.1837
@@ -1553,7 +1571,8 @@ def _public_api(code: str, limit: int = 600) -> str:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
             note = return_note(code, n.name)                            # §17.1834, §17.1837
             fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else "") + _sec(n.name)
-                       + (" [own session]" if _opens_own_session(n) else ""))             # §17.1866
+                       + (" [own session]" if _opens_own_session(n) else "")              # §17.1866
+                       + (f" [imports at call time: {', '.join(ci)}]" if (ci := _call_time_imports(n)) else ""))  # §17.1875
         elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
             meths = [m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and not m.name.startswith("_")]
@@ -2362,9 +2381,11 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             n_lead = len(lines) + 1
         rk, sk = defs[mod].get("returns") or {}, defs[mod].get("secrets") or {}
         osn = defs[mod].get("own_session") or set()
+        cim = defs[mod].get("call_imports") or {}
 
         def _sec(name: str) -> str:              # §17.1863 -- `[secrets: SEC_CONTACT_EMAIL]`; §17.1866 -- `[own session]`
-            return (f" [secrets: {', '.join(sk[name])}]" if sk.get(name) else "") + (" [own session]" if name in osn else "")
+            return ((f" [secrets: {', '.join(sk[name])}]" if sk.get(name) else "") + (" [own session]" if name in osn else "")
+                    + (f" [imports at call time: {', '.join(cim[name])}]" if cim.get(name) else ""))      # §17.1875
         sigs = [_shape_signature(f, sh) + (f" -> {rk[f]}" if rk.get(f) else "") + _sec(f)   # §17.1834, §17.1837
                 for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
         for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
@@ -2390,7 +2411,9 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
             "`[secrets: A, B]` means the function reads those operator secrets "
             "through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`; "
             "`[own session]` means it opens its own `async_session()` and sees only rows the test has committed -- "
-            "`await db.commit()` after inserting the parent rows, before calling it)\n")
+            "`await db.commit()` after inserting the parent rows, before calling it; "
+            "`[imports at call time: app.modules.x.f]` means it reaches `f` through `app.modules.x` when called -- "
+            "patch it THERE (`patch(\"app.modules.x.f\")`), never on this module, which has no such name)\n")
     # §17.1862 — the modules the step runs through are never cut: the budget bounds the rest. Live (5b4880c0 T5):
     # the signatures grew their kinds and the cut at 6000 fell after 13 of 21 -- the step's own targets among the lost.
     n_lead = min(n_lead, len(lines))

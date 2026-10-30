@@ -523,6 +523,23 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
             public = [n for n in defined if not n.startswith("_")]
             where = [m for m, c in sorted(modules.items()) if name in _top_names(c)[0]]
             inserts = _inserts_of(reach[mod])
+            # §17.1875 — what the module reaches through imports inside its functions: the name lives on THAT module
+            from app.modules.engine_source import _call_time_imports
+            try:
+                late = {f.name: _call_time_imports(f) for f in ast.parse(reach[mod]).body
+                        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and _call_time_imports(f)}
+            except SyntaxError:
+                late = {}
+            same = [(f, i) for f, imps in late.items() for i in imps if i == name or i.rsplit(".", 1)[-1] == name]
+            late_note = ""
+            if same:
+                f, i = same[0]
+                late_note = (f". `{name}` is imported inside `{f}` at call time and is never an attribute of `{mod}`: "
+                             f"patch the name on `{i.rsplit('.', 1)[0] if '.' in i else i}` itself")
+            elif late:
+                late_note = ". It reaches outside through " + "; ".join(
+                    f"`{f}`, which imports {', '.join('`' + i + '`' for i in imps[:3])} at call time"
+                    for f, imps in sorted(late.items())[:3]) + " -- patch THOSE names on their own modules"
             found.append(
                 f"`{path}:{line}` patches `{name}` on `{mod}`, which has no such name (it has "
                 f"{', '.join(public[:12]) or 'nothing public'}; it imports {', '.join(imported[:12]) or 'nothing'}) -- "
@@ -531,6 +548,7 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
                    f"nothing `{mod}` does" if where else "")
                 + (f" -- `{mod}` writes {', '.join(f'`{t}`' for t in inserts)} itself: call it and read the rows it "
                    "wrote" if inserts else "")
+                + late_note
                 + ". Patch a name where the code looks it up, and only what reaches outside the engine")
     return found
 
@@ -885,8 +903,16 @@ def wrong_secret_mocks(files: dict[str, str], modules: dict[str, str], own: set[
             continue
         scopes = _scopes(tree)
         calls = _test_calls(code)
+        # §17.1875 — a test that expects a raise may hand the module no secret on purpose. Live (5b4880c0 T5 a1,
+        # 2026-10-30): `patch(…values_for, AsyncMock(return_value={}))` under `pytest.raises(AlpacaSecretsMissingError)`
+        raises = _expects_a_raise(tree)
+        fn_ranges = sorted((f.lineno, getattr(f, "end_lineno", None) or f.lineno) for f in ast.walk(tree)
+                           if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)))
         for mod, line, keys in mocks:
             if keys is None or (mod != "runner_secrets" and mod not in reach):
+                continue
+            rng = next((r for r in reversed(fn_ranges) if r[0] <= line <= r[1]), None)
+            if rng and any(rng[0] <= a and b <= rng[1] for a, b in raises):
                 continue
             sc = _scope_of(scopes, line)
             in_scope = [(m, f) for m, f, ln in calls if m in reach and (not sc.startswith("test") or _scope_of(scopes, ln) == sc)]
@@ -1369,6 +1395,17 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
         out.scope = out.scope or val.scope
         return out
     if what == "call" and entering:                                           # entering either kind: an AsyncMock
+        # §17.1875 — measured: `async with MagicMock() as c` yields a NEW AsyncMock, not the mock, unless the test set
+        # its `__aenter__`; what the test set on the mock itself (`get`, `aclose`) is then never reached. Live
+        # (5b4880c0 T5, 2026-10-30, four attempts, eight redraws): the finding named the response's `json()` as a
+        # coroutine and asked for a MagicMock response -- the response WAS one; the client was never entered.
+        prefix = (val.root, *val.path[:-1]) if val.root else None
+        set_on = sorted({k[len(prefix)] for k in fk.chains                          # type: ignore[arg-type]
+                         if prefix and len(k) > len(prefix) and k[:len(prefix)] == prefix
+                         and k[len(prefix)] not in ("__aenter__", "__aexit__")}) if prefix else []
+        if set_on and val.path[-1] == "__aenter__":
+            return _Val(kind="entered-anew:" + ", ".join(set_on), node=val.node, root=val.root, path=val.path,
+                        line=val.line, scope=val.scope)
         return _Val(mock="AsyncMock", node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
     if what == "call" and val.mock == "AsyncMock" and not arg:                # a coroutine, never awaited
         return _Val(kind="coroutine-mock", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
@@ -1394,6 +1431,11 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
     fake whose `json()` returns a list (line 290), which the module reads as a dict"; None when every use fits (or
     the fake is unknown)."""
     at = f" (line {val.line})" if val.line else ""
+    if val.kind and val.kind.startswith("entered-anew:"):                    # §17.1875
+        names = val.kind.split(":", 1)[1]
+        return (f"{done}a NEW AsyncMock{at}: a mock's `__aenter__()` returns a fresh mock, not the mock itself, so what "
+                f"the test set on the object the module enters (`{names}`) is never reached -- on that fake set "
+                "`fake.__aenter__ = AsyncMock(return_value=fake)` and `fake.__aexit__ = AsyncMock(return_value=False)`")
     if val.kind == "MagicMock-awaited":
         return f"{done}a `MagicMock`{at}, which the module awaits -- a MagicMock cannot be awaited: make it an `AsyncMock`"
     if val.kind in ("coroutine", "coroutine-mock"):                          # §17.1869/1870
