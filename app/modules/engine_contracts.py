@@ -784,10 +784,20 @@ def dropped_tests(output: str, prior: dict[str, list[str]] | None) -> list[str]:
     if not prior:
         return []
     have = written_tests(output)
+    # §17.1869 — a test file that does not compile is reported for that (`test_syntax_findings`), not as empty
+    from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
+    broken: set[str] = set()
+    for lang, code in extract_code_blocks(output or ""):
+        m = _TEST_PATH_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
+        if m:
+            try:
+                compile(code, "<block>", "exec", dont_inherit=True)
+            except SyntaxError:
+                broken.add(m.group(1))
     found: list[str] = []
     for path, names in sorted(prior.items()):
         gone = [n for n in names if n not in set(have.get(path, []))]
-        if not gone:
+        if not gone or path in broken:
             continue
         found.append(
             f"`{path}` dropped {len(gone)} of the {len(names)} tests your earlier attempts wrote: "
@@ -1097,6 +1107,7 @@ def uncommitted_parents(files: dict[str, str], modules: dict[str, str],
 # ── §17.1867 a fake does what the module does with it ─────────────────────────────────────────────────────────
 
 _MOCK_NAMES = ("MagicMock", "AsyncMock", "Mock", "NonCallableMock", "NonCallableMagicMock")
+_SESSION_PARAMS = frozenset({"db", "session", "conn", "connection"})
 _LITERALS = (ast.Constant, ast.Dict, ast.List, ast.Tuple, ast.Set, ast.JoinedStr)
 
 
@@ -1119,7 +1130,9 @@ class _Fakes:
         self.bound: dict[str, list[tuple[int, ast.AST]]] = {}
         self.chains: dict[tuple[str, ...], list[tuple[int, ast.AST]]] = {}
         for n in nodes:
-            if isinstance(n, ast.Assign) and len(n.targets) == 1:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):      # §17.1869 a local `async def fake(…)`
+                self.bound.setdefault(n.name, []).append((n.lineno, n))
+            elif isinstance(n, ast.Assign) and len(n.targets) == 1:
                 t = n.targets[0]
                 if isinstance(t, ast.Name):
                     self.bound.setdefault(t.id, []).append((n.lineno, n.value))
@@ -1149,11 +1162,13 @@ class _Fakes:
 class _Val:
     """A fake as the module will see it: a literal of some kind, a mock of some kind, or unknown; with the test's
     name and attribute path it came through, so a use can look up what the test set there."""
-    __slots__ = ("kind", "mock", "node", "root", "path", "line", "rv")
+    __slots__ = ("kind", "mock", "node", "root", "path", "line", "rv", "scope")
 
     def __init__(self, kind: str | None = None, mock: str | None = None, node: ast.AST | None = None,
-                 root: str | None = None, path: tuple[str, ...] = (), line: int = 0, rv: ast.AST | None = None):
+                 root: str | None = None, path: tuple[str, ...] = (), line: int = 0, rv: ast.AST | None = None,
+                 scope: "_Fakes | None" = None):
         self.kind, self.mock, self.node, self.root, self.path, self.line, self.rv = kind, mock, node, root, path, line, rv
+        self.scope = scope                       # §17.1869 -- the scope a value came from (a def's own bindings)
 
 
 _RESOLVE_HOPS = 8
@@ -1175,6 +1190,10 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e) or ("tuple" if isinstance(e, ast.Tuple) else "set" if isinstance(e, ast.Set) else None)
         return _Val(kind=kind, node=e, line=getattr(e, "lineno", 0))
+    if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):      # §17.1869 a function the test wrote
+        rv = e.body if isinstance(e, ast.Lambda) else next(
+            (r.value for r in ast.walk(e) if isinstance(r, ast.Return) and r.value is not None), None)
+        return _Val(mock="async def" if isinstance(e, ast.AsyncFunctionDef) else "def", node=e, line=e.lineno, rv=rv)
     if isinstance(e, ast.Call):
         name = _call_name(e)
         kw = {k.arg: k.value for k in e.keywords if k.arg}
@@ -1182,8 +1201,8 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
             return _Val(mock="AsyncMock" if name == "AsyncMock" else "MagicMock", node=e, line=e.lineno,
                         rv=kw.get("return_value"))
         if name in ("patch", "object") and isinstance(e.func, (ast.Name, ast.Attribute)):
-            if "new" in kw:
-                return _resolve(kw["new"], fakes, before, _hops + 1)
+            if (new := _patch_new(e)) is not None:
+                return _resolve(new, fakes, before, _hops + 1)
             nc = kw.get("new_callable")
             mock = ("AsyncMock" if isinstance(nc, ast.Name) and nc.id == "AsyncMock" else "MagicMock") if nc is not None \
                 else ("AsyncMock" if fakes.is_async(e) else "MagicMock")
@@ -1207,22 +1226,46 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
 def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int) -> _Val:
     """What the module gets after one use of a fake: `("attr", "get")`, `("call", awaited)`."""
     what, arg = step
+    if val.mock in ("def", "async def"):                                      # §17.1869 a function the test wrote
+        if what != "call":
+            return _Val()
+        if val.mock == "async def" and not arg:
+            return _Val(kind="coroutine", node=val.node, line=val.line)
+        if val.mock == "def" and arg:
+            return _Val()                                    # awaiting what a plain def returns: not followed
+        if val.rv is None:
+            return _Val(kind="None", node=val.node, line=val.line)
+        inner = _Fakes([x for x in ast.walk(val.node) if isinstance(x, ast.stmt)], None, fakes.is_async) \
+            if isinstance(val.node, (ast.FunctionDef, ast.AsyncFunctionDef)) else _Fakes([], None, fakes.is_async)
+        for k, v in fakes.bound.items():
+            inner.bound.setdefault(k, []).extend(v)
+        for k, v in fakes.chains.items():
+            inner.chains.setdefault(k, []).extend(v)
+        out = _resolve(val.rv, inner, 10 ** 9)
+        out.scope = out.scope or inner
+        return out
     if not val.mock:
         return _Val()
+    fk = val.scope or fakes
     path = val.path + ((arg,) if what == "attr" else ("return_value",))     # type: ignore[operator]
-    if val.root and (v := fakes.chain((val.root, *path), before)) is not None:
-        out = _resolve(v, fakes, before)
+    if val.root and (v := fk.chain((val.root, *path), before)) is not None:
+        out = _resolve(v, fk, before)
         if out.root is None:
             out.root, out.path = val.root, path
+        out.scope = out.scope or val.scope
         return out
     if what == "call" and not val.path and val.rv is not None:              # `MagicMock(return_value=x)` called
-        out = _resolve(val.rv, fakes, before)
+        out = _resolve(val.rv, fk, before)
         if out.root is None:
             out.root, out.path = val.root, path
+        out.scope = out.scope or val.scope
         return out
     if what == "call" and val.mock == "MagicMock" and arg:
-        return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line)
-    return _Val(mock="MagicMock" if what == "call" else val.mock, node=val.node, root=val.root, path=path, line=val.line)
+        if val.path and val.path[-1] in ("__aenter__", "__aexit__"):      # a MagicMock supports `async with` (3.8+)
+            return _Val(mock="MagicMock", node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
+        return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
+    return _Val(mock="MagicMock" if what == "call" else val.mock, node=val.node, root=val.root, path=path, line=val.line,
+                scope=val.scope)
 
 
 _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool", "None": "None", "tuple": "a tuple",
@@ -1238,14 +1281,21 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
     at = f" (line {val.line})" if val.line else ""
     if val.kind == "MagicMock-awaited":
         return f"{done}a `MagicMock`{at}, which the module awaits -- a MagicMock cannot be awaited: make it an `AsyncMock`"
+    if val.kind == "coroutine":                                               # §17.1869
+        needs = [m for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
+        how = ("enters it with `async with`" if "__aenter__" in needs else f"calls `.{needs[0]}()` on it"
+               if needs and needs[0] in uses["calls"] else f"reads `.{needs[0]}` from it" if needs else "uses it")
+        return (f"{done}a coroutine{at}: the fake is `async def`, and the module calls it as a plain function, "
+                f"then {how} -- make the fake a plain `def` (or a `MagicMock`) returning the object")
     if val.kind:
         needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         if val.kind == "dict":
             needs = [n for n in needs if n.rstrip("()") not in _DICT_OK]
         if needs:
             return (f"{done}{_CANNOT.get(val.kind, 'a ' + val.kind)}{at}, and the module "
-                    + ("calls it" if needs[0] == "()" else f"calls `.{needs[0]}` on it" if needs[0].endswith("()")
-                       else f"reads `.{needs[0]}` from it"))
+                    + ("calls it" if needs[0] == "()" else "enters it with `async with`" if needs[0] == "__aenter__()"
+                       else "enters it with `with`" if needs[0] == "__enter__()"
+                       else f"calls `.{needs[0]}` on it" if needs[0].endswith("()") else f"reads `.{needs[0]}` from it"))
         if uses["as"] == "dict" and val.kind in ("list", "tuple", "str", "int", "float", "bool", "set", "None"):
             return f"{done}{_CANNOT[val.kind]}{at}, which the module reads as a dict (`.get(…)` / `[\"key\"]`)"
         return None
@@ -1272,17 +1322,60 @@ def _result_uses(code: str, matches, local_of=None) -> dict | None:
         return None
     local = _local_functions(tree)
     root = _new_use()
+    klass: dict[int, ast.ClassDef] = {}
+    for c in tree.body:
+        if isinstance(c, ast.ClassDef):
+            for m in c.body:
+                klass[id(m)] = c
+
+    def take(fn: ast.AST, name: str, awaited: bool, result: dict | None = None) -> None:
+        if name.startswith("self.") and id(fn) in klass:
+            # §17.1869 — `self._client = httpx.AsyncClient(…)`: what every method does with `self._client`, and what
+            # the callers of a method that returns it do with that (live: `_ensure_client` returns it to `_request`)
+            c = klass[id(fn)]
+            methods = {m.name: m for m in c.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            sub = _new_use()
+            for m in methods.values():
+                returns_it = any(isinstance(r, ast.Return) and r.value is not None and ast.unparse(r.value) == name
+                                 for r in _own_nodes(m))
+                res = None
+                if returns_it:
+                    outer = _result_uses(code, lambda cl, mn=m.name: isinstance(cl.func, ast.Attribute)
+                                         and cl.func.attr == mn and isinstance(cl.func.value, ast.Name)
+                                         and cl.func.value.id == "self")
+                    res = outer["called"]["then"] if outer else None
+                _merge_uses(sub, _uses(m, name, methods, res))
+        else:
+            sub = _uses(fn, name, local_of(fn) if local_of else local, result)
+        if not root["called"]:
+            root["called"] = {"await": awaited, "then": _new_use()}
+        root["called"]["await"] = root["called"]["await"] or awaited
+        _merge_uses(root["called"]["then"], sub)
+
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for n in _own_nodes(fn):
-            if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+            if (isinstance(n, ast.Assign) and len(n.targets) == 1
                     and isinstance((call := _unwrap(n.value)), ast.Call) and matches(call)):
-                sub = _uses(fn, n.targets[0].id, local_of(fn) if local_of else local)
-                if not root["called"]:
-                    root["called"] = {"await": isinstance(n.value, ast.Await), "then": _new_use()}
-                root["called"]["await"] = root["called"]["await"] or isinstance(n.value, ast.Await)
-                _merge_uses(root["called"]["then"], sub)
+                t = n.targets[0]
+                if isinstance(t, ast.Name):
+                    take(fn, t.id, isinstance(n.value, ast.Await))
+                elif isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self":
+                    take(fn, f"self.{t.attr}", isinstance(n.value, ast.Await))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):                   # §17.1869 `async with X() as c:`
+                for item in n.items:
+                    call = _unwrap(item.context_expr)
+                    if isinstance(call, ast.Call) and matches(call):
+                        entered = _new_use()
+                        enter = "__aenter__" if isinstance(n, ast.AsyncWith) else "__enter__"
+                        then = _new_use()
+                        if isinstance(item.optional_vars, ast.Name):
+                            then = _uses(fn, item.optional_vars.id, local_of(fn) if local_of else local)
+                        entered["calls"][enter] = {"await": isinstance(n, ast.AsyncWith), "then": then, "line": n.lineno}
+                        if not root["called"]:
+                            root["called"] = {"await": isinstance(item.context_expr, ast.Await), "then": _new_use()}
+                        _merge_uses(root["called"]["then"], entered)
     return root if root["called"] else None
 
 
@@ -1314,12 +1407,24 @@ def _patch_sites(code: str) -> list[tuple[ast.Call, str, str, str, ast.AST | Non
                     owner[id(x)] = fn
     out = []
     for n in ast.walk(tree):
-        if not (isinstance(n, ast.Call) and _call_name(n) in ("patch", "object") and n.args):
+        if not (isinstance(n, ast.Call) and _call_name(n) in ("patch", "object", "setattr") and n.args):
             continue
         site = _patch_target(n, alias)
         if site:
             out.append((n, *site, owner.get(id(n))))
     return out
+
+
+def _patch_new(call: ast.Call) -> ast.AST | None:
+    """§17.1869 — the value a patch installs when it is given one: `patch(t, new)`, `patch(t, new=x)`,
+    `patch.object(o, "n", new)`, `monkeypatch.setattr("t", x)` / `monkeypatch.setattr(o, "n", x)`."""
+    kw = {k.arg: k.value for k in call.keywords if k.arg}
+    if "new" in kw:
+        return kw["new"]
+    a0 = call.args[0] if call.args else None
+    string_target = isinstance(a0, ast.Constant) and isinstance(a0.value, str)
+    want = 2 if string_target else 3
+    return call.args[want - 1] if len(call.args) >= want else None
 
 
 def _module_aliases(tree: ast.AST) -> dict[str, str]:
@@ -1432,25 +1537,46 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                     d = _defs(reach[mod])
                     target = d[0].get(key[1]) if d else None
                     shapes[key] = _call_shape(target, None, _local_functions(ast.parse(reach[mod]))) if target else {}
-                uses = shapes[key].get("uses") or {}
-                if not uses:
+                if not shapes[key]:
                     continue
                 pos = shapes[key]["pos"]
                 given = [(pos[i], a) for i, a in enumerate(call.args) if i < len(pos)] + [(k.arg, k.value) for k in call.keywords if k.arg]
+                # §17.1869 — a fake session where the sandbox provides a real one. Live (5b4880c0 T5, 2026-10-30, every
+                # attempt that reached the sandbox): `fake_db = MagicMock(); fake_db.execute = AsyncMock()` handed as
+                # `db=`, then "'MagicMock' object can't be awaited" at the commit, or rows that were never written.
+                for param, arg in given:
+                    if param in _SESSION_PARAMS and (v := _resolve(arg, fk, call.lineno)).mock in ("MagicMock", "AsyncMock"):
+                        say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", f"a `{v.mock}`{f' (line {v.line})' if v.line else ''}: the sandbox's "
+                            "`async_session` is a real scratch database with this job's tables, and a fake session answers "
+                            "nothing the code reads", "`async with async_session() as db:` and pass that `db`; assert on the rows it wrote")
+                uses = shapes[key].get("uses") or {}
+                if not uses:
+                    continue
                 for param, arg in given:
                     if param in uses and (bad := _check_uses(_resolve(arg, fk, call.lineno), uses[param], fk, call.lineno)):
                         say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", bad, f"`{param}{_uses_text(uses[param])}`")
         for pc, mod, owner, name, fn in _patch_sites(code):
             if mod not in reach:
                 continue
+            if name == "async_session" and not owner:
+                # §17.1869 — the session itself is never patched: the sandbox's is real (live: 19 patches of it on
+                # eight modules in one file, each an `async def` the module cannot `async with`)
+                say(pc.lineno, f"patches `async_session` on `{mod}` with", "a fake session: the sandbox's "
+                    "`async_session` is a real scratch database with this job's tables, and nothing a fake answers is "
+                    "what the code reads", "leave `async_session` alone; insert the rows the function reads and "
+                    "assert on the rows it wrote")
+                continue
             uses = _target_uses(reach[mod], owner, name)
             if not uses:
                 continue
             fk = fakes_for(fn)
-            kw = {k.arg: k.value for k in pc.keywords if k.arg}
-            # the mock the patch installs: `new=`, else the `as m` / decorator name (its chains apply), else the call
+            new = _patch_new(pc)
+            # the mock the patch installs: the value given, else the `as m` / decorator name (its chains apply), else
+            # the call itself (a `setattr` without a value is not a patch)
             alias_name = next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
-            val = (_resolve(kw["new"], fk, pc.lineno) if "new" in kw else
+            if new is None and _call_name(pc) == "setattr":
+                continue
+            val = (_resolve(new, fk, pc.lineno) if new is not None else
                    _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
             if (bad := _check_uses(val, uses, fk, 10 ** 9)):
                 say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")

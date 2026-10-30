@@ -218,3 +218,133 @@ async def test_ensure_client_patched_bare(mock_ensure):
     ], found
     # `values_for` is `async def` in the engine, `_ensure_client` in the module: `patch(…)` installs an AsyncMock itself
     assert not any("values_for" in f or "test_values_for_patched_bare" in f or ":25`" in f for f in found)
+
+
+# ── §17.1869 the fakes the gate missed live: a monkeypatched class, a local `async def`, a stored client ───────
+
+ALPACA2 = '''# app/modules/paper_alpaca_paper_client.py
+import httpx
+from app.modules.runner_secrets import values_for
+
+class AlpacaPaperClient:
+    def __init__(self):
+        self._client = None
+
+    async def _ensure_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def _request(self, method: str, path: str):
+        client = await self._ensure_client()
+        response = await client.request(method, path)
+        return response.json()
+
+    async def submit_order(self, symbol: str):
+        return await self._request("POST", "/v2/orders")
+'''
+NEWS = '''# app/modules/paper_news_ingestion.py
+import httpx
+from app.database import async_session
+
+async def fetch_news_items(query: str) -> list:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get("u", params={"q": query})
+        response.raise_for_status()
+        return response.json().get("results", [])
+
+async def ingest_news_for_ticker(ticker: str, *, db=None) -> int:
+    async with async_session() as session:
+        return 0
+'''
+MODULES2 = {m.split("\n", 1)[0][len("# app/modules/"):-3]: m.split("\n", 1)[1] for m in (ALPACA2, NEWS)}
+
+
+def test_the_index_follows_a_client_stored_on_self_and_one_entered_with_async_with():
+    from app.modules.engine_contracts import _target_uses
+    u = _target_uses(MODULES2["paper_alpaca_paper_client"], "httpx", "AsyncClient")
+    assert es._uses_text(u) == "()->{request()->{json()}}"
+    u = _target_uses(MODULES2["paper_news_ingestion"], "httpx", "AsyncClient")
+    assert es._uses_text(u) == "()->{async with -> {get()->{json(): dict, raise_for_status()}}}"
+
+
+def test_a_monkeypatched_async_def_for_a_class_is_a_coroutine_where_the_module_calls_it():
+    test = '''from unittest.mock import AsyncMock, MagicMock
+from app.modules.paper_alpaca_paper_client import AlpacaPaperClient
+from app.modules import paper_news_ingestion
+
+async def test_submit(monkeypatch):
+    fake_http_client = MagicMock()
+    fake_http_client.request = AsyncMock(return_value=MagicMock())
+
+    async def fake_async_client(*args, **kwargs):
+        return fake_http_client
+
+    monkeypatch.setattr("app.modules.paper_alpaca_paper_client.httpx.AsyncClient", fake_async_client)
+    await AlpacaPaperClient().submit_order("AAPL")
+
+async def test_news(monkeypatch):
+    async def fake_async_client(*args, **kwargs):
+        return MagicMock()
+    monkeypatch.setattr("app.modules.paper_news_ingestion.httpx.AsyncClient", fake_async_client)
+    await paper_news_ingestion.fetch_news_items("x")
+
+async def test_news_plain_def(monkeypatch):
+    def fake_async_client(*args, **kwargs):
+        m = MagicMock()
+        m.get = AsyncMock(return_value=MagicMock())
+        m.__aenter__.return_value = m
+        return m
+    monkeypatch.setattr(paper_news_ingestion.httpx, "AsyncClient", fake_async_client)
+    await paper_news_ingestion.fetch_news_items("x")
+
+async def test_news_lambda_literal(monkeypatch):
+    monkeypatch.setattr("app.modules.paper_news_ingestion.httpx.AsyncClient", lambda *a, **k: {"results": []})
+    await paper_news_ingestion.fetch_news_items("x")
+'''
+    found = wrong_fakes(_files(test), MODULES2, set())
+    assert found == [
+        "`tests/test_paper_twelve_modules.py:13` patches `AsyncClient` on `httpx` with a fake whose call returns a coroutine "
+        "(line 10): the fake is `async def`, and the module calls it as a plain function, then calls `.request()` on it -- "
+        "make the fake a plain `def` (or a `MagicMock`) returning the object -- give it what the module uses: "
+        "`AsyncClient()->{request()->{json()}}`",
+        "`tests/test_paper_twelve_modules.py:19` patches `AsyncClient` on `httpx` with a fake whose call returns a coroutine "
+        "(line 17): the fake is `async def`, and the module calls it as a plain function, then enters it with `async with` "
+        "-- make the fake a plain `def` (or a `MagicMock`) returning the object -- give it what the module uses: "
+        "`AsyncClient()->{async with -> {get()->{json(): dict, raise_for_status()}}}`",
+        "`tests/test_paper_twelve_modules.py:32` patches `AsyncClient` on `httpx` with a fake whose call returns a dict "
+        "(line 32), and the module enters it with `async with` -- give it what the module uses: "
+        "`AsyncClient()->{async with -> {get()->{json(): dict, raise_for_status()}}}`",
+    ], found
+    # the plain `def` returning a MagicMock that enters as itself, with an `AsyncMock` `get`, passes (a bare
+    # `MagicMock()` would not: `async with` hands the module `m.__aenter__.return_value`, a fresh MagicMock whose
+    # `get` cannot be awaited -- exactly what the sandbox would say)
+
+
+def test_a_fake_session_and_a_patched_async_session_are_refused():
+    test = '''from unittest.mock import AsyncMock, MagicMock
+from app.modules import paper_news_ingestion
+
+async def test_fake_db(monkeypatch):
+    fake_db = MagicMock()
+    fake_db.execute = AsyncMock()
+    fake_db.commit = AsyncMock()
+    await paper_news_ingestion.ingest_news_for_ticker("SPY", db=fake_db)
+
+async def test_patched_session(monkeypatch):
+    async def fake_session():
+        return MagicMock()
+    monkeypatch.setattr("app.modules.paper_news_ingestion.async_session", fake_session)
+    await paper_news_ingestion.ingest_news_for_ticker("SPY")
+'''
+    found = wrong_fakes(_files(test), MODULES2, set())
+    assert found == [
+        "`tests/test_paper_twelve_modules.py:9` hands `ingest_news_for_ticker(…)` `db` = a `MagicMock` (line 6): the sandbox's "
+        "`async_session` is a real scratch database with this job's tables, and a fake session answers nothing the code "
+        "reads -- give it what the module uses: `async with async_session() as db:` and pass that `db`; assert on the rows "
+        "it wrote",
+        "`tests/test_paper_twelve_modules.py:14` patches `async_session` on `paper_news_ingestion` with a fake session: the "
+        "sandbox's `async_session` is a real scratch database with this job's tables, and nothing a fake answers is what "
+        "the code reads -- give it what the module uses: leave `async_session` alone; insert the rows the function reads "
+        "and assert on the rows it wrote",
+    ], found

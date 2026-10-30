@@ -2648,11 +2648,19 @@ async def execute_next_node(
         # Fail-open: any exception in the gate lets the node proceed to the
         # LLM verifier — only a genuine SyntaxError can block.
         syntax_reason: str | None = None
+        _test_syntax: list[str] = []
         if settings.codegen_syntax_gate_enabled and (tool or "").lower() == "codegen":
             try:
                 _findings = check_python_syntax(output)
                 if _findings:
                     syntax_reason = format_syntax_reason(_findings)
+                    # §17.1869 — a test file that does not compile is a test-file finding (§17.1859): the file is
+                    # asked for again, not the attempt spent. Live (5b4880c0 T5, 2026-10-30): the last attempt's
+                    # 72-test file had `async def def` on one line and the §17.428 refusal took the attempt.
+                    from app.modules import engine_source as _es_syn
+                    if _es_syn.targets_the_engine(brief) and _es_syn.syntax_only_in_tests(output):
+                        _test_syntax = _es_syn.test_syntax_findings(output)
+                        syntax_reason = None
             except Exception as exc:
                 logger.warning(
                     "codegen_syntax_gate_error: node='%s' error=%s", title, exc,
@@ -2668,7 +2676,7 @@ async def execute_next_node(
                     # §17.1759–1760 — and its SQL against the tables that exist, its migration against the
                     # engine's history, and no sample value or note handing its unfinished work on
                     async with async_session() as _esdb:
-                        _refs = await _es.engine_findings(_esdb, job_id, node_key, output)
+                        _refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output)
                     # §17.1852 — a stand-in in the tests, and nothing else wrong: the module passed every check, so
                     # the test file is asked for again, alone, with the module in hand and the rows to insert named
                     # -- before this attempt is spent on it. §17.1859 — every finding that is about the test file's
@@ -2695,7 +2703,12 @@ async def execute_next_node(
                                      "`values_for` patched on that module, returning a test value under each secret's "
                                      "own name (the index shows them as `[secrets: …]`); a child row takes the id "
                                      "its parent's writer returned, never a number; no DELETE from the job's tables; "
-                                     "JSON columns take `json.dumps` with a CAST. Mock only what reaches outside the "
+                                     "JSON columns take `json.dumps` with a CAST; a parent row inserted in the test's "
+                                     "session is committed before a writer with its own session; a `db` is the real "
+                                     "`async with async_session() as db`, never a MagicMock; a fake does what the index "
+                                     "shows the function does with it (`p{get()->{json(): dict}}`), and a class is "
+                                     "replaced by a plain `def` or a `MagicMock`, never an `async def`; the file must "
+                                     "compile. Mock only what reaches outside the "
                                      "engine -- the broker, the network, model calls, the clock.")}],
                                 {"role": exec_role, "overrides": exec_overrides},
                                 temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
@@ -2704,8 +2717,10 @@ async def execute_next_node(
                             return (_r.text or "").strip() if getattr(_r, "success", False) else ""
 
                         async def _check_tests(_cand: str) -> list[str]:
+                            if check_python_syntax(_cand) and not _es.syntax_only_in_tests(_cand):
+                                return ["the module block does not compile"]       # not a test-file finding: stops
                             async with async_session() as _cdb:
-                                return await _es.engine_findings(_cdb, job_id, node_key, _cand)
+                                return _es.test_syntax_findings(_cand) + await _es.engine_findings(_cdb, job_id, node_key, _cand)
 
                         _before = len(_refs)
                         output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests)

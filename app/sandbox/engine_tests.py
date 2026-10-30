@@ -270,18 +270,46 @@ def _fold_library_frames(lines: list[str]) -> list[str]:
     return out
 
 
-def _report(text: str, budget: int = 6000) -> str:
+_FAILURE_HEAD = re.compile(r"^_{3,} (\S.*?) _{3,}$")
+
+
+def _failure_index(lines: list[str], limit: int = 80) -> list[str]:
+    """§17.1869 — every failure on one line: `test_x: E   AttributeError: …` (the first error line under its header),
+    so a run with fifty failures names all fifty before the tracebacks the budget keeps. Live (5b4880c0 T5,
+    2026-10-30): 50 of 70 failed; the refusal carried six of them."""
+    out: list[str] = []
+    name = ""
+    for ln in lines:
+        m = _FAILURE_HEAD.match(ln.strip())
+        if m:
+            if name:
+                out.append(f"{name}: (no error line)")
+            name = m.group(1)
+        elif name and ln.startswith("E ") and not ln.startswith("E   DETAIL") and "direct cause" not in ln:
+            out.append(f"{name}: {ln[:160]}")
+            name = ""
+    if name:
+        out.append(f"{name}: (no error line)")
+    return out[:limit] + ([f"… and {len(out) - limit} more"] if len(out) > limit else [])
+
+
+def _report(text: str, budget: int = 9000) -> str:
     """§17.1817 — a failed test run as the next attempt needs it: every failure's short traceback from the FIRST one
     (often the cause the rest follow from), then pytest's summary. Live (follow-up 5b4880c0 T6, 8-14 of its tests
     failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
-    ("- sqlalc..."), so each attempt was redrafted from one failure out of ten."""
+    ("- sqlalc..."), so each attempt was redrafted from one failure out of ten. §17.1869 — when the budget cuts,
+    an index of every failure (one line each) leads, so none goes unnamed."""
     lines = _fold_library_frames([ln for ln in (text or "").splitlines() if ln.strip()])
     whole = "\n".join(lines)
     if len(whole) <= budget:
         return whole
+    index = _failure_index(lines)
+    head = ("Every failure, one line each (the tracebacks below hold the first of them):\n" + "\n".join(index) + "\n\n") \
+        if len(index) > 1 else ""
+    budget = max(budget - len(head), budget // 2)
     cut = next((i for i, ln in enumerate(lines) if "short test summary info" in ln), len(lines))
     summary = "\n".join(lines[cut:])[-(budget // 4):]
-    return "\n".join(lines[:cut])[: budget - len(summary) - 3] + "\n…\n" + summary
+    return head + "\n".join(lines[:cut])[: budget - len(summary) - 3] + "\n…\n" + summary
 
 
 async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResult:
@@ -353,4 +381,4 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
            "in tests. ")
         + "Fix the code (or the test, when the test is what is wrong):"
-        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:6000]), ran)
+        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran)
