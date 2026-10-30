@@ -571,7 +571,7 @@ def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[
         if fname not in ("patch", "setattr") or not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
             continue
         parts = a0.value.split(".")
-        if len(parts) != 4 or parts[:2] != ["app", "modules"] or parts[2] not in reach:
+        if len(parts) not in (4, 5) or parts[:2] != ["app", "modules"] or parts[2] not in reach:
             continue
         mod, lib = parts[2], parts[3]
         mtree = _tree_or_empty(reach[mod])
@@ -583,11 +583,20 @@ def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[
         if not caught:
             continue
         used = sorted({x.func.attr for x in ast.walk(mtree) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
-                       and isinstance(x.func.value, ast.Name) and x.func.value.id == lib and x.func.attr not in caught})
+                       and isinstance(x.func.value, ast.Name) and x.func.value.id == lib
+                       and f"{lib}.{x.func.attr}" not in caught})
+        through = f" (`app.modules.{mod}.{lib}.{used[0]}`)" if used else ""
+        if len(parts) == 5:                                   # §17.1878 one exception class of it, patched by name
+            if f"{lib}.{parts[4]}" in caught:
+                out.append(f"`{path}:{n.lineno}` patches `{lib}.{parts[4]}` on `{mod}`, an exception class the module "
+                           f"catches (`except ({', '.join(caught)})`): a mock is not an exception class, and the "
+                           "`except` fails with `TypeError: catching classes that do not inherit from BaseException is "
+                           "not allowed` -- patch only the name it leaves the engine through" + through)
+            continue
         out.append(f"`{path}:{n.lineno}` patches `{lib}` whole on `{mod}`: every class on it becomes a mock, and the "
                    f"module's `except ({', '.join(caught)})` then fails with `TypeError: catching classes that do not "
                    "inherit from BaseException is not allowed` -- patch only the name it leaves the engine through"
-                   + (f" (`app.modules.{mod}.{lib}.{used[0]}`)" if used else ""))
+                   + through)
     return out
 
 
@@ -1593,6 +1602,10 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         got = _step(val, ("attr", a), fakes, before)
         if got.kind and got.kind.startswith("missing:"):
             return _check_uses(got, uses, fakes, before, done)
+        if a in (uses.get("bound") or ()) and got.mock and got.kind is None:   # §17.1878 bound to a column
+            return (f"{done}a fake whose `.{a}` is a mock{at}: the module writes `.{a}` to a database column, and a "
+                    f"mock is not a value -- set `fake.{a} = \"…\"` on the object the call returns "
+                    f"(`AsyncMock(return_value=SimpleNamespace({a}=\"…\"))`)")
     return None
 
 

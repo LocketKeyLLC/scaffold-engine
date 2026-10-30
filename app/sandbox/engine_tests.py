@@ -164,6 +164,11 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "a finished module reaches for a name that does not exist (a module's missing attribute, an undefined name): that "
      "module is at fault, not the test -- when it is another step's module, the job gets a fix step for it and this "
      "step waits"),
+    # §17.1878 — live (5b4880c0 T5 a1, 2026-10-30): the whole run timed out with no test named
+    (re.compile(r"Failed: Timeout >\s*[\d.]+s"),
+     "a test hung until the sandbox's per-test timeout: the code reached the real network (a client the test never "
+     "patched, a retry's `asyncio.sleep`), or awaited a fake that never answers -- patch the client where the module "
+     "looks it up and give every method it awaits an `AsyncMock` that returns at once"),
 )
 
 
@@ -357,7 +362,7 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
     tests = sorted(p for p in mine if is_test(p))
     if tests:
         command = ["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
-                   "-o", "asyncio_default_fixture_loop_scope=function", "--timeout=60", "-c", "/dev/null",
+                   "-o", "asyncio_default_fixture_loop_scope=function", "--timeout=20", "-c", "/dev/null",
                    "--rootdir", ".", "-W", "ignore::DeprecationWarning", *tests]
     else:
         mods = [_module_name(p) for p in sorted(mine) if p.startswith("app/")]
@@ -376,7 +381,10 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
     if res.ok:
         return EngineTestResult("pass", ("tests passed" if tests else "imports cleanly") + f" ({', '.join(ran)})", ran)
     if res.timed_out:
-        why = f"timed out after {settings.engine_test_timeout_s:.0f}s (a test waiting on a network or database it does not have?)"
+        # §17.1878 — live (5b4880c0 T5 a1, 2026-10-30): three hung tests at 60 s each ran the 180 s cap out before
+        # pytest could name one; now 20 s a test under a 480 s run, and whatever pytest printed comes along
+        why = (f"timed out after {settings.engine_test_timeout_s:.0f}s (a test waiting on a network or database it does "
+               "not have?)" + (("\n" + _tail(res.stdout + "\n" + res.stderr, 20)) if (res.stdout or res.stderr) else ""))
     elif tests and res.exit_code == 5:
         why = "pytest collected no tests: name them `def test_…` / `async def test_…` at module level"
     elif tests:
