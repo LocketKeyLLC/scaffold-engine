@@ -146,3 +146,46 @@ async def test_prior_tests_are_read_from_the_run_log_over_the_same_window_as_ref
                 await db.execute(text(f"DELETE FROM {tbl} WHERE job_id = :j"), {"j": jid})
             await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": jid})
             await db.commit()
+
+
+# ── §17.1868 a dropped-tests finding still gets a redraw ──────────────────────────────────────────────────────
+
+def test_a_dropped_tests_finding_names_the_same_file_as_a_line_finding():
+    """Live (5b4880c0 T5, 2026-10-30): the finding has no `:line`, the path ran to the end of its sentence, the redraw
+    saw two files and never asked -- attempts 1 and 4 were spent on it."""
+    from app.modules.engine_contracts import _finding_path
+    dropped = ("`tests/test_paper_twelve_modules.py` dropped 1 of the 57 tests your earlier attempts wrote: `test_x` -- "
+               "keep every test by name; fix the ones the sandbox named, never drop them")
+    lined = "`tests/test_paper_twelve_modules.py:368` calls `FinraRecord(…)` is missing required argument(s) `release_date`"
+    assert _finding_path(dropped) == _finding_path(lined) == "tests/test_paper_twelve_modules.py"
+
+
+@pytest.mark.asyncio
+async def test_a_redraw_is_asked_for_when_a_dropped_tests_finding_is_among_the_findings():
+    from app.modules.engine_contracts import redraw_faked_tests
+    out = "```python\n# app/modules/paper_x.py\nX = 1\n```\n```python\n# tests/test_paper_twelve_modules.py\ndef test_a(): pass\n```"
+    findings = ["`tests/test_paper_twelve_modules.py` dropped 1 of the 2 tests your earlier attempts wrote: `test_b` -- keep every test",
+                "`tests/test_paper_twelve_modules.py:2` calls `f(…)` is missing required argument(s) `x`"]
+    asked: list[str] = []
+
+    async def ask(path, refusal, current):
+        asked.append(path)
+        return "# tests/test_paper_twelve_modules.py\ndef test_a(): pass\ndef test_b(): pass\n"
+
+    async def check(candidate):
+        return []
+    new, left = await redraw_faked_tests(out, findings, ask=ask, check=check)
+    assert asked == ["tests/test_paper_twelve_modules.py"] and left == [] and "def test_b" in new
+
+
+def test_the_keep_list_is_read_on_every_attempt_not_only_a_retry():
+    import inspect
+    from app.modules import execution_agent as xa
+    src = inspect.getsource(xa.execute_next_node)
+    before = src.index('node_snapshot["prior_tests"] = await prior_tests(')
+    guard = src.rindex('if node_snapshot["retry_count"]:', 0, before)
+    # the read sits after the retry-only block, at the block's own indentation, not inside it
+    line = src[src.rindex("\n", 0, before) + 1: before]
+    guard_line = src[src.rindex("\n", 0, guard) + 1: guard]
+    # inside the guard the read would sit two levels in (`if` -> `try` -> the read); outside, one (`try` -> the read)
+    assert len(line) - len(line.lstrip()) == len(guard_line) - len(guard_line.lstrip()) + 4

@@ -2508,7 +2508,11 @@ def findings_in_tests(findings: list[str]) -> list[str]:
 
 
 def _finding_path(finding: str) -> str:
-    return finding[1:].split(":", 1)[0]
+    """The test file a finding names: "`tests/x.py:17` hands …" and "`tests/x.py` dropped 3 of …" both give
+    `tests/x.py`. §17.1868 — live (5b4880c0 T5, 2026-10-30): the §17.1864 dropped-tests finding has no `:line`, so
+    the path ran to the end of its sentence, `redraw_faked_tests` saw two files and stopped before asking, and two of
+    four attempts were spent without the redraw every other finding on them had earned."""
+    return finding[1:].split("`", 1)[0].split(":", 1)[0]
 
 
 def replace_file_block(output: str, path: str, block: str) -> str:

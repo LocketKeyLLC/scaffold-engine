@@ -2054,10 +2054,14 @@ async def execute_next_node(
                 node_snapshot["prior_imports"] = await prior_imports(db, job_id, str(node_id))
             except Exception as exc:
                 logger.warning("prior_imports_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
-            try:                                                    # §17.1864
-                node_snapshot["prior_tests"] = await prior_tests(db, job_id, str(node_id))
-            except Exception as exc:
-                logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # §17.1868 — on every attempt, not only a retry: the history outlives a plain reset (§17.1864), so the first
+        # attempt after one is held to the names its earlier attempts wrote -- it is shown them too. Live (5b4880c0 T5,
+        # 2026-10-30): attempt 1 was refused for "dropped 30 of the 30 tests your earlier attempts wrote", a list its
+        # prompt never carried.
+        try:                                                    # §17.1864
+            node_snapshot["prior_tests"] = await prior_tests(db, job_id, str(node_id))
+        except Exception as exc:
+            logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router
