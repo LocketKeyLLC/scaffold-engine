@@ -64,7 +64,8 @@ async def test_the_earlier_jobs_finished_steps_come_first_under_their_own_keys()
         p8 = prior[:8]
         assert [r["node_key"] for r in rows] == [f"{p8}:T5", f"{p8}:T17", "T1"]     # done, written, in plan order
         assert rows[0]["output_text"] == "client" and set(rows[0]) == {
-            "node_key", "title", "description", "prompt_template", "output_text", "status"}
+            "node_key", "title", "description", "prompt_template", "output_text", "status",
+            "node_id"}                                          # §17.1864 -- the row's own id, for its retry history
         assert sorted(r["node_key"] for r in alone) == ["T17", "T30", "T31", "T5"]   # no link: only itself, as before
     finally:
         async with async_session() as db:

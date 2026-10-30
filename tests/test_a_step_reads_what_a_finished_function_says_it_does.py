@@ -148,14 +148,15 @@ def test_the_modules_the_step_runs_through_lead_the_job_modules_list_past_the_cu
                                  "funcs": {f"run_{c}": {"required": [], "optional": [], "kwonly": [], "varargs": False,
                                                         "varkw": False, "coroutine": True}}, "classes": {}, "returns": {}}
             for c in "abcdefghijklmnopqrstuvwxyz"}
-    # §17.1863 -- the header alone is ~480 chars now (the `p:a|b`, `p: dict` and `[secrets: …]` notes): the budget clears it
-    plain = es._render_job_modules(defs, "paper_batch", budget=800)
+    # §17.1866 -- the header alone is ~900 chars now (the `p:a|b`, `p: dict`, `dict{k}`, `p{use}`, `[secrets: …]` and
+    # `[own session]` notes): the budget clears it
+    plain = es._render_job_modules(defs, "paper_batch", budget=1300)
     assert "paper_a_module" in plain and "paper_z_module" not in plain and plain.rstrip().endswith("…")
-    led = es._render_job_modules(defs, "paper_batch", budget=800, first={"paper_z_module", "paper_y_module"})
+    led = es._render_job_modules(defs, "paper_batch", budget=1300, first={"paper_z_module", "paper_y_module"})
     lines = [ln for ln in led.splitlines() if ln.startswith("    paper_")]
     assert [ln.split(":")[0].strip() for ln in lines[:2]] == ["paper_y_module", "paper_z_module"]
     assert "paper_a_module" in led
-    assert es._render_job_modules(defs, "paper_batch", budget=800, first=set()) == plain
+    assert es._render_job_modules(defs, "paper_batch", budget=1300, first=set()) == plain
 
 
 @pytest.mark.integration

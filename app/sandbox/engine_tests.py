@@ -139,10 +139,14 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"'MagicMock' object can't be awaited|object MagicMock can't be used in 'await' expression"),
      "an awaited call was mocked with `MagicMock`: use `AsyncMock` for anything the code awaits (`db.execute`, "
      "`db.commit`, a client's coroutine methods) -- or test against the scratch database instead of a fake session"),
-    # §17.1853 — live (5b4880c0 T6, 2026-10-28): `write_order(approval_id=1, …)` with no `approval` row
+    # §17.1853 — live (5b4880c0 T6, 2026-10-28): `write_order(approval_id=1, …)` with no `approval` row.
+    # §17.1866 — or a parent the test inserted in its own session and never committed (live 5b4880c0 T5, 2026-10-29:
+    # the attempts whose helpers committed passed the same tests)
     (re.compile(r"violates foreign key constraint"),
      "a row was inserted with a foreign key to a parent row that does not exist: insert the parent row first -- with "
-     "its writer in the job's modules, or an INSERT -- and pass the id it returned, never a made-up one"),
+     "its writer in the job's modules, or an INSERT -- and pass the id it returned, never a made-up one; and when the "
+     "parent was inserted in the test's own session, `await db.commit()` before calling a writer that opens its own "
+     "`async_session()` -- it sees only committed rows"),
     # §17.1857 — live (5b4880c0 T5 and T8, 2026-10-28): the EDGAR ingester and the broker client ran for real
     (re.compile(r"Missing operator secret|SecretsMissingError|Missing \w[\w ]* secrets?:"),
      "the code ran for real and asked for an operator secret the sandbox does not have: patch `values_for` where the "

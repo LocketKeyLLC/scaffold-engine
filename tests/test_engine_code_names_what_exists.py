@@ -706,7 +706,7 @@ def test_the_block_indexes_the_jobs_modules_with_signatures():
     defs = es.sibling_definitions([T4_ROW, T10_STREAM])
     b = es.block_for(T6_ROW, set(), modules=defs)
     assert "### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only " \
-           "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a literal of another kind is refused; `[secrets: A, B]` means the function reads those operator secrets through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`)" in b
+           "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a literal of another kind is refused; `p: dict{k, q: Decimal}` are the keys it reads from `p`, each with the kind it takes; `p{get()->{json(): dict}}` is what it does with `p` -- a fake must do the same; `[secrets: A, B]` means the function reads those operator secrets through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`; `[own session]` means it opens its own `async_session()` and sees only rows the test has committed -- `await db.commit()` after inserting the parent rows, before calling it)" in b
     assert "    alpaca_stream: async start_stream(callback)" in b
     assert "    paper_audit_trail_writer: async write_signal(**kwargs)" in b
     assert b.index("This job's modules") < b.index("### Conventions")
@@ -774,7 +774,7 @@ class AlpacaPaperClient:
 def test_the_index_shows_a_modules_public_classes():
     r = es._render_job_modules(es.sibling_definitions([T5_CLIENT]), "other")
     line = [x for x in r.splitlines() if "paper_alpaca_paper_client" in x][0]
-    assert "class AlpacaAccount(equity, cash, _raw=…)" in line                              # §17.1803 its constructor
+    assert "class AlpacaAccount(equity: str, cash: str, _raw: dict | None = …)" in line     # §17.1865 its fields' kinds                              # §17.1803 its constructor
     assert ("class AlpacaPaperClient(*, base_url: str = …) {build(symbol, qty), async get_account(), "
             "async get_latest_trade(symbol: str); read-only: ready}") in line                    # §17.1803
     assert "AlpacaPaperClientError" not in line and "_request" not in line
@@ -881,7 +881,7 @@ class RiskState:
 
 def test_a_data_class_renders_as_its_constructor_with_properties_read_only():
     r = es._render_job_modules(es.sibling_definitions([T6_STATE]), "other")
-    assert "class RiskState(equity, day_start_equity, now=…) {read-only: daily_pnl}" in r
+    assert "class RiskState(equity: float, day_start_equity: float, now: float = …) {read-only: daily_pnl}" in r
 
 
 def test_a_data_class_built_with_a_property_or_without_a_field_is_refused():
