@@ -1959,14 +1959,20 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
 
     from app.modules import engine_schema
     rows = await code_rows(db, job_id)                  # §17.1811
-    others = [str(r["output_text"] or "") for r in rows if r["node_key"] != node_key]
+    # §17.1872 — only a FINISHED step's output is a sibling's code: a failed step keeps its last draft in
+    # `output_text`, and that draft is not what the sandbox runs (`current_sources` takes done rows). Live (5b4880c0
+    # T5U2 a4, 2026-10-30): the audit writer was cited as "(step T5U1)" -- T5U1 had failed three times -- and a
+    # failed draft defining a name the finished module lacks would have made the name look present. Planned-but-
+    # unwritten steps still count for what they will write (`imports_an_unwritten_sibling`, `writes_a_siblings_module`).
+    _all_others = [dict(r) for r in rows if r["node_key"] != node_key]
+    _others = [r for r in _all_others if r.get("status") in (None, "done")]      # None: a synthetic row
+    others = [str(r["output_text"] or "") for r in _others]
     texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
-                      + (() if r["node_key"] == node_key else ("output_text",)))
+                      + (("output_text",) if r["node_key"] != node_key and r.get("status") in (None, "done") else ()))
              for r in rows]
     mods, names = job_own_code(texts)
     found = unresolved_refs(output, mods, names)
     me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
-    _others = [dict(r) for r in rows if r["node_key"] != node_key]
     # §17.1816 — a module this output rewrites is checked against what the output now defines, not against the
     # earlier job's version of it. Live (5b4880c0 T2, rewriting `paper_order_executor` in place): its tests' calls to
     # its own new `execute_order(db=…, client=…)` were refused as "has no parameter `db` (it takes approval)" -- the
@@ -1978,9 +1984,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     _defs = sibling_definitions(_defs_rows)
     _fks = engine_schema.foreign_keys_in_code(others)
     found += sibling_refs(output, _defs, fks=_fks, rules=engine_schema.column_rules_in_code(others))   # §17.1866
-    found += imports_an_unwritten_sibling(output, _others, _defs)
+    found += imports_an_unwritten_sibling(output, _all_others, _defs)
     found += replaces_an_engine_module(output, me)
-    found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
+    found += writes_a_siblings_module(output, me, _all_others)
     tables = dict(await engine_schema.live_tables(db))
     jobs_own = engine_schema.tables_in_code(others)
     for k, v in jobs_own.items():
@@ -2017,6 +2023,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
+    # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
+    from app.modules.engine_contracts import responses_without_a_request
+    found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
     found += unreturned_reads(files_of({**me, "output_text": output}), _cur)
