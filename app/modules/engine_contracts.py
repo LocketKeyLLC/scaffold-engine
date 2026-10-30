@@ -355,7 +355,7 @@ def _patch_targets(code: str) -> list[tuple[str, str, int]]:
         a0 = n.args[0]
         if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
             parts = a0.value.split(".")
-            if len(parts) == 4:
+            if len(parts) >= 4:                   # §17.1870 -- `app.modules.m.httpx.AsyncClient` needs `m.httpx` first
                 out.append((parts[2], parts[3], n.lineno))
         elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
               and isinstance(n.args[1].value, str)):
@@ -1130,7 +1130,7 @@ class _Fakes:
         self.bound: dict[str, list[tuple[int, ast.AST]]] = {}
         self.chains: dict[tuple[str, ...], list[tuple[int, ast.AST]]] = {}
         for n in nodes:
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):      # §17.1869 a local `async def fake(…)`
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):   # §17.1869/1870 a local fake
                 self.bound.setdefault(n.name, []).append((n.lineno, n))
             elif isinstance(n, ast.Assign) and len(n.targets) == 1:
                 t = n.targets[0]
@@ -1190,6 +1190,8 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e) or ("tuple" if isinstance(e, ast.Tuple) else "set" if isinstance(e, ast.Set) else None)
         return _Val(kind=kind, node=e, line=getattr(e, "lineno", 0))
+    if isinstance(e, ast.ClassDef):                                            # §17.1870 a class the test wrote
+        return _Val(mock="class", node=e, line=e.lineno)
     if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):      # §17.1869 a function the test wrote
         rv = e.body if isinstance(e, ast.Lambda) else next(
             (r.value for r in ast.walk(e) if isinstance(r, ast.Return) and r.value is not None), None)
@@ -1209,6 +1211,10 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
             return _Val(mock=mock, node=e, line=e.lineno, rv=kw.get("return_value"))
         if isinstance(e.func, ast.Attribute):
             return _Val()                                    # `patch.dict(…)`, `json.dumps(…)`: not read
+        if isinstance(e.func, ast.Name) and isinstance(fakes.last(e.func.id, before),
+                                                       (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            made = _resolve(e.func, fakes, before, _hops + 1)                 # §17.1870 `FakeClient()` / `make()`
+            return _step(made, ("call", False), fakes, before)
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e)
         return _Val(kind=kind, node=e, line=e.lineno) if kind else _Val()
@@ -1223,15 +1229,83 @@ def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
     return _Val()
 
 
-def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int) -> _Val:
-    """What the module gets after one use of a fake: `("attr", "get")`, `("call", awaited)`."""
+def _fits(fn: ast.AST, sig: tuple[int, frozenset[str]] | None, method: bool) -> str:
+    """§17.1870 — why a call of shape `sig` (positional count, keyword names) does not fit a function the test wrote;
+    empty when it does. Live (5b4880c0 T5, 2026-10-30): `class FakeClient: async def get(self, url)` called by the
+    module as `client.get(url, params=…, timeout=30.0)` -- TypeError in the sandbox, eight tests."""
+    if sig is None or isinstance(fn, ast.Lambda):
+        return ""
+    a = fn.args                                                               # type: ignore[attr-defined]
+    pos = [x.arg for x in a.posonlyargs + a.args][1 if method else 0:]
+    npos, kws = sig
+    if npos > len(pos) and a.vararg is None:
+        return f"takes {len(pos)} positional argument(s) ({', '.join(pos) or 'none'}); the module passes {npos}"
+    allowed = set(pos) | {x.arg for x in a.kwonlyargs}
+    unknown = sorted(k for k in kws if k not in allowed)
+    if unknown and a.kwarg is None:
+        return f"has no parameter {', '.join(f'`{k}`' for k in unknown)} (it takes {', '.join(pos + [x.arg for x in a.kwonlyargs]) or 'nothing'}); the module passes {', '.join(f'`{k}=`' for k in unknown)}"
+    return ""
+
+
+def _class_attr(cls: ast.ClassDef, name: str) -> ast.AST | None:
+    """A method, a class-level binding, or what `__init__` stores as `self.<name>`; None when the class lacks it."""
+    for n in cls.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return n
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
+            return n.value
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == name and n.value is not None:
+            return n.value
+    init = next((n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "__init__"), None)
+    for n in ast.walk(init) if init else ():
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == name and isinstance(t.value, ast.Name)
+                                             and t.value.id == "self" for t in n.targets):
+            return n.value
+    return None
+
+
+def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
+          sig: tuple[int, frozenset[str]] | None = None) -> _Val:
+    """What the module gets after one use of a fake: `("attr", "get")`, `("call", awaited)`. §17.1870 — the mock
+    model is the measured one (`python -c` in the dev image): every attribute of an `AsyncMock` is an `AsyncMock`
+    and of a `MagicMock` a `MagicMock`; awaiting an `AsyncMock` call gives its `return_value` (an `AsyncMock` by
+    default); an `AsyncMock` called without `await` is a coroutine; entering either kind with `async with` gives an
+    `AsyncMock`; a `MagicMock` call awaited fails. Live (5b4880c0 T5, 2026-10-30): the old model said MagicMock in
+    the last three places -- right by accident twice (`json()` on an `AsyncMock` response is a coroutine the module
+    reads as a dict), wrong in the text every time."""
     what, arg = step
-    if val.mock in ("def", "async def"):                                      # §17.1869 a function the test wrote
+    if val.mock == "class":                                                   # §17.1870 a class the test wrote
         if what != "call":
             return _Val()
-        if val.mock == "async def" and not arg:
+        return _Val(mock="instance", node=val.node, line=val.line, scope=val.scope)
+    if val.mock == "instance":
+        cls = val.node
+        if what == "call":                                                    # an instance with `__call__` is callable
+            dunder = _class_attr(cls, "__call__")                            # type: ignore[arg-type]
+            if isinstance(dunder, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                rv = next((r.value for r in ast.walk(dunder) if isinstance(r, ast.Return) and r.value is not None), None)
+                return _step(_Val(mock="async method" if isinstance(dunder, ast.AsyncFunctionDef) else "method",
+                                  node=dunder, line=dunder.lineno, rv=rv, scope=val.scope), step, fakes, before, sig)
+            return _Val(kind="instance-called", node=cls, line=val.line)
+        if what != "attr":
+            return _Val()
+        member = _class_attr(cls, str(arg))                                  # type: ignore[arg-type]
+        if member is None:
+            return _Val(kind=f"missing:{arg}", node=cls, line=val.line)
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rv = next((r.value for r in ast.walk(member) if isinstance(r, ast.Return) and r.value is not None), None)
+            return _Val(mock="async method" if isinstance(member, ast.AsyncFunctionDef) else "method", node=member,
+                        line=member.lineno, rv=rv, scope=val.scope)
+        return _resolve(member, val.scope or fakes, 10 ** 9)
+    if val.mock in ("def", "async def", "method", "async method"):           # §17.1869 a function the test wrote
+        if what != "call":
+            return _Val()
+        is_async = val.mock.startswith("async")
+        if (bad := _fits(val.node, sig, val.mock.endswith("method"))):       # type: ignore[arg-type]
+            return _Val(kind="signature", node=val.node, line=val.line, rv=ast.Constant(value=bad))
+        if is_async and not arg:
             return _Val(kind="coroutine", node=val.node, line=val.line)
-        if val.mock == "def" and arg:
+        if not is_async and arg:
             return _Val()                                    # awaiting what a plain def returns: not followed
         if val.rv is None:
             return _Val(kind="None", node=val.node, line=val.line)
@@ -1254,18 +1328,28 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int) -
             out.root, out.path = val.root, path
         out.scope = out.scope or val.scope
         return out
-    if what == "call" and not val.path and val.rv is not None:              # `MagicMock(return_value=x)` called
+    if what == "call" and val.rv is not None:                                # `MagicMock(return_value=x)` called
         out = _resolve(val.rv, fk, before)
         if out.root is None:
             out.root, out.path = val.root, path
         out.scope = out.scope or val.scope
         return out
+    entering = bool(val.path) and val.path[-1] in ("__aenter__", "__aexit__")
+    if what == "call" and entering:                                           # entering either kind: an AsyncMock
+        return _Val(mock="AsyncMock", node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
     if what == "call" and val.mock == "MagicMock" and arg:
-        if val.path and val.path[-1] in ("__aenter__", "__aexit__"):      # a MagicMock supports `async with` (3.8+)
-            return _Val(mock="MagicMock", node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
         return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
-    return _Val(mock="MagicMock" if what == "call" else val.mock, node=val.node, root=val.root, path=path, line=val.line,
-                scope=val.scope)
+    if what == "call" and val.mock == "AsyncMock" and not arg:                # a coroutine, never awaited
+        return _Val(kind="coroutine-mock", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
+    return _Val(mock=val.mock, node=val.node, root=val.root, path=path, line=val.line, scope=val.scope)
+
+
+def _uses_empty_(u: dict) -> bool:
+    return not (u["attrs"] or u["calls"] or u["called"] or u["as"])
+
+
+def uses_calls_of(uses: dict, attr: str) -> set[str]:
+    return set(uses["calls"]) if attr in uses["calls"] else set()
 
 
 _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool", "None": "None", "tuple": "a tuple",
@@ -1281,12 +1365,33 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
     at = f" (line {val.line})" if val.line else ""
     if val.kind == "MagicMock-awaited":
         return f"{done}a `MagicMock`{at}, which the module awaits -- a MagicMock cannot be awaited: make it an `AsyncMock`"
-    if val.kind == "coroutine":                                               # §17.1869
+    if val.kind in ("coroutine", "coroutine-mock"):                          # §17.1869/1870
+        if _uses_empty_(uses):
+            return None                                      # called and dropped: a warning at most, never a failure
         needs = [m for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         how = ("enters it with `async with`" if "__aenter__" in needs else f"calls `.{needs[0]}()` on it"
-               if needs and needs[0] in uses["calls"] else f"reads `.{needs[0]}` from it" if needs else "uses it")
-        return (f"{done}a coroutine{at}: the fake is `async def`, and the module calls it as a plain function, "
-                f"then {how} -- make the fake a plain `def` (or a `MagicMock`) returning the object")
+               if needs and needs[0] in uses["calls"] else f"reads `.{needs[0]}` from it" if needs
+               else "reads it as a dict" if uses["as"] == "dict" else "iterates it")
+        if val.kind == "coroutine":
+            return (f"{done}a coroutine{at}: the fake is `async def`, and the module calls it as a plain function, "
+                    f"then {how} -- make the fake a plain `def` (or a `MagicMock`) returning the object")
+        return (f"{done}a coroutine{at}: an `AsyncMock` method called without `await` (every attribute of an "
+                f"`AsyncMock` is one), and the module {how} -- make that object a `MagicMock` (its plain calls "
+                "answer at once; give the methods the module awaits an `AsyncMock` each)")
+    if val.kind == "signature":                                               # §17.1870
+        fn = val.node
+        return (f"{done}`{getattr(fn, 'name', 'a function')}(…)`{at}, which {val.rv.value}"       # type: ignore[union-attr]
+                " -- accept what the module passes (`*args, **kwargs` is enough)")
+    if val.kind and val.kind.startswith("missing:"):                          # §17.1870
+        attr = val.kind.split(":", 1)[1]
+        cls = getattr(val.node, "name", "the class")
+        how = ("enters it with `async with` -- it needs `async def __aenter__(self): return self` and "
+               "`async def __aexit__(self, *exc): pass`" if attr == "__aenter__" else
+               "enters it with `with` -- it needs `__enter__` and `__exit__`" if attr == "__enter__" else
+               f"calls `.{attr}()` on it" if attr in uses_calls_of(uses, attr) else f"reads `.{attr}` from it")
+        return f"{done}a `{cls}` instance{at}, which has no `{attr}`, and the module {how}"
+    if val.kind == "instance-called":
+        return f"{done}a `{getattr(val.node, 'name', 'class')}` instance{at}, which the module calls"
     if val.kind:
         needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         if val.kind == "dict":
@@ -1305,10 +1410,19 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         nxt = _step(val, ("call", uses["called"]["await"]), fakes, before)
         return _check_uses(nxt, uses["called"]["then"], fakes, before, done + "a fake whose call returns ")
     for m, info in sorted(uses["calls"].items(), key=lambda mi: mi[1].get("line", 0)):
-        nxt = _step(_step(val, ("attr", m), fakes, before), ("call", info["await"]), fakes, before)
+        got = _step(val, ("attr", m), fakes, before)
+        if got.kind and (got.kind.startswith("missing:") or got.kind == "instance-called"):
+            return _check_uses(got, uses, fakes, before, done)
+        nxt = _step(got, ("call", info["await"]), fakes, before, sig=info.get("sig"))
+        if nxt.kind == "signature":
+            return _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}` is ")
         bad = _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}()` returns ")
         if bad:
             return bad
+    for a in sorted(uses["attrs"]):                                           # §17.1870 an attribute a class lacks
+        got = _step(val, ("attr", a), fakes, before)
+        if got.kind and got.kind.startswith("missing:"):
+            return _check_uses(got, uses, fakes, before, done)
     return None
 
 
@@ -1526,11 +1640,14 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
             seen.add((line, what))
             found.append(f"`{path}:{line}` {what} {bad} -- give it what the module uses: {uses_text}")
 
+        raises = _expects_a_raise(tree)                      # §17.1870 -- a call there is meant to fail early
         for fn in fns:
             fk = fakes_for(fn)
             for call in (c for c in _own_nodes(fn) if isinstance(c, ast.Call)):
                 mod = by_line.get((call.lineno, _call_name(call)))
                 if not mod or mod not in reach:
+                    continue
+                if any(a <= call.lineno <= b for a, b in raises):
                     continue
                 key = (mod, _call_name(call))
                 if key not in shapes:
@@ -1558,6 +1675,9 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
         for pc, mod, owner, name, fn in _patch_sites(code):
             if mod not in reach:
                 continue
+            if fn is not None and any(fn.lineno <= a and b <= (fn.end_lineno or b) and any(
+                    isinstance(c, ast.Call) and a <= c.lineno <= b for c in _own_nodes(fn)) for a, b in raises):
+                continue                                     # §17.1870 -- a call of this test is meant to raise first
             if name == "async_session" and not owner:
                 # §17.1869 — the session itself is never patched: the sandbox's is real (live: 19 patches of it on
                 # eight modules in one file, each an `async def` the module cannot `async with`)
@@ -1580,6 +1700,99 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                    _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
             if (bad := _check_uses(val, uses, fk, 10 ** 9)):
                 say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
+    return found
+
+
+# ── §17.1870 a test reads what a returned class has ───────────────────────────────────────────────────────────
+
+def _class_members(code: str, cname: str) -> set[str] | None:
+    """The attributes an instance of `cname` (defined in `code`) has: annotated fields, class-level names, methods,
+    properties and what any method stores as `self.x`; None when the class is not there (or inherits)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    cls = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cname), None)
+    if cls is None or cls.bases and not all(getattr(b, "id", "") in ("object",) for b in cls.bases):
+        return None
+    out: set[str] = set()
+    for n in cls.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(n.name)
+            for x in ast.walk(n):
+                if isinstance(x, ast.Assign):
+                    out |= {t.attr for t in x.targets if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+                            and t.value.id == "self"}
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+        elif isinstance(n, ast.Assign):
+            out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+    return out
+
+
+def _returned_class(fn: ast.AST) -> str | None:
+    """`-> RiskDecision`, `-> Optional[RiskDecision]`, `-> RiskDecision | None` -> "RiskDecision"."""
+    ann = getattr(fn, "returns", None)
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return None
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        names = [x for x in (ann.left, ann.right) if not (isinstance(x, ast.Constant) and x.value is None)]
+        ann = names[0] if len(names) == 1 else None
+    if isinstance(ann, ast.Subscript) and getattr(ann.value, "id", "") == "Optional":
+        ann = ann.slice
+    return ann.id if isinstance(ann, ast.Name) and ann.id[:1].isupper() else None
+
+
+def unknown_result_attributes(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1870 — each attribute a test reads from what a job function returns -- a class of the job's modules --
+    that the class lacks. Live (5b4880c0 T5, 2026-10-30): six tests read `result.passed` from `check_daily_loss(…)`,
+    which returns a `RiskDecision` with `allowed` and `reason`; the index had shown the class's fields."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    members_of: dict[tuple[str, str], set[str] | None] = {}
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            bound: dict[str, tuple[str, str, str]] = {}      # name -> (module, function, class)
+            for n in _own_nodes(fn):
+                if not (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)):
+                    continue
+                call = _unwrap(n.value)
+                if not isinstance(call, ast.Call):
+                    continue
+                mod = by_line.get((call.lineno, _call_name(call)))
+                if not mod or mod not in reach:
+                    continue
+                d = _defs(reach[mod])
+                target = d[0].get(_call_name(call)) if d else None
+                cname = _returned_class(target) if target is not None else None
+                if cname:
+                    bound[n.targets[0].id] = (mod, _call_name(call), cname)
+            if not bound:
+                continue
+            for n in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
+                             and x.value.id in bound and isinstance(x.ctx, ast.Load)), key=lambda x: x.lineno):
+                mod, f, cname = bound[n.value.id]
+                key = (mod, cname)
+                if key not in members_of:
+                    members_of[key] = _class_members(reach[mod], cname)
+                have = members_of[key]
+                if have is None or n.attr in have or n.attr.startswith("__"):
+                    continue
+                msg = (f"`{path}:{n.lineno}` reads `.{n.attr}` from what `{f}` (`{mod}`) returns, a `{cname}`, which has "
+                       f"no `{n.attr}` -- it has {', '.join(f'`{a}`' for a in sorted(a for a in have if not a.startswith('_'))) or 'no public attribute'}")
+                if msg not in found:
+                    found.append(msg)
     return found
 
 

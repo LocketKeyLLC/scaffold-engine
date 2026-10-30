@@ -404,8 +404,11 @@ def _new_use() -> dict:
 def _merge_uses(dst: dict, src: dict) -> None:
     dst["attrs"] |= src["attrs"]
     for m, info in src["calls"].items():
-        d = dst["calls"].setdefault(m, {"await": info["await"], "then": _new_use(), "line": info.get("line", 0)})
+        d = dst["calls"].setdefault(m, {"await": info["await"], "then": _new_use(), "line": info.get("line", 0),
+                                        "sig": (0, frozenset())})
         d["await"] = d["await"] or info["await"]
+        a, b = d.get("sig") or (0, frozenset()), info.get("sig") or (0, frozenset())
+        d["sig"] = (max(a[0], b[0]), a[1] | b[1])
         d["line"] = min(d.get("line") or info.get("line", 0), info.get("line", 0)) or d.get("line", 0)
         _merge_uses(d["then"], info["then"])
     if src["called"]:
@@ -480,12 +483,16 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 base = node_of(f.value)
                 if base is None:
                     return None
-                if (f.attr in _DICT_READS and 1 <= len(e.args) <= 2 and not e.keywords) \
-                        or (f.attr in ("keys", "items", "values") and not e.args):
+                if (f.attr in _DICT_READS and 1 <= len(e.args) <= 2 and not e.keywords and not awaited) \
+                        or (f.attr in ("keys", "items", "values") and not e.args):     # `await client.get(u)`: a call
                     base["as"] = base["as"] or "dict"
                     return None
-                c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno})
+                c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno,
+                                                      "sig": (0, frozenset())})
                 c["await"] = c["await"] or awaited
+                npos, kws = c.get("sig") or (0, frozenset())            # §17.1870 -- how the module calls it
+                c["sig"] = (max(npos, len([a for a in e.args if not isinstance(a, ast.Starred)])),
+                            kws | {str(k.arg) for k in e.keywords if k.arg})
                 return c["then"]
             if isinstance(f, ast.Name) and f.id in names:
                 base = names[f.id]
@@ -862,13 +869,30 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
         if spread:
             continue
         why = _required_column(info["to"], fks, rules) if info.get("to") else ""
-        if info.get("req") or why:
+        below = _required_below(info.get("sub") or {}, fks, rules)           # §17.1870
+        if info.get("req") or why or below:
             has = ", ".join(f"`{k}`" for k in given) or "no keys"
             out.append(f'{label}: {where} is read for `{key}`'
-                       + (f" (written to `{info['to']}`, which {why})" if why else " (as `[\"" + key + "\"]`, which raises without it)")
+                       + (f" (written to `{info['to']}`, which {why})" if why else
+                          f" (its `{below[0]}` is written to `{below[1]}`, which {below[2]})" if below else
+                          " (as `[\"" + key + "\"]`, which raises without it)")
                        + f" -- the dict given has {has} and no `{key}`"
-                       + ("; pass the id its parent's writer returned" if why.startswith("references") else ""))
+                       + ("; pass the id its parent's writer returned"
+                          if (why or (below[2] if below else "")).startswith("references") else ""))
     return out
+
+
+def _required_below(sub: dict, fks: dict | None, rules: dict | None) -> tuple[str, str, str] | None:
+    """§17.1870 — (key path, column, why) of the first key under a dict key that must be given, so the key above it
+    must be too. Live (5b4880c0 T5, 2026-10-30): `payload={"proposal_id": 1}` with no `proposal` -- the gate reads
+    `payload.get("proposal", {})["proposal_id"]` into `approval.proposal_id` and wrote the null."""
+    for k in sorted(sub):
+        info = sub[k]
+        if info.get("to") and (why := _required_column(info["to"], fks, rules)):
+            return k, info["to"], why
+        if (deeper := _required_below(info.get("sub") or {}, fks, rules)):
+            return f"{k}.{deeper[0]}", deeper[1], deeper[2]
+    return None
 
 
 def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
@@ -1985,9 +2009,10 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += made_up_parent_ids(files_of({**me, "output_text": output}), _cur, _fks)
     # §17.1866 — a parent row inserted in the test's session is committed before a writer with its own session;
     # §17.1867 — a fake does what the module does with it
-    from app.modules.engine_contracts import uncommitted_parents, wrong_fakes
+    from app.modules.engine_contracts import uncommitted_parents, unknown_result_attributes, wrong_fakes
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
+    found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
     found += unreturned_reads(files_of({**me, "output_text": output}), _cur)
