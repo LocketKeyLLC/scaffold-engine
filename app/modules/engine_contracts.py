@@ -977,6 +977,486 @@ def made_up_parent_ids(files: dict[str, str], modules: dict[str, str],
     return found
 
 
+# ── §17.1866 a parent row inserted in the test's session is committed before a writer with its own session ────
+
+def _commits(fn: ast.AST) -> bool:
+    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "commit"
+               for n in _own_nodes(fn))
+
+
+def _insert_execute(node: ast.AST, fn: ast.AST) -> bool:
+    """Whether `node` holds a `db.execute(text("INSERT …"))`."""
+    return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "execute"
+               and _insert_parts(_sql_of(c, fn) or "") is not None for c in ast.walk(node))
+
+
+def _call_name(call: ast.Call) -> str:
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+def _root_name(e: ast.AST) -> str | None:
+    """`x`, `x.attr`, `x[0]`, `int(x)` -> "x"."""
+    while isinstance(e, (ast.Attribute, ast.Subscript, ast.Await)):
+        e = e.value
+    if isinstance(e, ast.Call) and len(e.args) == 1 and isinstance(e.func, ast.Name) and e.func.id in ("int", "str"):
+        return _root_name(e.args[0])
+    return e.id if isinstance(e, ast.Name) else None
+
+
+def uncommitted_parents(files: dict[str, str], modules: dict[str, str],
+                        fks: dict[str, dict[str, str]] | None = None) -> list[str]:
+    """§17.1866 — each test that hands a writer opening its own `async_session()` the id of a row it inserted in its
+    own session and never committed: the writer's transaction cannot see it, and the scratch database refuses the
+    child as if the parent did not exist. Live (5b4880c0 T5, 2026-10-29, attempts 1 and 3): the test's own
+    `insert_ingested_item(db, …)` (an INSERT, no commit) then `write_signal(ingested_item_id=ingested_id, …)` --
+    "Key (ingested_item_id)=(1) is not present in table ingested_item" -- and `write_approval(proposal_id=…)` before
+    the `await db.commit()` that followed it; the attempts whose helpers committed passed the same tests. The §17.1853
+    cause read it as a made-up id."""
+    from app.modules.engine_source import _opens_own_session, _own_statements
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    own_sess: dict[str, dict[str, ast.AST]] = {}
+    for mod, code in reach.items():
+        d = _defs(code)
+        if d:
+            own_sess[mod] = {name: fn for name, fn in d[0].items() if _opens_own_session(fn)}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        calls = _test_calls(code)
+        fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+        def writer_of(call: ast.Call, within: ast.AST | None = None) -> tuple[str, str, ast.AST] | None:
+            """(module, writer, its def) for a call to a job function that opens its own session, directly or
+            through one local helper that forwards to one."""
+            name = _call_name(call)
+            for m, f, ln in calls:
+                if ln == call.lineno and f == name and m in own_sess and f in own_sess[m]:
+                    return m, f, own_sess[m][f]
+            if within is None and isinstance(call.func, ast.Name):
+                helper = next((h for h in fns if h.name == call.func.id), None)
+                if helper is not None:
+                    for c in _own_nodes(helper):
+                        if isinstance(c, ast.Call) and (w := writer_of(c, helper)):
+                            return w
+            return None
+
+        local_pending = {h.name for h in fns if _writes_table(h) and not _commits(h)}
+        committing = {h.name for h in fns if _commits(h)}      # a helper that commits commits the whole session
+        for fn in fns:
+            pending: dict[str, str] = {}                     # a tainted name -> what put it there
+            for st in (x for x in _own_statements(fn) if isinstance(x, ast.stmt)):
+                if any(isinstance(c, ast.Call) and _call_name(c) == "commit" for c in ast.walk(st)):
+                    pending.clear()
+                    continue
+                if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in committing
+                       for c in ast.walk(st)) and not any(writer_of(c) for c in ast.walk(st) if isinstance(c, ast.Call)):
+                    pending.clear()
+                    continue
+                for call in (c for c in ast.walk(st) if isinstance(c, ast.Call)):
+                    w = writer_of(call)
+                    if not w:
+                        continue
+                    mod, writer, wfn = w
+                    via = f"`{_call_name(call)}(…)` -- which calls `{writer}` -- " if _call_name(call) != writer else f"`{writer}(…)` "
+                    given = [(k.arg, k.value) for k in call.keywords if k.arg] + [(None, a) for a in call.args]
+                    hit = next(((param, _root_name(v)) for param, v in given if _root_name(v) in pending), None)
+                    if not hit:
+                        continue
+                    param, var = hit
+                    table = _writes_table(wfn)
+                    parent = (fks or {}).get(table or "", {}).get(param or "")
+                    fk = (f"`{table}.{param}` references `{parent.split('.')[0]}`: no such row" if parent
+                          else "no such parent row")
+                    found.append(
+                        f"`{path}:{call.lineno}` hands {via}`{var}`, {pending[var]} -- a row in the test's own session, "
+                        f"not committed: `{writer}` opens its own `async_session()` and sees only committed rows, so "
+                        f"the scratch database refuses the child ({fk}). `await db.commit()` after inserting the "
+                        "parent rows, before the call -- or insert them with a writer that opens its own session")
+                    break
+                if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                    v = _unwrap(st.value)
+                    target = st.targets[0].id
+                    if isinstance(v, ast.Call) and writer_of(v):
+                        pending.pop(target, None)            # a writer with its own session commits what it wrote
+                    elif isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in local_pending:
+                        pending[target] = f"the id `{v.func.id}(db, …)` returned at line {st.lineno} (an INSERT with no commit)"
+                    elif _insert_execute(v, fn):
+                        pending[target] = f"the id its own INSERT returned at line {st.lineno}"
+                    elif (src := next((n.id for n in ast.walk(v) if isinstance(n, ast.Name) and n.id in pending), None)):
+                        pending[target] = pending[src]
+    return found
+
+
+# ── §17.1867 a fake does what the module does with it ─────────────────────────────────────────────────────────
+
+_MOCK_NAMES = ("MagicMock", "AsyncMock", "Mock", "NonCallableMock", "NonCallableMagicMock")
+_LITERALS = (ast.Constant, ast.Dict, ast.List, ast.Tuple, ast.Set, ast.JoinedStr)
+
+
+def _call_chain(e: ast.AST) -> tuple[str, ...] | None:
+    """`a.b.c` -> ("a", "b", "c"); None when the chain does not start at a name."""
+    chain: list[str] = []
+    while isinstance(e, ast.Attribute):
+        chain.insert(0, e.attr)
+        e = e.value
+    return (e.id, *chain) if isinstance(e, ast.Name) else None
+
+
+class _Fakes:
+    """The fakes one scope of a test file builds: each name's value, each `a.b.return_value = x` chain, each
+    `with patch(…) as m` / `@patch(…)` mock parameter. `is_async(patch_call)`: whether a `patch(…)` without
+    `new_callable` replaces an `async def` -- `patch` then installs an `AsyncMock` itself."""
+
+    def __init__(self, nodes: list[ast.AST], fn: ast.AST | None = None, is_async=lambda call: False):
+        self.is_async = is_async
+        self.bound: dict[str, list[tuple[int, ast.AST]]] = {}
+        self.chains: dict[tuple[str, ...], list[tuple[int, ast.AST]]] = {}
+        for n in nodes:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1:
+                t = n.targets[0]
+                if isinstance(t, ast.Name):
+                    self.bound.setdefault(t.id, []).append((n.lineno, n.value))
+                elif (chain := _call_chain(t)) and len(chain) > 1:
+                    self.chains.setdefault(chain, []).append((n.lineno, n.value))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for item in n.items:
+                    if isinstance(item.optional_vars, ast.Name) and isinstance(item.context_expr, ast.Call):
+                        self.bound.setdefault(item.optional_vars.id, []).append((n.lineno, item.context_expr))
+        if fn is not None:                                   # `@patch(…)` decorators fill the trailing parameters
+            a = fn.args                                      # type: ignore[attr-defined]
+            params = [x.arg for x in a.posonlyargs + a.args if x.arg not in ("self", "cls")]
+            decos = [d for d in fn.decorator_list if isinstance(d, ast.Call) and _call_name(d) in ("patch", "object")   # type: ignore[attr-defined]
+                     and not any(k.arg == "new" for k in d.keywords)]
+            for d, name in zip(reversed(decos), params[len(params) - len(decos):], strict=False):
+                self.bound.setdefault(name, []).append((fn.lineno, d))        # type: ignore[attr-defined]
+
+    def last(self, name: str, before: int) -> ast.AST | None:
+        hits = [v for ln, v in self.bound.get(name, []) if ln <= before]
+        return hits[-1] if hits else None
+
+    def chain(self, key: tuple[str, ...], before: int) -> ast.AST | None:
+        hits = [v for ln, v in self.chains.get(key, []) if ln <= before]
+        return hits[-1] if hits else None
+
+
+class _Val:
+    """A fake as the module will see it: a literal of some kind, a mock of some kind, or unknown; with the test's
+    name and attribute path it came through, so a use can look up what the test set there."""
+    __slots__ = ("kind", "mock", "node", "root", "path", "line", "rv")
+
+    def __init__(self, kind: str | None = None, mock: str | None = None, node: ast.AST | None = None,
+                 root: str | None = None, path: tuple[str, ...] = (), line: int = 0, rv: ast.AST | None = None):
+        self.kind, self.mock, self.node, self.root, self.path, self.line, self.rv = kind, mock, node, root, path, line, rv
+
+
+_RESOLVE_HOPS = 8
+
+
+def _resolve(e: ast.AST, fakes: _Fakes, before: int, _hops: int = 0) -> _Val:
+    e = _unwrap(e)
+    if _hops > _RESOLVE_HOPS:
+        return _Val()
+    if isinstance(e, ast.Name):
+        v = fakes.last(e.id, before)
+        if v is None:
+            return _Val(root=e.id)
+        out = _resolve(v, fakes, before, _hops + 1)
+        if out.root is None:
+            out.root = e.id
+        return out
+    if isinstance(e, _LITERALS):
+        from app.modules.engine_source import _literal_kind
+        kind = _literal_kind(e) or ("tuple" if isinstance(e, ast.Tuple) else "set" if isinstance(e, ast.Set) else None)
+        return _Val(kind=kind, node=e, line=getattr(e, "lineno", 0))
+    if isinstance(e, ast.Call):
+        name = _call_name(e)
+        kw = {k.arg: k.value for k in e.keywords if k.arg}
+        if name in _MOCK_NAMES:
+            return _Val(mock="AsyncMock" if name == "AsyncMock" else "MagicMock", node=e, line=e.lineno,
+                        rv=kw.get("return_value"))
+        if name in ("patch", "object") and isinstance(e.func, (ast.Name, ast.Attribute)):
+            if "new" in kw:
+                return _resolve(kw["new"], fakes, before, _hops + 1)
+            nc = kw.get("new_callable")
+            mock = ("AsyncMock" if isinstance(nc, ast.Name) and nc.id == "AsyncMock" else "MagicMock") if nc is not None \
+                else ("AsyncMock" if fakes.is_async(e) else "MagicMock")
+            return _Val(mock=mock, node=e, line=e.lineno, rv=kw.get("return_value"))
+        if isinstance(e.func, ast.Attribute):
+            return _Val()                                    # `patch.dict(…)`, `json.dumps(…)`: not read
+        from app.modules.engine_source import _literal_kind
+        kind = _literal_kind(e)
+        return _Val(kind=kind, node=e, line=e.lineno) if kind else _Val()
+    if isinstance(e, ast.Attribute):
+        chain = _call_chain(e)
+        if chain and (v := fakes.chain(chain, before)) is not None:
+            return _resolve(v, fakes, before, _hops + 1)
+        if chain and len(chain) == 2:
+            base = _resolve(ast.Name(id=chain[0], ctx=ast.Load()), fakes, before, _hops + 1)
+            if base.mock:
+                return _step(base, ("attr", chain[1]), fakes, before)
+    return _Val()
+
+
+def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int) -> _Val:
+    """What the module gets after one use of a fake: `("attr", "get")`, `("call", awaited)`."""
+    what, arg = step
+    if not val.mock:
+        return _Val()
+    path = val.path + ((arg,) if what == "attr" else ("return_value",))     # type: ignore[operator]
+    if val.root and (v := fakes.chain((val.root, *path), before)) is not None:
+        out = _resolve(v, fakes, before)
+        if out.root is None:
+            out.root, out.path = val.root, path
+        return out
+    if what == "call" and not val.path and val.rv is not None:              # `MagicMock(return_value=x)` called
+        out = _resolve(val.rv, fakes, before)
+        if out.root is None:
+            out.root, out.path = val.root, path
+        return out
+    if what == "call" and val.mock == "MagicMock" and arg:
+        return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line)
+    return _Val(mock="MagicMock" if what == "call" else val.mock, node=val.node, root=val.root, path=path, line=val.line)
+
+
+_CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool", "None": "None", "tuple": "a tuple",
+           "list": "a list", "dict": "a dict", "set": "a set", "date": "a date", "datetime": "a datetime",
+           "Decimal": "a Decimal"}
+_DICT_OK = frozenset({"get", "keys", "items", "values", "pop", "setdefault", "update", "copy"})
+
+
+def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "") -> str | None:
+    """The first thing the module does with the fake that the fake cannot do, as "a fake whose `get()` returns a
+    fake whose `json()` returns a list (line 290), which the module reads as a dict"; None when every use fits (or
+    the fake is unknown)."""
+    at = f" (line {val.line})" if val.line else ""
+    if val.kind == "MagicMock-awaited":
+        return f"{done}a `MagicMock`{at}, which the module awaits -- a MagicMock cannot be awaited: make it an `AsyncMock`"
+    if val.kind:
+        needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
+        if val.kind == "dict":
+            needs = [n for n in needs if n.rstrip("()") not in _DICT_OK]
+        if needs:
+            return (f"{done}{_CANNOT.get(val.kind, 'a ' + val.kind)}{at}, and the module "
+                    + ("calls it" if needs[0] == "()" else f"calls `.{needs[0]}` on it" if needs[0].endswith("()")
+                       else f"reads `.{needs[0]}` from it"))
+        if uses["as"] == "dict" and val.kind in ("list", "tuple", "str", "int", "float", "bool", "set", "None"):
+            return f"{done}{_CANNOT[val.kind]}{at}, which the module reads as a dict (`.get(…)` / `[\"key\"]`)"
+        return None
+    if not val.mock:
+        return None
+    if uses["called"]:
+        nxt = _step(val, ("call", uses["called"]["await"]), fakes, before)
+        return _check_uses(nxt, uses["called"]["then"], fakes, before, done + "a fake whose call returns ")
+    for m, info in sorted(uses["calls"].items(), key=lambda mi: mi[1].get("line", 0)):
+        nxt = _step(_step(val, ("attr", m), fakes, before), ("call", info["await"]), fakes, before)
+        bad = _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}()` returns ")
+        if bad:
+            return bad
+    return None
+
+
+def _result_uses(code: str, matches, local_of=None) -> dict | None:
+    """What a module does with what a call returns, over every `x = [await] <call>` whose call `matches`: a `called`
+    use, or None when the module never binds such a result."""
+    from app.modules.engine_source import _local_functions, _merge_uses, _new_use, _uses
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    local = _local_functions(tree)
+    root = _new_use()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in _own_nodes(fn):
+            if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                    and isinstance((call := _unwrap(n.value)), ast.Call) and matches(call)):
+                sub = _uses(fn, n.targets[0].id, local_of(fn) if local_of else local)
+                if not root["called"]:
+                    root["called"] = {"await": isinstance(n.value, ast.Await), "then": _new_use()}
+                root["called"]["await"] = root["called"]["await"] or isinstance(n.value, ast.Await)
+                _merge_uses(root["called"]["then"], sub)
+    return root if root["called"] else None
+
+
+def _target_uses(code: str, owner: str, name: str) -> dict | None:
+    """What a module does with what a patched name returns: `values_for(…)`, `httpx.AsyncClient(…)`, or
+    `self.meth(…)` inside class `owner`."""
+    if owner and "." not in owner and owner[:1].isupper():
+        return _result_uses(code, lambda c: isinstance(c.func, ast.Attribute) and c.func.attr == name
+                            and isinstance(c.func.value, ast.Name) and c.func.value.id == "self")
+    dotted = f"{owner}.{name}" if owner else name
+    return _result_uses(code, lambda c: ast.unparse(c.func) == dotted)
+
+
+def _patch_sites(code: str) -> list[tuple[ast.Call, str, str, str, ast.AST | None]]:
+    """Each `patch(…)` / `patch.object(…)` in a test file: (the call, module, owner ("" or a class / an attribute
+    chain the name hangs on), name, the enclosing function)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    alias = _module_aliases(tree)
+    owner: dict[int, ast.AST] = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for x in _own_nodes(fn):
+                owner[id(x)] = fn
+            for d in fn.decorator_list:
+                for x in ast.walk(d):
+                    owner[id(x)] = fn
+    out = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and _call_name(n) in ("patch", "object") and n.args):
+            continue
+        site = _patch_target(n, alias)
+        if site:
+            out.append((n, *site, owner.get(id(n))))
+    return out
+
+
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    alias: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "app.modules":
+            alias.update({a.asname or a.name: a.name for a in n.names})
+        elif isinstance(n, ast.Import):
+            alias.update({a.asname: a.name.rsplit(".", 1)[1] for a in n.names
+                          if a.asname and a.name.startswith("app.modules.")})
+    return alias
+
+
+def _patch_target(call: ast.Call, alias: dict[str, str]) -> tuple[str, str, str] | None:
+    """(module, owner, name) a `patch(…)` / `patch.object(…)` call replaces, or None."""
+    a0 = call.args[0] if call.args else None
+    if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
+        parts = a0.value.split(".")
+        if len(parts) >= 4:
+            return parts[2], ".".join(parts[3:-1]), parts[-1]
+    elif a0 is not None and len(call.args) >= 2 and isinstance(call.args[1], ast.Constant) \
+            and isinstance(call.args[1].value, str):
+        chain = _call_chain(a0)
+        if chain and chain[0] in alias:
+            return alias[chain[0]], ".".join(chain[1:]), call.args[1].value
+    return None
+
+
+def _async_in(reach: dict[str, str], mod: str, owner: str, name: str) -> bool:
+    """§17.1867 — whether `patch("app.modules.<mod>.<owner>.<name>")` replaces an `async def` (`patch` then installs
+    an `AsyncMock` itself): defined in the module, a method of one of its classes, or imported from the engine."""
+    code = reach.get(mod)
+    if not code:
+        return False
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    if owner and "." not in owner:
+        cls = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == owner), None)
+        return any(isinstance(m, ast.AsyncFunctionDef) and m.name == name for m in (cls.body if cls else []))
+    if owner:
+        return False
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return isinstance(n, ast.AsyncFunctionDef)
+        if isinstance(n, ast.ImportFrom) and n.module and any((a.asname or a.name) == name for a in n.names):
+            src = next(a.name for a in n.names if (a.asname or a.name) == name)
+            if n.module.startswith("app.modules.") and n.module.rsplit(".", 1)[1] in reach:
+                return _async_in(reach, n.module.rsplit(".", 1)[1], "", src)
+            from app.modules.engine_source import module_index
+            return bool((module_index().get(n.module) or {}).get("funcs", {}).get(src, {}).get("async"))
+    return False
+
+
+def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.1867 — each fake a test hands a job function (or patches into a job module) that cannot do what the module
+    does with it: a literal where attributes are read or methods called, a list where a dict is read, a `MagicMock`
+    where the module awaits. Read against the module's own uses (`_uses`), the fake resolved through the test's
+    names, `return_value` chains and `patch(…)` arguments. Live (5b4880c0 T5, 2026-10-29): every attempt -- an
+    `http_get` returning `"text"` or `(200, "text")` where `_download_file` calls `.raise_for_status()`; a client
+    whose `get().json()` returned a list where `_fetch_house_disclosures` reads `data.get("results")`; a patched
+    `_ensure_client` returning a `MagicMock` whose `.request(…)` the module awaits; the entry point's patched
+    `AlpacaPaperClient` whose `.close()` it awaits (named by the sandbox, three attempts running)."""
+    from app.modules.engine_source import _call_shape, _local_functions, _own_statements, _uses_text
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        alias = _module_aliases(tree)
+
+        def is_async(call: ast.Call) -> bool:
+            t = _patch_target(call, alias)
+            return bool(t) and _async_in(reach, *t)
+
+        mod_fakes = _Fakes(tree.body, None, is_async)
+        fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
+        seen: set[tuple[int, str]] = set()
+        shapes: dict[tuple[str, str], dict] = {}
+
+        def fakes_for(fn: ast.AST | None) -> _Fakes:
+            if fn is None:
+                return mod_fakes
+            fk = _Fakes([x for x in _own_statements(fn) if isinstance(x, ast.stmt)], fn, is_async)
+            for k, v in mod_fakes.bound.items():
+                fk.bound.setdefault(k, []).extend(v)
+            return fk
+
+        def say(line: int, what: str, bad: str, uses_text: str) -> None:
+            if (line, what) in seen:
+                return
+            seen.add((line, what))
+            found.append(f"`{path}:{line}` {what} {bad} -- give it what the module uses: {uses_text}")
+
+        for fn in fns:
+            fk = fakes_for(fn)
+            for call in (c for c in _own_nodes(fn) if isinstance(c, ast.Call)):
+                mod = by_line.get((call.lineno, _call_name(call)))
+                if not mod or mod not in reach:
+                    continue
+                key = (mod, _call_name(call))
+                if key not in shapes:
+                    d = _defs(reach[mod])
+                    target = d[0].get(key[1]) if d else None
+                    shapes[key] = _call_shape(target, None, _local_functions(ast.parse(reach[mod]))) if target else {}
+                uses = shapes[key].get("uses") or {}
+                if not uses:
+                    continue
+                pos = shapes[key]["pos"]
+                given = [(pos[i], a) for i, a in enumerate(call.args) if i < len(pos)] + [(k.arg, k.value) for k in call.keywords if k.arg]
+                for param, arg in given:
+                    if param in uses and (bad := _check_uses(_resolve(arg, fk, call.lineno), uses[param], fk, call.lineno)):
+                        say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", bad, f"`{param}{_uses_text(uses[param])}`")
+        for pc, mod, owner, name, fn in _patch_sites(code):
+            if mod not in reach:
+                continue
+            uses = _target_uses(reach[mod], owner, name)
+            if not uses:
+                continue
+            fk = fakes_for(fn)
+            kw = {k.arg: k.value for k in pc.keywords if k.arg}
+            # the mock the patch installs: `new=`, else the `as m` / decorator name (its chains apply), else the call
+            alias_name = next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
+            val = (_resolve(kw["new"], fk, pc.lineno) if "new" in kw else
+                   _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
+            if (bad := _check_uses(val, uses, fk, 10 ** 9)):
+                say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
+    return found
+
+
 # ── §17.1839 what a test may mock: the exact names through which the job's modules leave the engine ────────────
 
 _KIND = (("app.model_router", "a model call"), ("openai", "a model call"), ("anthropic", "a model call"),

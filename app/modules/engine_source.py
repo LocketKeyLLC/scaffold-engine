@@ -114,7 +114,12 @@ def _kind_note(ann: ast.AST | None) -> str:
 
 
 def _kinds_text(k: frozenset[str] | set[str]) -> str:
-    """`dict | None`, `float | int`: one spelling for a signature and for the finding that checks a call against it."""
+    """`dict | None`, `date`: one spelling for a signature and for the finding that checks a call against it (what a
+    kind admits besides itself -- an int for a float, a datetime for a date -- is not spelled out)."""
+    k = set(k)
+    for kind, also in _KIND_ALSO.items():
+        if kind in k:
+            k -= also
     return " | ".join(sorted(k, key=lambda x: (x == "None", x)))
 
 
@@ -210,10 +215,382 @@ def _param_values(fn: ast.FunctionDef | ast.AsyncFunctionDef, consts: dict[str, 
     return out
 
 
+#: §17.1865 — a method only a date/datetime or a Decimal has: calling it on a key's value says the kind the key takes
+_DATE_METHODS = frozenset({"isoformat", "strftime", "weekday", "isoweekday", "toordinal", "isocalendar"})
+_DATETIME_METHODS = frozenset({"timestamp", "astimezone", "utcoffset", "tzname", "utctimetuple"})
+_DECIMAL_METHODS = frozenset({"quantize", "as_tuple", "normalize", "to_integral_value", "to_eng_string"})
+_KEY_HOPS = 2
+_MAX_KEYS = 8
+_DB_PARAMS = frozenset({"db", "session", "conn", "connection"})
+
+
+def _own_statements(fn: ast.AST) -> list[ast.AST]:
+    """A function's own nodes in source order (not those of the functions and classes defined inside it)."""
+    cached = getattr(fn, "_es_statements", None)
+    if cached is None:
+        from app.modules.engine_contracts import _own_nodes
+        cached = sorted(_own_nodes(fn), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+        fn._es_statements = cached                                            # type: ignore[attr-defined]
+    return cached
+
+
+def _parents(fn: ast.AST) -> dict[int, ast.AST]:
+    cached = getattr(fn, "_es_parents", None)
+    if cached is None:
+        cached = {}
+        for p in ast.walk(fn):
+            for c in ast.iter_child_nodes(p):
+                cached[id(c)] = p
+        fn._es_parents = cached                                               # type: ignore[attr-defined]
+    return cached
+
+
+def _handed(call: ast.Call, callee: ast.AST) -> list[tuple[str, ast.AST]]:
+    """(their parameter, the argument) of each argument a call hands to a local function."""
+    a = callee.args                                                           # type: ignore[attr-defined]
+    pos: list[str] = [str(x.arg) for x in a.posonlyargs + a.args]
+    out: list[tuple[str, ast.AST]] = [(pos[i], v) for i, v in enumerate(call.args)
+                                      if i < len(pos) and not isinstance(v, ast.Starred)]
+    return out + [(str(k.arg), k.value) for k in call.keywords if k.arg]
+
+
+def _merge_keys(dst: dict, src: dict) -> None:
+    for k, info in src.items():
+        d = dst.setdefault(k, {})
+        for f in ("kinds", "to"):
+            if info.get(f) and not d.get(f):
+                d[f] = info[f]
+        if info.get("req"):
+            d["req"] = True
+        if info.get("sub"):
+            _merge_keys(d.setdefault("sub", {}), info["sub"])
+
+
+def _insert_columns(fn: ast.AST, dict_node: ast.Dict, parents: dict[int, ast.AST]) -> dict[str, str]:
+    """The dict of parameters of `db.execute(text("INSERT INTO t (a, b) VALUES (:x, :y)"), {...})`: parameter name ->
+    `t.column`; empty when the dict is not that."""
+    from app.modules.engine_contracts import _insert_parts, _sql_of
+    call = parents.get(id(dict_node))
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "execute"
+            and (dict_node in call.args or any(k.value is dict_node for k in call.keywords))):
+        return {}
+    parts = _insert_parts(_sql_of(call, fn) or "")
+    if not parts:
+        return {}
+    table, cols, vals = parts[0].lower(), [c.strip().lower() for c in parts[1]], parts[2]
+    out: dict[str, str] = {}
+    for c, v in zip(cols, vals, strict=False):
+        m = re.fullmatch(r"(?:CAST\s*\(\s*)?:(\w+)(?:\s+AS\s+\w+\s*\))?", v.strip(), re.I)
+        if m:
+            out[m.group(1)] = f"{table}.{c}"
+    return out
+
+
+def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: int = 0,
+                _seen: frozenset[str] = frozenset()) -> dict[str, dict]:
+    """§17.1866 — the keys a function reads from each dict parameter, and what it does with each:
+    ``{"payload": {"proposal": {"sub": {"proposal_id": {"to": "approval.proposal_id"}}}, "proposal_id": {}}}``.
+    `kinds`: the kind the value is used as -- handed to a function of the same module whose parameter has one, or a
+    date/Decimal method called on it; `to`: the INSERT column it is bound to; `req`: read as `p["k"]`, which raises
+    without it. Followed through the module's own functions the dict (or a key's dict) is handed to, two hops.
+    Live (5b4880c0 T5, 2026-10-29): `handle_approval_answer(…, payload)` reads `payload["proposal"]["proposal_id"]`
+    into `approval.proposal_id` (not null, a foreign key); three attempts passed `{"proposal": {"id": …}}` and the
+    sandbox refused the null. `request_approval(proposal)` formats `proposal["quantity"]` as a Decimal; the tests
+    passed `"1"`."""
+    memo = getattr(fn, "_es_keys", None)
+    if _depth == 0 and memo is not None:
+        return memo
+    a = fn.args                                                               # type: ignore[attr-defined]
+    params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+    paths: dict[str, tuple[str, ...]] = {p: (p,) for p in params if p not in ("self", "cls")}
+    out: dict[str, dict] = {}
+    parents = _parents(fn)
+
+    def entry(path: tuple[str, ...]) -> dict:
+        cur = out.setdefault(path[0], {})
+        for k in path[1:]:
+            cur = cur.setdefault(k, {}).setdefault("sub", {})
+        return cur
+
+    def read_of(n: ast.AST) -> tuple[tuple[str, ...], str] | None:
+        """`x.get("k", …)` / `x["k"]` on a known dict -> (its path, "k")."""
+        from app.modules.engine_contracts import _get_key
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) \
+                and n.func.value.id in paths and (k := _get_key(n, {n.func.value.id})) is not None:
+            return paths[n.func.value.id], k
+        if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
+                and n.value.id in paths and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
+            return paths[n.value.id], n.slice.value
+        return None
+
+    stmts = _own_statements(fn)
+    for _ in range(2):                                   # aliases of aliases: `p = payload.get("proposal", {})`
+        for n in stmts:
+            if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                    and n.targets[0].id not in paths and (r := read_of(n.value))):
+                paths[n.targets[0].id] = r[0] + (r[1],)
+    for n in stmts:
+        r = read_of(n)
+        if not r:
+            continue
+        path, key = r
+        info = entry(path).setdefault(key, {})
+        if isinstance(n, ast.Subscript):
+            info["req"] = True
+        par = parents.get(id(n))
+        if isinstance(par, ast.Attribute) and par.attr in _DATE_METHODS | _DATETIME_METHODS | _DECIMAL_METHODS:
+            k = "date" if par.attr in _DATE_METHODS else "datetime" if par.attr in _DATETIME_METHODS else "Decimal"
+            info.setdefault("kinds", frozenset({k} | _KIND_ALSO.get(k, set())))
+        elif isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and local and par.func.id in local \
+                and local[par.func.id] is not fn:
+            callee = local[par.func.id]
+            their = next((p for p, v in _handed(par, callee) if v is n), None)
+            if their:
+                ca = callee.args                                              # type: ignore[attr-defined]
+                ann = next((x.annotation for x in ca.posonlyargs + ca.args + ca.kwonlyargs if x.arg == their), None)
+                if (k := _kinds(ann)):
+                    info.setdefault("kinds", k)
+                if _depth < _KEY_HOPS and callee.name not in _seen:          # type: ignore[attr-defined]
+                    sub = _param_keys(callee, local, _depth + 1, _seen | {fn.name}).get(their)   # type: ignore[attr-defined]
+                    if sub:
+                        _merge_keys(info.setdefault("sub", {}), sub)
+        elif isinstance(par, ast.Dict) and n in par.values:
+            cols = _insert_columns(fn, par, parents)
+            i = par.values.index(n)
+            kname = par.keys[i]
+            if cols and isinstance(kname, ast.Constant) and kname.value in cols:
+                info.setdefault("to", cols[kname.value])
+    # the dict itself (or a key's dict) handed whole to a function of the same module
+    if local and _depth < _KEY_HOPS:
+        for n in stmts:
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in local
+                    and local[n.func.id] is not fn and n.func.id not in _seen):
+                continue
+            callee = local[n.func.id]
+            for their, v in _handed(n, callee):
+                if isinstance(v, ast.Name) and v.id in paths:
+                    sub = _param_keys(callee, local, _depth + 1, _seen | {fn.name}).get(their)    # type: ignore[attr-defined]
+                    if sub:
+                        path = paths[v.id]
+                        _merge_keys(entry(path[:1]) if len(path) == 1 else entry(path[:-1]).setdefault(path[-1], {}).setdefault("sub", {}), sub)
+    done = {p: ks for p, ks in out.items() if ks}
+    if _depth == 0:
+        fn._es_keys = done                                                    # type: ignore[attr-defined]
+    return done
+
+
+def _keys_text(keys: dict) -> str:
+    """`{proposal_id, quantity: Decimal, proposal{proposal_id}}` -- what a dict parameter is read for."""
+    parts = []
+    for k in sorted(keys)[:_MAX_KEYS]:
+        info = keys[k]
+        t = k + (": " + _kinds_text(info["kinds"]) if info.get("kinds") else "")
+        if info.get("sub"):
+            t += _keys_text(info["sub"])
+        parts.append(t)
+    if len(keys) > _MAX_KEYS:
+        parts.append("…")
+    return "{" + ", ".join(parts) + "}"
+
+
+_DICT_READS = frozenset({"get", "keys", "items", "values", "pop", "setdefault"})
+_USE_HOPS = 3
+
+
+def _new_use() -> dict:
+    return {"attrs": set(), "calls": {}, "called": None, "as": None}
+
+
+def _merge_uses(dst: dict, src: dict) -> None:
+    dst["attrs"] |= src["attrs"]
+    for m, info in src["calls"].items():
+        d = dst["calls"].setdefault(m, {"await": info["await"], "then": _new_use(), "line": info.get("line", 0)})
+        d["await"] = d["await"] or info["await"]
+        d["line"] = min(d.get("line") or info.get("line", 0), info.get("line", 0)) or d.get("line", 0)
+        _merge_uses(d["then"], info["then"])
+    if src["called"]:
+        if not dst["called"]:
+            dst["called"] = {"await": src["called"]["await"], "then": _new_use()}
+        dst["called"]["await"] = dst["called"]["await"] or src["called"]["await"]
+        _merge_uses(dst["called"]["then"], src["called"]["then"])
+    dst["as"] = dst["as"] or src["as"]
+
+
+def _uses_empty(u: dict) -> bool:
+    return not (u["attrs"] or u["calls"] or u["called"] or u["as"])
+
+
+def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, result: dict | None = None,
+          _depth: int = 0, _seen: frozenset[str] = frozenset()) -> dict:
+    """§17.1867 — what a function does with the value named `name` (a parameter, or any local): the attributes it
+    reads, the methods it calls (and whether it awaits them, and what it does with what they return), whether it
+    calls the value itself, and whether it reads it as a dict or a list. Followed into the module's own functions the
+    value is handed to, and back out along their `return`s (`result`: what the caller does with the call's result).
+    Live (5b4880c0 T5, 2026-10-29, every attempt): `http_get` fakes returned a `str` or a `(200, text)` tuple where
+    `_download_file` calls `.raise_for_status()` and reads `.text`; `client.get().json()` fakes returned a list where
+    `_fetch_house_disclosures` reads `data.get("results")`; a patched `_ensure_client` returned a `MagicMock` whose
+    `.request(…)` the module awaits."""
+    memo = getattr(fn, "_es_uses", None)
+    if result is None and memo is not None and name in memo:
+        return memo[name]
+    root = _new_use()
+    names: dict[str, dict] = {name: root}
+    parents = _parents(fn)
+    # a statement under `if <name> is None:` / `if not <name>:` (or a flag bound to that) acts on the module's own
+    # object, never on what a test handed it; one under `if <name> is not None:` acts on the fake alone
+    flags: dict[str, bool] = {}                          # `own_client = client is None` -> own_client: True (None side)
+
+    def none_test(t: ast.AST) -> bool | None:
+        """True: the branch runs when `name` is None/falsy; False: when it is given; None: unrelated."""
+        if isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.left, ast.Name) and t.left.id == name \
+                and isinstance(t.comparators[0], ast.Constant) and t.comparators[0].value is None:
+            return isinstance(t.ops[0], ast.Is) if isinstance(t.ops[0], (ast.Is, ast.IsNot)) else None
+        if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not):
+            inner = none_test(t.operand)
+            return None if inner is None else not inner
+        if isinstance(t, ast.BoolOp) and isinstance(t.op, ast.And):      # `if own_client and client is not None:`
+            sides = [none_test(v) for v in t.values]
+            return True if any(x is True for x in sides) else False if all(x is False for x in sides) else None
+        if isinstance(t, ast.Name):
+            return flags.get(t.id) if t.id in flags else (False if t.id == name else None)
+        return None
+
+    skip: set[int] = set()
+    for st in _own_statements(fn):
+        if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name) \
+                and (side := none_test(st.value)) is not None:
+            flags[st.targets[0].id] = side
+        elif isinstance(st, ast.If) and (side := none_test(st.test)) is not None:
+            for b in (st.body if side else st.orelse):
+                skip.update(id(x) for x in ast.walk(b))
+
+    def node_of(e: ast.AST) -> dict | None:
+        e = e.value if isinstance(e, ast.Await) else e
+        if isinstance(e, ast.Name):
+            return names.get(e.id)
+        if isinstance(e, ast.BoolOp):                    # `getter = http_get or _default_http_get`
+            return next((b for v in e.values if (b := node_of(v)) is not None), None)
+        if isinstance(e, ast.Call):
+            awaited = isinstance(parents.get(id(e)), ast.Await)
+            f = e.func
+            if isinstance(f, ast.Attribute):
+                base = node_of(f.value)
+                if base is None:
+                    return None
+                if (f.attr in _DICT_READS and 1 <= len(e.args) <= 2 and not e.keywords) \
+                        or (f.attr in ("keys", "items", "values") and not e.args):
+                    base["as"] = base["as"] or "dict"
+                    return None
+                c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno})
+                c["await"] = c["await"] or awaited
+                return c["then"]
+            if isinstance(f, ast.Name) and f.id in names:
+                base = names[f.id]
+                if not base["called"]:
+                    base["called"] = {"await": awaited, "then": _new_use()}
+                base["called"]["await"] = base["called"]["await"] or awaited
+                return base["called"]["then"]
+            if isinstance(f, ast.Name) and f.id == "len" and e.args and (b := node_of(e.args[0])) is not None:
+                b["as"] = b["as"] or "list"
+            return None
+        if isinstance(e, ast.Attribute):
+            base = node_of(e.value)
+            if base is None:
+                return None
+            par = parents.get(id(e))
+            if isinstance(par, ast.Call) and par.func is e:
+                return None                              # the call records it
+            base["attrs"].add(e.attr)
+            return None
+        if isinstance(e, ast.Subscript):
+            base = node_of(e.value)
+            if base is not None:
+                base["as"] = base["as"] or ("dict" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str)
+                                            else "list" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int) else None)
+            return None
+        return None
+
+    hops: list[tuple[ast.AST, dict | None, list[tuple[str, dict]]]] = []
+    returns: list[tuple[dict, dict]] = []
+    for n in _own_statements(fn):
+        if id(n) in skip:
+            continue
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            node = node_of(n.value)
+            if node is not None:
+                names[n.targets[0].id] = node
+        elif isinstance(n, (ast.For, ast.AsyncFor)) and (b := node_of(n.iter)) is not None:
+            b["as"] = b["as"] or "list"
+        elif isinstance(n, ast.Return) and n.value is not None and result is not None:
+            node = node_of(n.value)
+            if node is not None:
+                returns.append((node, result))
+        elif isinstance(n, (ast.Attribute, ast.Call, ast.Subscript)):
+            node_of(n)
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and local and n.func.id in local
+                and local[n.func.id] is not fn and n.func.id not in _seen and _depth < _USE_HOPS):
+            callee = local[n.func.id]
+            par = parents.get(id(n))
+            par = parents.get(id(par)) if isinstance(par, ast.Await) else par
+            res = None
+            if isinstance(par, ast.Assign) and len(par.targets) == 1 and isinstance(par.targets[0], ast.Name):
+                res = names.setdefault(par.targets[0].id, _new_use())
+            handed = [(their, names[v.id]) for their, v in _handed(n, callee) if isinstance(v, ast.Name) and v.id in names]
+            if handed:
+                hops.append((callee, res, handed))
+    # the hops run once the walk is done, so what this function does with each call's result (`data.get(…)` after
+    # `data = await _fetch_json(client, …)`) is known when the callee's `return response.json()` takes it
+    for callee, res, handed in hops:
+        for their, node in handed:
+            _merge_uses(node, _uses(callee, their, local, res, _depth + 1, _seen | {fn.name}))    # type: ignore[attr-defined]
+    for node, res in returns:
+        _merge_uses(node, res)
+    if result is None:
+        if memo is None:
+            memo = fn._es_uses = {}                                           # type: ignore[attr-defined]
+        memo[name] = root
+    return root
+
+
+def _uses_text(u: dict, _depth: int = 0) -> str:
+    """`{get()->{json(): dict, raise_for_status(), status_code}, aclose()}`; a value that is called: `()->{…}`."""
+    parts: list[str] = []
+    if u["called"]:
+        then = u["called"]["then"]
+        t = _uses_text(then, _depth + 1) if not _uses_empty(then) else ""
+        return "()" + ("->" + (t[2:] if t.startswith(": ") else t) if t else "")
+    for m, info in sorted(u["calls"].items()):
+        t = m + "()"
+        then = info["then"]
+        if then["as"] and _uses_empty({**then, "as": None}):
+            t += ": " + then["as"]
+        elif not _uses_empty(then) and _depth < 2:
+            t += "->" + _uses_text(then, _depth + 1)
+        parts.append(t)
+    parts += sorted(u["attrs"])
+    if len(parts) > 6:
+        parts = parts[:6] + ["…"]
+    if not parts:
+        return ": " + u["as"] if u["as"] else ""
+    return "{" + ", ".join(parts) + "}"
+
+
+def _opens_own_session(fn: ast.AST) -> bool:
+    """§17.1866 — a function that opens its own `async_session()` (no session parameter): it sees only rows the
+    caller has committed."""
+    a = fn.args                                                               # type: ignore[attr-defined]
+    if {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs} & _DB_PARAMS:
+        return False
+    from app.modules.engine_contracts import _own_nodes
+    return any(isinstance(n, ast.Call) and (getattr(n.func, "id", None) or getattr(n.func, "attr", None)) == "async_session"
+               for n in _own_nodes(fn))
+
+
 def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef, consts: dict[str, list[str]] | None = None,
-                local: dict[str, ast.AST] | None = None) -> dict:
+                local: dict[str, ast.AST] | None = None, deep: bool = True) -> dict:
     """§17.1756 — what a call to this function must look like. §17.1855 — `values`: the only values a parameter
-    takes, where the function itself refuses others."""
+    takes, where the function itself refuses others. §17.1866 — `keys`: what it reads from each dict parameter;
+    §17.1867 — `uses`: what it does with each parameter that has no kind."""
     a = fn.args
     pos = [x.arg for x in a.posonlyargs + a.args]
     n_def = len(a.defaults)
@@ -225,10 +602,14 @@ def _call_shape(fn: ast.FunctionDef | ast.AsyncFunctionDef, consts: dict[str, li
         isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(fn)
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) or n is fn)
     kinds = {x.arg: k for x in a.posonlyargs + a.args + a.kwonlyargs if (k := _kinds(x.annotation))}
+    values = _param_values(fn, consts, local)
+    keys = _param_keys(fn, local) if deep else {}
+    uses = {p: u for p in pos + kwonly if deep and p not in kinds and p not in values and p not in keys
+            and p not in ("self", "cls") and p not in _DB_PARAMS and not _uses_empty(u := _uses(fn, p, local))}
     return {"async": isinstance(fn, ast.AsyncFunctionDef) and not agen, "pos": pos, "required_pos": required_pos,
             "posonly": [x.arg for x in a.posonlyargs], "kwonly": kwonly, "kw_required": kw_required,
             "varargs": a.vararg is not None, "varkw": a.kwarg is not None, "kinds": kinds,
-            "values": _param_values(fn, consts, local), "returns_tuple": _is_tuple_annotation(fn.returns)}
+            "values": values, "returns_tuple": _is_tuple_annotation(fn.returns), "keys": keys, "uses": uses}
 
 
 def _is_tuple_annotation(ann: ast.AST | None) -> bool:
@@ -311,9 +692,18 @@ def _tuples_used_whole(tree: ast.AST, engine_funcs: dict, engine_mods: dict, ind
     return out
 
 
-#: §17.1761 — the builtin kinds an annotation admits; only plain ones are read (anything else admits everything)
+#: §17.1761 — the builtin kinds an annotation admits; only plain ones are read (anything else admits everything).
+#: §17.1865 — and a date, a datetime, a Decimal. Live (5b4880c0 T5, every attempt of three rounds, 2026-10-29): the
+#: tests passed `release_date="20261015"` where `ingest_finra_file` takes a `date` (`.strftime`), built a
+#: `FinraRecord(release_date="2026-10-15")` (`.isoformat`), and handed `"quantity": "1"` where the approval gate
+#: formats a `Decimal` -- `'str' object has no attribute 'strftime'`, `Unknown format code 'f' for object of type
+#: 'str'`; the table knew six kinds and the index showed these parameters bare.
 _KIND_NAMES = {"str": "str", "dict": "dict", "list": "list", "int": "int", "float": "float", "bool": "bool",
-               "Dict": "dict", "List": "list", "None": "None"}
+               "Dict": "dict", "List": "list", "None": "None",
+               "datetime": "datetime", "date": "date", "Decimal": "Decimal"}
+#: what a kind admits besides itself: an int is a float to a type checker, a datetime is a date, an int is a Decimal
+_KIND_ALSO = {"float": {"int"}, "date": {"datetime"}, "Decimal": {"int"}}
+_TEMPORAL = ("datetime", "date", "Decimal")
 
 
 def _kinds(ann: ast.AST | None) -> frozenset[str] | None:
@@ -335,11 +725,10 @@ def _kinds(ann: ast.AST | None) -> frozenset[str] | None:
         return frozenset({_KIND_NAMES[base]}) if base in _KIND_NAMES else None
     if isinstance(ann, ast.Constant) and ann.value is None:
         return frozenset({"None"})
+    if isinstance(ann, ast.Attribute) and ann.attr in _TEMPORAL:          # §17.1865 `datetime.date`, `decimal.Decimal`
+        ann = ast.Name(id=ann.attr, ctx=ast.Load())
     if isinstance(ann, ast.Name) and ann.id in _KIND_NAMES:
-        k = {_KIND_NAMES[ann.id]}
-        if ann.id == "float":
-            k.add("int")                                    # an int is a float to a type checker
-        return frozenset(k)
+        return frozenset({_KIND_NAMES[ann.id]} | _KIND_ALSO.get(ann.id, set()))
     return None
 
 
@@ -355,6 +744,18 @@ def _literal_kind(v: ast.AST, consts: dict | None = None) -> str | None:
         return "str"
     if isinstance(v, ast.Constant):
         return {str: "str", bool: "bool", int: "int", float: "float", type(None): "None"}.get(type(v.value))
+    if isinstance(v, ast.Call):                      # §17.1865 `date(2026, 1, 1)`, `Decimal("1")`, `datetime.now(…)`
+        f = v.func
+        head = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        base = (f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else
+                f.value.attr if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) else "")
+        if head in _TEMPORAL:
+            return head
+        if base in ("date", "datetime") and head in ("today", "now", "utcnow", "fromisoformat", "fromtimestamp",
+                                                     "strptime", "combine", "fromordinal"):
+            return base
+        if not base and head in ("str", "int", "float", "bool", "dict", "list"):
+            return head
     return None
 
 
@@ -365,14 +766,22 @@ def _shape_signature(name: str, shape: dict) -> str:
     req = set(shape.get("required_pos") or []) | set(shape.get("kw_required") or [])
     vals = shape.get("values") or {}
     kinds = shape.get("kinds") or {}
+    keys = shape.get("keys") or {}
+    uses = shape.get("uses") or {}
 
     def _p(p: str) -> str:
         if p in vals:
             return p + ":" + "|".join(vals[p])
-        return p + (": " + _kinds_text(kinds[p]) if p in kinds else "")      # §17.1862
+        if p in kinds:                                                        # §17.1862
+            return p + ": " + _kinds_text(kinds[p]) + (_keys_text(keys[p]) if p in keys and "dict" in kinds[p] else "")
+        if p in keys:                                                         # §17.1866 `payload: dict{proposal_id}`
+            return p + ": dict" + _keys_text(keys[p])
+        if p in uses:                                                         # §17.1867 `client{get()->{json(): dict}}`
+            return p + _uses_text(uses[p])
+        return p
 
     def _d(p: str) -> str:              # with a default: `n=…`, `n: str = …`
-        return _p(p) if p in req else _p(p) + (" = …" if p in kinds and p not in vals else "=…")
+        return _p(p) if p in req else _p(p) + (" = …" if (p in kinds or p in keys or p in uses) and p not in vals else "=…")
     pos = [_d(p) for p in shape.get("pos") or []]
     kw = [_d(p) for p in shape.get("kwonly") or []]
     parts = pos + (["*args"] if shape.get("varargs") else (["*"] if kw else [])) + kw + (["**kwargs"] if shape.get("varkw") else [])
@@ -389,16 +798,57 @@ def _at(code: str, n: ast.AST) -> str:
 
 
 def _call_mismatches(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
-                     consts: dict | None = None) -> list[str]:
+                     consts: dict | None = None, fks: dict | None = None, rules: dict | None = None) -> list[str]:
     """§17.1756 — a call to an engine function that cannot work as written. §17.1785 — each finding ends with the
     whole signature: live (job f00ea97f T17, three attempts) "takes at most 0 positional argument(s)" / "missing
     `approval_id`" fixed one argument per attempt and broke another."""
-    found = _call_mismatches_bare(call, name, shape, coroutine_misused, consts)
+    found = _call_mismatches_bare(call, name, shape, coroutine_misused, consts, fks, rules)
     return [f"{m} -- the signature is `{_shape_signature(name, shape)}`" for m in found]
 
 
+def _required_column(to: str, fks: dict | None, rules: dict | None) -> str:
+    """Why `t.c` must be given: "references `proposal`" / "has no default"; empty when nothing says it must."""
+    table, _, col = to.partition(".")
+    parent = (fks or {}).get(table, {}).get(col)
+    if parent:
+        return f"references `{parent.split('.')[0]}`"
+    if col in ((rules or {}).get(table) or {}).get("required", []):
+        return "has no default"
+    return ""
+
+
+def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: dict | None,
+                     fks: dict | None, rules: dict | None) -> list[str]:
+    """§17.1865/1866 — what a dict literal lacks or mis-kinds, against the keys the function reads from it."""
+    out: list[str] = []
+    given: dict[str, ast.AST] = {k.value: v for k, v in zip(lit.keys, lit.values, strict=False)
+                                 if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    spread = any(k is None for k in lit.keys)
+    for key in sorted(keys):
+        info = keys[key]
+        if key in given:
+            v = given[key]
+            v = consts[v.id] if isinstance(v, ast.Name) and consts and v.id in consts else v
+            want, got = info.get("kinds"), _literal_kind(v, consts)
+            if want and got and got not in want:
+                out.append(f'{label}: {where}["{key}"] is `{_kinds_text(want)}`; it was given a `{got}`')
+            elif info.get("sub") and isinstance(v, ast.Dict):
+                out += _dict_mismatches(label, f'{where}["{key}"]', v, info["sub"], consts, fks, rules)
+            continue
+        if spread:
+            continue
+        why = _required_column(info["to"], fks, rules) if info.get("to") else ""
+        if info.get("req") or why:
+            has = ", ".join(f"`{k}`" for k in given) or "no keys"
+            out.append(f'{label}: {where} is read for `{key}`'
+                       + (f" (written to `{info['to']}`, which {why})" if why else " (as `[\"" + key + "\"]`, which raises without it)")
+                       + f" -- the dict given has {has} and no `{key}`"
+                       + ("; pass the id its parent's writer returned" if why.startswith("references") else ""))
+    return out
+
+
 def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misused: bool,
-                          consts: dict | None = None) -> list[str]:
+                          consts: dict | None = None, fks: dict | None = None, rules: dict | None = None) -> list[str]:
     out: list[str] = []
     label = f"`{name}(…)`"
     # §17.1761 — live (T14): `frame_decision(node, brief=…, upstream={"proposal": …})` (upstream: str) and
@@ -411,6 +861,13 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
         if want and got and got not in want:
             out.append(f"{label}: `{param}` is `{_kinds_text(want)}`; it was given a `{got}`"
                        + (f" (`{val.id}`)" if isinstance(val, ast.Name) else ""))
+    # §17.1865/1866 — a dict literal handed for a parameter the function reads keys from: each key the kind it takes,
+    # and the keys it must carry (read as `p["k"]`, or written to a column that has no default or references a parent)
+    keys = shape.get("keys") or {}
+    for param, val in given:
+        lit = consts[val.id] if isinstance(val, ast.Name) and consts and val.id in consts else val
+        if param in keys and isinstance(lit, ast.Dict):
+            out += _dict_mismatches(label, f"`{param}`", lit, keys[param], consts, fks, rules)
     # §17.1855 — a literal the function itself refuses (live: `ingest_finra_file(source="test", …)`)
     vals = shape.get("values") or {}
     for param, val in given:
@@ -532,7 +989,7 @@ def module_index() -> dict[str, dict]:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(node.name)
-                funcs[node.name] = _call_shape(node, _consts, _local)
+                funcs[node.name] = _call_shape(node, _consts, _local, deep=False)   # §17.1866 -- the job's modules only
                 if not node.name.startswith("_"):
                     public.append(_signature(node))
             elif isinstance(node, ast.ClassDef):
@@ -679,7 +1136,7 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
             if not mod:
                 continue
             codes[mod] = code
-            a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}})
+            a = acc.setdefault(mod, {"names": set(), "defined": set(), "funcs": {}, "classes": {}, "own_session": set()})
             names, defined, funcs, classes = a["names"], a["defined"], a["funcs"], a["classes"]
             _consts, _local = module_values(tree), _local_functions(tree)       # §17.1855
             for n in tree.body:
@@ -687,6 +1144,8 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
                     names.add(n.name)
                     defined.add(n.name)
                     funcs[n.name] = _call_shape(n, _consts, _local)
+                    if _opens_own_session(n):                                # §17.1866
+                        a["own_session"].add(n.name)
                     if not n.name.startswith("_"):                       # §17.1834 — what its dicts carry
                         from app.modules.engine_contracts import return_note
                         a.setdefault("returns", {})[n.name] = return_note(code, n.name)        # §17.1837
@@ -744,6 +1203,7 @@ def _class_shape(c: ast.ClassDef, consts: dict[str, list[str]] | None = None) ->
     fields: list[str] = []
     props: list[str] = []
     ann: list[tuple[str, bool]] = []                     # every annotated field, and whether it has a default
+    ann_kinds: dict[str, frozenset[str]] = {}            # §17.1865 -- and the kind each takes
     for x in c.body:
         if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
             deco = {getattr(d, "id", None) or getattr(d, "attr", None) for d in x.decorator_list}
@@ -763,6 +1223,8 @@ def _class_shape(c: ast.ClassDef, consts: dict[str, list[str]] | None = None) ->
         elif isinstance(x, ast.AnnAssign) and isinstance(x.target, ast.Name):
             if "ClassVar" not in ast.unparse(x.annotation):
                 ann.append((x.target.id, x.value is not None))
+                if (k := _kinds(x.annotation)):
+                    ann_kinds[x.target.id] = k
             if not x.target.id.startswith("_"):
                 fields.append(x.target.id)
     # §17.1803 — a data class is built from its fields: its constructor is checked like any call
@@ -772,12 +1234,27 @@ def _class_shape(c: ast.ClassDef, consts: dict[str, list[str]] | None = None) ->
     if init is None and is_dc:
         names = [n for n, _ in ann]
         init = {"async": False, "pos": names, "required_pos": [n for n, has in ann if not has], "posonly": [],
-                "kwonly": [], "kw_required": [], "varargs": False, "varkw": False, "kinds": {}, "values": {},
+                "kwonly": [], "kw_required": [], "varargs": False, "varkw": False, "kinds": ann_kinds, "values": {},
                 "returns_tuple": False}
     return {"init": init, "methods": methods, "fields": fields, "props": props, "dataclass": is_dc}
 
 
-def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
+def _literal_bindings(nodes) -> dict[str, ast.AST]:
+    """§17.1866 — each name bound exactly once, to a literal (or a `date(…)`/`Decimal(…)` call), among `nodes`."""
+    seen: dict[str, int] = {}
+    vals: dict[str, ast.AST] = {}
+    for n in nodes:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            name = n.targets[0].id
+            seen[name] = seen.get(name, 0) + 1
+            if isinstance(n.value, (ast.Constant, ast.Dict, ast.List, ast.Tuple, ast.JoinedStr, ast.Call)):
+                vals[name] = n.value
+        elif isinstance(n, (ast.AnnAssign, ast.AugAssign)) and isinstance(n.target, ast.Name):
+            seen[n.target.id] = seen.get(n.target.id, 0) + 1
+    return {k: v for k, v in vals.items() if seen.get(k) == 1}
+
+
+def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, rules: dict | None = None) -> list[str]:
     """§17.1762 — an import of a name a sibling module does not define, or a call that does not fit its signature.
 
     Live (job 2772acae): T12 imported six names from T10's `alpaca_stream` that T10 never wrote and called T16's
@@ -795,6 +1272,11 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
         imported: dict[str, tuple[str, str]] = {}
         mods: dict[str, str] = {}
         for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "app.modules":
+                # §17.1866 — `from app.modules import paper_x` (live: every call of 5b4880c0 T5's fourth attempt
+                # went unchecked -- the file imported its twelve modules this way)
+                mods.update({al.asname or al.name: al.name for al in n.names if al.name in defs})
+                continue
             if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
                 leaf = n.module.split(".")[-1]
                 if leaf not in defs or (n.module.startswith("app.") and n.module in module_index()):
@@ -827,15 +1309,26 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
         # in the sandbox, every attempt.
         pseudo = {leaf: {"funcs": {**d.get("ctors", {}), **d["funcs"]}} for leaf, d in defs.items()}
         misused = _coroutines_used_as_values(tree, imported, mods, pseudo) if (imported or mods) else set()
+        # §17.1866 — the literals a call's arguments name: the module's, and the enclosing function's own
+        from app.modules.engine_contracts import _own_nodes
+        mod_consts = _literal_bindings(tree.body)
+        local_consts: dict[int, dict[str, ast.AST]] = {}
+        owner: dict[int, int] = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                own = list(_own_nodes(fn))
+                local_consts[id(fn)] = _literal_bindings(own)
+                owner.update({id(x): id(fn) for x in own if isinstance(x, ast.Call)})
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
+            consts = {**mod_consts, **local_consts.get(owner.get(id(n), 0), {})}
             target = None
             if isinstance(n.func, ast.Name) and n.func.id in imported:
                 target = imported[n.func.id]
             elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id in mods):
                 leaf = mods[n.func.value.id]
-                if n.func.attr in defs[leaf]["funcs"]:
+                if n.func.attr in defs[leaf]["funcs"] or n.func.attr in defs[leaf].get("ctors", {}):
                     target = (leaf, n.func.attr)
                 elif n.func.attr not in defs[leaf]["names"]:
                     found.append(f"`{n.func.value.id}.{n.func.attr}(…)`: `{leaf}` (step {defs[leaf]['node']}) has no "
@@ -845,7 +1338,7 @@ def sibling_refs(output: str, defs: dict[str, dict]) -> list[str]:
                 shape = defs[leaf]["funcs"].get(fname) or defs[leaf].get("ctors", {}).get(fname)
                 if not shape:
                     continue
-                for m in _call_mismatches(n, fname, shape, id(n) in misused):
+                for m in _call_mismatches(n, fname, shape, id(n) in misused, consts, fks, rules):
                     m = _at(code, n) + m.replace("in the engine", f"in `{leaf}`")          # §17.1861
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
@@ -998,7 +1491,8 @@ def _public_api(code: str, limit: int = 600) -> str:
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_"):
             note = return_note(code, n.name)                            # §17.1834, §17.1837
-            fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else "") + _sec(n.name))
+            fns.append(_signature(n).split("def ", 1)[1] + (f" -> {note}" if note else "") + _sec(n.name)
+                       + (" [own session]" if _opens_own_session(n) else ""))             # §17.1866
         elif isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
             meths = [m for m in n.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and not m.name.startswith("_")]
@@ -1430,7 +1924,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     if len(_defs_rows) != len(_others):
         _defs_rows.append({**me, "output_text": output})
     _defs = sibling_definitions(_defs_rows)
-    found += sibling_refs(output, _defs)
+    _fks = engine_schema.foreign_keys_in_code(others)
+    found += sibling_refs(output, _defs, fks=_fks, rules=engine_schema.column_rules_in_code(others))   # §17.1866
     found += imports_an_unwritten_sibling(output, _others, _defs)
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, [dict(r) for r in rows if r["node_key"] != node_key])
@@ -1439,7 +1934,6 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    _fks = engine_schema.foreign_keys_in_code(others)
     found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own), _fks)
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
@@ -1465,6 +1959,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import wrong_secret_mocks
     found += wrong_secret_mocks(files_of({**me, "output_text": output}), _cur, _own)
     found += made_up_parent_ids(files_of({**me, "output_text": output}), _cur, _fks)
+    # §17.1866 — a parent row inserted in the test's session is committed before a writer with its own session;
+    # §17.1867 — a fake does what the module does with it
+    from app.modules.engine_contracts import uncommitted_parents, wrong_fakes
+    found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
+    found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     # §17.1850 — and it reads only keys a finished function returns
     from app.modules.engine_contracts import unreturned_reads
     found += unreturned_reads(files_of({**me, "output_text": output}), _cur)
@@ -1791,9 +2290,10 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
         if mod in lead:
             n_lead = len(lines) + 1
         rk, sk = defs[mod].get("returns") or {}, defs[mod].get("secrets") or {}
+        osn = defs[mod].get("own_session") or set()
 
-        def _sec(name: str) -> str:              # §17.1863 -- `[secrets: SEC_CONTACT_EMAIL]`
-            return f" [secrets: {', '.join(sk[name])}]" if sk.get(name) else ""
+        def _sec(name: str) -> str:              # §17.1863 -- `[secrets: SEC_CONTACT_EMAIL]`; §17.1866 -- `[own session]`
+            return (f" [secrets: {', '.join(sk[name])}]" if sk.get(name) else "") + (" [own session]" if name in osn else "")
         sigs = [_shape_signature(f, sh) + (f" -> {rk[f]}" if rk.get(f) else "") + _sec(f)   # §17.1834, §17.1837
                 for f, sh in sorted(defs[mod]["funcs"].items()) if not f.startswith("_")]
         for cname, c in sorted((defs[mod].get("classes") or {}).items()):     # §17.1798
@@ -1814,8 +2314,12 @@ def _render_job_modules(defs: dict[str, dict], own: str, budget: int = 6000, fir
         return ""
     head = ("### This job's modules (written -- their public functions, exact signatures; `p:a|b` means `p` takes only "
             "`a` or `b` -- the function refuses the rest; `p: dict` is the kind `p` takes -- a call that hands it a "
-            "literal of another kind is refused; `[secrets: A, B]` means the function reads those operator secrets "
-            "through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`)\n")
+            "literal of another kind is refused; `p: dict{k, q: Decimal}` are the keys it reads from `p`, each with "
+            "the kind it takes; `p{get()->{json(): dict}}` is what it does with `p` -- a fake must do the same; "
+            "`[secrets: A, B]` means the function reads those operator secrets "
+            "through `values_for` -- a test patches `values_for` on that module to return `{\"A\": …, \"B\": …}`; "
+            "`[own session]` means it opens its own `async_session()` and sees only rows the test has committed -- "
+            "`await db.commit()` after inserting the parent rows, before calling it)\n")
     # §17.1862 — the modules the step runs through are never cut: the budget bounds the rest. Live (5b4880c0 T5):
     # the signatures grew their kinds and the cut at 6000 fell after 13 of 21 -- the step's own targets among the lost.
     n_lead = min(n_lead, len(lines))

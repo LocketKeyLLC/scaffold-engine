@@ -32,8 +32,9 @@ def _fn(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 def test_both_renderers_show_the_kind_the_gate_checks():
     h = _fn("handle_approval_answer")
     assert es._signature(h) == "async def handle_approval_answer(job_id: str, node_key: str, answer: dict, payload: dict)"
+    # §17.1866 -- the job-module index adds the keys the function reads from a dict parameter
     assert es._shape_signature("handle_approval_answer", es._call_shape(h)) == \
-        "async handle_approval_answer(job_id: str, node_key: str, answer: dict, payload: dict)"
+        "async handle_approval_answer(job_id: str, node_key: str, answer: dict{approved}, payload: dict)"
     assert "handle_approval_answer(job_id: str, node_key: str, answer: dict, payload: dict)" in es._public_api(GATE)
 
 
