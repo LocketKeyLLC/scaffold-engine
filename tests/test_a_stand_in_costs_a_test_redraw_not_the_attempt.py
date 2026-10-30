@@ -155,7 +155,7 @@ async def test_a_stand_in_costs_a_redraw_and_the_loop_stops_when_clean_or_on_ano
         return f"```python\n{FAKED}```"
 
     out, left = await redraw_faked_tests(OUT, fakes, ask=still, check=lambda o: _aret(fakes), tries=2)
-    assert left == fakes and len(asked) == 2
+    assert left == fakes and len(asked) == 1               # §17.1877 the identical file: asking again gets the same
     # a redraw that brings a finding of another kind stops the loop with that finding
     other = ["`app/modules/paper_daily_signal_proposal_batch.py:9` binds a dict to `:payload`"]   # §17.1859: module-side
     asked.clear()
@@ -212,7 +212,7 @@ async def test_the_second_redraw_is_shown_the_first_redraws_file_not_the_attempt
 
     from app.modules import execution_agent
     src = inspect.getsource(execution_agent)
-    ask_src = src.split("async def _ask_tests(_path: str, _refusal: str, _current: str)", 1)[1].split("async def _check_tests", 1)[0]
+    ask_src = src.split("async def _ask_tests(_path: str, _refusal: str, _current: str,", 1)[1].split("async def _check_tests", 1)[0]
     assert '{"role": "assistant", "content": _current}' in ask_src and '"content": output' not in ask_src
 
 
