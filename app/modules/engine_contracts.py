@@ -1504,6 +1504,85 @@ def _result_uses(code: str, matches, local_of=None) -> dict | None:
     return root if root["called"] else None
 
 
+def _calls_into(code: str, mod: str, fn: ast.AST) -> bool:
+    """§17.1872 — whether test function `fn` calls a name of job module `mod` directly."""
+    lo, hi = fn.lineno, getattr(fn, "end_lineno", None) or fn.lineno
+    return any(m == mod and lo <= ln <= hi for m, _f, ln in _test_calls(code))
+
+
+def _asserts_on(fn: ast.AST, root: str | None) -> bool:
+    """§17.1872 — whether the test asserts a mock bound to `root` was called (`m.assert_called…`, `m.call_args`,
+    `m.called`, `m.await_count`): it expects the path through the mock to run."""
+    if not root:
+        return False
+    for n in _own_nodes(fn):
+        if isinstance(n, ast.Attribute) and (n.attr.startswith("assert_") or n.attr in (
+                "called", "call_args", "call_args_list", "call_count", "await_count", "await_args", "awaited")):
+            base = n.value
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id == root:
+                return True
+    return False
+
+
+def _calls_raise_for_status(code: str) -> str | None:
+    """§17.1872 — the first function of a module that calls `.raise_for_status()`; None when none does."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "raise_for_status"
+                for c in _own_nodes(fn)):
+            return fn.name
+    return None
+
+
+def responses_without_a_request(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1872 — a test builds an `httpx.Response(…)` without `request=` for a module that calls
+    `raise_for_status()` on the response it is given: httpx refuses that call on a response that never had a request
+    (`RuntimeError: Cannot call raise_for_status as the request instance has not been set on this response`). Live
+    (5b4880c0 T5U2 a1, 2026-10-30): `return httpx.Response(status_code, text=text_content)` handed as `http_get`, nine
+    of fourteen tests failed in the sandbox on `_download_file`'s `response.raise_for_status()` -- one attempt spent.
+    A response whose `request` the test sets afterwards (`r.request = …`) is left alone."""
+    found: list[str] = []
+    callers = {m: f for m, c in modules.items() if (f := _calls_raise_for_status(c))}
+    if not callers:
+        return found
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        under_test = [m for m in callers if re.search(rf"\b{re.escape(m)}\b", code)]
+        if not under_test:
+            continue
+        if any(isinstance(n, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == "request" for t in n.targets)
+               for n in ast.walk(tree)):
+            continue
+        direct = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "httpx"
+                  for a in n.names if a.name == "Response"}
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            is_resp = (isinstance(f, ast.Attribute) and f.attr == "Response" and isinstance(f.value, ast.Name)
+                       and f.value.id == "httpx") or (isinstance(f, ast.Name) and f.id in direct)
+            if not is_resp or any(k.arg == "request" for k in n.keywords):
+                continue
+            mod = under_test[0]
+            found.append(f"`{path}:{n.lineno}` builds an `httpx.Response(…)` without `request=`: "
+                         f"`{mod}.{callers[mod]}` calls `raise_for_status()` on the response it is given, and httpx "
+                         "refuses that on a response that never had a request (`RuntimeError: Cannot call "
+                         "raise_for_status as the request instance has not been set on this response`) -- pass "
+                         '`request=httpx.Request("GET", url)` to `httpx.Response(…)`')
+    return found
+
+
 def _use_sites(code: str, owner: str, name: str) -> set[str]:
     """§17.1871 — the functions of a module in which a patched name's call result is bound."""
     try:
@@ -1777,6 +1856,15 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
             val = (_resolve(new, fk, pc.lineno) if new is not None else
                    _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
             if (bad := _check_uses(val, uses, fk, 10 ** 9)):
+                # §17.1872 — a bare mock the module awaits on a path this test never calls into directly: the test
+                # calls another module, which reaches the patched one only on a value it did not pass (live: the
+                # approval gate's rejected approval never reaches `execute_order`'s `await client.submit_order(…)`).
+                # Configured (`m.return_value = …`, `new=MagicMock(return_value=…)`) or asserted on
+                # (`m.assert_called…`), the test expects that path and is held to it; the sandbox names a real one.
+                if ("cannot be awaited" in bad and fn is not None and not _calls_into(code, mod, fn)
+                        and val.rv is None and not any(k and k[0] == val.root for k in fk.chains)
+                        and not _asserts_on(fn, val.root)):
+                    continue
                 say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
     return found
 
