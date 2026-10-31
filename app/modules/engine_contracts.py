@@ -1522,6 +1522,15 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
         return _Val()
     fk = val.scope or fakes
     path = val.path + ((arg,) if what == "attr" else ("return_value",))     # type: ignore[operator]
+    if (what == "attr" and isinstance(val.node, ast.Call) and _call_name(val.node) in _MOCK_NAMES
+            and (kw := next((k.value for k in val.node.keywords if k.arg == arg), None)) is not None):
+        # §17.1884 `MagicMock(json=MagicMock(return_value={…}))`: the keyword IS the attribute (live, 5b4880c0 T5 a2,
+        # 2026-10-31: the 13F response built this way, its `recent` list never seen -- "'list' object has no attribute 'get'")
+        out = _resolve(kw, fk, before, val.hops + 1)
+        if out.root is None:
+            out.root, out.path = val.root, path
+        out.scope = out.scope or val.scope
+        return out
     entering = bool(val.path) and val.path[-1] in ("__aenter__", "__aexit__")
     if what == "call" and arg and val.mock == "MagicMock" and not entering:
         # §17.1873 — awaited, a MagicMock fails whatever its `return_value` (measured: `await MagicMock(return_value=x)()`
@@ -2185,7 +2194,7 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                         opens = t0 is not None and any(                      # `if db is None: async with async_session() …`
                             isinstance(x, ast.Call) and (getattr(x.func, "id", None) or getattr(x.func, "attr", None)) == "async_session"
                             for x in _own_nodes(t0))
-                        if t0 is not None and not opens and _used_when_none(t0, param):
+                        if t0 is not None and not opens and _used_when_none(t0, param, _local_functions(ast.parse(reach[mod]))):
                             u0 = _uses(t0, param, _local_functions(ast.parse(reach[mod])))
                             if not _uses_empty_(u0):
                                 say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", "None, and the function uses it "
@@ -2302,9 +2311,11 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
     return found
 
 
-def _used_when_none(fn: ast.AST, param: str) -> bool:
+def _used_when_none(fn: ast.AST, param: str, local: dict[str, ast.AST] | None = None, _depth: int = 0) -> bool:
     """§17.1883 — whether `fn` reads or calls on `param` outside any `if param is not None:` / `if param:` guard (or the
-    `else` of `if param is None:`): the uses that run when the caller hands None."""
+    `else` of `if param is None:`): the uses that run when the caller hands None. §17.1884 — or hands it, unguarded, to a
+    function of the same module that does (one hop: `ingest_form_4_for_tickers(db, …)` -> `ingest_form_4_filings(db, …)`
+    -> `db.commit()`; live, "'NoneType' object has no attribute 'commit'")."""
     parents: dict[int, ast.AST] = {}
     for p_ in ast.walk(fn):
         for c in ast.iter_child_nodes(p_):
@@ -2329,10 +2340,20 @@ def _used_when_none(fn: ast.AST, param: str) -> bool:
             cur = par
         return False
 
-    # a `db` handed on to another function as it is (`values_for(db, …)`) is that function's to refuse: the engine's
-    # own helpers open a session when given None -- only a direct `db.execute` / `db.commit` here is certain
-    return any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == param and not guarded(n)
-               for n in _own_nodes(fn))
+    # a `db` handed on to an ENGINE helper (`values_for(db, …)`) is that helper's to refuse: the engine's own helpers
+    # open a session when given None -- a direct `db.execute` / `db.commit` here, or in a local function it is handed to
+    if any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == param and not guarded(n)
+           for n in _own_nodes(fn)):
+        return True
+    if local and _depth < 1:
+        from app.modules.engine_source import _handed
+        for n in _own_nodes(fn):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in local and local[n.func.id] is not fn
+                    and not guarded(n)):
+                for their, v in _handed(n, local[n.func.id]):
+                    if isinstance(v, ast.Name) and v.id == param and _used_when_none(local[n.func.id], their, local, _depth + 1):
+                        return True
+    return False
 
 
 def _class_names(code: str) -> set[str]:
@@ -2603,6 +2624,82 @@ def undefined_test_names(files: dict[str, str], modules: dict[str, str]) -> list
                    + (f"; `from app.modules.{where[n.id][0]} import {n.id}`" if where[n.id] else ""))
             if msg not in found:
                 found.append(msg)
+    return found
+
+
+# ── §17.1884 a session call awaited; a patch where the caller looks the name up ───────────────────────────────
+
+_SESSION_CALLS = frozenset({"execute", "commit", "rollback", "flush", "refresh", "scalar", "scalars", "close", "delete",
+                            "merge", "get", "begin", "run_sync"})
+
+
+def unawaited_session_calls(files: dict[str, str]) -> list[str]:
+    """§17.1884 — each `db.execute(…)` / `db.commit()` in a test file that is not awaited: the sandbox's session is an
+    `AsyncSession`, every one of those is a coroutine. Live (5b4880c0 T5 a3, 2026-10-31): a plain `def
+    make_ingested_item(db, …)` helper did `result = db.execute(…)` and read `result.scalar_one()` -- "'coroutine' object
+    has no attribute 'scalar_one'" in thirty of the attempt's 52 failures, every test that inserted a row."""
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        parents = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        sessions: set[str] = set(_SESSION_PARAMS)
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.With, ast.AsyncWith)):
+                for item in n.items:
+                    if (isinstance(item.optional_vars, ast.Name) and isinstance(item.context_expr, ast.Call)
+                            and _call_name(item.context_expr) == "async_session"):
+                        sessions.add(item.optional_vars.id)
+        for n in sorted((x for x in ast.walk(tree) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+                         and isinstance(x.func.value, ast.Name) and x.func.value.id in sessions
+                         and x.func.attr in _SESSION_CALLS), key=lambda x: x.lineno):
+            if isinstance(parents.get(id(n)), ast.Await):
+                continue
+            # the enclosing function: a plain `def` cannot await -- the helper itself must become `async def`
+            cur: ast.AST | None = n
+            while cur is not None and not isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                cur = parents.get(id(cur))
+            in_sync_def = isinstance(cur, ast.FunctionDef)
+            found.append(f"`{path}:{n.lineno}` calls `{n.func.value.id}.{n.func.attr}(…)` without `await`: the session is "
+                         f"an `AsyncSession`, and `{n.func.attr}` returns a coroutine (`'coroutine' object has no "
+                         f"attribute 'scalar_one'`) -- `await {n.func.value.id}.{n.func.attr}(…)`"
+                         + (f", and make `{cur.name}` an `async def` the test awaits" if in_sync_def and cur is not None else ""))
+    return found
+
+
+def import_bound_patches(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1884 — each patch of a name on the module that DEFINES it, in a test that calls into another job module
+    that bound the name at import (`from app.modules.m import X` at the top): the patch never reaches the caller.
+    Live (5b4880c0 T5 a2, 2026-10-31): `patch("app.modules.paper_alpaca_paper_client.AlpacaPaperClient", …)` with the
+    backtester and the SPY tracker under test -- both hold their own `AlpacaPaperClient`, both opened a real client,
+    seven tests reached the network."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        calls = _test_calls(code)
+        for pc, mod, owner, name, fn in _patch_sites(code):
+            if owner or mod not in reach or fn is None or name not in _top_names(reach[mod])[0]:
+                continue
+            lo, hi = fn.lineno, getattr(fn, "end_lineno", None) or fn.lineno
+            users = sorted({(m, f) for m, f, ln in calls if lo <= ln <= hi and m != mod and m in reach})
+            for m, f in users:
+                try:
+                    top = ast.parse(reach[m]).body
+                except SyntaxError:
+                    continue
+                bound = any(isinstance(n, ast.ImportFrom) and n.module == f"app.modules.{mod}"
+                            and any(a.name == name for a in n.names) for n in top)
+                if bound:
+                    found.append(f"`{path}:{pc.lineno}` patches `{name}` on `{mod}`, but `{f}` (`{m}`) bound it at import "
+                                 f"(`from app.modules.{mod} import {name}`): the patch never reaches it -- patch "
+                                 f"`app.modules.{m}.{name}` (where that code looks the name up)")
     return found
 
 
