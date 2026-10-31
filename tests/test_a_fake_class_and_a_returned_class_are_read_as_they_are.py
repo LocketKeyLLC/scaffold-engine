@@ -148,12 +148,15 @@ async def test_sync_get():
         "(line 14), which has no parameter `params`, `timeout` (it takes url); the module passes `params=`, `timeout=` "
         "-- accept what the module passes (`*args, **kwargs` is enough) -- give it what the module uses: "
         "`client{get()->{json(): dict{results}, raise_for_status()}}`",
+        # §17.1883 -- the sync `get` the module awaits is refused as what it is
+        "`tests/test_paper_twelve_modules.py:36` hands `fetch_disclosures(…)` `client` = a fake whose `get` is a plain "
+        "`def` (line 34), whose result the module awaits -- make it `async def` (or an `AsyncMock(return_value=…)`) -- "
+        "give it what the module uses: `client{get()->{json(): dict{results}, raise_for_status()}}`",
         "`tests/test_paper_twelve_modules.py:29` patches `AsyncClient` on `httpx` with a fake whose call returns a "
         "`FakeClient` instance (line 26), which has no `__aenter__`, and the module enters it with `async with` -- it "
         "needs `async def __aenter__(self): return self` and `async def __aexit__(self, *exc): pass` -- give it what the "
         "module uses: `AsyncClient()->{async with -> {get()->{json(): dict{data{children}}}}}`",
     ], found
-    # the sync `get` awaited is not followed (a plain def's result awaited: unknown); `test_fits` passes
 
 
 def test_a_test_that_expects_a_raise_may_never_reach_its_fake():

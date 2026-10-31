@@ -200,7 +200,7 @@ def test_a_list_parameter_is_read_item_by_item_down_to_the_column_its_key_is_wri
     tree = ast.parse(PROPOSER)
     local = es._local_functions(tree)
     keys = es._param_keys(local["propose_trades"], local)
-    assert keys["signals"]["[]"]["sub"]["signal_id"] == {"to": "proposal.signal_id"}
+    assert keys["signals"]["[]"]["sub"]["signal_id"] == {"to": "proposal.signal_id", "needed": True}   # §17.1883 `if … is None: continue`
     assert es._keys_text(keys["signals"]) == "[{id, signal_id, ticker}]"
     defs = es.sibling_definitions([_row("T6", PROPOSER)])
     fks = {"proposal": {"signal_id": "signal.id"}}

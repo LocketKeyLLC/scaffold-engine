@@ -262,6 +262,8 @@ def _merge_keys(dst: dict, src: dict) -> None:
                 d[f] = info[f]
         if info.get("req"):
             d["req"] = True
+        if info.get("needed"):
+            d["needed"] = True
         if info.get("sub"):
             _merge_keys(d.setdefault("sub", {}), info["sub"])
 
@@ -343,6 +345,21 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
                     v = v.values[0]
                 if (r := read_of(v)):
                     paths[n.targets[0].id] = r[0] + (r[1],)
+    # §17.1883 — an alias of a `.get(…)` read that the function refuses without: `execution_id = data.get("execution_id")`
+    # then `if not execution_id: raise ValueError(…)` -- as required as `data["execution_id"]`. Live (5b4880c0 T5 a4,
+    # 2026-10-31): two fill envelopes with every other key, "fill event missing execution_id"
+    from app.modules.engine_contracts import _gives_up
+    for n in stmts:
+        if not (isinstance(n, ast.If) and _gives_up(n.body)):
+            continue
+        t = n.test
+        name = (t.operand.id if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) and isinstance(t.operand, ast.Name)
+                else t.left.id if (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Is)
+                                   and isinstance(t.left, ast.Name) and isinstance(t.comparators[0], ast.Constant)
+                                   and t.comparators[0].value is None) else None)
+        if name and len(paths.get(name, ())) >= 2:
+            pth = paths[name]
+            entry(pth[:-1]).setdefault(pth[-1], {})["needed"] = True
     # §17.1881 — an alias bound into an INSERT: `signal_id = signal.get("signal_id") …` then `{"signal_id": signal_id}`
     for n in stmts:
         if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and len(paths.get(n.id, ())) >= 2
@@ -1154,12 +1171,13 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
             continue
         why = _required_column(info["to"], fks, rules) if info.get("to") else ""
         below = _required_below(info.get("sub") or {}, fks, rules)           # §17.1870
-        if info.get("req") or why or below or info.get("values"):
+        if info.get("req") or why or below or info.get("values") or info.get("needed"):
             has = ", ".join(f"`{k}`" for k in given) or "no keys"
             out.append(f'{label}: {where} is read for `{key}`'
                        + (f" (written to `{info['to']}`, which {why})" if why else
                           f" (its `{below[0]}` is written to `{below[1]}`, which {below[2]})" if below else
                           " (as `[\"" + key + "\"]`, which raises without it)" if info.get("req") else
+                          " (and refused without it)" if info.get("needed") and not info.get("values") else
                           f" (one of {', '.join(f'`{x}`' for x in info['values'])}; without it the function takes the other way)")
                        + f" -- the dict given has {has} and no `{key}`"
                        + ("; pass the id its parent's writer returned"
@@ -1202,6 +1220,9 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
     keys = shape.get("keys") or {}
     for param, val in given:
         lit = consts[val.id] if isinstance(val, ast.Name) and consts and val.id in consts else val
+        if (isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and not val.args and not val.keywords
+                and consts and f"{val.func.id}()" in consts):                       # §17.1883 a helper's literal
+            lit = consts[f"{val.func.id}()"]
         # §17.1881 — a list handed for a parameter the function iterates: each item's keys (`signals=[{"signal_id": 1,
         # …}]` into `propose_trades`, whose loop writes `signal_id` to `proposal.signal_id`, a foreign key)
         if (param in keys and isinstance(lit, ast.List) and lit.elts and isinstance(lit.elts[0], ast.Dict)
@@ -1679,6 +1700,13 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         # §17.1866 — the literals a call's arguments name: the module's, and the enclosing function's own
         from app.modules.engine_contracts import _own_nodes
         mod_consts = _literal_bindings(tree.body)
+        # §17.1883 — `is_trade_update(_make_fill_envelope())`: a module-level helper that returns one literal and
+        # takes nothing stands in for it (keyed `name()`). Live (5b4880c0 T5 a1, 2026-10-31): two envelopes never read
+        for f in tree.body:
+            if isinstance(f, ast.FunctionDef) and not f.args.args and not f.args.kwonlyargs and not f.args.posonlyargs:
+                rets = [r.value for r in ast.walk(f) if isinstance(r, ast.Return) and r.value is not None]
+                if len(rets) == 1 and isinstance(rets[0], (ast.Dict, ast.List, ast.Constant)):
+                    mod_consts[f"{f.name}()"] = rets[0]
         local_assigns: dict[int, list[ast.Assign]] = {}
         owner: dict[int, int] = {}
         for fn in ast.walk(tree):
