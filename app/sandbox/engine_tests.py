@@ -165,10 +165,14 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "module is at fault, not the test -- when it is another step's module, the job gets a fix step for it and this "
      "step waits"),
     # §17.1878 — live (5b4880c0 T5 a1, 2026-10-30): the whole run timed out with no test named
-    (re.compile(r"Failed: Timeout >\s*[\d.]+s"),
+    # §17.1885 — pytest-timeout's wording is `Failed: Timeout (>20.0s) from pytest-timeout`; and "ERROR at setup of"
+    # means the FIXTURE hung, not the test (live: six tests at setup in one attempt, one session fixture)
+    (re.compile(r"Failed: Timeout \(?>\s*[\d.]+s\)?"),
      "a test hung until the sandbox's per-test timeout: the code reached the real network (a client the test never "
      "patched, a retry's `asyncio.sleep`), or awaited a fake that never answers -- patch the client where the module "
-     "looks it up and give every method it awaits an `AsyncMock` that returns at once"),
+     "looks it up and give every method it awaits an `AsyncMock` that returns at once; `ERROR at setup of` means the "
+     "test never started -- its fixture hung (a session fixture that never yields, commits or closes), or the test "
+     "before it left a connection or task open: close every session and client a test opens, inside the test"),
 )
 
 

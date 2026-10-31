@@ -1444,6 +1444,15 @@ def _class_attr(cls: ast.ClassDef, name: str) -> ast.AST | None:
     return None
 
 
+def _first_return(fn: ast.AST) -> ast.AST | None:
+    """§17.1885 — the first `return <value>` of a function in SOURCE order (not breadth-first: a fallthrough `return`
+    at the end of the body came before the one inside an `if` above it -- live, 5b4880c0 T5 a4, 2026-10-31: a fake
+    client's `get` returned the submissions response under `if "submissions" in url:` and a bare document response
+    after it; the gate read the bare one, `json()` None)."""
+    rets = [r for r in ast.walk(fn) if isinstance(r, ast.Return) and r.value is not None]
+    return min(rets, key=lambda r: (r.lineno, r.col_offset)).value if rets else None
+
+
 def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
           sig: tuple[int, frozenset[str]] | None = None,
           call: ast.Call | None = None) -> _Val:
@@ -1458,13 +1467,38 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
     if val.mock == "class":                                                   # §17.1870 a class the test wrote
         if what != "call":
             return _Val()
-        return _Val(mock="instance", node=val.node, line=val.line, scope=val.scope)
+        # §17.1885 — an instance carries its own scope: every `self.x = …` of the class, and the `__init__` parameters
+        # bound to the constructor call's arguments (`FakeResponse({"filings": …})` -> `self._json_data = json_data`).
+        # Live (5b4880c0 T5 a4, 2026-10-31): the 13F client's response was such a class, its `recent` list unseen
+        cls = val.node
+        inner = _Fakes([x for x in ast.walk(cls) if isinstance(x, ast.stmt)], None, fakes.is_async) \
+            if isinstance(cls, ast.ClassDef) else _Fakes([], None, fakes.is_async)
+        init = next((n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "__init__"),
+                    None) if isinstance(cls, ast.ClassDef) else None
+        if call is not None and init is not None:
+            ia = init.args
+            pos = [x.arg for x in ia.posonlyargs + ia.args if x.arg not in ("self", "cls")]
+            for i, a in enumerate(call.args):
+                if i < len(pos) and not isinstance(a, ast.Starred):
+                    inner.bound.setdefault(pos[i], []).append((0, a))
+            for k in call.keywords:
+                if k.arg:
+                    inner.bound.setdefault(k.arg, []).append((0, k.value))
+        own_names = set(inner.bound)
+        outer = val.scope or fakes
+        for k, v in outer.bound.items():
+            if k not in own_names:
+                inner.bound.setdefault(k, []).extend(v)
+        for k, v in outer.chains.items():
+            if not (k and k[0] in own_names):
+                inner.chains.setdefault(k, []).extend(v)
+        return _Val(mock="instance", node=val.node, line=val.line, scope=inner)
     if val.mock == "instance":
         cls = val.node
         if what == "call":                                                    # an instance with `__call__` is callable
             dunder = _class_attr(cls, "__call__")                            # type: ignore[arg-type]
             if isinstance(dunder, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                rv = next((r.value for r in ast.walk(dunder) if isinstance(r, ast.Return) and r.value is not None), None)
+                rv = _first_return(dunder)
                 return _step(_Val(mock="async method" if isinstance(dunder, ast.AsyncFunctionDef) else "method",
                                   node=dunder, line=dunder.lineno, rv=rv, scope=val.scope), step, fakes, before, sig)
             return _Val(kind="instance-called", node=cls, line=val.line)
@@ -1474,7 +1508,7 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
         if member is None:
             return _Val(kind=f"missing:{arg}", node=cls, line=val.line)
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            rv = next((r.value for r in ast.walk(member) if isinstance(r, ast.Return) and r.value is not None), None)
+            rv = _first_return(member)
             return _Val(mock="async method" if isinstance(member, ast.AsyncFunctionDef) else "method", node=member,
                         line=member.lineno, rv=rv, scope=val.scope)
         return _resolve(member, val.scope or fakes, 10 ** 9, val.hops + 1)
@@ -1509,10 +1543,11 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
         # `client = _fake_async_client(…)` -- the caller's later line won `last("client")`, resolved to the call, into
         # the def, to its `client` again, without end (RecursionError, every gate silent, the sandbox ran unchecked)
         own_names = set(inner.bound)
-        for k, v in fakes.bound.items():
+        outer = val.scope or fakes                        # §17.1885 a method's outer scope is its instance's
+        for k, v in outer.bound.items():
             if k not in own_names:
                 inner.bound.setdefault(k, []).extend(v)
-        for k, v in fakes.chains.items():
+        for k, v in outer.chains.items():
             if not (k and k[0] in own_names):
                 inner.chains.setdefault(k, []).extend(v)
         out = _resolve(val.rv, inner, 10 ** 9, val.hops + 1)

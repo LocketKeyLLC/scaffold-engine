@@ -318,7 +318,8 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         """`x.get("k", …)` / `x["k"]` on a known dict -> (its path, "k"); §17.1879 -- chained too:
         `x.get("filings", {}).get("recent")` -> ((x, filings), "recent")."""
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and n.args
-                and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
+                and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)
+                and not isinstance(parents.get(id(n)), ast.Await)):     # §17.1885 `await client.get("url")` is no dict read
             base, key = n.func.value, n.args[0].value
         elif (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.slice, ast.Constant)
               and isinstance(n.slice.value, str)):
