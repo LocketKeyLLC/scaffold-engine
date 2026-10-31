@@ -1794,6 +1794,7 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         bad = _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}()` returns ")
         if bad:
             return bad
+    unset: list[str] = []                                                     # §17.1887 every field the fake lacks
     for a in sorted(uses["attrs"]):                                           # §17.1870 an attribute a class lacks
         got = _step(val, ("attr", a), fakes, before)
         if got.kind and got.kind.startswith("missing:"):
@@ -1809,9 +1810,15 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
                 and (given := _set_on(val, fakes)) and a not in given):
             # §17.1879 — the test set fields on this fake, and not the one the module reads. Live (5b4880c0 T5,
             # 2026-10-31): `MagicMock(content=content)` where the FINRA downloader returns `response.text` --
-            # `io.StringIO(<MagicMock>)`, "initial_value must be str or None", two tests an attempt, three attempts
-            return (f"{done}a fake with {', '.join(f'`{x}`' for x in sorted(given))} set{at}, where the module reads "
-                    f"`.{a}` -- set `fake.{a} = …` too (the index shows what it reads)")
+            # `io.StringIO(<MagicMock>)`, "initial_value must be str or None", two tests an attempt, three attempts.
+            # §17.1887 — all of them at once: named one at a time (`.status`, then `.filled_qty` in the sandbox:
+            # "'<=' not supported between instances of 'MagicMock' and 'int'"), each cost a round
+            unset.append(a)
+    if unset:
+        given = _set_on(val, fakes)
+        return (f"{done}a fake with {', '.join(f'`{x}`' for x in sorted(given))} set{at}, where the module reads "
+                f"{', '.join(f'`.{x}`' for x in unset)} -- set {', '.join(f'`fake.{x} = …`' for x in unset)} too "
+                "(the index shows what it reads)")
     return None
 
 
@@ -2752,6 +2759,41 @@ def unawaited_session_calls(files: dict[str, str]) -> list[str]:
                          f"an `AsyncSession`, and `{n.func.attr}` returns a coroutine (`'coroutine' object has no "
                          f"attribute 'scalar_one'`) -- `await {n.func.value.id}.{n.func.attr}(…)`"
                          + (f", and make `{cur.name}` an `async def` the test awaits" if in_sync_def and cur is not None else ""))
+    return found
+
+
+_RESULT_CALLS = frozenset({"fetchone", "fetchall", "fetchmany", "first", "all", "one", "one_or_none", "scalar",
+                           "scalar_one", "scalar_one_or_none", "scalars", "mappings", "keys", "partitions", "unique"})
+
+
+def awaited_result_calls(files: dict[str, str]) -> list[str]:
+    """§17.1887 — each `await result.fetchone()` (or `.scalar_one()`, `.fetchall()`, …) in a test file where `result`
+    is what `await db.execute(…)` returned: the execute was the coroutine, a `Result`'s methods are plain. Live
+    (5b4880c0 T5 a2, 2026-10-31): `ingested_item_id = (await result.fetchone())[0]` in the one row helper every test
+    used -- "'Row' object can't be awaited", eight of the attempt's 19 tests."""
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        def from_execute(v: ast.AST) -> bool:
+            return (isinstance(v, ast.Await) and isinstance(v.value, ast.Call) and isinstance(v.value.func, ast.Attribute)
+                    and v.value.func.attr in ("execute", "stream", "scalars"))
+
+        results = {n.targets[0].id for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1
+                   and isinstance(n.targets[0], ast.Name) and from_execute(n.value)}
+        for n in sorted((x for x in ast.walk(tree) if isinstance(x, ast.Await) and isinstance(x.value, ast.Call)
+                         and isinstance(x.value.func, ast.Attribute) and x.value.func.attr in _RESULT_CALLS), key=lambda x: x.lineno):
+            recv = n.value.func.value
+            if (isinstance(recv, ast.Name) and recv.id in results) or from_execute(recv):
+                who = recv.id if isinstance(recv, ast.Name) else "(await db.execute(…))"
+                found.append(f"`{path}:{n.lineno}` awaits `{who}.{n.value.func.attr}()`: `execute` was the coroutine and "
+                             f"was awaited already; a `Result`'s methods are plain (`'Row' object can't be awaited`) -- "
+                             f"`{who}.{n.value.func.attr}()` without `await`")
     return found
 
 
@@ -3866,25 +3908,32 @@ def replace_file_block(output: str, path: str, block: str) -> str:
     """`output` with the fenced Python block headed `# path` replaced by `block` (a fenced block, or bare code that
     is then fenced); appended when there is none."""
     from app.modules.execution_codegen_gate import PYTHON_LANGS
+    from app.sandbox.engine_tests import after_reasoning
+    output = after_reasoning(output or "")                 # §17.1887 a leaked draft is not the answer
     new = block.strip()
     if not new.startswith("```"):
         new = f"```python\n{new}\n```"
     fence = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
-    for m in fence.finditer(output or ""):
+    last = None                                             # §17.1887 the LAST block headed `# path`: what `files_of` reads
+    for m in fence.finditer(output):
         if m.group(1).lower() not in PYTHON_LANGS:
             continue
         first = m.group(2).lstrip().splitlines()[0] if m.group(2).strip() else ""
         hm = re.match(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b", first)
         if hm and (hm.group(1) == path or hm.group(1) == path.rsplit("/", 1)[-1]):
-            return output[:m.start()] + new + output[m.end():]
-    return (output or "").rstrip() + "\n\n" + new
+            last = m
+    if last is not None:
+        return output[:last.start()] + new + output[last.end():]
+    return output.rstrip() + "\n\n" + new
 
 
 def drop_file_block(output: str, path: str) -> str:
     """§17.1860 — `output` without the fenced Python block headed `# path` (unchanged when there is none)."""
     from app.modules.execution_codegen_gate import PYTHON_LANGS
+    from app.sandbox.engine_tests import after_reasoning
+    output = after_reasoning(output or "")                 # §17.1887
     fence = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
-    for m in fence.finditer(output or ""):
+    for m in fence.finditer(output):
         if m.group(1).lower() not in PYTHON_LANGS:
             continue
         first = m.group(2).lstrip().splitlines()[0] if m.group(2).strip() else ""
