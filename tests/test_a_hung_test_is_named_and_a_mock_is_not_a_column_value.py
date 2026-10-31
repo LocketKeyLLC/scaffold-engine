@@ -105,6 +105,7 @@ async def test_it(db):
         "`AlpacaPaperClient()->{close(), submit_order()->{client_order_id, id, status}}`"], got
     fixed = test.replace("fake_client.submit_order = AsyncMock()",
                          "fake_order = MagicMock()\n    fake_order.id = \"o-1\"\n    fake_order.status = \"accepted\"\n"
+                         "    fake_order.client_order_id = \"c-1\"\n"
                          "    fake_client.submit_order = AsyncMock(return_value=fake_order)")
     assert wrong_fakes({PATH: fixed}, MODULES, set()) == []
 
@@ -113,7 +114,7 @@ def test_a_result_handed_on_keeps_what_its_reader_does_with_it():
     tree = ast.parse(THIRTEEN_F)
     local = es._local_functions(tree)
     assert es._uses_text(es._uses(local["ingest_13f_holdings"], "client", local)) == \
-        "{get()->{json(): dict{filings}, raise_for_status()}}"
+        "{get()->{json(): dict{filings{recent}}, raise_for_status()}}"
     test = '''# tests/test_paper_twelve_modules.py
 from unittest.mock import AsyncMock, MagicMock
 from app.modules.paper_13f_holdings_ingestion import ingest_13f_holdings
@@ -129,7 +130,7 @@ async def test_it():
     assert got == [
         "`tests/test_paper_twelve_modules.py:10` hands `ingest_13f_holdings(…)` `client` = a fake whose `get()` returns "
         "a fake whose `json()` returns a list (line 7), which the module reads as a dict (`.get(…)` / `[\"key\"]`) -- "
-        "give it what the module uses: `client{get()->{json(): dict{filings}, raise_for_status()}}`"], got
+        "give it what the module uses: `client{get()->{json(): dict{filings{recent}}, raise_for_status()}}`"], got
     assert wrong_fakes({PATH: test.replace('[{"filings": {}}]', '{"filings": {}}')}, MODULES, set()) == []
 
 

@@ -313,14 +313,20 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         return cur
 
     def read_of(n: ast.AST) -> tuple[tuple[str, ...], str] | None:
-        """`x.get("k", …)` / `x["k"]` on a known dict -> (its path, "k")."""
-        from app.modules.engine_contracts import _get_key
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) \
-                and n.func.value.id in paths and (k := _get_key(n, {n.func.value.id})) is not None:
-            return paths[n.func.value.id], k
-        if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
-                and n.value.id in paths and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
-            return paths[n.value.id], n.slice.value
+        """`x.get("k", …)` / `x["k"]` on a known dict -> (its path, "k"); §17.1879 -- chained too:
+        `x.get("filings", {}).get("recent")` -> ((x, filings), "recent")."""
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and n.args
+                and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
+            base, key = n.func.value, n.args[0].value
+        elif (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load) and isinstance(n.slice, ast.Constant)
+              and isinstance(n.slice.value, str)):
+            base, key = n.value, n.slice.value
+        else:
+            return None
+        if isinstance(base, ast.Name) and base.id in paths:
+            return paths[base.id], key
+        if (inner := read_of(base)) is not None:
+            return inner[0] + (inner[1],), key
         return None
 
     stmts = _own_statements(fn)
@@ -398,12 +404,15 @@ _USE_HOPS = 3
 
 
 def _new_use() -> dict:
-    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": set(), "bound": set()}
+    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set()}
 
 
 def _read_keys_text(u: dict) -> str:
-    """§17.1876 — `{results|data|filings}`: the keys a value read as a dict is read for (`.get("k")`, `["k"]`)."""
-    return "{" + "|".join(sorted(u.get("keys") or ())) + "}" if u.get("as") == "dict" and u.get("keys") else ""
+    """§17.1876 — `{results|data|filings}`: the keys a value read as a dict is read for (`.get("k")`, `["k"]`);
+    §17.1879 — nested where a key's value is read on: `{filings{recent}|tickers}`."""
+    if not (u.get("as") == "dict" and u.get("keys")):
+        return ""
+    return "{" + "|".join(k + _read_keys_text(sub) for k, sub in sorted(u["keys"].items())) + "}"
 
 
 def _merge_uses(dst: dict, src: dict) -> None:
@@ -422,7 +431,8 @@ def _merge_uses(dst: dict, src: dict) -> None:
         dst["called"]["await"] = dst["called"]["await"] or src["called"]["await"]
         _merge_uses(dst["called"]["then"], src["called"]["then"])
     dst["as"] = dst["as"] or src["as"]
-    dst["keys"] = (dst.get("keys") or set()) | (src.get("keys") or set())                      # §17.1876
+    for k, sub in (src.get("keys") or {}).items():                                            # §17.1876/1879
+        _merge_uses(dst.setdefault("keys", {}).setdefault(k, _new_use()), sub)
     dst["bound"] = (dst.get("bound") or set()) | (src.get("bound") or set())                   # §17.1878
 
 
@@ -494,7 +504,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                         or (f.attr in ("keys", "items", "values") and not e.args):     # `await client.get(u)`: a call
                     base["as"] = base["as"] or "dict"
                     if e.args and isinstance(e.args[0], ast.Constant) and isinstance(e.args[0].value, str):
-                        base.setdefault("keys", set()).add(e.args[0].value)              # §17.1876 `.get("results")`
+                        # §17.1876 `.get("results")`; §17.1879 what is read on THAT value follows (`.get("recent")`)
+                        return base.setdefault("keys", {}).setdefault(e.args[0].value, _new_use())
                     return None
                 c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno,
                                                       "sig": (0, frozenset())})
@@ -527,7 +538,7 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 base["as"] = base["as"] or ("dict" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str)
                                             else "list" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int) else None)
                 if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str):
-                    base.setdefault("keys", set()).add(e.slice.value)                     # §17.1876 `["results"]`
+                    return base.setdefault("keys", {}).setdefault(e.slice.value, _new_use())   # §17.1876/1879
             return None
         return None
 
@@ -916,6 +927,9 @@ def _required_column(to: str, fks: dict | None, rules: dict | None) -> str:
     return ""
 
 
+_CONTROL_KEYS = frozenset({"approved", "decision", "status", "rejected", "enabled", "dry_run", "force", "allowed"})
+
+
 def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: dict | None,
                      fks: dict | None, rules: dict | None) -> list[str]:
     """§17.1865/1866 — what a dict literal lacks or mis-kinds, against the keys the function reads from it."""
@@ -923,12 +937,20 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
     given: dict[str, ast.AST] = {k.value: v for k, v in zip(lit.keys, lit.values, strict=False)
                                  if isinstance(k, ast.Constant) and isinstance(k.value, str)}
     spread = any(k is None for k in lit.keys)
+    # §17.1879 — a dict with none of the keys the function reads at this level says nothing it will hear. Live
+    # (5b4880c0 T5, 2026-10-31, every attempt): `is_trade_update({"T": "trade_updates"})` where it reads `stream`;
+    # `parse_fill_event({"T": …, "msg": {…}})` where it reads `data` -- four failures a run, three runs
+    none_given = bool(given and keys and not spread and not set(given) & set(keys))
     for key in sorted(keys):
         info = keys[key]
         if key in given:
             v = given[key]
             v = consts[v.id] if isinstance(v, ast.Name) and consts and v.id in consts else v
             want, got = info.get("kinds"), _literal_kind(v, consts)
+            if info.get("sub") and got in ("list", "str", "int", "float", "bool", "None"):        # §17.1879
+                out.append(f'{label}: {where}["{key}"] is read as a dict (its '
+                           f'{", ".join(f"`{k}`" for k in sorted(info["sub"]))}); it was given a `{got}`')
+                continue
             table, _, col = (info.get("to") or "").partition(".")
             parent = (fks or {}).get(table, {}).get(col) if info.get("to") else None
             if want and got and got not in want:
@@ -954,6 +976,9 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
                        + f" -- the dict given has {has} and no `{key}`"
                        + ("; pass the id its parent's writer returned"
                           if (why or (below[2] if below else "")).startswith("references") else ""))
+    if none_given and not out:                           # nothing more specific to say about any key
+        out.append(f"{label}: {where} has none of the keys the function reads ({', '.join(f'`{k}`' for k in sorted(keys))}): "
+                   f"it has {', '.join(f'`{k}`' for k in given)}")
     return out
 
 
@@ -991,6 +1016,15 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
         lit = consts[val.id] if isinstance(val, ast.Name) and consts and val.id in consts else val
         if param in keys and isinstance(lit, ast.Dict):
             out += _dict_mismatches(label, f"`{param}`", lit, keys[param], consts, fks, rules)
+            # §17.1879 — a key that would steer the function, which it never reads. Live (5b4880c0 T5, 2026-10-31,
+            # six tests an attempt): `execute_order({"decision": "rejected", …})` asserted a refusal; the executor
+            # reads `approval_id`, `proposal`, `proposal_id` and executes what it is given
+            names = {k.value for k in lit.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            for k in sorted((names & _CONTROL_KEYS) - set(keys[param])):
+                out.append(f'{label}: `{param}["{k}"]` is never read by `{name}` (it reads '
+                           f'{", ".join(f"`{x}`" for x in sorted(keys[param]))}): it does what it does whatever `{k}` '
+                           "says -- a refusal lives in the function that reads such a key (the index shows each "
+                           "function's keys)")
     # §17.1855 — a literal the function itself refuses (live: `ingest_finra_file(source="test", …)`)
     vals = shape.get("values") or {}
     for param, val in given:
@@ -1472,7 +1506,9 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 if not shape:
                     continue
                 for m in _call_mismatches(n, fname, shape, id(n) in misused, consts, fks, rules):
-                    if in_raise and ("is read for `" in m or "a made-up id the scratch database refuses" in m):
+                    if in_raise and ("is read for `" in m or "a made-up id the scratch database refuses" in m
+                                 or "has none of the keys the function reads" in m      # §17.1879 a missing key
+                                 or "is read as a dict (its" in m):                     # is one way to make it raise
                         continue                                                           # §17.1874
                     m = _at(code, n) + m.replace("in the engine", f"in `{leaf}`")          # §17.1861
                     if m not in found:
