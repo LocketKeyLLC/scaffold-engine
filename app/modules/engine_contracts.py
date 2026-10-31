@@ -562,15 +562,22 @@ def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[
     except SyntaxError:
         return []
     out: list[str] = []
+    alias = _module_aliases(tree)
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call) or not n.args:
             continue
         f = n.func
         fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
         a0 = n.args[0]
-        if fname not in ("patch", "setattr") or not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
+        if fname not in ("patch", "setattr", "object"):
             continue
-        parts = a0.value.split(".")
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+            parts = a0.value.split(".")
+        elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+              and isinstance(n.args[1].value, str)):                              # §17.1882 `patch.object(m, "httpx")`
+            parts = ["app", "modules", alias[a0.id], *n.args[1].value.split(".")]
+        else:
+            continue
         if len(parts) not in (4, 5) or parts[:2] != ["app", "modules"] or parts[2] not in reach:
             continue
         mod, lib = parts[2], parts[3]
@@ -1265,6 +1272,14 @@ class _Fakes:
                     self.bound.setdefault(t.id, []).append((n.lineno, n.value))
                 elif (chain := _call_chain(t)) and len(chain) > 1:
                     self.chains.setdefault(chain, []).append((n.lineno, n.value))
+                elif isinstance(t, (ast.Tuple, ast.List)) and isinstance(n.value, ast.Call):
+                    # §17.1882 `factory, client, response = _make_fake(…)`: each name is one element of what the
+                    # helper returns. Live (5b4880c0 T5 a3, 2026-10-31): eight tests' clients came this way,
+                    # `response = AsyncMock()` inside -- the gate never saw them
+                    for i, elt in enumerate(t.elts):
+                        if isinstance(elt, ast.Name):
+                            view = ast.copy_location(ast.Subscript(value=n.value, slice=ast.Constant(i), ctx=ast.Load()), n)
+                            self.bound.setdefault(elt.id, []).append((n.lineno, view))
             elif isinstance(n, (ast.With, ast.AsyncWith)):
                 for item in n.items:
                     if isinstance(item.optional_vars, ast.Name) and isinstance(item.context_expr, ast.Call):
@@ -1339,6 +1354,14 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e) or ("tuple" if isinstance(e, ast.Tuple) else "set" if isinstance(e, ast.Set) else None)
         return _Val(kind=kind, node=e, line=getattr(e, "lineno", 0))
+    if isinstance(e, ast.Subscript) and isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int):
+        base = _resolve(e.value, fakes, before, _hops + 1)                     # §17.1882 one element of a tuple
+        i = e.slice.value
+        if base.kind == "tuple" and isinstance(base.node, ast.Tuple) and 0 <= i < len(base.node.elts):
+            out = _resolve(base.node.elts[i], base.scope or fakes, 10 ** 9 if base.scope else before, _hops + 1)
+            out.scope = out.scope or base.scope              # what the helper set on it is set in ITS scope
+            return out
+        return _Val()
     if isinstance(e, ast.ClassDef):                                            # §17.1870 a class the test wrote
         return _Val(mock="class", node=e, line=e.lineno)
     if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):      # §17.1869 a function the test wrote
@@ -2063,12 +2086,36 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
         seen: set[tuple[int, str]] = set()
         shapes: dict[tuple[str, str], dict] = {}
 
+        fixtures = {f.name: f for f in tree.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and any("fixture" in ast.unparse(d) for d in f.decorator_list)}
+
         def fakes_for(fn: ast.AST | None) -> _Fakes:
             if fn is None:
                 return mod_fakes
             fk = _Fakes([x for x in _own_statements(fn) if isinstance(x, ast.stmt)], fn, is_async)
             for k, v in mod_fakes.bound.items():
                 fk.bound.setdefault(k, []).extend(v)
+            # §17.1882 — a pytest fixture handed in as a parameter IS what it yields: `def patch_alpaca_httpx(): with
+            # patch("…httpx.AsyncClient") as m: yield m` -> the parameter is that patch, and what the fixture set on
+            # `m` is set on it. Live (5b4880c0 T5 a4, 2026-10-31): `patch_alpaca_httpx.AsyncClient.return_value =
+            # fake_client` -- set on the AsyncClient mock itself, so the real call returned a bare MagicMock, awaited
+            a = fn.args                                                                       # type: ignore[attr-defined]
+            for p in [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]:
+                fix = fixtures.get(p)
+                if fix is None:
+                    continue
+                ffk = _Fakes([x for x in _own_statements(fix) if isinstance(x, ast.stmt)], fix, is_async)
+                given = next((y.value for y in _own_nodes(fix) if isinstance(y, (ast.Yield, ast.Return)) and y.value is not None), None)
+                if given is None:
+                    continue
+                src = ffk.last(given.id, 10 ** 9) if isinstance(given, ast.Name) else given
+                if src is None:
+                    continue
+                fk.bound[p] = [(fn.lineno, src)]        # not the fixture def the module scope bound   # type: ignore[attr-defined]
+                if isinstance(given, ast.Name):
+                    for key, vals in ffk.chains.items():
+                        if key[0] == given.id:
+                            fk.chains.setdefault((p, *key[1:]), []).extend(vals)
             return fk
 
         def say(line: int, what: str, bad: str, uses_text: str) -> None:
@@ -2161,28 +2208,25 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                     continue
             else:
                 uses = _target_uses(reach[mod], owner, name)
-            if not uses:
-                continue
-            fk = fakes_for(fn)
-            new = _patch_new(pc)
-            # the mock the patch installs: the value given, else the `as m` / decorator name (its chains apply), else
-            # the call itself (a `setattr` without a value is not a patch)
-            alias_name = next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
-            if new is None and _call_name(pc) == "setattr":
-                continue
-            val = (_resolve(new, fk, pc.lineno) if new is not None else
-                   _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
-            if (bad := _check_uses(val, uses, fk, 10 ** 9)):
-                # §17.1872 — a bare mock the module awaits on a path this test never calls into directly: the test
-                # calls another module, which reaches the patched one only on a value it did not pass (live: the
-                # approval gate's rejected approval never reaches `execute_order`'s `await client.submit_order(…)`).
-                # Configured (`m.return_value = …`, `new=MagicMock(return_value=…)`) or asserted on
-                # (`m.assert_called…`), the test expects that path and is held to it; the sandbox names a real one.
-                if ("cannot be awaited" in bad and fn is not None and not _calls_into(code, mod, fn)
-                        and val.rv is None and not any(k and k[0] == val.root for k in fk.chains)
-                        and not _asserts_on(fn, val.root)):
+            # §17.1882 — a patch inside a pytest fixture is read once per TEST that takes the fixture: in that test's
+            # scope, under the fixture's name (what the test set on the parameter is set on the patch), with that test's
+            # own calls deciding the §17.1872 exemption. Live (5b4880c0 T5 a4, 2026-10-31): the fixture's bare
+            # `patch("…httpx.AsyncClient")` was read in the fixture, which calls nothing -- exempt -- and two tests
+            # awaited the MagicMock it installed
+            contexts: list[tuple[_Fakes, str | None, ast.AST | None]] = []
+            if fn is not None and fn.name in fixtures:                                   # type: ignore[attr-defined]
+                for t in fns:
+                    ta = t.args                                                           # type: ignore[attr-defined]
+                    if fn.name in [x.arg for x in ta.posonlyargs + ta.args + ta.kwonlyargs]:   # type: ignore[attr-defined]
+                        contexts.append((fakes_for(t), fn.name, t))                       # type: ignore[attr-defined]
+                if not contexts:
                     continue
-                say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
+            else:
+                contexts.append((fakes_for(fn), None, fn))
+            new = _patch_new(pc)
+            for fk, fixture_name, fn in contexts:
+                _check_patch_site(pc, mod, owner, name, fn, fk, fixture_name, uses, new, reach, code, say)
+        # (the patch-site body continues in `_check_patch_site`)
         # §17.1881 — an attribute set on an instance of a job class (`client._client = AsyncMock()`): what the class's
         # methods do with `self.<attr>` is what the fake must do. Live (5b4880c0 T5 a1, 2026-10-31): three Alpaca
         # tests, the real `_ensure_client` reading the fake's `is_closed` as a flag, a real client opened, the network
@@ -3722,3 +3766,43 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
             if len(findings) >= before:
                 break
     return output, findings
+
+
+def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST | None, fk: "_Fakes",
+                      fixture_name: str | None, uses: dict | None, new: ast.AST | None, reach: dict[str, str],
+                      code: str, say) -> None:
+    """§17.1882 — one patch site read in one scope (a test's, or a test's for a fixture it takes)."""
+    from app.modules.engine_source import _uses_text
+    if not uses and not owner and name in _top_names(reach[mod])[1]:
+        # §17.1882 — a library patched whole (`patch.object(m, "httpx") as mock_httpx`) and an attribute set
+        # on it (`mock_httpx.AsyncClient = MagicMock()`): the module calls `httpx.AsyncClient(…)` -- what it
+        # does with THAT is what the attribute must do. Live (5b4880c0 T5 a3, 2026-10-31): six tests, the
+        # backtester's and the SPY tracker's clients, "'MagicMock' object can't be awaited"
+        as_name = fixture_name or next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
+        for attr in sorted({k[1] for k in fk.chains if as_name and k[0] == as_name and len(k) >= 2}):
+            uses2 = _target_uses(reach[mod], name, attr)
+            if not uses2:
+                return
+            val2 = _resolve(ast.Attribute(value=ast.Name(id=as_name, ctx=ast.Load()), attr=attr, ctx=ast.Load()), fk, 10 ** 9)
+            if (bad := _check_uses(val2, uses2, fk, 10 ** 9)):
+                say(pc.lineno, f"patches `{name}` on `{mod}` and sets `.{attr}` to", bad, f"`{attr}{_uses_text(uses2)}`")
+        return
+    if not uses:
+        return  # the mock the patch installs: the value given, else the `as m` / decorator name (its chains apply), else
+    # the call itself (a `setattr` without a value is not a patch)
+    alias_name = fixture_name or next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
+    if new is None and _call_name(pc) == "setattr":
+        return
+    val = (_resolve(new, fk, pc.lineno) if new is not None else
+           _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
+    if (bad := _check_uses(val, uses, fk, 10 ** 9)):
+        # §17.1872 — a bare mock the module awaits on a path this test never calls into directly: the test
+        # calls another module, which reaches the patched one only on a value it did not pass (live: the
+        # approval gate's rejected approval never reaches `execute_order`'s `await client.submit_order(…)`).
+        # Configured (`m.return_value = …`, `new=MagicMock(return_value=…)`) or asserted on
+        # (`m.assert_called…`), the test expects that path and is held to it; the sandbox names a real one.
+        if ("cannot be awaited" in bad and fn is not None and not _calls_into(code, mod, fn)
+                and val.rv is None and not any(k and k[0] == val.root for k in fk.chains)
+                and not _asserts_on(fn, val.root)):
+            return
+        say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
