@@ -2384,6 +2384,10 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import undefined_test_names, wrong_result_uses
     found += wrong_result_uses(files_of({**me, "output_text": output}), _cur)
     found += undefined_test_names(files_of({**me, "output_text": output}), _cur)
+    # §17.1884 — a session call is awaited; a patch lands where the caller looks the name up
+    from app.modules.engine_contracts import import_bound_patches, unawaited_session_calls
+    found += unawaited_session_calls(files_of({**me, "output_text": output}))
+    found += import_bound_patches(files_of({**me, "output_text": output}), _cur)
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request
     found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)

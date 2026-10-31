@@ -1200,6 +1200,11 @@ _SINCE_THE_STEP_CHANGED = (
     "  AND (e.op IN ('replan', 'restore') OR (e.op = 'edit' "
     "       AND COALESCE(e.after, '{}'::jsonb) ?| array['prompt_template', 'tool', 'tool_config']))), "
     "  '-infinity') ")
+#: §17.1884 — the keep-list (§17.1864) starts over at a RESET: within one run every attempt keeps the names its
+#: predecessors wrote; across resets the union snowballed (110, 133, 160, then 267 names a draw -- 94k chars, past the
+#: generation ceiling, the redraws left with 68 findings they could not clear). A reset is a new run.
+_SINCE_THE_STEP_CHANGED_OR_RESET = _SINCE_THE_STEP_CHANGED.replace("e.op IN ('replan', 'restore')",
+                                                                   "e.op IN ('replan', 'restore', 'reset')")
 
 
 async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[str]:
@@ -1248,7 +1253,7 @@ async def prior_tests(db, job_id: str, node_id: str) -> dict[str, list[str]]:
     rows = (await db.execute(text(
         "SELECT l.details->>'tests' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
         "AND l.message LIKE :failed AND l.details->>'tests' IS NOT NULL "
-        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
+        + _SINCE_THE_STEP_CHANGED_OR_RESET + " ORDER BY l.created_at"),
         {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
     out: dict[str, list[str]] = {}
     for r in rows:
