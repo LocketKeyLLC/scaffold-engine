@@ -330,20 +330,34 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         return None
 
     stmts = _own_statements(fn)
+    for n in stmts:                                      # §17.1881 `for signal in signals:` -- each item, read on
+        if (isinstance(n, (ast.For, ast.AsyncFor)) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name)
+                and n.iter.id in paths and n.target.id not in paths):
+            paths[n.target.id] = paths[n.iter.id] + ("[]",)
     for _ in range(2):                                   # aliases of aliases: `p = payload.get("proposal", {})`
         for n in stmts:
             if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                    and n.targets[0].id not in paths and (r := read_of(n.value))):
-                paths[n.targets[0].id] = r[0] + (r[1],)
+                    and n.targets[0].id not in paths):
+                v = n.value
+                if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or) and v.values:   # §17.1881 `x.get("a") or x.get("b")`
+                    v = v.values[0]
+                if (r := read_of(v)):
+                    paths[n.targets[0].id] = r[0] + (r[1],)
+    # §17.1881 — an alias bound into an INSERT: `signal_id = signal.get("signal_id") …` then `{"signal_id": signal_id}`
     for n in stmts:
-        # §17.1880 — a name bound to a read, compared: `event = data.get("event")` … `if event not in ("fill", …)`
-        if (isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn))
-                and isinstance(n.left, ast.Name) and len(paths.get(n.left.id, ())) >= 2):
-            c = n.comparators[0]
-            vals = [c.value] if isinstance(c, ast.Constant) and isinstance(c.value, str) else _str_items(c)
-            if vals:
-                p = paths[n.left.id]
-                entry(p[:-1]).setdefault(p[-1], {}).setdefault("values", vals)
+        if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and len(paths.get(n.id, ())) >= 2
+                and isinstance((par := parents.get(id(n))), ast.Dict) and n in par.values):
+            cols = _insert_columns(fn, par, parents)
+            kname = par.keys[par.values.index(n)]
+            if cols and isinstance(kname, ast.Constant) and kname.value in cols:
+                pth = paths[n.id]
+                entry(pth[:-1]).setdefault(pth[-1], {}).setdefault("to", cols[kname.value])
+    for n in stmts:
+        # §17.1880 — a name bound to a read, gated: `event = data.get("event")` … `if event not in ("fill", …): return`
+        if (isinstance(n, ast.Compare) and isinstance(n.left, ast.Name) and len(paths.get(n.left.id, ())) >= 2
+                and (vals := _gate_values(n, parents))):                             # §17.1881 a gate, not a branch
+            p = paths[n.left.id]
+            entry(p[:-1]).setdefault(p[-1], {}).setdefault("values", vals)
         r = read_of(n)
         if not r:
             continue
@@ -355,12 +369,8 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         # §17.1880 — the values a key is compared with: `data.get("event") not in ("fill", "partial_fill")`,
         # `envelope.get("stream") == "trade_updates"`. Live (5b4880c0 T5, 2026-10-31): fill envelopes with every
         # other key right and no `event`, `parse_fill_event` returning None, two tests a run
-        if (isinstance(par, ast.Compare) and par.left is n and len(par.ops) == 1
-                and isinstance(par.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn))):
-            c = par.comparators[0]
-            vals = [c.value] if isinstance(c, ast.Constant) and isinstance(c.value, str) else _str_items(c)
-            if vals:
-                info.setdefault("values", vals)
+        if isinstance(par, ast.Compare) and par.left is n and (vals := _gate_values(par, parents)):   # §17.1881
+            info.setdefault("values", vals)
         if isinstance(par, ast.Attribute) and par.attr in _DATE_METHODS | _DATETIME_METHODS | _DECIMAL_METHODS:
             k = "date" if par.attr in _DATE_METHODS else "datetime" if par.attr in _DATETIME_METHODS else "Decimal"
             info.setdefault("kinds", frozenset({k} | _KIND_ALSO.get(k, set())))
@@ -383,6 +393,40 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
             kname = par.keys[i]
             if cols and isinstance(kname, ast.Constant) and kname.value in cols:
                 info.setdefault("to", cols[kname.value])
+    # §17.1881 — an alias put into a NEW dict that is handed to a function of the same module: what that function
+    # does with the key (`entry = {"signal_id": signal_id, …}; await _record_proposal(db, entry)` -> `entry["signal_id"]`
+    # into `proposal.signal_id`, a foreign key). Live (5b4880c0 T5, five rounds): `signals=[{"signal_id": 1, …}]`
+    # into `propose_trades`, the made-up id refused by the scratch database every time, never by the gate
+    if local and _depth < _KEY_HOPS:
+        built: dict[str, ast.Dict] = {n.targets[0].id: n.value for n in stmts
+                                      if isinstance(n, ast.Assign) and len(n.targets) == 1
+                                      and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Dict)}
+        # -- and through a list: `rejected.append({…})` then `for entry in rejected:` hands each one
+        appended = {n.func.value.id: n.args[0] for n in stmts
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+                    and isinstance(n.func.value, ast.Name) and len(n.args) == 1 and isinstance(n.args[0], ast.Dict)}
+        for n in stmts:
+            if (isinstance(n, (ast.For, ast.AsyncFor)) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name)
+                    and n.iter.id in appended and n.target.id not in built):
+                built[n.target.id] = appended[n.iter.id]
+        for n in stmts:
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in local
+                    and local[n.func.id] is not fn and n.func.id not in _seen):
+                continue
+            callee = local[n.func.id]
+            for their, v in _handed(n, callee):
+                d = built.get(v.id) if isinstance(v, ast.Name) else v if isinstance(v, ast.Dict) else None
+                if d is None:
+                    continue
+                theirs = _param_keys(callee, local, _depth + 1, _seen | {fn.name}).get(their) or {}   # type: ignore[attr-defined]
+                for kn, kv in zip(d.keys, d.values, strict=False):
+                    if (isinstance(kn, ast.Constant) and isinstance(kn.value, str) and isinstance(kv, ast.Name)
+                            and len(paths.get(kv.id, ())) >= 2 and theirs.get(kn.value)):
+                        pth = paths[kv.id]
+                        info = entry(pth[:-1]).setdefault(pth[-1], {})
+                        for f in ("to", "kinds"):
+                            if theirs[kn.value].get(f) and not info.get(f):
+                                info[f] = theirs[kn.value][f]
     # the dict itself (or a key's dict) handed whole to a function of the same module
     if local and _depth < _KEY_HOPS:
         for n in stmts:
@@ -405,6 +449,8 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
 def _keys_text(keys: dict) -> str:
     """`{proposal_id, quantity: Decimal, proposal{proposal_id}}` -- what a dict parameter is read for."""
     parts = []
+    if set(keys) == {"[]"} and keys["[]"].get("sub"):                       # §17.1881 a list, read item by item
+        return "[" + _keys_text(keys["[]"]["sub"]) + "]"
     for k in sorted(keys)[:_MAX_KEYS]:
         info = keys[k]
         t = k + (": " + _kinds_text(info["kinds"]) if info.get("kinds") else "")
@@ -422,8 +468,48 @@ _DICT_READS = frozenset({"get", "keys", "items", "values", "pop", "setdefault"})
 _USE_HOPS = 3
 
 
+def _gate_values(n: ast.Compare, parents: dict[int, ast.AST]) -> list[str] | None:
+    """§17.1881 — the strings a compare admits when it GATES the function: `if x not in ("P", "S"): return None`,
+    `if x != "fill": raise …`, `if x in (…): … else: return`, `assert x in (…)`. A compare that merely chooses a branch
+    (`if raw.get("chamber") == "house": … else: …`) admits nothing and says nothing."""
+    from app.modules.engine_contracts import _gives_up
+    if len(n.ops) != 1 or not isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn)):
+        return None
+    c = n.comparators[0]
+    vals = [c.value] if isinstance(c, ast.Constant) and isinstance(c.value, str) else _str_items(c)
+    if not vals:
+        return None
+    par = parents.get(id(n))
+    negative = isinstance(n.ops[0], (ast.NotEq, ast.NotIn))
+    if isinstance(par, ast.Assert) and par.test is n:
+        return vals if not negative else None
+    if isinstance(par, ast.If) and par.test is n:
+        if negative and _gives_up(par.body):
+            return vals
+        if not negative and par.orelse and _gives_up(par.orelse):
+            return vals
+    return None
+
+
+def _unwrapped_read(e: ast.AST) -> ast.AST:
+    """§17.1881 — `str(x.get("k", "")).strip().upper()` -> `x.get("k", "")`: the read under the casts and the string
+    methods a module applies before comparing it."""
+    while True:
+        if isinstance(e, ast.Await):
+            e = e.value
+        elif (isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in ("str", "int", "float", "Decimal")
+              and len(e.args) == 1 and not e.keywords):
+            e = e.args[0]
+        elif (isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and not e.args and not e.keywords
+              and e.func.attr in ("strip", "upper", "lower", "title", "casefold", "lstrip", "rstrip")):
+            e = e.func.value
+        else:
+            return e
+
+
 def _new_use() -> dict:
-    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set(), "item": None}
+    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set(), "item": None,
+            "tested": set(), "values": None}
 
 
 def _read_keys_text(u: dict) -> str:
@@ -433,7 +519,30 @@ def _read_keys_text(u: dict) -> str:
         return "[" + (("dict" + _read_keys_text(item)) if item.get("as") == "dict" or item.get("keys") else item["as"]) + "]"
     if not (u.get("as") == "dict" and u.get("keys")):
         return ""
-    return "{" + "|".join(k + _read_keys_text(sub) for k, sub in sorted(u["keys"].items())) + "}"
+    return "{" + "|".join(k + (":" + "|".join(sub["values"][:4]) if sub.get("values") else "") + _read_keys_text(sub)
+                          for k, sub in sorted(u["keys"].items())) + "}"
+
+
+def _is_tested(e: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """§17.1881 — whether an expression is read for its truth: the test of an `if` / `while` / `assert` / `x if c
+    else y`, an operand of `and` / `or` / `not` there. Live (5b4880c0 T5, 2026-10-31): `client._client = AsyncMock()`
+    on a real `AlpacaPaperClient`, whose `_ensure_client` reads `if self._client is None or self._client.is_closed:`
+    -- a mock attribute is truthy, so it opened a real `httpx.AsyncClient` and three tests reached the network."""
+    cur = e
+    while True:
+        par = parents.get(id(cur))
+        if par is None:
+            return False
+        if isinstance(par, (ast.If, ast.While, ast.IfExp)) and par.test is cur:
+            return True
+        if isinstance(par, ast.Assert) and par.test is cur:
+            return True
+        if isinstance(par, ast.comprehension) and cur in par.ifs:
+            return True
+        if isinstance(par, ast.BoolOp) or (isinstance(par, ast.UnaryOp) and isinstance(par.op, ast.Not)):
+            cur = par
+            continue
+        return False
 
 
 def _merge_uses(dst: dict, src: dict) -> None:
@@ -458,6 +567,16 @@ def _merge_uses(dst: dict, src: dict) -> None:
         if dst.get("item") is None:
             dst["item"] = _new_use()
         _merge_uses(dst["item"], src["item"])
+    dst["tested"] = (dst.get("tested") or set()) | (src.get("tested") or set())                 # §17.1881
+    if src.get("optional"):
+        dst["optional"] = True
+    if src.get("alt") and not dst.get("alt"):
+        dst["alt"] = src["alt"]
+    for k in src.get("same_as") or []:
+        if k not in (dst.get("same_as") or []):
+            dst.setdefault("same_as", []).append(k)
+    if src.get("values") and not dst.get("values"):
+        dst["values"] = src["values"]
     dst["bound"] = (dst.get("bound") or set()) | (src.get("bound") or set())                   # §17.1878
 
 
@@ -517,7 +636,12 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 and f"self.{e.attr}" in names:                                   # §17.1869 `self._client`
             return names[f"self.{e.attr}"]
         if isinstance(e, ast.BoolOp):                    # `getter = http_get or _default_http_get`
-            return next((b for v in e.values if (b := node_of(v)) is not None), None)
+            found = [b for v in e.values if (b := node_of(v)) is not None]
+            if len(found) > 1 and isinstance(e.op, ast.Or):   # §17.1881 `data.get("results") or data.get("data")`:
+                for other in found[1:]:                        # one value under either key -- the first node speaks
+                    if other.get("key") and other["key"] not in (found[0].get("same_as") or []):
+                        found[0].setdefault("same_as", []).append(other["key"])
+            return found[0] if found else None
         if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):          # §17.1880 `house + senate`: one list
             return next((b for v in (e.left, e.right) if (b := node_of(v)) is not None), None)
         if isinstance(e, ast.Call):
@@ -536,7 +660,16 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                     base["as"] = base["as"] or "dict"
                     if e.args and isinstance(e.args[0], ast.Constant) and isinstance(e.args[0].value, str):
                         # §17.1876 `.get("results")`; §17.1879 what is read on THAT value follows (`.get("recent")`)
-                        return base.setdefault("keys", {}).setdefault(e.args[0].value, _new_use())
+                        sub = base.setdefault("keys", {}).setdefault(e.args[0].value, _new_use())
+                        sub["key"] = e.args[0].value
+                        if len(e.args) == 2:                  # §17.1881 `raw.get("filing_type", raw.get("type"))`
+                            d = e.args[1]
+                            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "get"
+                                    and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
+                                sub["alt"] = d.args[0].value  # read from the other key when this one is absent
+                            elif isinstance(d, (ast.Call, ast.Subscript, ast.Name)):
+                                sub["optional"] = True
+                        return sub
                     return None
                 c = base["calls"].setdefault(f.attr, {"await": awaited, "then": _new_use(), "line": e.lineno,
                                                       "sig": (0, frozenset())})
@@ -562,6 +695,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             if isinstance(par, ast.Call) and par.func is e:
                 return None                              # the call records it
             base["attrs"].add(e.attr)
+            if _is_tested(e, parents):                   # §17.1881 `if self._client.is_closed:` -- a flag
+                base["tested"].add(e.attr)
             return None
         if isinstance(e, ast.Subscript):
             base = node_of(e.value)
@@ -595,8 +730,16 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             elif isinstance(v, ast.Dict):
                 dict_names[n.targets[0].id] = v
             node = node_of(n.value)
+            if node is None and (inner := _unwrapped_read(v)) is not v:       # §17.1881 `str(raw.get("k")).upper()`
+                node = node_of(inner)
             if node is not None:
                 names[n.targets[0].id] = node
+        elif isinstance(n, ast.Compare) and (vals := _gate_values(n, parents)):
+            # §17.1881 — the values a key is gated on: `if raw.get("type") not in ("P", "S"): return None`
+            left = _unwrapped_read(n.left)
+            lnode = names.get(left.id) if isinstance(left, ast.Name) else node_of(left) if isinstance(left, (ast.Call, ast.Subscript)) else None
+            if vals and lnode is not None and not lnode.get("values"):
+                lnode["values"] = vals
         elif isinstance(n, (ast.For, ast.AsyncFor)) and (b := node_of(n.iter)) is not None:
             b["as"] = b["as"] or "list"
             if isinstance(n.target, ast.Name):                                  # §17.1880 each item, read on
@@ -1059,6 +1202,12 @@ def _call_mismatches_bare(call: ast.Call, name: str, shape: dict, coroutine_misu
     keys = shape.get("keys") or {}
     for param, val in given:
         lit = consts[val.id] if isinstance(val, ast.Name) and consts and val.id in consts else val
+        # §17.1881 — a list handed for a parameter the function iterates: each item's keys (`signals=[{"signal_id": 1,
+        # …}]` into `propose_trades`, whose loop writes `signal_id` to `proposal.signal_id`, a foreign key)
+        if (param in keys and isinstance(lit, ast.List) and lit.elts and isinstance(lit.elts[0], ast.Dict)
+                and (item := keys[param].get("[]", {}).get("sub"))):
+            out += _dict_mismatches(label, f"`{param}`[0]", lit.elts[0], item, consts, fks, rules)
+            continue
         if param in keys and isinstance(lit, ast.Dict):
             out += _dict_mismatches(label, f"`{param}`", lit, keys[param], consts, fks, rules)
             # §17.1879 — a key that would steer the function, which it never reads. Live (5b4880c0 T5, 2026-10-31,
