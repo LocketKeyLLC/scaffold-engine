@@ -1527,6 +1527,32 @@ _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool"
 _DICT_OK = frozenset({"get", "keys", "items", "values", "pop", "setdefault", "update", "copy"})
 
 
+def _dict_literal_misuse(lit: ast.Dict, keys: dict, where: str) -> tuple[str, str] | None:
+    """§17.1876/1879 — a literal dict against the keys the module reads from it, level by level: none of them
+    there; a list (a str, a number) under a key the module reads as a dict; the same one level down. Live (5b4880c0
+    T5, 2026-10-31): `json()` -> `{"filings": [...]}` where `_find_13f_hr_rows` reads `.get("filings", {}).get("recent")`
+    -- "'list' object has no attribute 'get'" in the sandbox, two tests an attempt, three attempts."""
+    from app.modules.engine_source import _literal_kind
+    given = {k.value: v for k, v in zip(lit.keys, lit.values, strict=False)
+             if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    if len(given) != len(lit.keys) or not given or not keys:
+        return None
+    reads = " / ".join(f"`{k}`" for k in sorted(keys))
+    if not set(given) & set(keys):
+        return (f"a dict{where} with keys {', '.join(f'`{k}`' for k in given)}",
+                f", which the module reads for {reads} -- none of them is there")
+    for k in sorted(set(given) & set(keys)):
+        sub, v = keys[k], given[k]
+        kind = _literal_kind(v)
+        if (sub.get("as") == "dict" or sub.get("keys")) and kind in ("list", "str", "int", "float", "bool", "None", "tuple"):
+            return (f"a dict{where} whose `{k}` is {_CANNOT.get(kind, kind)}",
+                    f", which the module reads as a dict (`.get(…)` / `[\"key\"]`"
+                    f"{(' for ' + ' / '.join(f'`{x}`' for x in sorted(sub['keys']))) if sub.get('keys') else ''})")
+        if isinstance(v, ast.Dict) and sub.get("keys") and (deeper := _dict_literal_misuse(v, sub["keys"], f'{where}["{k}"]')):
+            return deeper
+    return None
+
+
 def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "") -> str | None:
     """The first thing the module does with the fake that the fake cannot do, as "a fake whose `get()` returns a
     fake whose `json()` returns a list (line 290), which the module reads as a dict"; None when every use fits (or
@@ -1578,10 +1604,8 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         if uses["as"] == "dict" and val.kind in ("list", "tuple", "str", "int", "float", "bool", "set", "None"):
             return f"{done}{_CANNOT[val.kind]}{at}, which the module reads as a dict (`.get(…)` / `[\"key\"]`)"
         if val.kind == "dict" and uses.get("keys") and isinstance(val.node, ast.Dict) and val.node.keys:  # §17.1876
-            lit = [k.value for k in val.node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
-            if len(lit) == len(val.node.keys) and not set(lit) & set(uses["keys"]):
-                return (f"{done}a dict with keys {', '.join(f'`{k}`' for k in lit)}{at}, which the module reads for "
-                        f"{' / '.join(f'`{k}`' for k in sorted(uses['keys']))} -- none of them is there")
+            if (bad := _dict_literal_misuse(val.node, uses["keys"], "")) is not None:
+                return f"{done}{bad[0]}{at}{bad[1]}"
         return None
     if not val.mock:
         return None
@@ -1606,7 +1630,27 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module writes `.{a}` to a database column, and a "
                     f"mock is not a value -- set `fake.{a} = \"…\"` on the object the call returns "
                     f"(`AsyncMock(return_value=SimpleNamespace({a}=\"…\"))`)")
+        if got.mock and got.kind is None and a not in uses["calls"] and (given := _set_on(val, fakes)) and a not in given:
+            # §17.1879 — the test set fields on this fake, and not the one the module reads. Live (5b4880c0 T5,
+            # 2026-10-31): `MagicMock(content=content)` where the FINRA downloader returns `response.text` --
+            # `io.StringIO(<MagicMock>)`, "initial_value must be str or None", two tests an attempt, three attempts
+            return (f"{done}a fake with {', '.join(f'`{x}`' for x in sorted(given))} set{at}, where the module reads "
+                    f"`.{a}` -- set `fake.{a} = …` too (the index shows what it reads)")
     return None
+
+
+def _set_on(val: _Val, fakes: _Fakes) -> set[str]:
+    """§17.1879 — the attribute names a test set on this fake: `MagicMock(content=…)` keywords and `fake.x = …` chains
+    under the name and path it came through; empty when nothing was set (a bare mock is read as before)."""
+    out: set[str] = set()
+    if isinstance(val.node, ast.Call):
+        out |= {str(k.arg) for k in val.node.keywords if k.arg and k.arg not in ("return_value", "side_effect", "spec",
+                                                                                   "spec_set", "name", "wraps")}
+    if val.root:
+        prefix = (val.root, *val.path)
+        out |= {k[len(prefix)] for k in fakes.chains if len(k) > len(prefix) and k[:len(prefix)] == prefix
+                and k[len(prefix)] not in ("return_value", "side_effect", "__aenter__", "__aexit__")}
+    return out
 
 
 def _result_uses(code: str, matches, local_of=None) -> dict | None:
