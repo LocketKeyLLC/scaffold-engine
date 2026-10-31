@@ -1593,6 +1593,19 @@ def _class_shape(c: ast.ClassDef, consts: dict[str, list[str]] | None = None) ->
     return {"init": init, "methods": methods, "fields": fields, "props": props, "dataclass": is_dc}
 
 
+def _literal_bindings_before(assigns: list[ast.Assign], line: int) -> dict[str, ast.AST]:
+    """§17.1882 — name -> the literal (or `date(…)`/`Decimal(…)` call) last bound to it above `line`."""
+    out: dict[str, ast.AST] = {}
+    for n in assigns:
+        if n.lineno >= line or len(n.targets) != 1 or not isinstance(n.targets[0], ast.Name):
+            continue
+        if isinstance(n.value, (ast.Constant, ast.Dict, ast.List, ast.Tuple, ast.JoinedStr, ast.Call)):
+            out[n.targets[0].id] = n.value
+        else:
+            out.pop(n.targets[0].id, None)
+    return out
+
+
 def _literal_bindings(nodes) -> dict[str, ast.AST]:
     """§17.1866 — each name bound exactly once, to a literal (or a `date(…)`/`Decimal(…)` call), among `nodes`."""
     seen: dict[str, int] = {}
@@ -1666,12 +1679,12 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         # §17.1866 — the literals a call's arguments name: the module's, and the enclosing function's own
         from app.modules.engine_contracts import _own_nodes
         mod_consts = _literal_bindings(tree.body)
-        local_consts: dict[int, dict[str, ast.AST]] = {}
+        local_assigns: dict[int, list[ast.Assign]] = {}
         owner: dict[int, int] = {}
         for fn in ast.walk(tree):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 own = list(_own_nodes(fn))
-                local_consts[id(fn)] = _literal_bindings(own)
+                local_assigns[id(fn)] = sorted((x for x in own if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
                 owner.update({id(x): id(fn) for x in own if isinstance(x, ast.Call)})
         # §17.1874 — a call the test expects to raise is meant to fail before any write: the row a parent key points
         # at is not required of it. Live (5b4880c0 T5 a2/a3, 2026-10-30): every finding left after the redraws was
@@ -1682,7 +1695,9 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
-            consts = {**mod_consts, **local_consts.get(owner.get(id(n), 0), {})}
+            # §17.1882 — the LAST literal bound to a name above the call, not only a name bound once: live (5b4880c0
+            # T5 a4, 2026-10-31) `envelope = {"T": …}` … `envelope = {"T": "subscription"}` -- two calls, neither read
+            consts = {**mod_consts, **_literal_bindings_before(local_assigns.get(owner.get(id(n), 0), []), n.lineno)}
             in_raise = any(a <= n.lineno <= b for a, b in raises)
             target = None
             if isinstance(n.func, ast.Name) and n.func.id in imported:
