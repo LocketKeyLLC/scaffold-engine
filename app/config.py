@@ -338,7 +338,7 @@ class Settings(BaseSettings):
     # other modules written in, before it can pass. Unreachable, off, or holding another engine = a logged skip.
     engine_test_check_enabled: bool = True
     engine_test_url: str = "http://scaffold-enginetest:8020"
-    engine_test_timeout_s: float = Field(default=180.0, ge=10.0, le=600.0)
+    engine_test_timeout_s: float = Field(default=480.0, ge=10.0, le=600.0)
 
     searxng_url: str = "http://searxng:8080"
     # §17.1438 — Ollama web search (ollama.com/settings/keys). Supplements a THIN SearXNG answer; empty = off.

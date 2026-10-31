@@ -398,7 +398,7 @@ _USE_HOPS = 3
 
 
 def _new_use() -> dict:
-    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": set()}
+    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": set(), "bound": set()}
 
 
 def _read_keys_text(u: dict) -> str:
@@ -423,6 +423,7 @@ def _merge_uses(dst: dict, src: dict) -> None:
         _merge_uses(dst["called"]["then"], src["called"]["then"])
     dst["as"] = dst["as"] or src["as"]
     dst["keys"] = (dst.get("keys") or set()) | (src.get("keys") or set())                      # §17.1876
+    dst["bound"] = (dst.get("bound") or set()) | (src.get("bound") or set())                   # §17.1878
 
 
 def _uses_empty(u: dict) -> bool:
@@ -533,6 +534,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
     hops: list[tuple[ast.AST, dict | None, list[tuple[str, dict]]]] = []
     returns: list[tuple[dict, dict]] = []
     consumed: set[int] = set()                           # §17.1871 -- an expression read through its statement once
+    attr_alias: dict[str, tuple[dict, str]] = {}         # §17.1878 `broker_id = order.id` -> ("order" node, "id")
+    dict_names: dict[str, ast.Dict] = {}                 # `params = {…}` handed to `db.execute(…)`
     for n in _own_statements(fn):
         if id(n) in skip:
             continue
@@ -540,6 +543,11 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             # read once: visited again as a bare expression after `raw = raw.decode()` rebinds `raw` to its own
             # result, the call would hang a second `decode()` under the first (live: `raw{decode()->{decode()}}`)
             consumed.update(id(x) for x in (n.value, getattr(n.value, "value", None)) if x is not None)
+            v = n.value.value if isinstance(n.value, ast.Await) else n.value
+            if isinstance(v, ast.Attribute) and (ab := node_of(v.value)) is not None:
+                attr_alias[n.targets[0].id] = (ab, v.attr)
+            elif isinstance(v, ast.Dict):
+                dict_names[n.targets[0].id] = v
             node = node_of(n.value)
             if node is not None:
                 names[n.targets[0].id] = node
@@ -571,13 +579,36 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             handed = [(their, names[v.id]) for their, v in _handed(n, callee) if isinstance(v, ast.Name) and v.id in names]
             if handed:
                 hops.append((callee, res, handed))
+    # §17.1878 — what the function binds into its SQL: `db.execute(text(…), {"broker_order_id": order.id})`, or
+    # through a name (`bid = order.id`) or a dict name (`params = {…}`): that attribute must be a real value. Live
+    # (5b4880c0 T5, 2026-10-30): `submit_order = AsyncMock()` with no return value, `order.id` an AsyncMock bound to
+    # a str column -- twelve sandbox failures over two attempts, every one past the gate
+    for c in (x for x in _own_statements(fn) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+              and x.func.attr == "execute"):
+        for arg in list(c.args) + [k.value for k in c.keywords]:
+            d = dict_names.get(arg.id) if isinstance(arg, ast.Name) else arg if isinstance(arg, ast.Dict) else None
+            for v in (d.values if d is not None else []):
+                if isinstance(v, ast.Attribute) and (ab := node_of(v.value)) is not None:
+                    ab["bound"].add(v.attr)
+                elif isinstance(v, ast.Name) and v.id in attr_alias:
+                    attr_alias[v.id][0]["bound"].add(attr_alias[v.id][1])
     # the hops run once the walk is done, so what this function does with each call's result (`data.get(…)` after
-    # `data = await _fetch_json(client, …)`) is known when the callee's `return response.json()` takes it
-    for callee, res, handed in hops:
-        for their, node in handed:
-            _merge_uses(node, _uses(callee, their, local, res, _depth + 1, _seen | {fn.name}))    # type: ignore[attr-defined]
+    # `data = await _fetch_json(client, …)`) is known when the callee's `return response.json()` takes it.
+    # §17.1878 — and twice when a hop's result is handed to a later hop: `submissions = await _fetch_submissions(…)`
+    # then `_find_13f_hr_rows(submissions)` -- the first hop's `return response.json()` took an empty `submissions`
+    # and the dict read (`.get("filings")`) never reached `json()`. Live (5b4880c0 T5 a3, 2026-10-30): a fake
+    # `json()` returning a list passed the gate; "'list' object has no attribute 'get'" in the sandbox, twice.
+    # -- and the returns FIRST: `return response.json()` fills the `json()` node with what the caller does with the
+    # result, and only then does the hop into `_rate_limited_request` copy `response` (json() included) under `get()`;
+    # the other way round the copy was taken before the fill (live: `client{get()->{json()}}`, no dict)
     for node, res in returns:
         _merge_uses(node, res)
+    results = {id(res) for _, res, _ in hops if res is not None}
+    rounds = 2 if any(id(node) in results for _, _, handed in hops for _, node in handed) else 1
+    for _ in range(rounds):
+        for callee, res, handed in hops:
+            for their, node in handed:
+                _merge_uses(node, _uses(callee, their, local, res, _depth + 1, _seen | {fn.name}))    # type: ignore[attr-defined]
     if result is None:
         if memo is None:
             memo = fn._es_uses = {}                                           # type: ignore[attr-defined]
