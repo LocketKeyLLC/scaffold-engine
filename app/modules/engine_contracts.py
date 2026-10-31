@@ -1544,19 +1544,40 @@ def _dict_literal_misuse(lit: ast.Dict, keys: dict, where: str) -> tuple[str, st
              if isinstance(k, ast.Constant) and isinstance(k.value, str)}
     if len(given) != len(lit.keys) or not given or not keys:
         return None
+    # §17.1881 — `data.get("results") or data.get("data")`: what is read under the first is read under the others
+    keys = dict(keys)
+    for k, node in list(keys.items()):
+        for alt in node.get("same_as") or []:
+            if alt in keys and not (keys[alt].get("as") or keys[alt].get("keys")):
+                keys[alt] = node
     reads = " / ".join(f"`{k}`" for k in sorted(keys))
     if not set(given) & set(keys):
         return (f"a dict{where} with keys {', '.join(f'`{k}`' for k in given)}",
                 f", which the module reads for {reads} -- none of them is there")
+    for k in sorted(set(keys) - set(given)):                                   # §17.1881 a compared key, missing
+        if keys[k].get("values") and not keys[k].get("optional") and keys[k].get("alt") not in given:
+            return (f"a dict{where} without `{k}`",
+                    f", which the module compares with {' / '.join(f'`{x}`' for x in keys[k]['values'][:4])} -- it takes the other way without it")
     for k in sorted(set(given) & set(keys)):
         sub, v = keys[k], given[k]
         kind = _literal_kind(v)
+        if (sub.get("values") and isinstance(v, ast.Constant) and isinstance(v.value, str)
+                and v.value not in sub["values"] and v.value.upper() not in sub["values"]
+                and v.value.lower() not in sub["values"]):                           # §17.1881
+            return (f"a dict{where} whose `{k}` is {v.value!r}",
+                    f", and the module takes only {' / '.join(f'`{x}`' for x in sub['values'][:4])} there")
         if (sub.get("as") == "dict" or sub.get("keys")) and kind in ("list", "str", "int", "float", "bool", "None", "tuple"):
             return (f"a dict{where} whose `{k}` is {_CANNOT.get(kind, kind)}",
                     f", which the module reads as a dict (`.get(…)` / `[\"key\"]`"
                     f"{(' for ' + ' / '.join(f'`{x}`' for x in sorted(sub['keys']))) if sub.get('keys') else ''})")
         if isinstance(v, ast.Dict) and sub.get("keys") and (deeper := _dict_literal_misuse(v, sub["keys"], f'{where}["{k}"]')):
             return deeper
+        if (isinstance(v, ast.Dict) and sub.get("as") == "list" and (it := sub.get("item")) is not None
+                and (it.get("as") == "dict" or it.get("keys"))):                  # §17.1881 a dict where a list is read
+            return (f"a dict{where} whose `{k}` is a dict",
+                    f", which the module iterates as a list and reads each item as a dict"
+                    f"{(' (' + ' / '.join(f'`{x}`' for x in sorted(it['keys'])) + ')') if it.get('keys') else ''}"
+                    " -- iterating a dict yields its keys, strings")
         if isinstance(v, ast.List) and sub.get("item") is not None \
                 and (deeper := _list_literal_misuse(v, sub["item"], f'{where}["{k}"]')):          # §17.1880
             return deeper
@@ -1668,6 +1689,9 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module writes `.{a}` to a database column, and a "
                     f"mock is not a value -- set `fake.{a} = \"…\"` on the object the call returns "
                     f"(`AsyncMock(return_value=SimpleNamespace({a}=\"…\"))`)")
+        if a in (uses.get("tested") or ()) and got.mock and got.kind is None:        # §17.1881 read for its truth
+            return (f"{done}a fake whose `.{a}` is a mock{at}: the module tests it (`if … .{a}`), and a mock attribute "
+                    f"is always truthy -- set `fake.{a} = False` (or what the real one would say)")
         if got.mock and got.kind is None and a not in uses["calls"] and (given := _set_on(val, fakes)) and a not in given:
             # §17.1879 — the test set fields on this fake, and not the one the module reads. Live (5b4880c0 T5,
             # 2026-10-31): `MagicMock(content=content)` where the FINRA downloader returns `response.text` --
@@ -2159,7 +2183,57 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                         and not _asserts_on(fn, val.root)):
                     continue
                 say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
+        # §17.1881 — an attribute set on an instance of a job class (`client._client = AsyncMock()`): what the class's
+        # methods do with `self.<attr>` is what the fake must do. Live (5b4880c0 T5 a1, 2026-10-31): three Alpaca
+        # tests, the real `_ensure_client` reading the fake's `is_closed` as a flag, a real client opened, the network
+        for fn in fns:
+            fk = fakes_for(fn)
+            for n in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Assign) and len(x.targets) == 1
+                             and isinstance(x.targets[0], ast.Attribute) and isinstance(x.targets[0].value, ast.Name)),
+                            key=lambda x: x.lineno):
+                inst, attr = n.targets[0].value.id, n.targets[0].attr
+                if any(a <= n.lineno <= b for a, b in raises):
+                    continue
+                made = fk.last(inst, n.lineno)
+                if not isinstance(made, ast.Call):
+                    continue
+                cname = _call_name(made)
+                mod = next((m for m, c in reach.items() if cname in _class_names(c)), None)
+                if not mod:
+                    continue
+                uses = _instance_uses(reach[mod], cname, attr)
+                if uses is None or _uses_empty_(uses):
+                    continue
+                val = _resolve(n.value, fk, n.lineno)
+                if val.root is None:
+                    val.root, val.path = inst, (attr,)
+                if (bad := _check_uses(val, uses, fk, 10 ** 9)):
+                    say(n.lineno, f"sets `{attr}` on a `{cname}` instance to", bad, f"`{attr}{_uses_text(uses)}`")
     return found
+
+
+def _class_names(code: str) -> set[str]:
+    try:
+        return {n.name for n in ast.parse(code).body if isinstance(n, ast.ClassDef)}
+    except SyntaxError:
+        return set()
+
+
+def _instance_uses(code: str, cname: str, attr: str) -> dict | None:
+    """§17.1881 — what every method of class `cname` does with `self.<attr>`, merged."""
+    from app.modules.engine_source import _merge_uses, _new_use, _uses
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    cls = next((c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cname), None)
+    if cls is None:
+        return None
+    methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    out = _new_use()
+    for m in methods.values():
+        _merge_uses(out, _uses(m, f"self.{attr}", methods))
+    return out
 
 
 # ── §17.1870 a test reads what a returned class has ───────────────────────────────────────────────────────────
@@ -2263,10 +2337,19 @@ _BUILTIN_KINDS = {"dict": "dict", "list": "list", "set": "set", "tuple": "tuple"
                   "str": "str", "bool": "bool"}
 
 
-def _result_misuse(n: ast.Name, par: ast.AST | None, kinds: frozenset[str]) -> tuple[str, str] | None:
+def _result_misuse(n: ast.Name, par: ast.AST | None, kinds: frozenset[str], keys: list[str] | None = None) -> tuple[str, str] | None:
     """(what the test does with the result, what the function returns instead) for a use its annotation refutes."""
     from app.modules.engine_source import _kinds_text as _kt
     real = kinds - {"None"}
+    if keys and "dict" in kinds and isinstance(par, ast.Compare) and len(par.ops) == 1 \
+            and isinstance(par.ops[0], (ast.Eq, ast.Is)):                                # §17.1881 (`!= {}` is fine)
+        other = par.comparators[0] if par.left is n else par.left
+        text0 = " ".join(ast.unparse(par).split())
+        if isinstance(other, ast.Dict) and not other.keys:
+            return (f"compares `{n.id}` (`{text0}`)", f"a dict with keys {', '.join(f'`{k}`' for k in keys)} -- never "
+                    "an empty one: assert on those keys")
+        if "None" not in kinds and isinstance(other, ast.Constant) and other.value is None:
+            return (f"compares `{n.id}` (`{text0}`)", f"a dict with keys {', '.join(f'`{k}`' for k in keys)}, never None")
 
     def _kinds_text(k: frozenset[str]) -> str:                   # with its article: "an `int`", "a `list`"
         t = _kt(k)
@@ -2320,7 +2403,7 @@ def wrong_result_uses(files: dict[str, str], modules: dict[str, str]) -> list[st
         by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
         for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
             # each name's bindings in source order: a use is governed by the latest one above it (None: not a result)
-            binds: dict[str, list[tuple[int, tuple[str, str, frozenset[str]] | None]]] = {}
+            binds: dict[str, list[tuple[int, tuple[str, str, frozenset[str], list[str]] | None]]] = {}
             for n in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Assign) and len(x.targets) == 1
                              and isinstance(x.targets[0], ast.Name)), key=lambda x: x.lineno):
                 info = None
@@ -2330,7 +2413,8 @@ def wrong_result_uses(files: dict[str, str], modules: dict[str, str]) -> list[st
                     target = d[0].get(_call_name(call)) if d else None
                     kinds = _kinds(getattr(target, "returns", None)) if target is not None else None
                     if kinds:
-                        info = (mod, _call_name(call), kinds)
+                        rk = returned_keys(reach[mod], _call_name(call)) if "dict" in kinds else []
+                        info = (mod, _call_name(call), kinds, rk)
                 binds.setdefault(n.targets[0].id, []).append((n.lineno, info))
             if not any(i for b in binds.values() for _, i in b):
                 continue
@@ -2340,8 +2424,8 @@ def wrong_result_uses(files: dict[str, str], modules: dict[str, str]) -> list[st
                 prior = [i for ln, i in binds[n.id] if ln < n.lineno]
                 if not prior or prior[-1] is None:
                     continue
-                mod, f, kinds = prior[-1]
-                bad = _result_misuse(n, parents.get(id(n)), kinds)
+                mod, f, kinds, rk = prior[-1]
+                bad = _result_misuse(n, parents.get(id(n)), kinds, rk)
                 if not bad:
                     continue
                 msg = f"`{path}:{n.lineno}` {bad[0]}, what `{f}(…)` (`{mod}`) returns -- and `{f}` returns {bad[1]}"

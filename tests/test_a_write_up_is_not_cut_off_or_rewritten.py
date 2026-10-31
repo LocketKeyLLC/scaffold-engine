@@ -41,5 +41,5 @@ def test_every_node_generation_call_rescues():
 def test_the_optimizer_leaves_a_step_given_the_inventory_alone():
     src = pathlib.Path("app/modules/execution_agent.py").read_text()
     # §17.1567 joined the inventory skip with the format-step skip on one condition; the inventory clause stays
-    assert ("if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text\n"
-            "                and not formats_what_came_before(") in src
+    assert ("if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text and not _engine_code\n"
+            "                and not formats_what_came_before(") in src       # §17.1881 -- nor for engine code

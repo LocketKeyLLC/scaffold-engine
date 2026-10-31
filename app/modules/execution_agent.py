@@ -2294,7 +2294,13 @@ async def execute_next_node(
         # attempts in a row were refused for the same deletes. It is put back verbatim in front of the rewrite.
         _fb = _format_reviewer_feedback(node_snapshot)
         _kept = _fb if _fb and _task_prompt.startswith(_fb) else ""
-        if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text
+        # §17.1881 — nor for code written for the engine itself: the gates and the index are keyed to the task's own
+        # words. Live (5b4880c0 T5, 2026-10-30/31): the rewrite restated the step's "mock `async_session`" where the
+        # sandbox provides a real one and the gate refuses the fake, and twice returned nothing at all (its 4096
+        # tokens spent on reasoning) -- two model calls a run for a prompt the engine then threw away
+        from app.modules import engine_source as _es0
+        _engine_code = (tool or "").lower() == "codegen" and _es0.targets_the_engine(brief)
+        if (not skip_optimize and settings.execution_optimize_enabled and not _inventory_text and not _engine_code
                 and not formats_what_came_before(dict(node) if hasattr(node, "keys") else {})):
             try:
                 opt_result = await optimize_prompt(
