@@ -1354,6 +1354,14 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e) or ("tuple" if isinstance(e, ast.Tuple) else "set" if isinstance(e, ast.Set) else None)
         return _Val(kind=kind, node=e, line=getattr(e, "lineno", 0))
+    if isinstance(e, ast.IfExp):
+        # §17.1883 `json_data if json_data is not None else {}`: the branch that carries the value given. Live
+        # (5b4880c0 T5 a1/a4, 2026-10-31): every response helper set `.json.return_value` this way, and the
+        # nested-key check never saw the dict -- "'list' object has no attribute 'get'", eight tests over two attempts
+        first = _resolve(e.body, fakes, before, _hops + 1)
+        if first.kind is not None or first.mock is not None:
+            return first
+        return _resolve(e.orelse, fakes, before, _hops + 1)
     if isinstance(e, ast.Subscript) and isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int):
         base = _resolve(e.value, fakes, before, _hops + 1)                     # §17.1882 one element of a tuple
         i = e.slice.value
@@ -1386,7 +1394,7 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         if isinstance(e.func, ast.Name) and isinstance(fakes.last(e.func.id, before),
                                                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             made = _resolve(e.func, fakes, before, _hops + 1)                 # §17.1870 `FakeClient()` / `make()`
-            return _step(made, ("call", False), fakes, before)
+            return _step(made, ("call", False), fakes, before, call=e)
         from app.modules.engine_source import _literal_kind
         kind = _literal_kind(e)
         return _Val(kind=kind, node=e, line=e.lineno) if kind else _Val()
@@ -1437,7 +1445,8 @@ def _class_attr(cls: ast.ClassDef, name: str) -> ast.AST | None:
 
 
 def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
-          sig: tuple[int, frozenset[str]] | None = None) -> _Val:
+          sig: tuple[int, frozenset[str]] | None = None,
+          call: ast.Call | None = None) -> _Val:
     """What the module gets after one use of a fake: `("attr", "get")`, `("call", awaited)`. §17.1870 — the mock
     model is the measured one (`python -c` in the dev image): every attribute of an `AsyncMock` is an `AsyncMock`
     and of a `MagicMock` a `MagicMock`; awaiting an `AsyncMock` call gives its `return_value` (an `AsyncMock` by
@@ -1477,12 +1486,24 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             return _Val(kind="signature", node=val.node, line=val.line, rv=ast.Constant(value=bad))
         if is_async and not arg:
             return _Val(kind="coroutine", node=val.node, line=val.line)
-        if not is_async and arg:
-            return _Val()                                    # awaiting what a plain def returns: not followed
+        if not is_async and arg:                              # §17.1883 `await getter(url)` on a plain `def`
+            return _Val(kind="def-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
         if val.rv is None:
             return _Val(kind="None", node=val.node, line=val.line)
         inner = _Fakes([x for x in ast.walk(val.node) if isinstance(x, ast.stmt)], None, fakes.is_async) \
             if isinstance(val.node, (ast.FunctionDef, ast.AsyncFunctionDef)) else _Fakes([], None, fakes.is_async)
+        if call is not None and isinstance(val.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # §17.1883 — the helper's parameters ARE the call's arguments: `_response({"filings": …})` binds `json_data`
+            # (live, 5b4880c0 T5 a1/a4, 2026-10-31: every response helper's `json_data if json_data is not None else {}`
+            # read as `{}`, the nested-key check blind to eight fakes)
+            fa = val.node.args
+            pos = [x.arg for x in fa.posonlyargs + fa.args if x.arg not in ("self", "cls")]
+            for i, a in enumerate(call.args):
+                if i < len(pos) and not isinstance(a, ast.Starred):
+                    inner.bound.setdefault(pos[i], []).append((0, a))
+            for k in call.keywords:
+                if k.arg:
+                    inner.bound.setdefault(k.arg, []).append((0, k.value))
         # §17.1873 — a name the def binds itself is its own: the caller's binding of the same name is not merged in.
         # Live (5b4880c0 T5 a1/a2): `def _fake_async_client(): client = MagicMock(); …; return client` and the test's
         # `client = _fake_async_client(…)` -- the caller's later line won `last("client")`, resolved to the call, into
@@ -1639,6 +1660,9 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
                 "`fake.__aenter__ = AsyncMock(return_value=fake)` and `fake.__aexit__ = AsyncMock(return_value=False)`")
     if val.kind == "MagicMock-awaited":
         return f"{done}a `MagicMock`{at}, which the module awaits -- a MagicMock cannot be awaited: make it an `AsyncMock`"
+    if val.kind == "def-awaited":                                              # §17.1883
+        return (f"{done}a plain `def`{at}, whose result the module awaits -- make it `async def` (or an "
+                "`AsyncMock(return_value=…)`)")
     if val.kind in ("coroutine", "coroutine-mock"):                          # §17.1869/1870
         if _uses_empty_(uses):
             return None                                      # called and dropped: a warning at most, never a failure
@@ -1692,6 +1716,9 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
     if not val.mock:
         return None
     if uses["called"]:
+        if val.mock == "def" and uses["called"]["await"]:                     # §17.1883 named as what it is
+            return (f"{done}a plain `def`{at}, whose result the module awaits -- make it `async def` (or an "
+                    "`AsyncMock(return_value=…)`)")
         nxt = _step(val, ("call", uses["called"]["await"]), fakes, before)
         return _check_uses(nxt, uses["called"]["then"], fakes, before, done + "a fake whose call returns ")
     for m, info in sorted(uses["calls"].items(), key=lambda mi: mi[1].get("line", 0)):
@@ -1699,6 +1726,9 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         if got.kind and (got.kind.startswith("missing:") or got.kind == "instance-called"):
             return _check_uses(got, uses, fakes, before, done)
         nxt = _step(got, ("call", info["await"]), fakes, before, sig=info.get("sig"))
+        if nxt.kind == "def-awaited":                                             # §17.1883 a sync method awaited
+            return (f"{done}a fake whose `{m}` is a plain `def`{f' (line {got.line})' if got.line else ''}, whose "
+                    "result the module awaits -- make it `async def` (or an `AsyncMock(return_value=…)`)")
         if nxt.kind == "signature":
             return _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}` is ")
         bad = _check_uses(nxt, info["then"], fakes, before, done + f"a fake whose `{m}()` returns ")
@@ -2146,6 +2176,22 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                 # attempt that reached the sandbox): `fake_db = MagicMock(); fake_db.execute = AsyncMock()` handed as
                 # `db=`, then "'MagicMock' object can't be awaited" at the commit, or rows that were never written.
                 for param, arg in given:
+                    if param in _SESSION_PARAMS and isinstance(arg, ast.Constant) and arg.value is None:
+                        # §17.1883 `db=None` into a function that uses `db` and never opens its own session (live,
+                        # 5b4880c0 T5 a1, 2026-10-31: "'NoneType' object has no attribute 'execute'", two tests)
+                        from app.modules.engine_source import _uses
+                        d0 = _defs(reach[mod])
+                        t0 = d0[0].get(key[1]) if d0 else None
+                        opens = t0 is not None and any(                      # `if db is None: async with async_session() …`
+                            isinstance(x, ast.Call) and (getattr(x.func, "id", None) or getattr(x.func, "attr", None)) == "async_session"
+                            for x in _own_nodes(t0))
+                        if t0 is not None and not opens and _used_when_none(t0, param):
+                            u0 = _uses(t0, param, _local_functions(ast.parse(reach[mod])))
+                            if not _uses_empty_(u0):
+                                say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", "None, and the function uses it "
+                                    f"(`{param}{_uses_text(u0)}`) -- `'NoneType' object has no attribute 'execute'`",
+                                    "`async with async_session() as db:` and pass that `db`")
+                                continue
                     if param in _SESSION_PARAMS and (v := _resolve(arg, fk, call.lineno)).mock in ("MagicMock", "AsyncMock"):
                         say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", f"a `{v.mock}`{f' (line {v.line})' if v.line else ''}: the sandbox's "
                             "`async_session` is a real scratch database with this job's tables, and a fake session answers "
@@ -2254,6 +2300,39 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                 if (bad := _check_uses(val, uses, fk, 10 ** 9)):
                     say(n.lineno, f"sets `{attr}` on a `{cname}` instance to", bad, f"`{attr}{_uses_text(uses)}`")
     return found
+
+
+def _used_when_none(fn: ast.AST, param: str) -> bool:
+    """§17.1883 — whether `fn` reads or calls on `param` outside any `if param is not None:` / `if param:` guard (or the
+    `else` of `if param is None:`): the uses that run when the caller hands None."""
+    parents: dict[int, ast.AST] = {}
+    for p_ in ast.walk(fn):
+        for c in ast.iter_child_nodes(p_):
+            parents[id(c)] = p_
+
+    def guarded(n: ast.AST) -> bool:
+        cur = n
+        while (par := parents.get(id(cur))) is not None and par is not fn:
+            if isinstance(par, ast.If):
+                t = par.test
+                given_branch = None                       # the branch that runs when the param is NOT None
+                if isinstance(t, ast.Name) and t.id == param:
+                    given_branch = par.body
+                elif (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.left, ast.Name) and t.left.id == param
+                      and isinstance(t.comparators[0], ast.Constant) and t.comparators[0].value is None):
+                    given_branch = par.body if isinstance(t.ops[0], ast.IsNot) else par.orelse
+                elif (isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) and isinstance(t.operand, ast.Name)
+                      and t.operand.id == param):
+                    given_branch = par.orelse
+                if given_branch is not None and any(cur is b or any(cur is x for x in ast.walk(b)) for b in given_branch):
+                    return True
+            cur = par
+        return False
+
+    # a `db` handed on to another function as it is (`values_for(db, …)`) is that function's to refuse: the engine's
+    # own helpers open a session when given None -- only a direct `db.execute` / `db.commit` here is certain
+    return any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == param and not guarded(n)
+               for n in _own_nodes(fn))
 
 
 def _class_names(code: str) -> set[str]:
@@ -2421,6 +2500,9 @@ def _result_misuse(n: ast.Name, par: ast.AST | None, kinds: frozenset[str], keys
         return (f"asserts `{text}` on `{n.id}`", f"{_kinds_text(kinds)}, never a `{par.args[1].id}`")
     if isinstance(par, ast.Subscript) and par.value is n and real <= _SCALARS:
         return (f"subscripts `{n.id}` (`{text}`)", f"{_kinds_text(kinds)}, which has no items")
+    if (isinstance(par, ast.Subscript) and par.value is n and real <= {"list", "tuple", "set"}
+            and isinstance(par.slice, ast.Constant) and isinstance(par.slice.value, str)):      # §17.1883
+        return (f"reads `{text}` from `{n.id}`", f"{_kinds_text(kinds)}, which has no keys -- index it, or iterate it")
     if isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and par.func.id == "len" and par.args \
             and par.args[0] is n and real <= _SCALARS:
         return (f"measures `{n.id}` (`{text}`)", f"{_kinds_text(kinds)}, which has no length")
