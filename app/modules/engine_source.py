@@ -254,6 +254,22 @@ def _handed(call: ast.Call, callee: ast.AST) -> list[tuple[str, ast.AST]]:
     return out + [(str(k.arg), k.value) for k in call.keywords if k.arg]
 
 
+def _param_to(callee: ast.AST, param: str) -> str | None:
+    """§17.1887 — the column a plain parameter of `callee` is written to: `proposal_id = payload.get("proposal_id")`,
+    then `_record_approval(db, proposal_id=proposal_id, …)` whose INSERT binds `:proposal_id` to `approval.proposal_id`.
+    Live (5b4880c0 T5 a3, 2026-10-31): the payload nested the id under `proposal`, the top-level key the approve path
+    reads absent -- `null value in column "proposal_id" of relation "approval"` in the sandbox, unread by the gate."""
+    parents = {id(c): p for p in ast.walk(callee) for c in ast.iter_child_nodes(p)}
+    for d in ast.walk(callee):
+        if not isinstance(d, ast.Dict):
+            continue
+        for kn, kv in zip(d.keys, d.values, strict=False):
+            if (isinstance(kv, ast.Name) and kv.id == param and isinstance(kn, ast.Constant)
+                    and isinstance(kn.value, str) and (cols := _insert_columns(callee, d, parents)) and kn.value in cols):
+                return cols[kn.value]
+    return None
+
+
 def _merge_keys(dst: dict, src: dict) -> None:
     for k, info in src.items():
         d = dst.setdefault(k, {})
@@ -370,6 +386,20 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
             if cols and isinstance(kname, ast.Constant) and kname.value in cols:
                 pth = paths[n.id]
                 entry(pth[:-1]).setdefault(pth[-1], {}).setdefault("to", cols[kname.value])
+    # §17.1887 — an alias handed to a function of the same module that writes it to a column: `proposal_id =
+    # payload.get("proposal_id")`, then `_record_approval(db, proposal_id=proposal_id, …)` -> `approval.proposal_id`
+    for n in stmts:
+        if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and len(paths.get(n.id, ())) >= 2 and local):
+            continue
+        par = parents.get(id(n))
+        if isinstance(par, ast.keyword):
+            par = parents.get(id(par))
+        if (isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and par.func.id in local
+                and local[par.func.id] is not fn):
+            their = next((p for p, v in _handed(par, local[par.func.id]) if v is n), None)
+            if their and (col := _param_to(local[par.func.id], their)):
+                pth = paths[n.id]
+                entry(pth[:-1]).setdefault(pth[-1], {}).setdefault("to", col)
     for n in stmts:
         # §17.1880 — a name bound to a read, gated: `event = data.get("event")` … `if event not in ("fill", …): return`
         if (isinstance(n, ast.Compare) and isinstance(n.left, ast.Name) and len(paths.get(n.left.id, ())) >= 2
@@ -401,6 +431,8 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
                 ann = next((x.annotation for x in ca.posonlyargs + ca.args + ca.kwonlyargs if x.arg == their), None)
                 if (k := _kinds(ann)):
                     info.setdefault("kinds", k)
+                if (col := _param_to(callee, their)):                         # §17.1887 a scalar written to a column
+                    info.setdefault("to", col)
                 if _depth < _KEY_HOPS and callee.name not in _seen:          # type: ignore[attr-defined]
                     sub = _param_keys(callee, local, _depth + 1, _seen | {fn.name}).get(their)   # type: ignore[attr-defined]
                     if sub:
@@ -808,6 +840,14 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             node = node_of(n.value)
             if node is not None:
                 returns.append((node, result))
+            elif isinstance(n.value, ast.Dict):
+                # §17.1887 — the value returned under a KEY: `return {"order": order, …}` then, in the caller,
+                # `order_obj = send_result["order"]` handed to `_record_fill_from_order(order=…)` -> `order.filled_qty`
+                # (live, 5b4880c0 T5 a3, 2026-10-31: "'<=' not supported between instances of 'MagicMock' and 'int'")
+                for kn, kv in zip(n.value.keys, n.value.values, strict=False):
+                    if (isinstance(kn, ast.Constant) and isinstance(kn.value, str) and (sub := (result.get("keys") or {}).get(kn.value))
+                            and (b := node_of(kv)) is not None):
+                        returns.append((b, sub))
         elif isinstance(n, (ast.Attribute, ast.Call, ast.Subscript)) and id(n) not in consumed:
             node_of(n)
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and local and n.func.id in local
@@ -2417,8 +2457,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += wrong_result_uses(files_of({**me, "output_text": output}), _cur)
     found += undefined_test_names(files_of({**me, "output_text": output}), _cur)
     # §17.1884 — a session call is awaited; a patch lands where the caller looks the name up
-    from app.modules.engine_contracts import import_bound_patches, unawaited_session_calls
+    from app.modules.engine_contracts import awaited_result_calls, import_bound_patches, unawaited_session_calls
     found += unawaited_session_calls(files_of({**me, "output_text": output}))
+    found += awaited_result_calls(files_of({**me, "output_text": output}))        # §17.1887
     found += import_bound_patches(files_of({**me, "output_text": output}), _cur)
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request

@@ -48,13 +48,24 @@ def record(res: EngineTestResult) -> dict:
     return {"verdict": res.verdict, "kind": kind, "ran": list(res.ran), "reason": (res.reason or "")[:500]}
 
 
+def after_reasoning(text: str) -> str:
+    """§17.1887 — the answer after a leaked reasoning draft: a thinking model that closes its chain of thought with a
+    bare `</think>` in the content (no opening tag survived) puts a whole draft file, "We'll output this as the final
+    answer.", then the file again. Live (5b4880c0 T5 a1, 2026-10-31): two blocks headed `# tests/test_paper_twelve_
+    modules.py`; `files_of` read the last, the redraw spliced the FIRST -- no finding ever moved, the attempt spent."""
+    text = text or ""
+    if "</think>" not in text:
+        return text
+    return text.rsplit("</think>", 1)[1].lstrip()
+
+
 def files_of(row: dict) -> dict[str, str]:
     """The files one step writes: each Python block at the path its `# path.py` header names, else (the first
     unnamed block) at the step's own module -- `app/modules/x.py`, or `tests/test_x.py` for a test module."""
     from app.modules.engine_source import step_module
     out: dict[str, str] = {}
     unnamed_used = False
-    for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
+    for lang, code in extract_code_blocks(after_reasoning(str(row.get("output_text") or ""))):
         if lang not in PYTHON_LANGS or not code.strip():
             continue
         first = code.lstrip().splitlines()[0]
