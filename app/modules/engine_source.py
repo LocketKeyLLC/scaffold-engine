@@ -257,7 +257,7 @@ def _handed(call: ast.Call, callee: ast.AST) -> list[tuple[str, ast.AST]]:
 def _merge_keys(dst: dict, src: dict) -> None:
     for k, info in src.items():
         d = dst.setdefault(k, {})
-        for f in ("kinds", "to"):
+        for f in ("kinds", "to", "values"):
             if info.get(f) and not d.get(f):
                 d[f] = info[f]
         if info.get("req"):
@@ -336,6 +336,14 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
                     and n.targets[0].id not in paths and (r := read_of(n.value))):
                 paths[n.targets[0].id] = r[0] + (r[1],)
     for n in stmts:
+        # §17.1880 — a name bound to a read, compared: `event = data.get("event")` … `if event not in ("fill", …)`
+        if (isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn))
+                and isinstance(n.left, ast.Name) and len(paths.get(n.left.id, ())) >= 2):
+            c = n.comparators[0]
+            vals = [c.value] if isinstance(c, ast.Constant) and isinstance(c.value, str) else _str_items(c)
+            if vals:
+                p = paths[n.left.id]
+                entry(p[:-1]).setdefault(p[-1], {}).setdefault("values", vals)
         r = read_of(n)
         if not r:
             continue
@@ -344,6 +352,15 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         if isinstance(n, ast.Subscript):
             info["req"] = True
         par = parents.get(id(n))
+        # §17.1880 — the values a key is compared with: `data.get("event") not in ("fill", "partial_fill")`,
+        # `envelope.get("stream") == "trade_updates"`. Live (5b4880c0 T5, 2026-10-31): fill envelopes with every
+        # other key right and no `event`, `parse_fill_event` returning None, two tests a run
+        if (isinstance(par, ast.Compare) and par.left is n and len(par.ops) == 1
+                and isinstance(par.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn))):
+            c = par.comparators[0]
+            vals = [c.value] if isinstance(c, ast.Constant) and isinstance(c.value, str) else _str_items(c)
+            if vals:
+                info.setdefault("values", vals)
         if isinstance(par, ast.Attribute) and par.attr in _DATE_METHODS | _DATETIME_METHODS | _DECIMAL_METHODS:
             k = "date" if par.attr in _DATE_METHODS else "datetime" if par.attr in _DATETIME_METHODS else "Decimal"
             info.setdefault("kinds", frozenset({k} | _KIND_ALSO.get(k, set())))
@@ -391,6 +408,8 @@ def _keys_text(keys: dict) -> str:
     for k in sorted(keys)[:_MAX_KEYS]:
         info = keys[k]
         t = k + (": " + _kinds_text(info["kinds"]) if info.get("kinds") else "")
+        if info.get("values"):
+            t += ":" + "|".join(info["values"][:4]) + ("|…" if len(info["values"]) > 4 else "")     # §17.1880
         if info.get("sub"):
             t += _keys_text(info["sub"])
         parts.append(t)
@@ -404,12 +423,14 @@ _USE_HOPS = 3
 
 
 def _new_use() -> dict:
-    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set()}
+    return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set(), "item": None}
 
 
 def _read_keys_text(u: dict) -> str:
     """§17.1876 — `{results|data|filings}`: the keys a value read as a dict is read for (`.get("k")`, `["k"]`);
     §17.1879 — nested where a key's value is read on: `{filings{recent}|tickers}`."""
+    if u.get("as") == "list" and (item := u.get("item")) is not None and (item.get("keys") or item.get("as")):
+        return "[" + (("dict" + _read_keys_text(item)) if item.get("as") == "dict" or item.get("keys") else item["as"]) + "]"
     if not (u.get("as") == "dict" and u.get("keys")):
         return ""
     return "{" + "|".join(k + _read_keys_text(sub) for k, sub in sorted(u["keys"].items())) + "}"
@@ -433,6 +454,10 @@ def _merge_uses(dst: dict, src: dict) -> None:
     dst["as"] = dst["as"] or src["as"]
     for k, sub in (src.get("keys") or {}).items():                                            # §17.1876/1879
         _merge_uses(dst.setdefault("keys", {}).setdefault(k, _new_use()), sub)
+    if src.get("item") is not None:                                                             # §17.1880
+        if dst.get("item") is None:
+            dst["item"] = _new_use()
+        _merge_uses(dst["item"], src["item"])
     dst["bound"] = (dst.get("bound") or set()) | (src.get("bound") or set())                   # §17.1878
 
 
@@ -493,12 +518,18 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             return names[f"self.{e.attr}"]
         if isinstance(e, ast.BoolOp):                    # `getter = http_get or _default_http_get`
             return next((b for v in e.values if (b := node_of(v)) is not None), None)
+        if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):          # §17.1880 `house + senate`: one list
+            return next((b for v in (e.left, e.right) if (b := node_of(v)) is not None), None)
         if isinstance(e, ast.Call):
             awaited = isinstance(parents.get(id(e)), ast.Await)
             f = e.func
             if isinstance(f, ast.Attribute):
                 base = node_of(f.value)
                 if base is None:
+                    # §17.1880 `results.extend(records)`: `results` carries the same items from here on
+                    if (f.attr == "extend" and len(e.args) == 1 and isinstance(f.value, ast.Name)
+                            and f.value.id not in names and (src := node_of(e.args[0])) is not None):
+                        names[f.value.id] = src
                     return None
                 if (f.attr in _DICT_READS and 1 <= len(e.args) <= 2 and not e.keywords and not awaited) \
                         or (f.attr in ("keys", "items", "values") and not e.args):     # `await client.get(u)`: a call
@@ -539,6 +570,10 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                                             else "list" if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int) else None)
                 if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str):
                     return base.setdefault("keys", {}).setdefault(e.slice.value, _new_use())   # §17.1876/1879
+                if isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int):      # §17.1880 `rows[0]`
+                    if base.get("item") is None:
+                        base["item"] = _new_use()
+                    return base["item"]
             return None
         return None
 
@@ -564,6 +599,10 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 names[n.targets[0].id] = node
         elif isinstance(n, (ast.For, ast.AsyncFor)) and (b := node_of(n.iter)) is not None:
             b["as"] = b["as"] or "list"
+            if isinstance(n.target, ast.Name):                                  # §17.1880 each item, read on
+                if b.get("item") is None:
+                    b["item"] = _new_use()
+                names[n.target.id] = b["item"]
         elif isinstance(n, (ast.With, ast.AsyncWith)):   # §17.1869 `async with X() as c:` enters what X() returns
             for item in n.items:
                 b = node_of(item.context_expr)
@@ -614,9 +653,9 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
     # the other way round the copy was taken before the fill (live: `client{get()->{json()}}`, no dict)
     for node, res in returns:
         _merge_uses(node, res)
-    results = {id(res) for _, res, _ in hops if res is not None}
-    rounds = 2 if any(id(node) in results for _, _, handed in hops for _, node in handed) else 1
-    for _ in range(rounds):
+    # §17.1880 — any later hop may fill what an earlier hop's return copied (an item node under a key of the
+    # result, not only the result itself): two rounds whenever there is more than one hop
+    for _ in range(2 if len(hops) > 1 else 1):
         for callee, res, handed in hops:
             for their, node in handed:
                 _merge_uses(node, _uses(callee, their, local, res, _depth + 1, _seen | {fn.name}))    # type: ignore[attr-defined]
@@ -793,7 +832,7 @@ def _tuples_used_whole(tree: ast.AST, engine_funcs: dict, engine_mods: dict, ind
 #: `FinraRecord(release_date="2026-10-15")` (`.isoformat`), and handed `"quantity": "1"` where the approval gate
 #: formats a `Decimal` -- `'str' object has no attribute 'strftime'`, `Unknown format code 'f' for object of type
 #: 'str'`; the table knew six kinds and the index showed these parameters bare.
-_KIND_NAMES = {"str": "str", "dict": "dict", "list": "list", "int": "int", "float": "float", "bool": "bool",
+_KIND_NAMES = {"str": "str", "bytes": "bytes", "dict": "dict", "list": "list", "int": "int", "float": "float", "bool": "bool",
                "Dict": "dict", "List": "list", "None": "None",
                "datetime": "datetime", "date": "date", "Decimal": "Decimal"}
 #: what a kind admits besides itself: an int is a float to a type checker, a datetime is a date, an int is a Decimal
@@ -951,6 +990,11 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
                 out.append(f'{label}: {where}["{key}"] is read as a dict (its '
                            f'{", ".join(f"`{k}`" for k in sorted(info["sub"]))}); it was given a `{got}`')
                 continue
+            if (info.get("values") and isinstance(v, ast.Constant) and isinstance(v.value, str)
+                    and v.value not in info["values"]):                                       # §17.1880
+                out.append(f'{label}: {where}["{key}"] is one of {", ".join(f"`{x}`" for x in info["values"])}; '
+                           f'it was given {v.value!r}')
+                continue
             table, _, col = (info.get("to") or "").partition(".")
             parent = (fks or {}).get(table, {}).get(col) if info.get("to") else None
             if want and got and got not in want:
@@ -967,12 +1011,13 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
             continue
         why = _required_column(info["to"], fks, rules) if info.get("to") else ""
         below = _required_below(info.get("sub") or {}, fks, rules)           # §17.1870
-        if info.get("req") or why or below:
+        if info.get("req") or why or below or info.get("values"):
             has = ", ".join(f"`{k}`" for k in given) or "no keys"
             out.append(f'{label}: {where} is read for `{key}`'
                        + (f" (written to `{info['to']}`, which {why})" if why else
                           f" (its `{below[0]}` is written to `{below[1]}`, which {below[2]})" if below else
-                          " (as `[\"" + key + "\"]`, which raises without it)")
+                          " (as `[\"" + key + "\"]`, which raises without it)" if info.get("req") else
+                          f" (one of {', '.join(f'`{x}`' for x in info['values'])}; without it the function takes the other way)")
                        + f" -- the dict given has {has} and no `{key}`"
                        + ("; pass the id its parent's writer returned"
                           if (why or (below[2] if below else "")).startswith("references") else ""))

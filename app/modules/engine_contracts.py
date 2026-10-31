@@ -1483,6 +1483,12 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
         # §17.1873 — awaited, a MagicMock fails whatever its `return_value` (measured: `await MagicMock(return_value=x)()`
         # is a TypeError); the chain and `return_value` hops below used to come first and follow the value instead
         return _Val(kind="MagicMock-awaited", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
+    if what == "call" and not arg and val.mock == "AsyncMock" and not entering:
+        # §17.1880 — and not awaited, an AsyncMock method is a coroutine whatever its `return_value` (measured): the
+        # `return_value` chain hop below used to come first. Live (5b4880c0 T5 a1, 2026-10-31): `mock_response =
+        # AsyncMock(); mock_response.json.return_value = {…}` passed the gate; "'coroutine' object has no attribute
+        # 'get'" in the sandbox, three tests
+        return _Val(kind="coroutine-mock", node=val.node, root=val.root, path=val.path, line=val.line, scope=val.scope)
     if val.root and (v := fk.chain((val.root, *path), before)) is not None:
         out = _resolve(v, fk, before, val.hops + 1)
         if out.root is None:
@@ -1521,6 +1527,7 @@ def uses_calls_of(uses: dict, attr: str) -> set[str]:
     return set(uses["calls"]) if attr in uses["calls"] else set()
 
 
+_VALUE_KINDS = frozenset({"str", "bytes", "int", "float", "bool", "Decimal", "date", "datetime", "None"})
 _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool", "None": "None", "tuple": "a tuple",
            "list": "a list", "dict": "a dict", "set": "a set", "date": "a date", "datetime": "a datetime",
            "Decimal": "a Decimal"}
@@ -1550,6 +1557,29 @@ def _dict_literal_misuse(lit: ast.Dict, keys: dict, where: str) -> tuple[str, st
                     f"{(' for ' + ' / '.join(f'`{x}`' for x in sorted(sub['keys']))) if sub.get('keys') else ''})")
         if isinstance(v, ast.Dict) and sub.get("keys") and (deeper := _dict_literal_misuse(v, sub["keys"], f'{where}["{k}"]')):
             return deeper
+        if isinstance(v, ast.List) and sub.get("item") is not None \
+                and (deeper := _list_literal_misuse(v, sub["item"], f'{where}["{k}"]')):          # §17.1880
+            return deeper
+    return None
+
+
+def _list_literal_misuse(lit: ast.List, item: dict, where: str) -> tuple[str, str] | None:
+    """§17.1880 — a literal list against what the module reads from each of its items: a str (a number) where an
+    item is read as a dict; a dict item with none of the keys read from it. Live (5b4880c0 T5, 2026-10-31): the
+    congressional parser's rows, the EDGAR filings, the reddit posts -- fakes whose items carried none of the keys
+    each parser reads, every test asserting `>= 1` row on data the parser dropped."""
+    from app.modules.engine_source import _literal_kind
+    if not lit.elts or any(isinstance(e, ast.Starred) for e in lit.elts):
+        return None
+    first = lit.elts[0]
+    kind = _literal_kind(first)
+    if (item.get("as") == "dict" or item.get("keys")) and kind in ("str", "int", "float", "bool", "None", "list", "tuple"):
+        return (f"a list{where} whose items are {kind}s", ", which the module reads as dicts"
+                + ((" (" + " / ".join(f"`{k}`" for k in sorted(item["keys"])) + ")") if item.get("keys") else ""))
+    if isinstance(first, ast.Dict) and item.get("keys"):
+        bad = _dict_literal_misuse(first, item["keys"], f"{where}[0]")
+        if bad:
+            return bad
     return None
 
 
@@ -1605,6 +1635,14 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
             return f"{done}{_CANNOT[val.kind]}{at}, which the module reads as a dict (`.get(…)` / `[\"key\"]`)"
         if val.kind == "dict" and uses.get("keys") and isinstance(val.node, ast.Dict) and val.node.keys:  # §17.1876
             if (bad := _dict_literal_misuse(val.node, uses["keys"], "")) is not None:
+                return f"{done}{bad[0]}{at}{bad[1]}"
+        item = uses.get("item")                                                 # §17.1880 what it does with each item
+        if item is not None and (item.get("as") == "dict" or item.get("keys")):
+            if val.kind == "dict":
+                return (f"{done}a dict{at}, which the module iterates as a list and reads each item as a dict"
+                        f"{(' (' + ' / '.join(f'`{k}`' for k in sorted(item['keys'])) + ')') if item.get('keys') else ''}"
+                        " -- iterating a dict yields its keys, strings")
+            if val.kind == "list" and isinstance(val.node, ast.List) and (bad := _list_literal_misuse(val.node, item, "")):
                 return f"{done}{bad[0]}{at}{bad[1]}"
         return None
     if not val.mock:
@@ -1718,6 +1756,16 @@ def _result_uses(code: str, matches, local_of=None) -> dict | None:
                             root["called"] = {"await": isinstance(item.context_expr, ast.Await), "then": _new_use()}
                         _merge_uses(root["called"]["then"], entered)
     return root if root["called"] else None
+
+
+def _imports_from(code: str) -> set[str]:
+    """§17.1880 — every `module.name` a module imports with `from module import name`, at the top or inside a function."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    return {f"{n.module}.{a.name}" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module and not n.level
+            for a in n.names}
 
 
 def _calls_into(code: str, mod: str, fn: ast.AST) -> bool:
@@ -2031,6 +2079,18 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                         say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", f"a `{v.mock}`{f' (line {v.line})' if v.line else ''}: the sandbox's "
                             "`async_session` is a real scratch database with this job's tables, and a fake session answers "
                             "nothing the code reads", "`async with async_session() as db:` and pass that `db`; assert on the rows it wrote")
+                # §17.1880 — a mock for a parameter that takes a value. Live (5b4880c0 T5 a4, 2026-10-31):
+                # `parse_envelope(MagicMock())` where `raw: bytes | str` goes to `json.loads` -- "the JSON object must
+                # be str, bytes or bytearray, not MagicMock", two tests
+                kinds = shapes[key].get("kinds") or {}
+                for param, arg in given:
+                    if (param in kinds and kinds[param] <= _VALUE_KINDS
+                            and (v := _resolve(arg, fk, call.lineno)).mock in ("MagicMock", "AsyncMock")):
+                        from app.modules.engine_source import _kinds_text
+                        say(call.lineno, f"hands `{key[1]}(…)` `{param}` =",
+                            f"a `{v.mock}`{f' (line {v.line})' if v.line else ''}: `{param}` is `{_kinds_text(kinds[param])}`, "
+                            "a value the function reads as one (parsed, compared, decoded), never an object with attributes",
+                            f"a real `{_kinds_text(kinds[param])}`")
                 uses = shapes[key].get("uses") or {}
                 if not uses:
                     continue
@@ -2038,13 +2098,21 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                     if param in uses and (bad := _check_uses(_resolve(arg, fk, call.lineno), uses[param], fk, call.lineno)):
                         say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", bad, f"`{param}{_uses_text(uses[param])}`")
         for pc, mod, owner, name, fn in _patch_sites(code):
+            users: list[str] = []
             if mod not in reach:
-                continue
+                # §17.1880 — a name of an ENGINE module that a job module imports (at the top, or inside a function
+                # at call time): what the job module does with the result is what the fake must answer. Live
+                # (5b4880c0 T5 a4, 2026-10-31): `patch("app.modules.gt_extractor.search_searxng", return_value={…})`
+                # where `fetch_news_items` iterates the result and reads `title` / `url` from each -- "'str' object
+                # has no attribute 'get'", four tests
+                users = [m2 for m2, c2 in reach.items() if f"app.modules.{mod}.{name}" in _imports_from(c2)]
+                if not users:
+                    continue
             if fn is not None and any(fn.lineno <= a and b <= (fn.end_lineno or b) and any(
                     isinstance(c, ast.Call) and a <= c.lineno <= b for c in _own_nodes(fn)) for a, b in raises):
                 continue                                     # §17.1870 -- a call of this test is meant to raise first
             # §17.1871 — a name used only as the default for a parameter this test passes is never reached
-            if fn is not None and (sites := _use_sites(reach[mod], owner, name)):
+            if fn is not None and not users and (sites := _use_sites(reach[mod], owner, name)):
                 params = {_default_for(reach[mod], site) for site in sites}
                 if None not in params and params:
                     given = {k.arg for m_, f_, ln in _test_calls(code) if m_ == mod and fn.lineno <= ln <= (fn.end_lineno or ln)
@@ -2059,7 +2127,16 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                     "what the code reads", "leave `async_session` alone; insert the rows the function reads and "
                     "assert on the rows it wrote")
                 continue
-            uses = _target_uses(reach[mod], owner, name)
+            if users:
+                from app.modules.engine_source import _merge_uses, _new_use
+                uses = _new_use()
+                for m2 in users:
+                    if (u2 := _target_uses(reach[m2], None, name)):
+                        _merge_uses(uses, u2)
+                if _uses_empty_(uses):
+                    continue
+            else:
+                uses = _target_uses(reach[mod], owner, name)
             if not uses:
                 continue
             fk = fakes_for(fn)
