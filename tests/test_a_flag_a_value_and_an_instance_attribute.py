@@ -92,7 +92,7 @@ async def test_get_account_parses():
         "`tests/test_paper_twelve_modules.py:9` sets `_client` on a `AlpacaPaperClient` instance to a fake whose "
         "`.is_closed` is a mock (line 9): the module tests it (`if … .is_closed`), and a mock attribute is always truthy "
         "-- set `fake.is_closed = False` (or what the real one would say)"], got
-    assert got[0].endswith("-- give it what the module uses: `_client{is_closed}`"), got
+    assert got[0].endswith("-- give it what the module uses: `_client{request()->{json()}, is_closed}`"), got   # §17.1886 the getter's callers too
     fixed = test.replace("client._client = AsyncMock()\n", "client._client = AsyncMock()\n    client._client.is_closed = False\n")
     assert wrong_fakes({PATH: fixed}, MODULES, set()) == []
     # the tree knows which attributes are read for their truth
