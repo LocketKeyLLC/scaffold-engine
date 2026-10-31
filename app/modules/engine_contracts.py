@@ -1263,6 +1263,10 @@ class _Fakes:
         self.is_async = is_async
         self.bound: dict[str, list[tuple[int, ast.AST]]] = {}
         self.chains: dict[tuple[str, ...], list[tuple[int, ast.AST]]] = {}
+        # §17.1886 — an argument expression bound to a parameter resolves in the CALLER's scope, at the call's line
+        # (`FakeResponse(self._json, self._status_code)` inside `FakeAsyncClient.request`: that `self` is the client,
+        # not the response being made; `_response(json_data=json_data)`: the caller's name, not the parameter itself)
+        self.given: dict[int, tuple["_Fakes", int]] = {}
         for n in nodes:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):   # §17.1869/1870 a local fake
                 self.bound.setdefault(n.name, []).append((n.lineno, n))
@@ -1346,7 +1350,8 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         v = fakes.last(e.id, before)
         if v is None:
             return _Val(root=e.id)
-        out = _resolve(v, fakes, before, _hops + 1)
+        where, at = fakes.given.get(id(v), (fakes, before))               # §17.1886 a caller's argument, in its scope
+        out = _resolve(v, where, at, _hops + 1)
         if out.root is None:
             out.root = e.id
         return out
@@ -1481,9 +1486,18 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             for i, a in enumerate(call.args):
                 if i < len(pos) and not isinstance(a, ast.Starred):
                     inner.bound.setdefault(pos[i], []).append((0, a))
+                    inner.given[id(a)] = (fakes, before)
             for k in call.keywords:
                 if k.arg:
                     inner.bound.setdefault(k.arg, []).append((0, k.value))
+                    inner.given[id(k.value)] = (fakes, before)
+        if isinstance(cls, ast.ClassDef):
+            # §17.1886 — `self` in a method is the instance: `async def __aenter__(self): return self` hands the module
+            # the same object, and what it lacks is seen. Live (5b4880c0 T5 a1/a2, 2026-10-31): `_FakeWebSocket` with
+            # no `recv`, `FakeAsyncClient` with no `get`, both entered with `async with`, both reached the sandbox
+            self_call = call if call is not None else ast.copy_location(
+                ast.Call(func=ast.Name(id=cls.name, ctx=ast.Load()), args=[], keywords=[]), cls)
+            inner.bound.setdefault("self", []).append((0, self_call))
         own_names = set(inner.bound)
         outer = val.scope or fakes
         for k, v in outer.bound.items():
@@ -1535,9 +1549,11 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             for i, a in enumerate(call.args):
                 if i < len(pos) and not isinstance(a, ast.Starred):
                     inner.bound.setdefault(pos[i], []).append((0, a))
+                    inner.given[id(a)] = (fakes, before)
             for k in call.keywords:
                 if k.arg:
                     inner.bound.setdefault(k.arg, []).append((0, k.value))
+                    inner.given[id(k.value)] = (fakes, before)
         # §17.1873 — a name the def binds itself is its own: the caller's binding of the same name is not merged in.
         # Live (5b4880c0 T5 a1/a2): `def _fake_async_client(): client = MagicMock(); …; return client` and the test's
         # `client = _fake_async_client(…)` -- the caller's later line won `last("client")`, resolved to the call, into
@@ -1789,7 +1805,8 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         if a in (uses.get("tested") or ()) and got.mock and got.kind is None:        # §17.1881 read for its truth
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module tests it (`if … .{a}`), and a mock attribute "
                     f"is always truthy -- set `fake.{a} = False` (or what the real one would say)")
-        if got.mock and got.kind is None and a not in uses["calls"] and (given := _set_on(val, fakes)) and a not in given:
+        if (got.mock and got.kind is None and a not in uses["calls"] and a not in (uses.get("shown") or ())
+                and (given := _set_on(val, fakes)) and a not in given):
             # §17.1879 — the test set fields on this fake, and not the one the module reads. Live (5b4880c0 T5,
             # 2026-10-31): `MagicMock(content=content)` where the FINRA downloader returns `response.text` --
             # `io.StringIO(<MagicMock>)`, "initial_value must be str or None", two tests an attempt, three attempts
@@ -2256,6 +2273,11 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                 if not uses:
                     continue
                 for param, arg in given:
+                    if param in uses and isinstance(arg, ast.Constant) and arg.value is None:
+                        d1 = _defs(reach[mod])                       # §17.1886 None the function replaces or guards
+                        t1 = d1[0].get(key[1]) if d1 else None
+                        if t1 is not None and not _used_when_none(t1, param, _local_functions(ast.parse(reach[mod]))):
+                            continue
                     if param in uses and (bad := _check_uses(_resolve(arg, fk, call.lineno), uses[param], fk, call.lineno)):
                         say(call.lineno, f"hands `{key[1]}(…)` `{param}` =", bad, f"`{param}{_uses_text(uses[param])}`")
         for pc, mod, owner, name, fn in _patch_sites(code):
@@ -2351,6 +2373,14 @@ def _used_when_none(fn: ast.AST, param: str, local: dict[str, ast.AST] | None = 
     `else` of `if param is None:`): the uses that run when the caller hands None. §17.1884 — or hands it, unguarded, to a
     function of the same module that does (one hop: `ingest_form_4_for_tickers(db, …)` -> `ingest_form_4_filings(db, …)`
     -> `db.commit()`; live, "'NoneType' object has no attribute 'commit'")."""
+    # §17.1886 — a parameter the function binds itself (`own_client = client is None; if own_client: client =
+    # httpx.AsyncClient()`, `db = db or …`) is not None where it is then used. Live (5b4880c0 T5U1 a2/a4, 2026-10-31):
+    # `fetch_disclosures(None)` with `httpx.AsyncClient` patched -- the module's own default, refused twice
+    for n in _own_nodes(fn):
+        targets = (n.targets if isinstance(n, ast.Assign) else [n.target]
+                   if isinstance(n, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else [])
+        if any(isinstance(t, ast.Name) and t.id == param for t in targets):
+            return False
     parents: dict[int, ast.AST] = {}
     for p_ in ast.walk(fn):
         for c in ast.iter_child_nodes(p_):
@@ -2408,10 +2438,29 @@ def _instance_uses(code: str, cname: str, attr: str) -> dict | None:
     cls = next((c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cname), None)
     if cls is None:
         return None
+    from app.modules.engine_source import _local_functions
     methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    local = {**_local_functions(tree), **methods}         # §17.1886 the module's helpers too (`_parse_account(data)`)
+    # §17.1886 — what a method RETURNS is read by the methods that call it: `client = await self._ensure_client()`
+    # then `client.request(…)`; `return response.json()` in `_request`, then `data["id"]` in `get_account`. Each
+    # method's `return` is filled with its callers' uses of the result (the `result=` hop `_uses` already has for
+    # local functions). Live (5b4880c0 T5 a1, 2026-10-31): the Alpaca client's `_client` set to an AsyncMock whose
+    # response's `json()` was a coroutine -- every use behind both hops unseen, "Unexpected account response shape"
+    results: dict[str, dict] = {}
+    for _ in range(2):                                    # two rounds: `_ensure_client` -> `_request` -> `get_account`
+        nxt: dict[str, dict] = {}
+        for c in methods.values():
+            for st in ast.walk(c):
+                if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                    v = st.value.value if isinstance(st.value, ast.Await) else st.value
+                    if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and isinstance(v.func.value, ast.Name)
+                            and v.func.value.id == "self" and v.func.attr in methods and v.func.attr != c.name):
+                        _merge_uses(nxt.setdefault(v.func.attr, _new_use()),
+                                    _uses(c, st.targets[0].id, local, results.get(c.name)))
+        results = nxt
     out = _new_use()
     for m in methods.values():
-        _merge_uses(out, _uses(m, f"self.{attr}", methods))
+        _merge_uses(out, _uses(m, f"self.{attr}", local, results.get(m.name)))
     return out
 
 
@@ -2725,16 +2774,33 @@ def import_bound_patches(files: dict[str, str], modules: dict[str, str]) -> list
             lo, hi = fn.lineno, getattr(fn, "end_lineno", None) or fn.lineno
             users = sorted({(m, f) for m, f, ln in calls if lo <= ln <= hi and m != mod and m in reach})
             for m, f in users:
-                try:
-                    top = ast.parse(reach[m]).body
-                except SyntaxError:
-                    continue
-                bound = any(isinstance(n, ast.ImportFrom) and n.module == f"app.modules.{mod}"
-                            and any(a.name == name for a in n.names) for n in top)
-                if bound:
-                    found.append(f"`{path}:{pc.lineno}` patches `{name}` on `{mod}`, but `{f}` (`{m}`) bound it at import "
-                                 f"(`from app.modules.{mod} import {name}`): the patch never reaches it -- patch "
-                                 f"`app.modules.{m}.{name}` (where that code looks the name up)")
+                # §17.1886 — and through the job modules `m` imports from, transitively: the backtester calls
+                # `get_spy_benchmark` (SPY tracker), which bound `AlpacaPaperClient` at import. Live (5b4880c0 T5 a1,
+                # 2026-10-31): the patch on the client's module, `run_backtest` reached the network
+                seen: list[str] = []
+                queue = [m]
+                while queue:
+                    r = queue.pop(0)
+                    if r in seen or r == mod or r not in reach:
+                        continue
+                    seen.append(r)
+                    try:
+                        top = ast.parse(reach[r]).body
+                    except SyntaxError:
+                        continue
+                    if any(isinstance(n, ast.ImportFrom) and n.module == f"app.modules.{mod}"
+                           and any(a.name == name for a in n.names) for n in top):
+                        via = "" if r == m else f" calls into `{r}`, which"
+                        found.append(f"`{path}:{pc.lineno}` patches `{name}` on `{mod}`, but `{f}` (`{m}`){via} bound it at "
+                                     f"import (`from app.modules.{mod} import {name}`): the patch never reaches it -- patch "
+                                     f"`app.modules.{r}.{name}` (where that code looks the name up)")
+                        break
+                    for n in top:
+                        if isinstance(n, ast.ImportFrom) and n.module:
+                            if n.module.startswith("app.modules."):
+                                queue.append(n.module[len("app.modules."):])
+                            elif n.module == "app.modules":
+                                queue += [a.name for a in n.names]
     return found
 
 
@@ -3870,27 +3936,38 @@ def splice_definitions(code: str, new: str) -> str | None:
     byte as it was. None when `new` does not parse or defines nothing. Live (5b4880c0 T5, 2026-10-30, the §17.1876
     round): asked for the whole 97-test file again, the redraws rewrote 1,935 lines for five findings, dropped two
     tests, and once returned the identical file; a redraw that returns the definitions it was asked for cannot."""
-    new = (new or "").strip()
-    if new.startswith("```"):
-        new = new.split("\n", 1)[1] if "\n" in new else ""
-        new = new.rsplit("```", 1)[0]
-    try:
-        ntree = ast.parse(new)
-    except SyntaxError:
-        return None
-    defs = [n for n in ntree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-    if not defs:
+    # §17.1886 — EVERY fenced block of the answer, in order, a later definition of a name replacing an earlier one;
+    # a block that does not parse (a snippet, prose) is skipped. Live (5b4880c0 T5 a3, 2026-10-31): the answer was a
+    # draft block, "Wait, in the last query I incorrectly assumed…", a snippet, then "I'll output the final block with
+    # all definitions.```python" -- the old read took first fence to last fence, the prose made it unparseable, None
+    # ended the redraw and the attempt with its 18 findings
+    text = (new or "").strip()
+    if text.count("```") % 2 == 1:
+        text += "\n```"
+    blocks = re.findall(r"```[A-Za-z]*[ \t]*\n(.*?)```", text, re.S) or [text]
+    by_name: dict[str, str] = {}
+    imports_new: list[str] = []
+    for b in blocks:
+        try:
+            t = ast.parse(b)
+        except SyntaxError:
+            continue
+        blines = b.splitlines()
+        for n in t.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start = min([n.lineno] + [d.lineno for d in n.decorator_list])
+                by_name[n.name] = "\n".join(blines[start - 1:(n.end_lineno or n.lineno)])
+            elif isinstance(n, (ast.Import, ast.ImportFrom)) and ast.unparse(n) not in imports_new:
+                imports_new.append(ast.unparse(n))
+    if not by_name:
         return None
     lines = code.splitlines()
     spans = {name: (a, b) for name, a, b in _top_spans(code)}
-    nlines = new.splitlines()
     pieces: list[tuple[int, int, str]] = []
     appended: list[str] = []
-    for n in defs:
-        start = min([n.lineno] + [d.lineno for d in n.decorator_list])
-        text = "\n".join(nlines[start - 1:(n.end_lineno or n.lineno)])
-        if n.name in spans:
-            pieces.append((*spans[n.name], text))
+    for name, text in by_name.items():
+        if name in spans:
+            pieces.append((*spans[name], text))
         else:
             appended.append(text)
     try:
@@ -3898,7 +3975,7 @@ def splice_definitions(code: str, new: str) -> str | None:
     except SyntaxError:
         body = []
     have = {ast.unparse(x) for x in body if isinstance(x, (ast.Import, ast.ImportFrom))}
-    imports = [ast.unparse(x) for x in ntree.body if isinstance(x, (ast.Import, ast.ImportFrom)) and ast.unparse(x) not in have]
+    imports = [x for x in imports_new if x not in have]
     for a, b, text in sorted(pieces, key=lambda t: -t[0]):
         lines[a - 1:b] = text.splitlines()
     if appended:
@@ -3964,8 +4041,8 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
             break
         if only:
             spliced = splice_definitions(code, new_file)
-            if spliced is None:
-                break
+            if spliced is None:                       # §17.1886 nothing parsed: ask again (the asks cap bounds it)
+                continue
             candidate = replace_file_block(output, path, spliced)
         else:
             candidate = replace_file_block(output, path, new_file)

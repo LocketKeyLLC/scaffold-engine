@@ -527,7 +527,7 @@ def _unwrapped_read(e: ast.AST) -> ast.AST:
 
 def _new_use() -> dict:
     return {"attrs": set(), "calls": {}, "called": None, "as": None, "keys": {}, "bound": set(), "item": None,
-            "tested": set(), "values": None}
+            "tested": set(), "values": None, "shown": set()}
 
 
 def _read_keys_text(u: dict) -> str:
@@ -586,6 +586,7 @@ def _merge_uses(dst: dict, src: dict) -> None:
             dst["item"] = _new_use()
         _merge_uses(dst["item"], src["item"])
     dst["tested"] = (dst.get("tested") or set()) | (src.get("tested") or set())                 # §17.1881
+    dst["shown"] = (dst.get("shown") or set()) | (src.get("shown") or set())                     # §17.1886
     if src.get("optional"):
         dst["optional"] = True
     if src.get("alt") and not dst.get("alt"):
@@ -600,6 +601,30 @@ def _merge_uses(dst: dict, src: dict) -> None:
 
 def _uses_empty(u: dict) -> bool:
     return not (u["attrs"] or u["calls"] or u["called"] or u["as"])
+
+
+def _is_shown(e: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """§17.1886 — the read is only SHOWN: inside a `raise …(…)`, an f-string or a `logger.…(…)` call, where a mock
+    attribute does as well as a value. Live (5b4880c0 T5 a1, 2026-10-31): `response.text[:500]` in the Alpaca client's
+    error message made every response fake "a fake with `json`, `status_code` set, where the module reads `.text`"."""
+    cur = e
+    while (par := parents.get(id(cur))) is not None and not isinstance(par, ast.stmt):
+        if isinstance(par, ast.JoinedStr) or (isinstance(par, ast.Call) and isinstance(par.func, ast.Attribute)
+                                              and isinstance(par.func.value, ast.Name) and par.func.value.id in ("logger", "log")):
+            return True
+        cur = par
+    return isinstance(par, ast.Raise)
+
+
+def _refused_unless(call: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """§17.1886 — `call` is the `isinstance(x, T)` of an `if not isinstance(x, T): raise …` (or `return …`) guard: the
+    function requires a T. Live (5b4880c0 T5 a1, 2026-10-31): `get_account`'s `if not isinstance(data, dict): raise
+    AlpacaPaperClientError("Unexpected account response shape")` -- the shape the test's fake had to answer, unread."""
+    n = parents.get(id(call))
+    if not (isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not)):
+        return False
+    i = parents.get(id(n))
+    return isinstance(i, ast.If) and i.test is n and bool(i.body) and isinstance(i.body[0], (ast.Raise, ast.Return))
 
 
 def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, result: dict | None = None,
@@ -704,6 +729,10 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
                 return base["called"]["then"]
             if isinstance(f, ast.Name) and f.id == "len" and e.args and (b := node_of(e.args[0])) is not None:
                 b["as"] = b["as"] or "list"
+            if (isinstance(f, ast.Name) and f.id == "isinstance" and len(e.args) == 2 and isinstance(e.args[1], ast.Name)
+                    and e.args[1].id in ("dict", "list") and _refused_unless(e, parents)
+                    and (b := node_of(e.args[0])) is not None):
+                b["as"] = b["as"] or e.args[1].id        # §17.1886 `if not isinstance(data, dict): raise …`
             return None
         if isinstance(e, ast.Attribute):
             base = node_of(e.value)
@@ -715,6 +744,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             base["attrs"].add(e.attr)
             if _is_tested(e, parents):                   # §17.1881 `if self._client.is_closed:` -- a flag
                 base["tested"].add(e.attr)
+            if _is_shown(e, parents):                    # §17.1886 `raise X(response.text[:500])` -- only shown
+                base.setdefault("shown", set()).add(e.attr)
             return None
         if isinstance(e, ast.Subscript):
             base = node_of(e.value)
