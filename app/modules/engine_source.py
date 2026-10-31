@@ -1731,11 +1731,15 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
             continue
         imported: dict[str, tuple[str, str]] = {}
         mods: dict[str, str] = {}
+        from app.modules.engine_contracts import _own_nodes as _own_nodes_
+        owned_imports = {id(x) for f_ in ast.walk(tree) if isinstance(f_, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         for x in _own_nodes_(f_) if isinstance(x, (ast.Import, ast.ImportFrom))}   # §17.1888
         for n in ast.walk(tree):
             if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "app.modules":
                 # §17.1866 — `from app.modules import paper_x` (live: every call of 5b4880c0 T5's fourth attempt
                 # went unchecked -- the file imported its twelve modules this way)
-                mods.update({al.asname or al.name: al.name for al in n.names if al.name in defs})
+                if id(n) not in owned_imports:                 # §17.1888 a function's own alias is not the file's
+                    mods.update({al.asname or al.name: al.name for al in n.names if al.name in defs})
                 continue
             if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
                 leaf = n.module.split(".")[-1]
@@ -1757,9 +1761,9 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                                  "(a table the job's migration creates is written with `async_session` + `text`)")
                         if msg not in found:
                             found.append(msg)
-                    elif al.name in d["funcs"] or al.name in d.get("ctors", {}):
+                    elif (al.name in d["funcs"] or al.name in d.get("ctors", {})) and id(n) not in owned_imports:
                         imported[al.asname or al.name] = (leaf, al.name)
-            elif isinstance(n, ast.Import):
+            elif isinstance(n, ast.Import) and id(n) not in owned_imports:
                 for al in n.names:
                     leaf = al.name.split(".")[-1]
                     if leaf in defs and not al.name in module_index():
@@ -1781,11 +1785,32 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                     mod_consts[f"{f.name}()"] = rets[0]
         local_assigns: dict[int, list[ast.Assign]] = {}
         owner: dict[int, int] = {}
+        # §17.1888 — an alias a function imports for itself (`from app.modules import paper_x as mod` inside each
+        # test) names THAT module within the function. Live (5b4880c0 T5 a4, 2026-10-31): five tests, five modules,
+        # one alias -- the file-wide map kept the last, and every other test's `mod.f(…)` was "a name it has no"
+        local_mods: dict[int, dict[str, str]] = {}
+        local_imported: dict[int, dict[str, tuple[str, str]]] = {}
         for fn in ast.walk(tree):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 own = list(_own_nodes(fn))
                 local_assigns[id(fn)] = sorted((x for x in own if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
                 owner.update({id(x): id(fn) for x in own if isinstance(x, ast.Call)})
+                lm: dict[str, str] = {}
+                li: dict[str, tuple[str, str]] = {}
+                for x in own:
+                    if isinstance(x, ast.ImportFrom) and x.level == 0 and x.module == "app.modules":
+                        lm.update({al.asname or al.name: al.name for al in x.names if al.name in defs})
+                    elif isinstance(x, ast.ImportFrom) and x.level == 0 and x.module and x.module.split(".")[-1] in defs:
+                        leaf = x.module.split(".")[-1]
+                        li.update({al.asname or al.name: (leaf, al.name) for al in x.names
+                                   if al.name in defs[leaf]["funcs"] or al.name in defs[leaf].get("ctors", {})})
+                    elif isinstance(x, ast.Import):
+                        lm.update({al.asname or al.name.split(".")[-1]: al.name.split(".")[-1] for al in x.names
+                                   if al.name.split(".")[-1] in defs})
+                if lm:
+                    local_mods[id(fn)] = lm
+                if li:
+                    local_imported[id(fn)] = li
         # §17.1874 — a call the test expects to raise is meant to fail before any write: the row a parent key points
         # at is not required of it. Live (5b4880c0 T5 a2/a3, 2026-10-30): every finding left after the redraws was
         # `execute_order(approval)` under `with pytest.raises(ValueError):` -- "`approval` is read for `approval_id`"
@@ -1800,10 +1825,12 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
             consts = {**mod_consts, **_literal_bindings_before(local_assigns.get(owner.get(id(n), 0), []), n.lineno)}
             in_raise = any(a <= n.lineno <= b for a, b in raises)
             target = None
-            if isinstance(n.func, ast.Name) and n.func.id in imported:
-                target = imported[n.func.id]
-            elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id in mods):
-                leaf = mods[n.func.value.id]
+            fmods = {**mods, **local_mods.get(owner.get(id(n), 0), {})}           # §17.1888 the function's own aliases
+            fimported = {**imported, **local_imported.get(owner.get(id(n), 0), {})}
+            if isinstance(n.func, ast.Name) and n.func.id in fimported:
+                target = fimported[n.func.id]
+            elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id in fmods):
+                leaf = fmods[n.func.value.id]
                 if n.func.attr in defs[leaf]["funcs"] or n.func.attr in defs[leaf].get("ctors", {}):
                     target = (leaf, n.func.attr)
                 elif n.func.attr not in defs[leaf]["names"]:

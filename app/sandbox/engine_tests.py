@@ -184,6 +184,11 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "looks it up and give every method it awaits an `AsyncMock` that returns at once; `ERROR at setup of` means the "
      "test never started -- its fixture hung (a session fixture that never yields, commits or closes), or the test "
      "before it left a connection or task open: close every session and client a test opens, inside the test"),
+    # §17.1888 — a NUMERIC column read back and compared as text keeps its scale. Live (5b4880c0 T5 a3, 2026-10-31):
+    # `assert '2.000000' == '2'`, `'10000.00' == '10000'` -- three of nine failures, every writer test
+    (re.compile(r"assert '(\d+)\.\d*0' == '\1(?:\.\d+)?'"),
+     "a NUMERIC column read back as text keeps the column's scale ('2.000000', '10000.00'): compare numbers, not their "
+     "text -- `Decimal(row[0]) == Decimal(\"2\")`, or `float(row[0]) == 2`"),
 )
 
 
