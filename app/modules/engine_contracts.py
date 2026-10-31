@@ -330,6 +330,32 @@ def _origin(modules: dict[str, str], mod: str, name: str, depth: int = 0) -> str
     return None
 
 
+def _aliases_at(tree: ast.AST):
+    """§17.1888 — `alias_for(node)`: the `app.modules` aliases in force at `node` -- the file's, overridden by those
+    the enclosing function imports for itself (`from app.modules import paper_x as mod` inside each test). Live
+    (5b4880c0 T5 a4, 2026-10-31): five tests, five modules, one alias `mod`; every file-wide map kept the last, and
+    four gates called the other four tests' patches and calls names the wrong module "has no"."""
+    owner: dict[int, int] = {}
+    local: dict[int, dict[str, str]] = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            own = list(_own_nodes(fn))
+            owner.update({id(x): id(fn) for x in own})
+            for d in fn.decorator_list:
+                owner.update({id(x): id(fn) for x in ast.walk(d)})
+            la = _module_aliases(ast.Module(body=[x for x in own if isinstance(x, (ast.Import, ast.ImportFrom))], type_ignores=[]))
+            if la:
+                local[id(fn)] = la
+    # the file's own aliases: every import no function owns (a function's stays that function's)
+    base = _module_aliases(ast.Module(body=[x for x in ast.walk(tree) if isinstance(x, (ast.Import, ast.ImportFrom))
+                                            and id(x) not in owner], type_ignores=[]))
+
+    def alias_for(node: ast.AST) -> dict[str, str]:
+        la = local.get(owner.get(id(node), 0))
+        return {**base, **la} if la else base
+    return alias_for
+
+
 def _patch_targets(code: str) -> list[tuple[str, str, int]]:
     """(module, name, line) of each `patch("app.modules.m.name")`, `monkeypatch.setattr("app.modules.m.name", …)`,
     `patch.object(m, "name")` / `monkeypatch.setattr(m, "name", …)` with `m` a module imported from `app.modules`."""
@@ -337,13 +363,7 @@ def _patch_targets(code: str) -> list[tuple[str, str, int]]:
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    alias: dict[str, str] = {}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom) and n.module == "app.modules":
-            alias.update({a.asname or a.name: a.name for a in n.names})
-        elif isinstance(n, ast.Import):
-            alias.update({a.asname: a.name.rsplit(".", 1)[1] for a in n.names
-                          if a.asname and a.name.startswith("app.modules.")})
+    alias_for = _aliases_at(tree)                          # §17.1888
     out: list[tuple[str, str, int]] = []
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
@@ -352,6 +372,7 @@ def _patch_targets(code: str) -> list[tuple[str, str, int]]:
         fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
         if fname not in ("patch", "setattr", "object") or not n.args:
             continue
+        alias = alias_for(n)
         a0 = n.args[0]
         if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
             parts = a0.value.split(".")
@@ -562,7 +583,7 @@ def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[
     except SyntaxError:
         return []
     out: list[str] = []
-    alias = _module_aliases(tree)
+    alias_for = _aliases_at(tree)                          # §17.1888
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call) or not n.args:
             continue
@@ -571,6 +592,7 @@ def _whole_library_patches(path: str, code: str, reach: dict[str, str]) -> list[
         a0 = n.args[0]
         if fname not in ("patch", "setattr", "object"):
             continue
+        alias = alias_for(n)
         if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
             parts = a0.value.split(".")
         elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
@@ -2068,7 +2090,7 @@ def _patch_sites(code: str) -> list[tuple[ast.Call, str, str, str, ast.AST | Non
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    alias = _module_aliases(tree)
+    alias_for = _aliases_at(tree)                          # §17.1888
     owner: dict[int, ast.AST] = {}
     for fn in ast.walk(tree):
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2081,7 +2103,7 @@ def _patch_sites(code: str) -> list[tuple[ast.Call, str, str, str, ast.AST | Non
     for n in ast.walk(tree):
         if not (isinstance(n, ast.Call) and _call_name(n) in ("patch", "object", "setattr") and n.args):
             continue
-        site = _patch_target(n, alias)
+        site = _patch_target(n, alias_for(n))
         if site:
             out.append((n, *site, owner.get(id(n))))
     return out
@@ -2172,10 +2194,10 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
             tree = ast.parse(code)
         except SyntaxError:
             continue
-        alias = _module_aliases(tree)
+        alias_for = _aliases_at(tree)                      # §17.1888
 
         def is_async(call: ast.Call) -> bool:
-            t = _patch_target(call, alias)
+            t = _patch_target(call, alias_for(call))
             return bool(t) and _async_in(reach, *t)
 
         mod_fakes = _Fakes(tree.body, None, is_async)
@@ -4070,7 +4092,10 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
         fakes = findings if tests_only and len(test_paths) == 1 else findings_in_tests(findings)   # §17.1859
         if fakes != findings:
             break
-        paths = {_finding_path(f) for f in findings_in_tests(fakes)} or set(test_paths)
+        # §17.1888 — a finding with no `tests/…` path (`from app.modules.m import x`: m has no x; `mod.f(…)`: m has no
+        # f) is about the output's test file like every other: it falls back to the test paths instead of counting as
+        # a second file. Live (5b4880c0 T5 a2/a4, 2026-10-31): two attempts spent with no redraw at all
+        paths = {p for p in (_finding_path(f) for f in findings_in_tests(fakes)) if p.startswith("tests/")} or set(test_paths)
         if len(paths) != 1:
             break
         path = paths.pop()
