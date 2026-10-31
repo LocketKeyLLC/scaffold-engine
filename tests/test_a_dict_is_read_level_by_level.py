@@ -107,11 +107,15 @@ def test_raises():
         parse_fill_event({"data": {"event": "fill", "order": {}}})
 '''
     assert _calls(test) == [
-        "`tests/test_paper_twelve_modules.py:6` calls `is_trade_update(…)`: `envelope` has none of the keys the "
-        "function reads (`stream`): it has `T`",
+        # §17.1880 -- `stream` is compared with a value: that says more than "none of the keys"
+        "`tests/test_paper_twelve_modules.py:6` calls `is_trade_update(…)`: `envelope` is read for `stream` (one of "
+        "`trade_updates`; without it the function takes the other way) -- the dict given has `T` and no `stream`",
         "`tests/test_paper_twelve_modules.py:9` calls `parse_fill_event(…)`: `envelope` has none of the keys the "
         "function reads (`data`): it has `T`, `msg`",
-        # one level down, a key read as `["qty"]` says more than "none of the keys": that message wins
+        # one level down, a key compared with values and one read as `["qty"]` say more than "none of the keys"
+        "`tests/test_paper_twelve_modules.py:12` calls `parse_fill_event(…)`: `envelope`[\"data\"] is read for `event` "
+        "(one of `fill`, `partial_fill`; without it the function takes the other way) -- the dict given has `kind` "
+        "and no `event`",
         "`tests/test_paper_twelve_modules.py:12` calls `parse_fill_event(…)`: `envelope`[\"data\"] is read for `qty` "
         "(as `[\"qty\"]`, which raises without it) -- the dict given has `kind` and no `qty`",
         # line 16: `qty` is read as `["qty"]` and missing -- the test expects the KeyError: not refused
