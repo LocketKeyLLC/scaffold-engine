@@ -425,17 +425,6 @@ async def _dispatch_with_retry(
             "Attempt %d/%d failed for %s [%s]: %s",
             attempt + 1, retries, model, classification, last_resp.error,
         )
-        if classification == "quota":
-            # §17.1889 — the account's limit: no retry clears it, and a CPU fallback drawing in a cloud model's
-            # place is a silent, week-long degradation. Say it once, where the run and the operator look.
-            last_resp.error = f"{QUOTA_PREFIX} ({model}): {last_resp.error} -- the run stops rather than falling " \
-                              f"back to {fallback or 'nothing'}; add credits or wait for the limit to reset, then press Run again"
-            last_resp.retries = attempts_used
-            logger.error("model_quota_exhausted model=%s fallback_skipped=%s", model, fallback)
-            from app.utils.progress import turn_note
-            turn_note(f"The model call to {model} was refused: {QUOTA_PREFIX}. Nothing is being drawn on the local "
-                      f"model in its place.")
-            return last_resp
         if classification == "fail_fast":
             # §17.1623 — an unregistered cloud tag (a cloud role, the
             # escalation rung) is pulled by the engine and tried once more.
@@ -447,6 +436,17 @@ async def _dispatch_with_retry(
                     last_resp.retries = attempt
                     return last_resp
             break
+        if classification == "quota":
+            # §17.1889 — the account's limit: no retry clears it, and a CPU fallback drawing in a cloud model's
+            # place is a silent, week-long degradation. Say it once, where the run and the operator look.
+            last_resp.error = f"{QUOTA_PREFIX} ({model}): {last_resp.error} -- the run stops rather than falling " \
+                              f"back to {fallback or 'nothing'}; add credits or wait for the limit to reset, then press Run again"
+            last_resp.retries = attempts_used
+            logger.error("model_quota_exhausted model=%s fallback_skipped=%s", model, fallback)
+            from app.utils.progress import turn_note
+            turn_note(f"The model call to {model} was refused: {QUOTA_PREFIX}. Nothing is being drawn on the local "
+                      f"model in its place.")
+            return last_resp
         # §17.1082 — the operator's screen went quiet for 105 s while two
         # 500s from the cloud were retried in silence; say so where they look.
         if attempt + 1 < retries:
