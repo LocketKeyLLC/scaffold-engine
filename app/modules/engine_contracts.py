@@ -4171,3 +4171,408 @@ def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST
                 and not _asserts_on(fn, val.root)):
             return
         say(pc.lineno, f"patches `{name}` on `{owner or mod}` with", bad, f"`{name}{_uses_text(uses)}`")
+
+
+# ---------------------------------------------------------------------------
+# §17.1889 — an exit that swallows; a returned compare and a returned literal, read against the test's values; a
+# text whose every row the parser drops
+
+
+def _mock_exit_value(v: ast.AST) -> str | None:
+    """`AsyncMock()` / `MagicMock(return_value=True)` as an `__aexit__`: the text to show, or None when it returns falsy
+    (`return_value=False` / `None`) or something unknown (a name)."""
+    if not (isinstance(v, ast.Call) and _call_name(v) in ("AsyncMock", "MagicMock", "Mock")):
+        return None
+    rv = next((k.value for k in v.keywords if k.arg == "return_value"), None)
+    if rv is None:
+        return ast.unparse(v)                              # the default return: a MagicMock, truthy
+    if isinstance(rv, ast.Constant):
+        return ast.unparse(v) if rv.value else None
+    return ast.unparse(v) if isinstance(rv, ast.Call) else None
+
+
+def swallowing_exits(files: dict[str, str]) -> list[str]:
+    """§17.1889 — each `x.__aexit__ = AsyncMock()` (or `__exit__`, or the keyword form `MagicMock(__aexit__=…)`) in a
+    test: an exit that returns a truthy value -- a mock's default return is a `MagicMock` -- SUPPRESSES every
+    exception raised inside the `with`, so a `pytest.raises` around it sees nothing and the code after it runs as if
+    nothing failed. Live (5b4880c0 T5 a4, 2026-10-31, four rounds): `mock_session.return_value.__aexit__ =
+    AsyncMock()` around `await client._ensure_credentials()` under `pytest.raises(AlpacaSecretsMissingError)` -- the
+    module raised inside its `async with async_session() as db:`, the fake exit returned a MagicMock, "DID NOT
+    RAISE". Replayed: `AsyncMock(return_value=False)` raises as expected."""
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            hits: list[tuple[str, str, str]] = []                 # (target text, dunder, value text)
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Attribute) \
+                    and n.targets[0].attr in ("__aexit__", "__exit__") and (v := _mock_exit_value(n.value)):
+                hits.append((ast.unparse(n.targets[0]), n.targets[0].attr, v))
+            elif isinstance(n, ast.Call):
+                for k in n.keywords:
+                    if k.arg in ("__aexit__", "__exit__") and (v := _mock_exit_value(k.value)):
+                        hits.append((f"{ast.unparse(n.func)}(…, {k.arg}=…)", k.arg, v))
+            for target, dunder, v in hits:
+                msg = (f"`{path}:{n.lineno}` sets `{target}` to `{v}`: an `{dunder}` that returns a truthy value (a "
+                       f"mock's default return is a `MagicMock`) suppresses every exception raised inside the `with` -- "
+                       f"a `pytest.raises` around it sees nothing (\"DID NOT RAISE\"), and the code after the `with` "
+                       f"runs as if nothing failed -- `{_call_name(ast.parse(v, mode='eval').body)}(return_value=False)`, "
+                       f"or leave `{dunder}` as the `MagicMock` makes it (it returns False)")
+                if msg not in found:
+                    found.append(msg)
+    return _by_line(found)
+
+
+def _by_line(found: list[str]) -> list[str]:
+    """Findings in source order: `ast.walk` is breadth-first, and a test reads them top to bottom."""
+    return sorted(found, key=lambda m: int(re.search(r"\.py:(\d+)`", m).group(1)) if re.search(r"\.py:(\d+)`", m) else 0)
+
+
+def _consts_of(tree: ast.Module) -> dict[str, ast.Constant]:
+    """A module's top-level names bound to a constant: `TRADE_UPDATES_STREAM = "trade_updates"`."""
+    out: dict[str, ast.Constant] = {}
+    for n in tree.body:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        v = getattr(n, "value", None)
+        if isinstance(v, ast.Constant):
+            out.update({t.id: v for t in targets if isinstance(t, ast.Name)})
+    return out
+
+
+def _single_compare_return(fn: ast.AST) -> ast.Compare | None:
+    """A function whose whole body (after its docstring) is `return <a compare>`."""
+    body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+    if len(body) == 1 and isinstance(body[0], ast.Return) and isinstance(body[0].value, ast.Compare) \
+            and len(body[0].value.ops) == 1:
+        return body[0].value
+    return None
+
+
+def _param_key_read(e: ast.AST, params: set[str]) -> tuple[str, str] | None:
+    """`p.get("k")` / `p.get("k", d)` / `p["k"]` on a parameter -> (p, k)."""
+    if (k := _get_key(e, params)) is not None and isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) \
+            and isinstance(e.func.value, ast.Name):
+        return e.func.value.id, k
+    if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in params \
+            and isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, str):
+        return e.value.id, e.slice.value
+    return None
+
+
+def _truth_tests(test: ast.AST) -> list[tuple[ast.AST, bool, bool]]:
+    """What an assert tests the truth of: (expression, expected truth, every-operand-must-fail) -- `assert f(x)`,
+    `assert not f(x)`, `assert f(x) is True`, `assert f(x) == False`; under `and` each; under `or` all together."""
+    if isinstance(test, ast.BoolOp):
+        parts = [t for v in test.values for t in _truth_tests(v)]
+        return [(e, want, isinstance(test.op, ast.Or) or every) for e, want, every in parts]
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return [(e, not want, every) for e, want, every in _truth_tests(test.operand)]
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Is, ast.Eq, ast.IsNot,
+                                                                                            ast.NotEq)) \
+            and isinstance(test.comparators[0], ast.Constant) and isinstance(test.comparators[0].value, bool):
+        want = test.comparators[0].value
+        if isinstance(test.ops[0], (ast.IsNot, ast.NotEq)):
+            want = not want
+        return [(test.left, want, False)]
+    return [(test, True, False)]
+
+
+def _arg_for(call: ast.Call, fn: ast.AST, param: str) -> ast.AST | None:
+    """The argument a call hands to `param` of `fn`, by position or by keyword."""
+    for k in call.keywords:
+        if k.arg == param:
+            return k.value
+    names = [a.arg for a in fn.args.posonlyargs + fn.args.args if a.arg not in ("self", "cls")]
+    if param in names and names.index(param) < len(call.args):
+        return call.args[names.index(param)]
+    return None
+
+
+def _returns_under(fn: ast.AST, key: str, local: dict[str, ast.AST], _depth: int = 0) -> list[ast.AST] | None:
+    """The values a function returns under `key` of a dict -- `return {"k": v}`, `return d` with `d = {…}` bound in
+    the function, `return await g(…)` into a function of the same module (one hop). None when one return cannot be
+    read."""
+    own = list(_own_nodes(fn))
+    dicts = {n.targets[0].id: n.value for n in own if isinstance(n, ast.Assign) and len(n.targets) == 1
+             and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Dict)}
+    out: list[ast.AST] = []
+    for r in (n for n in own if isinstance(n, ast.Return)):
+        v = _unwrap(r.value) if r.value is not None else None
+        if isinstance(v, ast.Name) and v.id in dicts:
+            v = dicts[v.id]
+        if isinstance(v, ast.Dict):
+            hit = [val for k, val in zip(v.keys, v.values, strict=True) if isinstance(k, ast.Constant) and k.value == key]
+            if not hit:
+                return None
+            out.extend(hit)
+        elif isinstance(v, ast.Call) and _depth < 1 and _call_name(v) in local and isinstance(v.func, ast.Name):
+            sub = _returns_under(local[_call_name(v)], key, local, _depth + 1)
+            if sub is None:
+                return None
+            out.extend(sub)
+        else:
+            return None
+    return out or None
+
+
+def _value_shapes(values: list[ast.AST], fn: ast.AST, local: dict[str, ast.AST]) -> list[tuple[str, str]] | None:
+    """Each returned value as (shape, text): a dict literal with keys, a list literal with items, a `dict(…)` call;
+    a name is read through every binding of it in the function (and its callees' when the value came from one).
+    None when one value's shape is unknown (a comprehension, a call, a parameter)."""
+    scopes = [fn] + list(local.values())
+    binds: dict[str, list[ast.AST]] = {}
+    for scope in scopes:
+        for n in _own_nodes(scope):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                binds.setdefault(n.targets[0].id, []).append(n.value)
+    out: list[tuple[str, str]] = []
+    for v in values:
+        vals = binds.get(v.id) if isinstance(v, ast.Name) else [v]
+        if not vals:
+            return None
+        for val in vals:
+            if isinstance(val, ast.Dict) and val.keys:
+                text = ast.unparse(val)
+                out.append(("dict", text if len(text) <= 90 else text[:87] + "…}"))
+            elif isinstance(val, ast.List) and val.elts:
+                out.append(("list", ast.unparse(val)[:60]))
+            elif isinstance(val, ast.Call) and _call_name(val) == "dict" and (val.args or val.keywords):
+                out.append(("built", ast.unparse(val)[:60]))
+            elif isinstance(val, ast.DictComp):                   # a dict, maybe empty
+                out.append(("dictcomp", ast.unparse(val)[:60]))
+            elif isinstance(val, ast.ListComp) or (isinstance(val, ast.Call) and _call_name(val) == "list"):
+                out.append(("listcomp", ast.unparse(val)[:60]))   # a list, maybe empty
+            else:
+                return None
+    return out
+
+
+def returned_compares(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1889 — (1) a test asserts the truth of a call to a job function whose whole body is `return <param>.get("k")
+    == CONST` (or `["k"]`, `!=`, `in`; CONST a literal or a module constant), with a dict whose `k` makes the compare
+    come out the other way: `is_trade_update({"stream": "other"}) is True`. (2) a test asserts `result["k"] == {}`
+    (or `== []`, `is None`) on what a job function returns, where that key is never that: a dict literal with keys, a
+    `dict(…)` built from a row. Live (5b4880c0 T5, 2026-10-30/31): `is_trade_update` returning a compare and the
+    fill tracker's constant were parked five rounds as 'returned compares' / 'constants in compares'; a3 and a2
+    asserted `view["metrics"] == {}` where the operator view returns `{"cumulative_return": None, …}` or
+    `dict(metrics_row._mapping)`."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    trees: dict[str, ast.Module] = {}
+    for m, c in reach.items():
+        try:
+            trees[m] = ast.parse(c)
+        except SyntaxError:
+            pass
+    found: list[str] = []
+
+    def const_text(v: ast.AST, consts: dict[str, ast.Constant]) -> tuple[object, str] | None:
+        if isinstance(v, ast.Constant):
+            return v.value, repr(v.value)
+        if isinstance(v, ast.Name) and v.id in consts:
+            return consts[v.id].value, f"`{v.id}`, {consts[v.id].value!r}"
+        if isinstance(v, (ast.Tuple, ast.List, ast.Set)) and all(isinstance(e, ast.Constant) for e in v.elts):
+            return tuple(e.value for e in v.elts), ast.unparse(v)
+        return None
+
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            own = list(_own_nodes(fn))
+            assigns = sorted((x for x in own if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
+            results: dict[str, list[tuple[int, tuple[str, str] | None]]] = {}
+            for a in assigns:
+                if len(a.targets) != 1 or not isinstance(a.targets[0], ast.Name):
+                    continue
+                call = _unwrap(a.value)
+                info = None
+                if isinstance(call, ast.Call) and (mod := by_line.get((call.lineno, _call_name(call)))) in trees:
+                    info = (mod, _call_name(call))
+                results.setdefault(a.targets[0].id, []).append((a.lineno, info))
+            for st in sorted((x for x in own if isinstance(x, ast.Assert)), key=lambda x: x.lineno):
+                refuted: list[str] = []
+                tests = _truth_tests(st.test)
+                for expr, want, every in tests:
+                    msg = None
+                    call = _unwrap(expr)
+                    # (1) the truth of a call to a function that returns one compare on a dict parameter
+                    if isinstance(call, ast.Call) and (mod := by_line.get((call.lineno, _call_name(call)))) in trees:
+                        d = _defs(reach[mod])
+                        target = d[0].get(_call_name(call)) if d else None
+                        cmp = _single_compare_return(target) if target is not None else None
+                        params = {a.arg for a in target.args.args + target.args.kwonlyargs} if target else set()
+                        read = _param_key_read(cmp.left, params) if cmp is not None else None
+                        right = const_text(cmp.comparators[0], _consts_of(trees[mod])) if cmp is not None else None
+                        op = cmp.ops[0] if cmp is not None else None
+                        if read and right and isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)):
+                            arg = _arg_for(call, target, read[0])
+                            if isinstance(arg, ast.Name):
+                                from app.modules.engine_source import _literal_bindings_before
+                                arg = _literal_bindings_before(assigns, call.lineno).get(arg.id)
+                            given = None
+                            if isinstance(arg, ast.Dict):
+                                given = next((val for k, val in zip(arg.keys, arg.values, strict=True)
+                                              if isinstance(k, ast.Constant) and k.value == read[1]), None)
+                            if isinstance(given, ast.Constant):
+                                rv, rtext = right
+                                actual = ((given.value == rv) if isinstance(op, ast.Eq) else
+                                          (given.value != rv) if isinstance(op, ast.NotEq) else
+                                          (given.value in rv) if isinstance(op, ast.In) and isinstance(rv, tuple) else
+                                          (given.value not in rv) if isinstance(rv, tuple) else None)
+                                if actual is not None and actual != want:
+                                    msg = (f"`{path}:{st.lineno}` asserts `{_call_name(call)}(…)` is {want}, but it returns "
+                                           f"`{ast.unparse(cmp)}` ({rtext}), which is {actual} for the dict given "
+                                           f"(`{read[1]}` = {given.value!r})")
+                    # (2) a returned value under a key compared with {} / [] / None
+                    elif isinstance(expr, ast.Compare) and len(expr.ops) == 1 and isinstance(expr.left, ast.Subscript) \
+                            and isinstance(expr.left.value, ast.Name) and isinstance(expr.left.slice, ast.Constant) \
+                            and isinstance(expr.left.slice.value, str) and expr.left.value.id in results:
+                        comp, op = expr.comparators[0], expr.ops[0]
+                        # the literals the assert allows: `== {}`, `is None`, `in ({}, None)`; `== 0` on a list
+                        allowed = ([comp] if isinstance(op, (ast.Eq, ast.Is)) else
+                                   list(comp.elts) if isinstance(op, ast.In) and isinstance(comp, (ast.Tuple, ast.List))
+                                   else [])
+                        number = (isinstance(op, (ast.Eq, ast.Gt, ast.GtE, ast.Lt, ast.LtE)) and isinstance(comp, ast.Constant)
+                                  and isinstance(comp.value, (int, float)) and not isinstance(comp.value, bool))
+                        prior = [i for ln, i in results[expr.left.value.id] if ln < st.lineno]
+                        if (allowed or number) and prior and prior[-1] is not None:
+                            mod, f = prior[-1]
+                            d = _defs(reach[mod])
+                            target = d[0].get(f) if d else None
+                            local = d[0] if d else {}
+                            key = expr.left.slice.value
+                            vals = _returns_under(target, key, local) if target is not None else None
+                            shapes = _value_shapes(vals, target, local) if vals else None
+                            kinds = {s for s, _ in shapes} if shapes else set()
+
+                            def never(lit: ast.AST) -> bool:         # no returned value can equal this literal
+                                if isinstance(lit, ast.Constant) and lit.value is None:
+                                    return True                      # every shape is a dict, a list or a dict built
+                                if isinstance(lit, ast.Dict) and not lit.keys:
+                                    return kinds <= {"dict", "built"}
+                                if isinstance(lit, ast.List) and not lit.elts:
+                                    return kinds <= {"list"}
+                                return False
+                            if shapes and ((allowed and all(never(a) for a in allowed)) or (number and kinds)):
+                                what = " or ".join(dict.fromkeys(f"`{t}`" for _, t in shapes))
+                                tested = ast.unparse(expr)
+                                if number:
+                                    msg = (f"`{path}:{st.lineno}` asserts `{tested}`, but `{f}` (`{mod}`) returns "
+                                           f"{what} under `{key}` -- a {'list' if kinds <= {'list', 'listcomp'} else 'dict'} "
+                                           f"compared with a number is never equal: compare `len({ast.unparse(expr.left)})`")
+                                else:
+                                    msg = (f"`{path}:{st.lineno}` asserts `{tested}`, but `{f}` (`{mod}`) never returns "
+                                           f"{' or '.join(ast.unparse(a) for a in allowed)} under `{key}`: it is {what} -- "
+                                           f"assert the keys it carries")
+                    if msg:
+                        refuted.append(msg)
+                    elif every:
+                        refuted = []
+                        break
+                for msg in refuted:
+                    if msg not in found:
+                        found.append(msg)
+    return _by_line(found)
+
+
+_ROW_DELIMS = "|,;\t"
+
+
+def _row_rules(tree: ast.Module) -> list[tuple[str, int, str, list[str]]]:
+    """Each function of a module that splits text into rows -- `csv.reader(…, delimiter="|")`, `line.split("|")` --
+    and drops the narrow ones (`if len(row) < 5: continue`): (delimiter, width, function, the field names it unpacks)."""
+    out: list[tuple[str, int, str, list[str]]] = []
+    for fn in (n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        delim = None
+        for n in ast.walk(fn):
+            if not isinstance(n, ast.Call):
+                continue
+            if _call_name(n) == "reader":
+                d = next((k.value for k in n.keywords if k.arg == "delimiter"), None)
+                if isinstance(d, ast.Constant) and isinstance(d.value, str) and len(d.value) == 1:
+                    delim = d.value
+            elif _call_name(n) == "split" and n.args and isinstance(n.args[0], ast.Constant) \
+                    and isinstance(n.args[0].value, str) and n.args[0].value in _ROW_DELIMS:
+                delim = n.args[0].value
+        if delim is None:
+            continue
+        width, names = 0, []
+        for n in ast.walk(fn):
+            t = n.test if isinstance(n, ast.If) else None
+            if isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.left, ast.Call) \
+                    and _call_name(t.left) == "len" and isinstance(t.comparators[0], ast.Constant) \
+                    and isinstance(t.comparators[0].value, int) and isinstance(t.ops[0], (ast.Lt, ast.LtE)):
+                width = max(width, t.comparators[0].value + (1 if isinstance(t.ops[0], ast.LtE) else 0))
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Tuple) \
+                    and isinstance(n.value, ast.Subscript) and isinstance(n.value.slice, ast.Slice):
+                names = [e.id for e in n.targets[0].elts if isinstance(e, ast.Name)]
+        if width:
+            out.append((delim, width, fn.name, names))
+    return out
+
+
+def narrow_rows(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1889 — a text a test hands a module that parses it into rows of N fields, whose every row has fewer: the
+    parser drops all of it and the ingester counts nothing. The test is left alone when it asserts that nothing
+    came of it (`== 0`, `== []`). Live (5b4880c0 T5, 2026-10-30/31, the FINRA ingester -- `csv.reader(…,
+    delimiter="|")`, `if len(row) < 5: continue`): "header\\nrow1\\n" and three-field rows, parked four rounds as
+    'FINRA's CSV width (a str's content)'."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    rules: dict[str, list[tuple[str, int, str, list[str]]]] = {}
+    for m, c in reach.items():
+        try:
+            if r := _row_rules(ast.parse(c)):
+                rules[m] = r
+        except SyntaxError:
+            pass
+    if not rules:
+        return []
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        calls = [(m, f, ln) for m, f, ln in _test_calls(code) if m in rules]
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            end = getattr(fn, "end_lineno", fn.lineno)
+            mine = [(m, f, ln) for m, f, ln in calls if fn.lineno <= ln <= end]
+            if not mine:
+                continue
+            own = list(_own_nodes(fn))
+            if any(isinstance(c, ast.Constant) and c.value == 0 and not isinstance(c.value, bool)
+                   or isinstance(c, (ast.List, ast.Dict)) and not getattr(c, "elts", getattr(c, "keys", None))
+                   for a in own if isinstance(a, ast.Assert) for c in ast.walk(a.test)):
+                continue                                        # the test expects nothing to come of it
+            mod, f, _ = mine[0]
+            for s in (n for n in own if isinstance(n, ast.Constant) and isinstance(n.value, str)):
+                text_ = str(s.value)
+                for delim, width, parser, names in rules[mod]:
+                    if "\n" not in text_ and delim not in text_:
+                        continue
+                    lines = [ln for ln in text_.splitlines() if ln.strip()]
+                    if not lines or not all(ln.count(delim) + 1 < width for ln in lines):
+                        continue
+                    seen = ", ".join(f"`{ln.strip()[:30]}`" for ln in lines[:3])
+                    fields = f" (`{delim.join(names)}`)" if names and len(names) == width else ""
+                    msg = (f"`{path}:{s.lineno}` hands `{f}(…)` text whose rows have "
+                           f"{max(ln.count(delim) + 1 for ln in lines)} field(s) ({seen}) where `{parser}` (`{mod}`) "
+                           f"skips every row with fewer than {width}{fields}: nothing is parsed, nothing counted -- "
+                           f"give it rows of {width} `{delim}`-separated fields")
+                    if msg not in found:
+                        found.append(msg)
+                    break
+    return _by_line(found)

@@ -30,7 +30,7 @@ MERGED = (
 
 
 def test_a_long_test_name_opens_its_own_section_so_the_defect_stays_in_its_own_frame():
-    found = et.callee_defects(MERGED)
+    found = [{k: v for k, v in d.items() if k != "modules"} for d in et.callee_defects(MERGED)]   # §17.1889 frames
     assert found == [{"module": "paper_finra_data_ingestion",
                       "frame": "app/modules/paper_finra_data_ingestion.py:225 in _record_version",
                       "test": "TestFinraDataIngestion.test_ingest_finra_file_uses_int_version",

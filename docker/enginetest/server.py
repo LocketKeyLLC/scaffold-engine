@@ -131,6 +131,10 @@ async def _drop_db(name: str) -> None:
 #: tables are append-only (UPDATE/DELETE refused by trigger), so a test could not clean up -- "no fills" saw the last
 #: test's AAPL position and realized P&L summed across tests (20, 50, 70, 90): seven correct tests failed together.
 #: TRUNCATE is not a row DELETE, so the triggers do not refuse it; the engine's own (seeded) tables are left alone.
+#: §17.1889 — and when the tables cannot be emptied because a connection from an earlier test still holds a
+#: transaction open on them (TRUNCATE waits for its lock forever; live, 5b4880c0 T5 a4 2026-10-31: six "ERROR at
+#: setup of … Timeout (>20.0s)" in one run, the cause invisible), the plugin names it -- the test that ran before,
+#: the connection's state and its last statement -- terminates that connection, and goes on.
 ISOLATION_PLUGIN = '''"""§17.1819 — every test starts with this job's own tables empty."""
 import asyncio
 import os
@@ -138,20 +142,51 @@ import os
 import pytest
 
 _TABLES = [t for t in os.environ.get("ENGINETEST_JOB_TABLES", "").split(",") if t]
+_LAST = {"test": ""}
+_LOCK_WAIT = "3s"
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    _LAST["test"] = nodeid
+
+
+async def _empty_tables():
+    """TRUNCATE the job's tables; when another connection holds them, say which and end it. Returns the leak text."""
+    import asyncpg
+    conn = await asyncpg.connect(os.environ["ENGINETEST_DB_DSN"])
+    try:
+        await conn.execute("SET lock_timeout = '%s'" % _LOCK_WAIT)
+        sql = "TRUNCATE " + ", ".join('"%s"' % t for t in _TABLES) + " RESTART IDENTITY CASCADE"
+        try:
+            await conn.execute(sql)
+            return ""
+        except asyncpg.LockNotAvailableError:
+            pass
+        held = await conn.fetch(
+            "SELECT pid, state, left(query, 160) AS query, (now() - xact_start)::text AS held "
+            "FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() "
+            "AND state IS NOT NULL AND state <> 'idle' ORDER BY xact_start")
+        for r in held:
+            await conn.execute("SELECT pg_terminate_backend($1)", r["pid"])
+        await conn.execute(sql)
+        return "; ".join("a connection %s (%s, open %s), last statement `%s`"
+                         % (r["pid"], r["state"], (r["held"] or "?").split(".")[0], (r["query"] or "").strip())
+                         for r in held) or "a connection this database no longer lists"
+    finally:
+        await conn.close()
 
 
 @pytest.fixture(autouse=True)
 def _enginetest_job_tables_empty():
     if _TABLES:
-        import asyncpg
-
-        async def _truncate():
-            conn = await asyncpg.connect(os.environ["ENGINETEST_DB_DSN"])
-            try:
-                await conn.execute("TRUNCATE " + ", ".join('"%s"' % t for t in _TABLES) + " RESTART IDENTITY CASCADE")
-            finally:
-                await conn.close()
-        asyncio.run(_truncate())
+        leak = asyncio.run(_empty_tables())
+        if leak:
+            pytest.fail(
+                "§17.1889 the job's tables could not be emptied before this test: the test before it (%s) left a "
+                "transaction open on them -- %s. The session was never committed or closed: `async with "
+                "async_session() as db:` and `await db.commit()` inside the test (and in every helper it calls); "
+                "that connection was terminated so the run could go on, and THIS test did not run"
+                % (_LAST["test"] or "unknown", leak), pytrace=False)
     yield
 '''
 

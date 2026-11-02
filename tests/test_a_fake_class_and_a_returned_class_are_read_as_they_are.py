@@ -253,7 +253,7 @@ def test_a_finished_modules_missing_name_is_its_own_defect():
               'FAILED tests/test_paper_twelve_modules.py::test_ingest_finra_file - AttributeError\n')
     cause = et.known_causes(report)
     assert "a finished module reaches for a name that does not exist" in cause and "the job gets a fix step for it" in cause
-    assert et.callee_defects(report) == [{
+    assert [{k: v for k, v in d.items() if k != "modules"} for d in et.callee_defects(report)] == [{
         "module": "paper_finra_data_ingestion", "frame": "app/modules/paper_finra_data_ingestion.py:225 in _record_version",
         "test": "test_ingest_finra_file", "cause": et.KNOWN_CAUSES[5][1]}]
     # a missing attribute of an OBJECT raised inside a module is still the test's fake, never the module's defect

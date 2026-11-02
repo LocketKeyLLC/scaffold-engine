@@ -4496,6 +4496,36 @@ def _brief_text(job: dict | None) -> str:
     return str((job or {}).get("input_text") or "")[:2000]
 
 
+def _quota_hit(error) -> bool:
+    """§17.1889 — a node failure whose cause is the model account's usage limit (see `model_router.quota_exhausted`)."""
+    from app.model_router import quota_exhausted
+    return quota_exhausted(error if isinstance(error, str) else str(error or ""))
+
+
+async def _block_for_quota(job_id: str, node_key: str, res: dict):
+    """§17.1889 — the model account's usage limit was reached mid-run: no retry can draw the step, so the job is
+    BLOCKED with the reason (re-enterable: Run again once the limit resets or credits are added) instead of three
+    retries each failing the same way, or -- as live (5b4880c0 T5, 2026-10-31 12:49 UTC) -- a silent fallback to
+    the local CPU model that drew for 30 minutes until the operator cancelled. Mirrors the hands-on gate's shape:
+    `node_failed` (retries exhausted), the status write, a `warning` the operator's page renders."""
+    from app.modules import job_state as _js
+    msg = str(res.get("error") or "")
+    yield _sse_event("node_failed", {
+        "job_id": job_id, "node_key": node_key, "title": res.get("title"), "error": msg,
+        "verification_reason": res.get("verification_reason"), "model_used": res.get("model_used"),
+        "retries_exhausted": True, "quota_exhausted": True,
+    })
+    async with async_session() as db:
+        await _js.transition(db, job_id, to="blocked", expected_from=("running", "executing"),
+                             set_columns={"error_summary": msg}, reason="model_quota_exhausted")
+        await db.commit()
+    logger.error("model_quota_blocked_job job=%s node=%s", job_id, node_key)
+    yield _sse_event("warning", {
+        "message": (f"Step {node_key} could not be drawn: {msg} The job is blocked -- nothing about the work "
+                    f"changed; press Run again once the model account's limit resets or credits are added."),
+        "job_id": job_id, "reason": "model_quota_exhausted", "node_key": node_key})
+
+
 async def _run_parallel_frontier(
     job_id: str,
     *,
@@ -4656,6 +4686,10 @@ async def _run_parallel_frontier(
             elif status == "failed":
                 _failed_key = res.get("node_key", "")
                 _retried = False
+                if _quota_hit(res.get("error")):                              # §17.1889
+                    async for _qev in _block_for_quota(job_id, _failed_key, res):
+                        yield _qev
+                    return
                 if retry_budget > 0:
                     try:
                         async with async_session() as _retry_db:
@@ -5172,6 +5206,10 @@ async def execute_all_nodes(
             elif status == "failed":
                 _failed_key = result.get("node_key", "")
                 _retried = False
+                if _quota_hit(result.get("error")):                           # §17.1889
+                    async for _qev in _block_for_quota(job_id, _failed_key, result):
+                        yield _qev
+                    return
                 if retry_budget <= 0:
                     logger.warning(
                         "auto_retry_budget_exhausted: job=%s node=%s cap=%s",
