@@ -242,6 +242,19 @@ _RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
 # "anthropic HTTP 529: ..." forms (§17.610), so cloud errors classify correctly.
 _HTTP_CODE_RE = re.compile(r"HTTP (\d{3})")
 
+#: §17.1889 — a 429 that names the ACCOUNT'S usage limit ("you have reached your weekly usage limit", "quota
+#: exceeded") is not a brownout: no retry clears it, and the fallback is a local CPU model that cannot draw what a
+#: cloud model was asked for. Live (5b4880c0 T5, 2026-10-31 12:49 UTC): three 429s, then "Falling back from
+#: deepseek-v4-pro:cloud → qwen3.5:latest" and a 30-minute CPU draw nobody asked for, until the operator cancelled.
+_QUOTA_RE = re.compile(r"usage limit|quota", re.I)
+QUOTA_PREFIX = "the model account's usage limit is reached"
+
+
+def quota_exhausted(error: str | None) -> bool:
+    """§17.1889 — whether a model error names the account's usage limit (a 429 no retry or fallback can clear)."""
+    e = error or ""
+    return e.startswith(QUOTA_PREFIX) or bool(_HTTP_CODE_RE.search(e) and "429" in e and _QUOTA_RE.search(e))
+
 # Full-jitter exponential backoff: sleep ∈ [0, min(BASE * 2^attempt, CAP)].
 # Base 0.5s / cap 8s gives windows of [0,0.5], [0,1], [0,2], [0,4], [0,8] —
 # enough to ride out an Ollama brownout without piling on, and the 0-floor
@@ -274,6 +287,8 @@ def _classify_failure(resp: ModelResponse) -> str:
     m = _HTTP_CODE_RE.search(err)
     if m:
         code = int(m.group(1))
+        if code == 429 and _QUOTA_RE.search(err):
+            return "quota"                                  # §17.1889 -- the account, not the moment
         return "retry" if code in _RETRYABLE_HTTP_CODES else "fail_fast"
     # Generic exception path (httpx connect errors, RST, DNS, etc.) — and
     # unparseable HTTP strings — are almost always transient, so retry.
@@ -421,6 +436,17 @@ async def _dispatch_with_retry(
                     last_resp.retries = attempt
                     return last_resp
             break
+        if classification == "quota":
+            # §17.1889 — the account's limit: no retry clears it, and a CPU fallback drawing in a cloud model's
+            # place is a silent, week-long degradation. Say it once, where the run and the operator look.
+            last_resp.error = f"{QUOTA_PREFIX} ({model}): {last_resp.error} -- the run stops rather than falling " \
+                              f"back to {fallback or 'nothing'}; add credits or wait for the limit to reset, then press Run again"
+            last_resp.retries = attempts_used
+            logger.error("model_quota_exhausted model=%s fallback_skipped=%s", model, fallback)
+            from app.utils.progress import turn_note
+            turn_note(f"The model call to {model} was refused: {QUOTA_PREFIX}. Nothing is being drawn on the local "
+                      f"model in its place.")
+            return last_resp
         # §17.1082 — the operator's screen went quiet for 105 s while two
         # 500s from the cloud were retried in silence; say so where they look.
         if attempt + 1 < retries:

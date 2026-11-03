@@ -872,8 +872,13 @@ async def fix_upstream_defect(db, job_id: str, node_key: str, *, edited_by: str 
     found: dict[str, list[dict]] = {}
     for reason in reasons:
         for d in callee_defects(reason or ""):
-            if d["module"] in owner and d["module"] not in own and d not in found.get(d["module"], []):
-                found.setdefault(d["module"], []).append(d)
+            # §17.1889 — the deepest frame may be the engine's own (`operator_ask.json.dumps` refusing a Decimal the
+            # approval gate handed it): the module to fix is the deepest frame that is one of the job's
+            mod = next((m for m in reversed(d.get("modules") or [d["module"]]) if m in owner and m not in own), None)
+            if mod is not None:
+                d = {**d, "module": mod}
+                if d not in found.get(mod, []):
+                    found.setdefault(mod, []).append(d)
     existing_rows = (await db.execute(_t("SELECT node_key, tool_config FROM dag_nodes WHERE job_id = :j"),
                                       {"j": job_id})).mappings().all()
     existing = {r["node_key"] for r in existing_rows}

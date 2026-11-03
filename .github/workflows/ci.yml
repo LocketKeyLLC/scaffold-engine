@@ -247,7 +247,9 @@ jobs:
         # PIP_AUDIT_REVISIT this step fails, forcing a re-check for a patched
         # torch instead of the ignore living forever with no owner.
         run: |
-          PIP_AUDIT_REVISIT="2026-11-01"
+          # §17.1889 (2026-11-02) — re-checked: PYSEC-2026-139 lists torch <= 2.10.0 (a later torch is clear),
+          # CVE-2025-3000 still has no versioned fix in OSV; the torch bump is its own dependency PR
+          PIP_AUDIT_REVISIT="2026-11-16"
           today="$(date -u +%F)"
           echo "pip-audit CVE suppressions (expire $PIP_AUDIT_REVISIT): PYSEC-2026-139, CVE-2025-3000 — torch, unfixable-upstream (§17.585)"
           if [[ "$today" > "$PIP_AUDIT_REVISIT" ]]; then

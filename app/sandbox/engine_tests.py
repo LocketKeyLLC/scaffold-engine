@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import httpx
@@ -40,6 +40,16 @@ class EngineTestResult:
     verdict: str          # "pass" | "fail" | "skip"
     reason: str
     ran: list[str]
+    passed: list[str] = field(default_factory=list)      # §17.1891 the tests that passed, as pytest names them
+
+
+#: §17.1891 — pytest's `-rA` summary names every passing test: `PASSED tests/test_x.py::test_a` (`::Cls::test_a`)
+_PASSED_RE = re.compile(r"^PASSED (tests/\S+)", re.M)
+
+
+def passed_tests(stdout: str) -> list[str]:
+    """The node ids pytest reported PASSED, in order, each once."""
+    return list(dict.fromkeys(_PASSED_RE.findall(stdout or "")))
 
 
 def record(res: EngineTestResult) -> dict:
@@ -186,9 +196,23 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "before it left a connection or task open: close every session and client a test opens, inside the test"),
     # §17.1888 — a NUMERIC column read back and compared as text keeps its scale. Live (5b4880c0 T5 a3, 2026-10-31):
     # `assert '2.000000' == '2'`, `'10000.00' == '10000'` -- three of nine failures, every writer test
-    (re.compile(r"assert '(\d+)\.\d*0' == '\1(?:\.\d+)?'"),
+    (re.compile(r"assert (?:Decimal\()?'(\d+)\.\d*0'\)? == '\1(?:\.\d+)?'"),
      "a NUMERIC column read back as text keeps the column's scale ('2.000000', '10000.00'): compare numbers, not their "
      "text -- `Decimal(row[0]) == Decimal(\"2\")`, or `float(row[0]) == 2`"),
+    # §17.1889 — the sandbox's own isolation plugin found the leak (docker/enginetest/server.py ISOLATION_PLUGIN): the
+    # message names the test before, the connection's state and its last statement; the hint is what to do about it
+    (re.compile(r"the test before it \(([^)]*)\) left a transaction open"),
+     "the test named left a database session open with a transaction on the job's tables, so the next test's setup "
+     "could not empty them: every session a test opens (`async_session()`, `engine.connect()`, an `asyncpg.connect`) "
+     "must be closed inside that test -- `async with async_session() as db:` -- and committed (`await db.commit()`) "
+     "when it wrote; a helper that opens a session must close it before it returns"),
+    # §17.1889 — live (5b4880c0 T5 a4, 2026-11-02 21:22 UTC): the approval gate handed a proposal with a `Decimal`
+    # quantity into the engine's `open_decision_job` payload, and `json.dumps` in operator_ask refused it: the module
+    # that builds the payload is at fault (the engine's own frame is the deepest one, and is nobody's to fix)
+    (re.compile(r"Object of type (?:Decimal|datetime|date|UUID|\w+) is not JSON serializable"),
+     "a value that JSON cannot carry (a `Decimal`, a `date`, a `UUID`) was handed into the engine's decision payload "
+     "(`open_decision_job`) or a JSON column: the module that builds that dict converts it first -- `str(quantity)`, "
+     "`.isoformat()` -- that module is at fault, not the test (and the test may pass serialisable values too)"),
 )
 
 
@@ -226,7 +250,7 @@ def _awaited_mocks(text: str) -> list[str]:
 
 #: §17.1831 — the recognised causes that are the fault of the function that raised them (a dict bound to a JSON
 #: column is the binder's bug), not of the test that called it (an awaited `MagicMock` is the test's).
-CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5])                     # §17.1870 -- and a name the module lacks
+CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5], KNOWN_CAUSES[9])    # §17.1870 a name the module lacks; §17.1889 JSON
 #: §17.1871 — pytest pads a failure's header to the terminal width with underscores: a long test name gets ONE on
 #: each side. Live (5b4880c0 T5, 2026-10-30 04:16 UTC): `_ TestOperatorApprovalGate.test_handle_…_write_order _`
 #: did not open a section, two failures merged, and the FINRA module's missing name was pinned on the next test's
@@ -243,19 +267,21 @@ def callee_defects(report: str) -> list[dict]:
     file the step may not rewrite, and the hint told it to ``json.dumps`` its own values."""
     out: list[dict] = []
     test, frame, errors = "", None, []
+    frames: list[tuple] = []                           # §17.1889 every app/modules frame of the failure, outer first
 
     def close():
         hit = next((hint for rx, hint in CALLEE_CAUSES for e in errors if rx.search(e)), None)
         if frame and hit:
             out.append({"module": frame[1], "frame": f"{frame[0]}:{frame[2]} in {frame[3]}", "test": test,
-                        "cause": hit})
+                        "cause": hit, "modules": [f[1] for f in frames]})
 
     for ln in (report or "").splitlines():
         if (m := _SECTION_RE.match(ln.strip())) or "short test summary info" in ln:
             close()
-            test, frame, errors = (m.group(1) if m else ""), None, []
+            test, frame, errors, frames = (m.group(1) if m else ""), None, [], []
         elif (f := _APP_FRAME_RE.match(ln.strip())):
             frame = f.groups()
+            frames.append(frame)
         elif ln.startswith("E "):
             errors.append(ln)
     close()
@@ -337,7 +363,8 @@ def _report(text: str, budget: int = 9000) -> str:
     failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
     ("- sqlalc..."), so each attempt was redrafted from one failure out of ten. §17.1869 — when the budget cuts,
     an index of every failure (one line each) leads, so none goes unnamed."""
-    lines = _fold_library_frames([ln for ln in (text or "").splitlines() if ln.strip()])
+    lines = _fold_library_frames([ln for ln in (text or "").splitlines()
+                                  if ln.strip() and not ln.startswith("PASSED ")])      # §17.1891 -rA: the engine's
     whole = "\n".join(lines)
     if len(whole) <= budget:
         return whole
@@ -381,7 +408,7 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         return EngineTestResult("skip", f"engine-test sandbox holds another engine ({there} vs {here})", [])
     tests = sorted(p for p in mine if is_test(p))
     if tests:
-        command = ["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
+        command = ["python", "-m", "pytest", "-q", "-rA", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
                    "-o", "asyncio_default_fixture_loop_scope=function", "--timeout=20", "-c", "/dev/null",
                    "--rootdir", ".", "-W", "ignore::DeprecationWarning", *tests]
     else:
@@ -422,4 +449,5 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
            "in tests. ")
         + "Fix the code (or the test, when the test is what is wrong):"
-        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran)
+        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran,
+        passed=passed_tests(res.stdout) if tests else [])

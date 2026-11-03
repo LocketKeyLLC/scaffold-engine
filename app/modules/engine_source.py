@@ -1836,20 +1836,61 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 elif n.func.attr not in defs[leaf]["names"]:
                     found.append(f"`{n.func.value.id}.{n.func.attr}(…)`: `{leaf}` (step {defs[leaf]['node']}) has no "
                                  f"`{n.func.attr}`")
+            elif isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name):
+                # §17.1889 — a method called on an instance of a job class the function built (`client =
+                # AlpacaPaperClient()` … `client.submit_order(…)`) is checked against the method's signature. Live
+                # (5b4880c0 T5 a4, 2026-11-02): two tests called `submit_order(symbol=…, qty=…, side=…)` without the
+                # required `order_type`; the constructor was checked, the method never was
+                inst = _instance_of(n.func.value.id, local_assigns.get(owner.get(id(n), 0), []), n.lineno,
+                                    fimported, fmods, defs)
+                sh = (defs[inst[0]].get("classes", {}).get(inst[1], {}).get("methods", {}).get(n.func.attr)
+                      if inst else None)
+                if inst and sh:
+                    for m in _call_mismatches(n, f"{inst[1]}.{n.func.attr}", sh, id(n) in misused, consts, fks, rules):
+                        if in_raise and any(k in m for k in _RAISE_EXEMPT):               # `side="hold"` to make it raise
+                            continue
+                        m = _at(code, n) + m.replace("in the engine", f"in `{inst[0]}`")
+                        if m not in found:
+                            found.append(m + f" (`{inst[0]}`, step {defs[inst[0]]['node']})")
             if target:
                 leaf, fname = target
                 shape = defs[leaf]["funcs"].get(fname) or defs[leaf].get("ctors", {}).get(fname)
                 if not shape:
                     continue
                 for m in _call_mismatches(n, fname, shape, id(n) in misused, consts, fks, rules):
-                    if in_raise and ("is read for `" in m or "a made-up id the scratch database refuses" in m
-                                 or "has none of the keys the function reads" in m      # §17.1879 a missing key
-                                 or "is read as a dict (its" in m):                     # is one way to make it raise
-                        continue                                                           # §17.1874
+                    if in_raise and any(k in m for k in _RAISE_EXEMPT):                   # §17.1874
+                        continue
                     m = _at(code, n) + m.replace("in the engine", f"in `{leaf}`")          # §17.1861
                     if m not in found:
                         found.append(m + f" (`{leaf}`, step {defs[leaf]['node']})")
     return found
+
+
+#: §17.1874 — under `with pytest.raises(…)`, a call meant to fail before any write: a key or a value the function
+#: refuses is one way to make it raise, and is not refused. §17.1879 a missing key; §17.1889 a literal the function
+#: takes only certain values of (`side="hold"` into `submit_order`), or of the wrong kind. A missing required
+#: argument stays refused: that is a `TypeError`, not the error the test expects.
+_RAISE_EXEMPT = ("is read for `", "a made-up id the scratch database refuses", "has none of the keys the function reads",
+                 "is read as a dict (its", " is one of `", "; it was given a `")
+
+
+def _instance_of(name: str, assigns: list[ast.Assign], line: int, imported: dict[str, tuple[str, str]],
+                 mods: dict[str, str], defs: dict[str, dict]) -> tuple[str, str] | None:
+    """§17.1889 — (module, class) when `name` was last bound above `line` to `Cls(…)` / `mod.Cls(…)` of a job class."""
+    bound = None
+    for a in assigns:
+        if a.lineno >= line or len(a.targets) != 1 or not isinstance(a.targets[0], ast.Name) or a.targets[0].id != name:
+            continue
+        v = a.value.value if isinstance(a.value, ast.Await) else a.value
+        bound = None
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in imported:
+            leaf, cls = imported[v.func.id]
+            if cls in defs.get(leaf, {}).get("classes", {}):
+                bound = (leaf, cls)
+        elif (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and isinstance(v.func.value, ast.Name)
+              and v.func.value.id in mods and v.func.attr in defs.get(mods[v.func.value.id], {}).get("classes", {})):
+            bound = (mods[v.func.value.id], v.func.attr)
+    return bound
 
 
 def imports_an_unwritten_sibling(output: str, others: list[dict], written: dict[str, dict]) -> list[str]:
@@ -2488,6 +2529,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += unawaited_session_calls(files_of({**me, "output_text": output}))
     found += awaited_result_calls(files_of({**me, "output_text": output}))        # §17.1887
     found += import_bound_patches(files_of({**me, "output_text": output}), _cur)
+    # §17.1889 — an exit that swallows; a returned compare / literal read against the test's values; narrow rows
+    from app.modules.engine_contracts import narrow_rows, returned_compares, swallowing_exits
+    found += swallowing_exits(files_of({**me, "output_text": output}))
+    found += returned_compares(files_of({**me, "output_text": output}), _cur)
+    found += narrow_rows(files_of({**me, "output_text": output}), _cur)
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request
     found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)
@@ -3002,6 +3048,28 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
         parts.insert(1, "### Tests your earlier attempts wrote (keep every one, by name -- fix the ones the sandbox "
                         "named, never drop them)\n" + "".join(
                             f"    {path}: {', '.join(names)}\n" for path, names in sorted(prior.items()) if names))
+    passing = node.get("prior_passing") or {}
+    if isinstance(passing, dict) and any(passing.values()):
+        # §17.1891 — the ones that passed are kept as they are: the engine puts them back by name after the draw, so
+        # the attempt writes the failing and the new ones, and keeps the helpers the passing ones use
+        shown, used = [], 0
+        for path, defs in sorted(passing.items()):
+            for name, src in defs.items():
+                if used + len(src) > 4000:
+                    break
+                shown.append(f"# {path} -- {name}\n{src}")
+                used += len(src)
+        parts.insert(2, "### Tests that PASSED in the last run -- kept as written (the engine puts these back by name "
+                        "after your answer: do not write them again; write the tests the sandbox named and any new "
+                        "ones, and keep the helpers, fixtures and fake classes these use, with the same names and "
+                        "behaviour)\n" + "".join(f"    {path}: {', '.join(defs)}\n" for path, defs in sorted(passing.items())))
+        if shown:                                            # last: the block is cut at `budget`, and these go first
+            passing_tail = "### Some of the kept tests, as they passed (for the helpers they use)\n```python\n" \
+                           + "\n\n".join(shown) + "\n```\n"
+        else:
+            passing_tail = ""
+    else:
+        passing_tail = ""
     caps = capabilities_for(node)
     if caps:
         parts.append("### The engine's own way to do what this step names\n" + "".join(_render_capability(c) for c in caps))
@@ -3012,5 +3080,5 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
     parts.append("### Package layout\n" + "".join(
         f"    {head}: {', '.join(sorted(leaves)[:60])}{' …' if len(leaves) > 60 else ''}\n"
         for head, leaves in sorted(layout.items())))
-    out = "\n".join(parts)
+    out = "\n".join(parts + ([passing_tail] if passing_tail else []))
     return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
