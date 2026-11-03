@@ -286,8 +286,11 @@ async def _drop_engine_half_marks(db: AsyncSession, job_id: str, keys: list[str]
     return gone
 
 
-async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
-    """Reset nodes to pending — and write down what they were first.
+async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str], edited_by: str | None = None) -> None:
+    """Reset nodes to pending — and write down what they were first. §17.1896 — and WHO asked: the `reset` row carries
+    `edited_by` after the `node_editor:reset` mark, so a reset the engine made for itself (a fix step opened for a
+    sibling module, §17.1831) is told apart from the operator's -- the keep-list window (§17.1884) restarts at the
+    operator's only.
 
     §17.1211 — this destroyed status, output, both timestamps and the failure
     reason for every key, and recorded NOTHING. When it fired wrongly on a live
@@ -313,7 +316,7 @@ async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
              "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
              "last_verification_reason": r["last_verification_reason"],
              "retry_count": r["retry_count"]},
-            {"status": "pending"}, "node_editor:reset",
+            {"status": "pending"}, "node_editor:reset" + (f" by {edited_by}" if edited_by else ""),
         )
     await db.execute(
         text(
@@ -512,7 +515,7 @@ async def edit_node(
         downstream = all_downstream if cascade else set()          # §17.1288r — opt-in
         downstream_kept = sorted(all_downstream - downstream)
         reset_keys = sorted({node_key} | downstream)
-        await _reset_keys(db, job_id, reset_keys)
+        await _reset_keys(db, job_id, reset_keys, edited_by)
         await _reopen_job(db, job_id)
 
     after = {k: updates[k] for k in updates}
@@ -634,7 +637,7 @@ async def delete_node(
         for d in dependents:
             ds |= _transitive_downstream(post, d)
         reset_keys = sorted(ds)
-        await _reset_keys(db, job_id, reset_keys)
+        await _reset_keys(db, job_id, reset_keys, edited_by)
         await _reopen_job(db, job_id)
     await _audit(db, job_id, node_key, "delete", node, None, edited_by)
     await db.commit()
@@ -755,7 +758,7 @@ async def reset_node(
     all_downstream = _transitive_downstream(nodes, node_key)
     downstream = all_downstream if cascade else set()
     reset_keys = sorted({node_key} | downstream)
-    await _reset_keys(db, job_id, reset_keys)
+    await _reset_keys(db, job_id, reset_keys, edited_by)
     await _drop_engine_half_marks(db, job_id, reset_keys)
     await _drop_parked_frame(db, job_id, reset_keys, "reset")   # §17.1639 — its draft is gone with it
     await _reopen_job(db, job_id)
@@ -825,7 +828,7 @@ async def revise_decision(
     # the steps built on the old answer have to be built again
     downstream = sorted(_transitive_downstream(nodes, node_key))
     if downstream:
-        await _reset_keys(db, job_id, downstream)
+        await _reset_keys(db, job_id, downstream, edited_by)
         await _reopen_job(db, job_id)
     await _audit(db, job_id, node_key, "revise_decision",
                  {"output_text": prior[:8000]},
