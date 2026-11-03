@@ -165,6 +165,6 @@ def test_the_sandbox_names_a_hung_test_and_recognises_it():
     assert et.KNOWN_CAUSES[6][0].search("E       Failed: Timeout >60.0s")
     assert not et.KNOWN_CAUSES[6][0].search("httpx.TimeoutException: timed out")
     # the table's earlier entries keep their places (indexed by callers)
-    assert et.KNOWN_CAUSES[1][0] is et._MOCK_AWAITED and et.CALLEE_CAUSES == (et.KNOWN_CAUSES[0], et.KNOWN_CAUSES[5], et.KNOWN_CAUSES[9])   # §17.1889 JSON
+    assert et.KNOWN_CAUSES[1][0] is et._MOCK_AWAITED and et.CALLEE_CAUSES == (et.KNOWN_CAUSES[0], et.KNOWN_CAUSES[5], et.KNOWN_CAUSES[9], et.KNOWN_CAUSES[10])   # §17.1889 JSON, §17.1892 Decimal
     # a run that timed out whole still carries what pytest printed
     assert "_tail(res.stdout" in src.split("if res.timed_out:", 1)[1].split("elif", 1)[0]
