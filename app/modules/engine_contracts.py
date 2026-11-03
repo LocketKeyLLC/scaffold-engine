@@ -4422,6 +4422,81 @@ def null_inserts(files: dict[str, str], fks: dict | None, rules: dict | None) ->
     return _by_line(found)
 
 
+def stdlib_attrs(files: dict[str, str]) -> list[str]:
+    """§17.1897 — each `m.attr` read in a file where `m` is a standard-library module the file imports and the module
+    has no such attribute (`import time` then `time.min`: `AttributeError: module 'time' has no attribute 'min'`), and
+    each `from m import name` the module lacks (an `ImportError` at collection). The real module answers: the engine
+    runs the same Python. A name the file binds twice (two imports, or an assignment) is left alone. When another
+    module the file imports from holds a `m` with that attribute (`datetime.time.min`), it is named.
+    Live (5b4880c0 T5 a3, 2026-11-03 23:03 UTC): `datetime.combine(trading_day, time.min, …)` under `import time`,
+    one of the attempt's two failures."""
+    import importlib
+    import sys
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        bound: dict[str, list[tuple[str, int]]] = {}                    # alias -> [(module, line)]
+        froms: dict[str, set[str]] = {}                                  # module -> names imported from it
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    top = a.name.split(".")[0]
+                    if top in sys.stdlib_module_names:
+                        bound.setdefault(a.asname or top, []).append((a.name if a.asname else top, n.lineno))
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                if n.module.split(".")[0] in sys.stdlib_module_names:
+                    froms.setdefault(n.module, set()).update(a.name for a in n.names)
+                    for a in n.names:
+                        bound.setdefault(a.asname or a.name, []).append(("", n.lineno))     # shadows a module alias
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    if isinstance(t, ast.Name):
+                        bound.setdefault(t.id, []).append(("", n.lineno))
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.setdefault(n.name, []).append(("", n.lineno))
+                for a in n.args.args + n.args.kwonlyargs + n.args.posonlyargs if not isinstance(n, ast.ClassDef) else []:
+                    bound.setdefault(a.arg, []).append(("", n.lineno))
+        aliases = {k: v[0] for k, v in bound.items() if len(v) == 1 and v[0][0]}
+        mods: dict[str, object] = {}
+
+        def load(name: str):
+            if name not in mods:
+                try:
+                    mods[name] = importlib.import_module(name)
+                except Exception:
+                    mods[name] = None
+            return mods[name]
+
+        for mod, names in sorted(froms.items()):
+            m = load(mod)
+            if m is None:
+                continue
+            for name in sorted(names):
+                if name != "*" and not hasattr(m, name) and load(f"{mod}.{name}") is None:
+                    msg = f"`{path}` imports `{name}` from `{mod}`, which has no such name -- `ImportError` before any test runs"
+                    if msg not in found:
+                        found.append(msg)
+        for n in sorted((x for x in ast.walk(tree) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
+                         and x.value.id in aliases), key=lambda x: x.lineno):
+            modname, line = aliases[n.value.id]
+            m = load(modname)
+            if m is None or hasattr(m, n.attr) or load(f"{modname}.{n.attr}") is not None:
+                continue
+            other = next((f"`{fm}.{n.value.id}` has `.{n.attr}`: `from {fm} import {n.value.id}`"
+                          for fm in sorted(froms) if (fmod := load(fm)) is not None
+                          and hasattr(getattr(fmod, n.value.id, None), n.attr)), "")
+            msg = (f"`{path}:{n.lineno}` reads `{n.value.id}.{n.attr}`, but the `{modname}` module (`import {modname}`, "
+                   f"line {line}) has no `{n.attr}` -- `AttributeError` the instant it runs" + (f"; {other}" if other else ""))
+            if msg not in found:
+                found.append(msg)
+    return found
+
+
 def own_helper_calls(files: dict[str, str]) -> list[str]:
     """§17.1894 — each call in a test file to a function THAT FILE defines at module level, checked against the
     definition: a keyword it has no parameter for, a required argument left out, too many positional ones, `await` on

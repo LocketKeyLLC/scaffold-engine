@@ -1273,12 +1273,17 @@ async def prior_tests(db, job_id: str, node_id: str) -> dict[str, list[str]]:
 
 async def prior_passing_tests(db, job_id: str, node_id: str) -> dict[str, dict[str, str]]:
     """§17.1891 — the source of every test that PASSED in this step's earlier attempts (the latest verdict of each
-    name wins), over the same window as `prior_tests`. Live (5b4880c0 T5, 2026-11-02): a2 failed one test of 32, a3
-    two, a4 ten -- each attempt redrew every body from scratch and the passing ones regressed with the rest."""
+    name wins). Live (5b4880c0 T5, 2026-11-02): a2 failed one test of 32, a3 two, a4 ten -- each attempt redrew
+    every body from scratch and the passing ones regressed with the rest. §17.1896 — the window is the step's own
+    (`_SINCE_THE_STEP_CHANGED`: a replan, a restore, a new text), not the keep-list's: a reset -- the engine's for
+    a fix step, or the operator's after one -- keeps what passed; a kept test a changed module no longer satisfies
+    fails in the sandbox and is not kept again. Live (5b4880c0 T5, 2026-11-03 23:09 UTC): a cycle converged
+    5 -> 4 -> 2 -> 1 failures with 13 of 14 tests kept, then the job blocked, and the operator's reset would have
+    started the step from nothing."""
     rows = (await db.execute(text(
         "SELECT l.details->>'passed_tests' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
         "AND l.message LIKE :failed AND l.details->>'passed_tests' IS NOT NULL "
-        + _SINCE_THE_STEP_CHANGED_OR_RESET + " ORDER BY l.created_at"),
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
         {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
     out: dict[str, dict[str, str]] = {}
     for r in rows:
