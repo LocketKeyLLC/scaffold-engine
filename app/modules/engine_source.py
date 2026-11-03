@@ -3048,6 +3048,28 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
         parts.insert(1, "### Tests your earlier attempts wrote (keep every one, by name -- fix the ones the sandbox "
                         "named, never drop them)\n" + "".join(
                             f"    {path}: {', '.join(names)}\n" for path, names in sorted(prior.items()) if names))
+    passing = node.get("prior_passing") or {}
+    if isinstance(passing, dict) and any(passing.values()):
+        # §17.1891 — the ones that passed are kept as they are: the engine puts them back by name after the draw, so
+        # the attempt writes the failing and the new ones, and keeps the helpers the passing ones use
+        shown, used = [], 0
+        for path, defs in sorted(passing.items()):
+            for name, src in defs.items():
+                if used + len(src) > 4000:
+                    break
+                shown.append(f"# {path} -- {name}\n{src}")
+                used += len(src)
+        parts.insert(2, "### Tests that PASSED in the last run -- kept as written (the engine puts these back by name "
+                        "after your answer: do not write them again; write the tests the sandbox named and any new "
+                        "ones, and keep the helpers, fixtures and fake classes these use, with the same names and "
+                        "behaviour)\n" + "".join(f"    {path}: {', '.join(defs)}\n" for path, defs in sorted(passing.items())))
+        if shown:                                            # last: the block is cut at `budget`, and these go first
+            passing_tail = "### Some of the kept tests, as they passed (for the helpers they use)\n```python\n" \
+                           + "\n\n".join(shown) + "\n```\n"
+        else:
+            passing_tail = ""
+    else:
+        passing_tail = ""
     caps = capabilities_for(node)
     if caps:
         parts.append("### The engine's own way to do what this step names\n" + "".join(_render_capability(c) for c in caps))
@@ -3058,5 +3080,5 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
     parts.append("### Package layout\n" + "".join(
         f"    {head}: {', '.join(sorted(leaves)[:60])}{' …' if len(leaves) > 60 else ''}\n"
         for head, leaves in sorted(layout.items())))
-    out = "\n".join(parts)
+    out = "\n".join(parts + ([passing_tail] if passing_tail else []))
     return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"

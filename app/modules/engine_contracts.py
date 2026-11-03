@@ -4021,6 +4021,61 @@ def definitions_at(code: str, lines: list[int]) -> list[str]:
     return [name for name, a, b in _top_spans(code) if any(a <= ln <= b for ln in lines)]
 
 
+def kept_test_sources(output: str, passed: list[str]) -> dict[str, dict[str, str]]:
+    """§17.1891 — the source of each test that passed, by file and top-level name: a module-level test function with
+    its decorators; a class whole when every test method it holds passed (a class with one failing method is not
+    kept -- its namesake would carry the failure). `passed` is pytest's own naming (`tests/x.py::Cls::test_a`)."""
+    from app.sandbox.engine_tests import files_of
+    by_path: dict[str, set[tuple[str, ...]]] = {}
+    for nodeid in passed:
+        path, _, rest = nodeid.partition("::")
+        if rest:
+            by_path.setdefault(path, set()).add(tuple(rest.split("::")))
+    out: dict[str, dict[str, str]] = {}
+    for path, code in files_of({"output_text": output}).items():
+        if path not in by_path:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        lines = code.splitlines()
+        got = by_path[path]
+        for n in tree.body:
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(n, ast.ClassDef):
+                tests = [x.name for x in n.body if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and x.name.startswith("test")]
+                if not tests or any((n.name, t) not in got for t in tests):
+                    continue
+            elif not n.name.startswith("test") or (n.name,) not in got:
+                continue
+            start = min([n.lineno] + [d.lineno for d in n.decorator_list])
+            out.setdefault(path, {})[n.name] = "\n".join(lines[start - 1:(n.end_lineno or n.lineno)])
+    return out
+
+
+def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list[str]]:
+    """§17.1891 — `output` with each kept test (or class) put back in place of its namesake, byte for byte as it
+    passed, appended when the new file lacks it; the names spliced. A file the output does not carry is left to the
+    dropped-tests gate."""
+    from app.sandbox.engine_tests import files_of
+    names: list[str] = []
+    for path, defs in sorted((kept or {}).items()):
+        if not defs:
+            continue
+        code = files_of({"output_text": output}).get(path)
+        if code is None:
+            continue
+        spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
+        if spliced is None or spliced == code:
+            continue
+        output = replace_file_block(output, path, spliced)
+        names.extend(f"{path}::{n}" for n in defs)
+    return output, names
+
+
 def splice_definitions(code: str, new: str) -> str | None:
     """§17.1877 — `code` with each top-level function or class of `new` put in place of its namesake, a new name
     appended, and an import `new` has that `code` lacks inserted after the last import; everything else byte for

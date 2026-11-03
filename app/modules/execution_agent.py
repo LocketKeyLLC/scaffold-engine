@@ -1266,6 +1266,26 @@ async def prior_tests(db, job_id: str, node_id: str) -> dict[str, list[str]]:
     return out
 
 
+async def prior_passing_tests(db, job_id: str, node_id: str) -> dict[str, dict[str, str]]:
+    """§17.1891 — the source of every test that PASSED in this step's earlier attempts (the latest verdict of each
+    name wins), over the same window as `prior_tests`. Live (5b4880c0 T5, 2026-11-02): a2 failed one test of 32, a3
+    two, a4 ten -- each attempt redrew every body from scratch and the passing ones regressed with the rest."""
+    rows = (await db.execute(text(
+        "SELECT l.details->>'passed_tests' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'passed_tests' IS NOT NULL "
+        + _SINCE_THE_STEP_CHANGED_OR_RESET + " ORDER BY l.created_at"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
+    out: dict[str, dict[str, str]] = {}
+    for r in rows:
+        try:
+            for path, defs in (json.loads(r or "{}") or {}).items():
+                if isinstance(defs, dict):
+                    out.setdefault(str(path), {}).update({str(k): str(v) for k, v in defs.items()})
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
 async def prior_imports(db, job_id: str, node_id: str) -> list[str]:
     """§17.1851 — the job modules this step's earlier attempts imported, over the same window as `prior_refusals`
     (since the step itself last changed): a retry clears the attempt's output, so this is how the next attempt is
@@ -1482,6 +1502,14 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
         )
         return f"Knowledge base search failed: {e}"
 
+def _kept_after_check(output: str, res) -> dict:
+    """§17.1891 — the source of each test the sandbox saw pass, kept with the failed attempt for the next one."""
+    if not getattr(res, "passed", None):
+        return {}
+    from app.modules.engine_contracts import kept_test_sources
+    return kept_test_sources(output, list(res.passed))
+
+
 async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
                                    exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
                                    node_key: str) -> str:
@@ -1525,6 +1553,16 @@ async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dic
             logger.warning("engine_tests_not_completed job=%s node=%s file=%s", job_id, node_key, _need)
     except Exception as exc:
         logger.warning("engine_tests_completion_failed node=%s err=%r", node_key, exc)
+    # §17.1891 — a test that passed in an earlier attempt is put back as it passed, before any gate reads the file:
+    # the attempt rewrites only what failed (and what is new), and a passing test cannot regress
+    if node_snapshot.get("prior_passing"):
+        try:
+            from app.modules import engine_contracts as _kc
+            output, _kept = _kc.splice_kept(output, node_snapshot["prior_passing"])
+            if _kept:
+                logger.info("kept_passing_tests_spliced node=%s n=%d", node_key, len(_kept))
+        except Exception as exc:
+            logger.warning("kept_passing_tests_splice_failed node=%s err=%r", node_key, exc)
     return output
 
 
@@ -2090,6 +2128,7 @@ async def execute_next_node(
         # prompt never carried.
         try:                                                    # §17.1864
             node_snapshot["prior_tests"] = await prior_tests(db, job_id, str(node_id))
+            node_snapshot["prior_passing"] = await prior_passing_tests(db, job_id, str(node_id))   # §17.1891
         except Exception as exc:
             logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
     # ---- Session closed. LLM phase begins. ----
@@ -2796,6 +2835,7 @@ async def execute_next_node(
         # §17.1765 — and it is RUN: its tests, or an import of its module, in the engine-test sandbox with this job's
         # finished modules written in. A skip (sandbox off / unreachable / another engine) is logged, never a pass.
         engine_test_reason: str | None = None
+        _passed_tests: dict = {}                                 # §17.1891 what passed, kept for the next attempt
         if syntax_reason is None and engine_reason is None and (tool or "").lower() == "codegen":
             try:
                 from app.modules import engine_source as _es
@@ -2811,6 +2851,7 @@ async def execute_next_node(
                     _evidence_summary["engine_test"] = _et.record(_et_res)   # §17.1810 — kept, not only logged
                     if _et_res.verdict == "fail":
                         engine_test_reason = _et_res.reason
+                        _passed_tests = _kept_after_check(output, _et_res)
             except Exception as exc:
                 logger.warning("engine_test_check_error: node='%s' error=%r", title, exc)
         # §17.434 — sandbox exec-smoke, AFTER the syntax gate, BEFORE the LLM
@@ -3052,7 +3093,9 @@ async def execute_next_node(
              # is shown what those modules' functions say they do
              "imports": _ec_module_imports(str(output or "")),
              # §17.1864 — and the tests it wrote, by file: the next attempt keeps every one
-             "tests": _ec_written_tests(str(output or ""))},
+             "tests": _ec_written_tests(str(output or "")),
+             # §17.1891 — and the source of the ones that passed: the next attempt gets them back as they are
+             **({"passed_tests": _passed_tests} if _passed_tests else {})},
         )
         if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes

@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import httpx
@@ -40,6 +40,16 @@ class EngineTestResult:
     verdict: str          # "pass" | "fail" | "skip"
     reason: str
     ran: list[str]
+    passed: list[str] = field(default_factory=list)      # §17.1891 the tests that passed, as pytest names them
+
+
+#: §17.1891 — pytest's `-rA` summary names every passing test: `PASSED tests/test_x.py::test_a` (`::Cls::test_a`)
+_PASSED_RE = re.compile(r"^PASSED (tests/\S+)", re.M)
+
+
+def passed_tests(stdout: str) -> list[str]:
+    """The node ids pytest reported PASSED, in order, each once."""
+    return list(dict.fromkeys(_PASSED_RE.findall(stdout or "")))
 
 
 def record(res: EngineTestResult) -> dict:
@@ -353,7 +363,8 @@ def _report(text: str, budget: int = 9000) -> str:
     failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
     ("- sqlalc..."), so each attempt was redrafted from one failure out of ten. §17.1869 — when the budget cuts,
     an index of every failure (one line each) leads, so none goes unnamed."""
-    lines = _fold_library_frames([ln for ln in (text or "").splitlines() if ln.strip()])
+    lines = _fold_library_frames([ln for ln in (text or "").splitlines()
+                                  if ln.strip() and not ln.startswith("PASSED ")])      # §17.1891 -rA: the engine's
     whole = "\n".join(lines)
     if len(whole) <= budget:
         return whole
@@ -397,7 +408,7 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         return EngineTestResult("skip", f"engine-test sandbox holds another engine ({there} vs {here})", [])
     tests = sorted(p for p in mine if is_test(p))
     if tests:
-        command = ["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
+        command = ["python", "-m", "pytest", "-q", "-rA", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
                    "-o", "asyncio_default_fixture_loop_scope=function", "--timeout=20", "-c", "/dev/null",
                    "--rootdir", ".", "-W", "ignore::DeprecationWarning", *tests]
     else:
@@ -438,4 +449,5 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "The sandbox has no network, no database and no secrets: mock `async_session`, HTTP clients and model calls "
            "in tests. ")
         + "Fix the code (or the test, when the test is what is wrong):"
-        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran)
+        + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran,
+        passed=passed_tests(res.stdout) if tests else [])
