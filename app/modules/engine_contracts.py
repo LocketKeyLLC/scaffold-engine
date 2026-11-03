@@ -1545,8 +1545,11 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             return _Val(kind=f"missing:{arg}", node=cls, line=val.line)
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
             rv = _first_return(member)
-            return _Val(mock="async method" if isinstance(member, ast.AsyncFunctionDef) else "method", node=member,
-                        line=member.lineno, rv=rv, scope=val.scope)
+            method = _Val(mock="async method" if isinstance(member, ast.AsyncFunctionDef) else "method", node=member,
+                          line=member.lineno, rv=rv, scope=val.scope)
+            if any((getattr(d, "id", None) or getattr(d, "attr", None)) == "property" for d in member.decorator_list):
+                return _step(method, ("call", False), fakes, before, None)   # §17.1890 a property is its value
+            return method
         return _resolve(member, val.scope or fakes, 10 ** 9, val.hops + 1)
     if val.mock in ("def", "async def", "method", "async method"):           # §17.1869 a function the test wrote
         if what != "call":
@@ -1735,6 +1738,20 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
     fake whose `json()` returns a list (line 290), which the module reads as a dict"; None when every use fits (or
     the fake is unknown)."""
     at = f" (line {val.line})" if val.line else ""
+    # §17.1890 — a method of a fake class the module reads as a value and never calls: the module gets a bound method
+    # where it wanted the value. Live (5b4880c0 T5 a4, 2026-11-02): `class FakeResponse: def text(self): …` handed to
+    # the FINRA ingester, which reads `response.text` -- `io.StringIO(content)`: "initial_value must be str or None,
+    # not method". A plain `def` the test wrote is left alone unless the module reads something from it.
+    if val.mock in ("method", "async method", "def", "async def") and not uses["called"] \
+            and (val.mock.endswith("method") or not _uses_empty_(uses)):
+        name = getattr(val.node, "name", "it")
+        reads = sorted(uses["attrs"]) + [c + "()" for c in sorted(uses["calls"])]
+        how = (f"reads `.{reads[0]}` from it" if reads else "reads it as a dict" if uses["as"] == "dict"
+               else f"uses it as a {uses['as']}" if uses.get("as") else "reads it as a value")
+        kind = "method" if val.mock.endswith("method") else "function"
+        return (f"{done}a {kind} `{name}`{at} the module never calls -- it {how}: make `{name}` "
+                + ("an attribute set on the instance (`self." + name + " = …`), or a `@property`" if kind == "method"
+                   else "the value itself"))
     if val.kind and val.kind.startswith("entered-anew:"):                    # §17.1875
         names = val.kind.split(":", 1)[1]
         return (f"{done}a NEW AsyncMock{at}: a mock's `__aenter__()` returns a fresh mock, not the mock itself, so what "
@@ -1821,6 +1838,9 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         got = _step(val, ("attr", a), fakes, before)
         if got.kind and got.kind.startswith("missing:"):
             return _check_uses(got, uses, fakes, before, done)
+        if got.mock in ("method", "async method") and a not in uses["calls"]:   # §17.1890 a method read, never called
+            return _check_uses(got, {"attrs": set(), "calls": {}, "called": None, "as": None}, fakes, before,
+                               done + f"a fake whose `.{a}` is ")
         if a in (uses.get("bound") or ()) and got.mock and got.kind is None:   # §17.1878 bound to a column
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module writes `.{a}` to a database column, and a "
                     f"mock is not a value -- set `fake.{a} = \"…\"` on the object the call returns "
@@ -4243,6 +4263,10 @@ def _consts_of(tree: ast.Module) -> dict[str, ast.Constant]:
     return out
 
 
+def _class_def(tree: ast.Module, name: str) -> ast.ClassDef | None:
+    return next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name), None)
+
+
 def _single_compare_return(fn: ast.AST) -> ast.Compare | None:
     """A function whose whole body (after its docstring) is `return <a compare>`."""
     body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
@@ -4346,9 +4370,34 @@ def _value_shapes(values: list[ast.AST], fn: ast.AST, local: dict[str, ast.AST])
                 out.append(("dictcomp", ast.unparse(val)[:60]))
             elif isinstance(val, ast.ListComp) or (isinstance(val, ast.Call) and _call_name(val) == "list"):
                 out.append(("listcomp", ast.unparse(val)[:60]))   # a list, maybe empty
+            elif (isinstance(val, ast.JoinedStr) or (isinstance(val, ast.Constant) and isinstance(val.value, str))
+                  or (isinstance(val, ast.Call) and _call_name(val) in _TEXT_CALLS)):
+                out.append(("str", ast.unparse(val)[:60]))        # §17.1890 text: `x.isoformat()`, `str(x)`, an f-string
+            elif ((isinstance(val, ast.Constant) and type(val.value) in (int, float))
+                  or (isinstance(val, ast.Call) and _call_name(val) in ("len", "int", "float"))):
+                out.append(("num", ast.unparse(val)[:60]))
+            elif isinstance(val, ast.Call) and _call_name(val) == "Decimal":
+                out.append(("decimal", ast.unparse(val)[:60]))
             else:
                 return None
     return out
+
+
+_TEXT_CALLS = frozenset({"isoformat", "strftime", "str", "lower", "upper", "strip", "format", "join", "title"})
+_COLLECTION_SHAPES = frozenset({"dict", "built", "dictcomp", "list", "listcomp"})
+
+
+def _literal_kind_of(e: ast.AST) -> str | None:
+    """What a compared literal is: `date(…)` / `datetime(…)` -> date, `Decimal(…)` -> decimal, 3 -> num, "x" -> str."""
+    if isinstance(e, ast.Call) and _call_name(e) in ("date", "datetime"):
+        return "date"
+    if isinstance(e, ast.Call) and _call_name(e) == "Decimal":
+        return "decimal"
+    if isinstance(e, ast.Constant) and type(e.value) in (int, float):
+        return "num"
+    if isinstance(e, ast.Constant) and isinstance(e.value, str):
+        return "str"
+    return None
 
 
 def returned_compares(files: dict[str, str], modules: dict[str, str]) -> list[str]:
@@ -4391,13 +4440,25 @@ def returned_compares(files: dict[str, str], modules: dict[str, str]) -> list[st
             own = list(_own_nodes(fn))
             assigns = sorted((x for x in own if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
             results: dict[str, list[tuple[int, tuple[str, str] | None]]] = {}
+            instances: dict[str, tuple[str, str]] = {}                      # §17.1890 name -> (module, class)
             for a in assigns:
                 if len(a.targets) != 1 or not isinstance(a.targets[0], ast.Name):
                     continue
                 call = _unwrap(a.value)
                 info = None
                 if isinstance(call, ast.Call) and (mod := by_line.get((call.lineno, _call_name(call)))) in trees:
-                    info = (mod, _call_name(call))
+                    if _class_def(trees[mod], _call_name(call)) is not None:
+                        instances[a.targets[0].id] = (mod, _call_name(call))
+                    else:
+                        info = (mod, _call_name(call))
+                else:                                                        # `payload = record.payload` / `.payload()`
+                    member = call.func if isinstance(call, ast.Call) and not call.args and not call.keywords else call
+                    if isinstance(member, ast.Attribute) and isinstance(member.value, ast.Name) \
+                            and member.value.id in instances:
+                        mod, cls = instances[member.value.id]
+                        c = _class_def(trees[mod], cls)
+                        if c is not None and isinstance(_class_attr(c, member.attr), (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            info = (mod, f"{cls}.{member.attr}")
                 results.setdefault(a.targets[0].id, []).append((a.lineno, info))
             for st in sorted((x for x in own if isinstance(x, ast.Assert)), key=lambda x: x.lineno):
                 refuted: list[str] = []
@@ -4445,11 +4506,16 @@ def returned_compares(files: dict[str, str], modules: dict[str, str]) -> list[st
                         number = (isinstance(op, (ast.Eq, ast.Gt, ast.GtE, ast.Lt, ast.LtE)) and isinstance(comp, ast.Constant)
                                   and isinstance(comp.value, (int, float)) and not isinstance(comp.value, bool))
                         prior = [i for ln, i in results[expr.left.value.id] if ln < st.lineno]
-                        if (allowed or number) and prior and prior[-1] is not None:
+                        lit_kind = _literal_kind_of(comp) if isinstance(op, (ast.Eq, ast.NotEq)) else None
+                        if (allowed or number or lit_kind) and prior and prior[-1] is not None:
                             mod, f = prior[-1]
                             d = _defs(reach[mod])
-                            target = d[0].get(f) if d else None
                             local = d[0] if d else {}
+                            if "." in f:                                        # a class's property or method
+                                c = _class_def(trees[mod], f.split(".")[0])
+                                target = _class_attr(c, f.split(".")[1]) if c is not None else None
+                            else:
+                                target = d[0].get(f) if d else None
                             key = expr.left.slice.value
                             vals = _returns_under(target, key, local) if target is not None else None
                             shapes = _value_shapes(vals, target, local) if vals else None
@@ -4463,7 +4529,18 @@ def returned_compares(files: dict[str, str], modules: dict[str, str]) -> list[st
                                 if isinstance(lit, ast.List) and not lit.elts:
                                     return kinds <= {"list"}
                                 return False
-                            if shapes and ((allowed and all(never(a) for a in allowed)) or (number and kinds)):
+                            number = number and kinds <= _COLLECTION_SHAPES
+                            text_vs = (lit_kind in ("date", "decimal", "num") and kinds == {"str"}) or \
+                                      (lit_kind == "str" and bool(kinds) and kinds <= {"num", "decimal"})
+                            if shapes and text_vs:                               # §17.1890 a text compared with a date
+                                what = " or ".join(dict.fromkeys(f"`{t}`" for _, t in shapes))
+                                msg = (f"`{path}:{st.lineno}` asserts `{ast.unparse(expr)}`, but `{f}` (`{mod}`) returns "
+                                       f"{what} under `{key}` -- {'a `str`' if kinds == {'str'} else 'a number'}, never "
+                                       f"equal to {ast.unparse(comp)}: compare "
+                                       + ("its text (`" + ast.unparse(comp) + (".isoformat()`)" if lit_kind == "date"
+                                                                                  else "` as a str)")
+                                          if kinds == {"str"} else "numbers (`Decimal(…)` / `float(…)`)"))
+                            elif shapes and ((allowed and all(never(a) for a in allowed)) or (number and kinds)):
                                 what = " or ".join(dict.fromkeys(f"`{t}`" for _, t in shapes))
                                 tested = ast.unparse(expr)
                                 if number:
