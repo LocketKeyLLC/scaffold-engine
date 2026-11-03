@@ -1203,8 +1203,13 @@ _SINCE_THE_STEP_CHANGED = (
 #: §17.1884 — the keep-list (§17.1864) starts over at a RESET: within one run every attempt keeps the names its
 #: predecessors wrote; across resets the union snowballed (110, 133, 160, then 267 names a draw -- 94k chars, past the
 #: generation ceiling, the redraws left with 68 findings they could not clear). A reset is a new run.
-_SINCE_THE_STEP_CHANGED_OR_RESET = _SINCE_THE_STEP_CHANGED.replace("e.op IN ('replan', 'restore')",
-                                                                   "e.op IN ('replan', 'restore', 'reset')")
+#: §17.1896 — but not at a reset the ENGINE made for itself: when a fix step opens for a sibling module (§17.1831) the
+#: test step is reset to wait on it, and that is the same run -- its passing tests (§17.1891) and names stay kept.
+#: Live (5b4880c0 T5, 2026-11-03 22:48 UTC): T5U4 opened, T5 reset, and the next attempt drew 14 tests from nothing
+#: where 12 classes had passed. The operator's reset (`admin`) still starts over.
+_SINCE_THE_STEP_CHANGED_OR_RESET = _SINCE_THE_STEP_CHANGED.replace(
+    "e.op IN ('replan', 'restore')",
+    "e.op IN ('replan', 'restore') OR (e.op = 'reset' AND COALESCE(e.edited_by, '') NOT LIKE '%engine%')")
 
 
 async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[str]:

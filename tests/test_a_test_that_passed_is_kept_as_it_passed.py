@@ -144,7 +144,7 @@ async def test_the_latest_verdict_of_each_name_wins_over_the_same_window_as_the_
               json.dumps({"tests/t.py": {"test_a": "def test_a():\n    assert 2"}}), "not json"])
     got = await ea.prior_passing_tests(db, "job", "node")
     assert got == {"tests/t.py": {"test_a": "def test_a():\n    assert 2", "test_b": "def test_b():\n    pass"}}
-    assert "passed_tests" in db.sql and "e.op IN ('replan', 'restore', 'reset')" in db.sql
+    assert "passed_tests" in db.sql and "e.op IN ('replan', 'restore') OR (e.op = 'reset' AND COALESCE(e.edited_by, '') NOT LIKE '%engine%')" in db.sql
 
 
 def test_the_failed_attempt_records_what_passed_and_the_next_draw_splices_before_any_gate():

@@ -147,7 +147,7 @@ async def test_it():
 
 
 def test_the_keep_list_starts_over_at_a_reset():
-    assert "e.op IN ('replan', 'restore', 'reset')" in ea._SINCE_THE_STEP_CHANGED_OR_RESET
+    assert "e.op IN ('replan', 'restore') OR (e.op = 'reset' AND COALESCE(e.edited_by, '') NOT LIKE '%engine%')" in ea._SINCE_THE_STEP_CHANGED_OR_RESET      # §17.1896 the engine's own reset is not a reset
     assert "e.op IN ('replan', 'restore')" in ea._SINCE_THE_STEP_CHANGED and "'reset'" not in ea._SINCE_THE_STEP_CHANGED
     import inspect
     src = inspect.getsource(ea.prior_tests)
