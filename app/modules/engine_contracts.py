@@ -4336,6 +4336,135 @@ def fake_sessions(files: dict[str, str], modules: dict[str, str]) -> list[str]:
     return _by_line(found)
 
 
+def _none_by_default(v: ast.AST, fn: ast.AST, assigns: list[ast.Assign]) -> str | None:
+    """The parameter of `fn` whose absence makes the value `v` None: `v` is `None`; or a parameter defaulting to None;
+    or a name last bound to `x if p is not None else None` (or `… if p else None`) with `p` such a parameter."""
+    if isinstance(v, ast.Constant) and v.value is None:
+        return ""
+    a = fn.args
+    defaults = dict(zip([x.arg for x in a.posonlyargs + a.args][len(a.posonlyargs + a.args) - len(a.defaults):],
+                        a.defaults, strict=True))
+    defaults.update({x.arg: d for x, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d is not None})
+    none_params = {k for k, d in defaults.items() if isinstance(d, ast.Constant) and d.value is None}
+    bound = v
+    if isinstance(v, ast.Name):
+        bound = next((x.value for x in reversed(assigns) if len(x.targets) == 1 and isinstance(x.targets[0], ast.Name)
+                      and x.targets[0].id == v.id and x.lineno < v.lineno), None)
+        if bound is None:
+            return v.id if v.id in none_params else None    # the parameter itself, never rebound
+    if isinstance(bound, ast.IfExp) and isinstance(bound.orelse, ast.Constant) and bound.orelse.value is None:
+        t = bound.test                                       # `x if p is not None else None`, bound or inline
+        name = (t.left.id if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) else
+                t.id if isinstance(t, ast.Name) else None)
+        if name in none_params:
+            return name
+    return None
+
+
+def null_inserts(files: dict[str, str], fks: dict | None, rules: dict | None) -> list[str]:
+    """§17.1895 — a test's own INSERT (`db.execute(text("INSERT INTO t (…) VALUES (:a, …)"), {...})`) that binds None to
+    a column that has no default or references a parent: None outright, or a helper parameter defaulting to None
+    that a caller left out (`_insert_risk_check(db, proposal_id=…)` with `metrics=None` -> `CAST(:metrics AS json)`).
+    Live (5b4880c0 T5 a4, 2026-11-03 21:53 UTC): "null value in column \"metrics\" of relation \"risk_check\"
+    violates not-null constraint", four of nine failures through one helper every chain test calls."""
+    from app.modules.engine_source import _insert_columns, _required_column
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        parents = {id(c): par for par in ast.walk(tree) for c in ast.iter_child_nodes(par)}
+        calls_by_name: dict[str, list[ast.Call]] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                calls_by_name.setdefault(n.func.id, []).append(n)
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            own = list(_own_nodes(fn))
+            assigns = sorted((x for x in own if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
+            for d in (x for x in own if isinstance(x, ast.Dict)):
+                cols = _insert_columns(fn, d, parents)
+                if not cols:
+                    continue
+                for k, v in zip(d.keys, d.values, strict=True):
+                    if not (isinstance(k, ast.Constant) and k.value in cols):
+                        continue
+                    table, _, column = cols[k.value].partition(".")
+                    why = _required_column(cols[k.value], fks, rules) or (
+                        "is NOT NULL (its default applies only when the INSERT leaves the column out)"
+                        if column in ((rules or {}).get(table) or {}).get("not_null", []) else "")
+                    if not why:
+                        continue
+                    param = _none_by_default(v, fn, assigns)
+                    if param is None:
+                        continue
+                    col = cols[k.value]
+                    if param == "":
+                        msg = (f"`{path}:{d.lineno}` binds None to `{col}` in its INSERT, a column that {why}: the "
+                               f"database refuses the row -- give it a value")
+                        if msg not in found:
+                            found.append(msg)
+                        continue
+                    names = [x.arg for x in fn.args.posonlyargs + fn.args.args]
+                    callers = [c for c in calls_by_name.get(fn.name, [])
+                               if not any(kw.arg == param for kw in c.keywords)
+                               and not (param in names and len(c.args) > names.index(param))]
+                    for c in callers or [None]:
+                        where = f"`{path}:{c.lineno}` calls `{fn.name}(…)` without `{param}`" if c is not None else \
+                                f"`{path}:{fn.lineno}` `{fn.name}` takes `{param}=None`"
+                        msg = (f"{where}, which its INSERT writes to `{col}`, a column that {why}: the database refuses "
+                               f"the row -- pass `{param}=…`" + (" at every call" if c is None else "")
+                               + f", or give `{param}` a real default in `{fn.name}`")
+                        if msg not in found:
+                            found.append(msg)
+    return _by_line(found)
+
+
+def own_helper_calls(files: dict[str, str]) -> list[str]:
+    """§17.1894 — each call in a test file to a function THAT FILE defines at module level, checked against the
+    definition: a keyword it has no parameter for, a required argument left out, too many positional ones, `await` on
+    a plain `def`, a bare call on an `async def` whose coroutine is then used. The job functions' signatures were
+    checked since §17.1756; the test's own helpers never were. Live (5b4880c0 T5 a3, 2026-11-03 21:50 UTC):
+    `_insert_ingested_item(db, source="sec_edgar", ticker=ticker)` inside `_create_chain`, which six tests call --
+    "got an unexpected keyword argument 'ticker'", six of six failures from one line."""
+    from app.modules.engine_source import _await_mismatch, _call_mismatches_bare, _call_shape
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        helpers = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and not any((getattr(d, "id", None) or getattr(getattr(d, "func", None), "attr", None)
+                                or getattr(d, "attr", None)) in ("fixture",) for d in n.decorator_list)}
+        if not helpers:
+            continue
+        shapes = {name: _call_shape(fn) for name, fn in helpers.items()}
+        parents = {id(c): par for par in ast.walk(tree) for c in ast.iter_child_nodes(par)}
+        for call in sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id in helpers), key=lambda n: n.lineno):
+            name, shape = call.func.id, shapes[call.func.id]
+            msgs = [m for m in _call_mismatches_bare(call, name, shape, False)
+                    if "takes at most" in m or "has no parameter" in m or "is missing required argument" in m]
+            if (aw := _await_mismatch(call, name, shape, parents)):
+                msgs.append(aw)
+            par = parents.get(id(call))
+            if shape["async"] and not isinstance(par, ast.Await) and isinstance(par, (ast.Assign, ast.AnnAssign, ast.Return,
+                                                                                       ast.Subscript, ast.Attribute)):
+                msgs.append(f"`{name}(…)` without `await`: an `async def`, so what it holds is a coroutine, never the "
+                            f"result -- `await {name}(…)`")
+            for m in msgs:
+                msg = (f"`{path}:{call.lineno}` calls {m} -- `{name}` is this file's own (line "
+                       f"{helpers[name].lineno}): call it as it is defined, or change the definition")
+                if msg not in found:
+                    found.append(msg)
+    return found
+
+
 def swallowing_exits(files: dict[str, str]) -> list[str]:
     """§17.1889 — each `x.__aexit__ = AsyncMock()` (or `__exit__`, or the keyword form `MagicMock(__aexit__=…)`) in a
     test: an exit that returns a truthy value -- a mock's default return is a `MagicMock` -- SUPPRESSES every

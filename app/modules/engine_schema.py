@@ -235,7 +235,7 @@ def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
                         and n.args and isinstance(n.args[0], ast.Constant)):
                     continue
                 rules = out.setdefault(str(n.args[0].value).lower(),
-                                       {"json": [], "checks": [], "required": [], "unique": []})
+                                       {"json": [], "checks": [], "required": [], "unique": [], "not_null": []})
                 for a in n.args[1:]:
                     if not isinstance(a, ast.Call):
                         continue
@@ -251,6 +251,8 @@ def column_rules_in_code(texts: list[str]) -> dict[str, dict]:
                         # §17.1800 — a column a row must carry (NOT NULL, no default) and a UNIQUE column; live
                         # (f00ea97f T25E2) tests omitted `signal.ingested_item_id` and reused one external_id
                         kw = {k.arg: k.value for k in a.keywords if k.arg}
+                        if _is_false(kw.get("nullable")):                # §17.1895 NOT NULL, default or not
+                            rules["not_null"].append(col)
                         if (_is_false(kw.get("nullable")) and "default" not in kw and "server_default" not in kw
                                 and not _is_true(kw.get("primary_key"))):
                             rules["required"].append(col)

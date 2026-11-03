@@ -2574,8 +2574,12 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += swallowing_exits(files_of({**me, "output_text": output}))
     found += returned_compares(files_of({**me, "output_text": output}), _cur)
     found += narrow_rows(files_of({**me, "output_text": output}), _cur)
-    from app.modules.engine_contracts import fake_sessions
+    from app.modules.engine_contracts import fake_sessions, own_helper_calls
     found += fake_sessions(files_of({**me, "output_text": output}), _cur)             # §17.1892
+    found += own_helper_calls(files_of({**me, "output_text": output}))                # §17.1894
+    from app.modules.engine_contracts import null_inserts
+    found += null_inserts(files_of({**me, "output_text": output}), _fks,
+                          engine_schema.column_rules_in_code(others))                  # §17.1895
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request
     found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)
