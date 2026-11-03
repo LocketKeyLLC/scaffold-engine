@@ -152,11 +152,14 @@ def test_the_failed_attempt_records_what_passed_and_the_next_draw_splices_before
     assert src.index("_passed_tests = _kept_after_check(output, _et_res)") > src.index("_et_res = await _et.check(")
     assert '"passed_tests": _passed_tests' in src
     assert 'node_snapshot["prior_passing"] = await prior_passing_tests(' in src
-    # the splice ends `_complete_required_tests`, which runs before the syntax gate and every other
+    # the splice wraps `_complete_required_tests` (every return of the draw goes through it -- §17.1892: it sat after
+    # an early return and never ran live), which runs before the syntax gate and every other
     assert src.index("output = await _complete_required_tests(") < src.index("codegen_syntax_gate_error")
     crt = inspect.getsource(ea._complete_required_tests)
-    assert crt.rstrip().endswith("return output") and "splice_kept(output, node_snapshot[\"prior_passing\"])" in crt
+    assert crt.index("await _draw_required_tests(") < crt.index("return _splice_kept_tests(output, node_snapshot, node_key)")
+    assert "splice_kept(output, node_snapshot[\"prior_passing\"])" in inspect.getsource(ea._splice_kept_tests)
     assert ea._kept_after_check("x", type("R", (), {"passed": []})()) == {}
+    assert ea._splice_kept_tests("out", {}, "T5") == "out"
 
 
 @pytest.mark.integration

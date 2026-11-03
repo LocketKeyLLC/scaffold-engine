@@ -1513,6 +1513,32 @@ def _kept_after_check(output: str, res) -> dict:
 async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
                                    exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
                                    node_key: str) -> str:
+    """§17.1801 — the required test file drawn when it is missing (`_draw_required_tests`), then §17.1891 — every
+    test that passed in an earlier attempt put back as it passed, whatever path the draw took. Live (5b4880c0 T5 a3,
+    2026-11-03 21:13 UTC): the splice sat after the draw's early `return output` and never ran."""
+    output = await _draw_required_tests(output, tool=tool, node_snapshot=node_snapshot, brief=brief,
+                                        exec_prompt=exec_prompt, exec_role=exec_role, exec_overrides=exec_overrides,
+                                        gen_budget=gen_budget, job_id=job_id, node_key=node_key)
+    return _splice_kept_tests(output, node_snapshot, node_key)
+
+
+def _splice_kept_tests(output: str, node_snapshot: dict, node_key: str) -> str:
+    """§17.1891 — a test that passed in an earlier attempt is put back as it passed, before any gate reads the file:
+    the attempt rewrites only what failed (and what is new), and a passing test cannot regress."""
+    if not node_snapshot.get("prior_passing"):
+        return output
+    try:
+        from app.modules import engine_contracts as _kc
+        output, _kept = _kc.splice_kept(output, node_snapshot["prior_passing"])
+        logger.info("kept_passing_tests_spliced node=%s n=%d", node_key, len(_kept))
+    except Exception as exc:
+        logger.warning("kept_passing_tests_splice_failed node=%s err=%r", node_key, exc)
+    return output
+
+
+async def _draw_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
+                               exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
+                               node_key: str) -> str:
     """§17.1801 — code for the engine that left out its required test file is asked for that file alone, once, with
     the module in hand. §17.1860 — a near miss of the required path is not it: the ask names both, and the misnamed
     block goes once the required one is in hand (live: `tests/test_test_paper_twelve_modules.py`). Returns the output
@@ -1553,16 +1579,6 @@ async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dic
             logger.warning("engine_tests_not_completed job=%s node=%s file=%s", job_id, node_key, _need)
     except Exception as exc:
         logger.warning("engine_tests_completion_failed node=%s err=%r", node_key, exc)
-    # §17.1891 — a test that passed in an earlier attempt is put back as it passed, before any gate reads the file:
-    # the attempt rewrites only what failed (and what is new), and a passing test cannot regress
-    if node_snapshot.get("prior_passing"):
-        try:
-            from app.modules import engine_contracts as _kc
-            output, _kept = _kc.splice_kept(output, node_snapshot["prior_passing"])
-            if _kept:
-                logger.info("kept_passing_tests_spliced node=%s n=%d", node_key, len(_kept))
-        except Exception as exc:
-            logger.warning("kept_passing_tests_splice_failed node=%s err=%r", node_key, exc)
     return output
 
 

@@ -213,6 +213,12 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "a value that JSON cannot carry (a `Decimal`, a `date`, a `UUID`) was handed into the engine's decision payload "
      "(`open_decision_job`) or a JSON column: the module that builds that dict converts it first -- `str(quantity)`, "
      "`.isoformat()` -- that module is at fault, not the test (and the test may pass serialisable values too)"),
+    # §17.1892 — live (5b4880c0 T5 a2, 2026-11-03): `(last_close / first_close) - 1.0` on Decimal closes -- a NUMERIC
+    # column reads back as Decimal, and the module mixes it with a float literal: the module's, whatever the test fed
+    (re.compile(r"unsupported operand type\(s\) for [-+*/]: '(?:decimal\.Decimal' and 'float|float' and 'decimal\.Decimal)'"),
+     "a `Decimal` (what a NUMERIC column reads back as) was mixed with a `float` literal inside the module -- the "
+     "module is at fault, not the test: compute in `Decimal` (`Decimal(\"1.0\")`, `Decimal(str(x))`) or convert "
+     "once at the edge (`float(close)`), never mix the two"),
 )
 
 
@@ -250,7 +256,7 @@ def _awaited_mocks(text: str) -> list[str]:
 
 #: §17.1831 — the recognised causes that are the fault of the function that raised them (a dict bound to a JSON
 #: column is the binder's bug), not of the test that called it (an awaited `MagicMock` is the test's).
-CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5], KNOWN_CAUSES[9])    # §17.1870 a name the module lacks; §17.1889 JSON
+CALLEE_CAUSES = (KNOWN_CAUSES[0], KNOWN_CAUSES[5], KNOWN_CAUSES[9], KNOWN_CAUSES[10])   # §17.1870 a name the module lacks; §17.1889 Decimal/float; JSON
 #: §17.1871 — pytest pads a failure's header to the terminal width with underscores: a long test name gets ONE on
 #: each side. Live (5b4880c0 T5, 2026-10-30 04:16 UTC): `_ TestOperatorApprovalGate.test_handle_…_write_order _`
 #: did not open a section, two failures merged, and the FINRA module's missing name was pinned on the next test's
@@ -357,13 +363,28 @@ def _failure_index(lines: list[str], limit: int = 80) -> list[str]:
     return out[:limit] + ([f"… and {len(out) - limit} more"] if len(out) > limit else [])
 
 
+def _without_passes(lines: list[str]) -> list[str]:
+    """§17.1891 — `-rA` adds a PASSES section (each passing test's captured log) before the summary: the engine reads
+    the PASSED lines; the model is shown the failures only."""
+    out, skipping = [], False
+    for ln in lines:
+        if re.match(r"^=+ PASSES =+$", ln.strip()):
+            skipping = True
+            continue
+        if skipping and ("short test summary info" in ln or re.match(r"^=+ (?:FAILURES|ERRORS|warnings summary) =+$", ln.strip())):
+            skipping = False
+        if not skipping:
+            out.append(ln)
+    return out
+
+
 def _report(text: str, budget: int = 9000) -> str:
     """§17.1817 — a failed test run as the next attempt needs it: every failure's short traceback from the FIRST one
     (often the cause the rest follow from), then pytest's summary. Live (follow-up 5b4880c0 T6, 8-14 of its tests
     failing per attempt): the last 60 lines of long tracebacks held one failure and a summary cut at 80 columns
     ("- sqlalc..."), so each attempt was redrafted from one failure out of ten. §17.1869 — when the budget cuts,
     an index of every failure (one line each) leads, so none goes unnamed."""
-    lines = _fold_library_frames([ln for ln in (text or "").splitlines()
+    lines = _fold_library_frames([ln for ln in _without_passes((text or "").splitlines())
                                   if ln.strip() and not ln.startswith("PASSED ")])      # §17.1891 -rA: the engine's
     whole = "\n".join(lines)
     if len(whole) <= budget:

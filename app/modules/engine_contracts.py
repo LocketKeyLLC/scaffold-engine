@@ -1291,7 +1291,10 @@ class _Fakes:
         self.given: dict[int, tuple["_Fakes", int]] = {}
         for n in nodes:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):   # §17.1869/1870 a local fake
-                self.bound.setdefault(n.name, []).append((n.lineno, n))
+                # §17.1892 — bound for the whole scope: a test runs after its file loaded, so a fake class defined
+                # BELOW the test is the one it builds (live, 5b4880c0 T5 a2, 2026-11-03: `_FakeSecClient` at the
+                # file's end, its plain `get` awaited by the EDGAR ingester, unresolved and unrefused)
+                self.bound.setdefault(n.name, []).append((0, n))
             elif isinstance(n, ast.Assign) and len(n.targets) == 1:
                 t = n.targets[0]
                 if isinstance(t, ast.Name):
@@ -4266,6 +4269,73 @@ def _mock_exit_value(v: ast.AST) -> str | None:
     return ast.unparse(v) if isinstance(rv, ast.Call) else None
 
 
+def _executes_on(fn: ast.AST, param: str, local: dict[str, ast.AST], _depth: int = 0) -> bool:
+    """Whether a function calls `.execute(` / `.begin(` / `.commit(` on `param`, itself or through a function of
+    the same module it hands the parameter to (one hop)."""
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("execute", "begin", "commit", "stream") \
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == param:
+            return True
+        if _depth < 1 and isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in local:
+            callee = local[n.func.id]
+            names = [a.arg for a in callee.args.posonlyargs + callee.args.args]
+            for i, a in enumerate(n.args):
+                if isinstance(a, ast.Name) and a.id == param and i < len(names) and _executes_on(callee, names[i], local, 1):
+                    return True
+            for k in n.keywords:
+                if isinstance(k.value, ast.Name) and k.value.id == param and k.arg and _executes_on(callee, k.arg, local, 1):
+                    return True
+    return False
+
+
+def fake_sessions(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1892 — a class the test wrote with an `execute` method (`class FakeDB: async def execute(…): return
+    self._results.pop(0)`) handed as the session to a job function that runs SQL on it: a fake session answers canned
+    results whatever the query, and the sandbox has a real scratch database for exactly this. Live (5b4880c0 T5 a2,
+    2026-11-03): four of nine failures -- `'FakeResult' object has no attribute 'scalar_one'`, `'dict' object has no
+    attribute '_mapping'`, and two counts of rows the fake never wrote."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        sessions = {c.name for c in tree.body if isinstance(c, ast.ClassDef)
+                    and any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == "execute" for x in c.body)}
+        if not sessions:
+            continue
+        by_line = {(ln, f): m for m, f, ln in _test_calls(code)}
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            assigns = sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Assign)), key=lambda x: x.lineno)
+            for call in sorted((x for x in _own_nodes(fn) if isinstance(x, ast.Call)), key=lambda x: x.lineno):
+                mod = by_line.get((call.lineno, _call_name(call)))
+                if mod not in reach or (d := _defs(reach[mod])) is None or (target := d[0].get(_call_name(call))) is None:
+                    continue
+                from app.modules.engine_source import _literal_bindings_before
+                lits = _literal_bindings_before(assigns, call.lineno)
+                params = [a.arg for a in target.args.posonlyargs + target.args.args if a.arg not in ("self", "cls")]
+                given: list[tuple[str, ast.AST]] = [(params[i], a) for i, a in enumerate(call.args) if i < len(params)]
+                given += [(k.arg, k.value) for k in call.keywords if k.arg]
+                for param, arg in given:
+                    v = lits.get(arg.id) if isinstance(arg, ast.Name) else arg
+                    if not (isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in sessions):
+                        continue
+                    if not _executes_on(target, param, d[0]):
+                        continue
+                    msg = (f"`{path}:{call.lineno}` hands `{_call_name(call)}(…)` `{param}` = a `{v.func.id}` instance, a "
+                           f"fake session that answers canned results whatever the query -- `{_call_name(call)}` "
+                           f"(`{mod}`) runs SQL on it, and a fake cannot say whether that SQL works: the sandbox has a "
+                           f"real scratch database -- `async with async_session() as db:`, pass that `db`, insert the "
+                           f"rows the test needs with `text()`, and read the rows the function wrote")
+                    if msg not in found:
+                        found.append(msg)
+    return _by_line(found)
+
+
 def swallowing_exits(files: dict[str, str]) -> list[str]:
     """§17.1889 — each `x.__aexit__ = AsyncMock()` (or `__exit__`, or the keyword form `MagicMock(__aexit__=…)`) in a
     test: an exit that returns a truthy value -- a mock's default return is a `MagicMock` -- SUPPRESSES every
@@ -4408,6 +4478,8 @@ def _value_shapes(values: list[ast.AST], fn: ast.AST, local: dict[str, ast.AST])
         for n in _own_nodes(scope):
             if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
                 binds.setdefault(n.targets[0].id, []).append(n.value)
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+                binds.setdefault(n.target.id, []).append(n.value)        # §17.1892 `approvals: list[dict] = []`
     out: list[tuple[str, str]] = []
     for v in values:
         vals = binds.get(v.id) if isinstance(v, ast.Name) else [v]
@@ -4423,8 +4495,9 @@ def _value_shapes(values: list[ast.AST], fn: ast.AST, local: dict[str, ast.AST])
                 out.append(("built", ast.unparse(val)[:60]))
             elif isinstance(val, ast.DictComp):                   # a dict, maybe empty
                 out.append(("dictcomp", ast.unparse(val)[:60]))
-            elif isinstance(val, ast.ListComp) or (isinstance(val, ast.Call) and _call_name(val) == "list"):
-                out.append(("listcomp", ast.unparse(val)[:60]))   # a list, maybe empty
+            elif isinstance(val, ast.ListComp) or (isinstance(val, ast.Call) and _call_name(val) == "list") \
+                    or (isinstance(val, ast.List) and not val.elts):
+                out.append(("listcomp", ast.unparse(val)[:60]))   # a list, maybe empty (`[]` then `.append`)
             elif (isinstance(val, ast.JoinedStr) or (isinstance(val, ast.Constant) and isinstance(val.value, str))
                   or (isinstance(val, ast.Call) and _call_name(val) in _TEXT_CALLS)):
                 out.append(("str", ast.unparse(val)[:60]))        # §17.1890 text: `x.isoformat()`, `str(x)`, an f-string
