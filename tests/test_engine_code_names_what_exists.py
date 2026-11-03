@@ -681,7 +681,9 @@ def test_json_columns_and_checks_are_read_and_shown():
     rules = sch.column_rules_in_code([T3_RULES])
     assert rules == {"ingested_item": {"json": ["payload (json)"], "checks": ["source IN ('sec_edgar','reddit')"],
                                        "required": ["source", "external_id", "payload"],     # §17.1800
-                                       "unique": ["(slug)", "(source, external_id)"]}}
+                                       "unique": ["(slug)", "(source, external_id)"],
+                                       "not_null": rules["ingested_item"]["not_null"]}}       # §17.1895 (read below)
+    assert set(rules["ingested_item"]["not_null"]) >= {"source", "external_id", "payload"}
     b = es.block_for(T6_ROW, set(), tables=sch.tables_in_code([T3_RULES]), rules=rules)
     assert ("required: source, external_id, payload; UNIQUE (slug); UNIQUE (source, external_id); "
             "JSON: payload (json); CHECK source IN ('sec_edgar','reddit')") in b

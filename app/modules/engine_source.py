@@ -280,6 +280,8 @@ def _merge_keys(dst: dict, src: dict) -> None:
             d["req"] = True
         if info.get("needed"):
             d["needed"] = True
+        if info.get("or"):
+            d["or"] = list(info["or"])
         if info.get("sub"):
             _merge_keys(d.setdefault("sub", {}), info["sub"])
 
@@ -353,30 +355,42 @@ def _param_keys(fn: ast.AST, local: dict[str, ast.AST] | None = None, _depth: in
         if (isinstance(n, (ast.For, ast.AsyncFor)) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name)
                 and n.iter.id in paths and n.target.id not in paths):
             paths[n.target.id] = paths[n.iter.id] + ("[]",)
+    alts: dict[str, list[str]] = {}                      # §17.1893 the other keys an alias may come from
     for _ in range(2):                                   # aliases of aliases: `p = payload.get("proposal", {})`
         for n in stmts:
             if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
                     and n.targets[0].id not in paths):
                 v = n.value
                 if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or) and v.values:   # §17.1881 `x.get("a") or x.get("b")`
+                    others = [rr[1] for rr in (read_of(x) for x in v.values[1:]) if rr]
                     v = v.values[0]
+                    if others:
+                        alts[n.targets[0].id] = others
                 if (r := read_of(v)):
                     paths[n.targets[0].id] = r[0] + (r[1],)
     # §17.1883 — an alias of a `.get(…)` read that the function refuses without: `execution_id = data.get("execution_id")`
     # then `if not execution_id: raise ValueError(…)` -- as required as `data["execution_id"]`. Live (5b4880c0 T5 a4,
     # 2026-10-31): two fill envelopes with every other key, "fill event missing execution_id"
     from app.modules.engine_contracts import _gives_up
-    for n in stmts:
-        if not (isinstance(n, ast.If) and _gives_up(n.body)):
-            continue
-        t = n.test
-        name = (t.operand.id if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) and isinstance(t.operand, ast.Name)
+    def _refused_name(t: ast.AST) -> str | None:
+        return (t.operand.id if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) and isinstance(t.operand, ast.Name)
                 else t.left.id if (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Is)
                                    and isinstance(t.left, ast.Name) and isinstance(t.comparators[0], ast.Constant)
                                    and t.comparators[0].value is None) else None)
-        if name and len(paths.get(name, ())) >= 2:
-            pth = paths[name]
-            entry(pth[:-1]).setdefault(pth[-1], {})["needed"] = True
+    for n in stmts:
+        if not (isinstance(n, ast.If) and _gives_up(n.body)):
+            continue
+        # §17.1893 — `if not symbol or not side or quantity is None: raise` refuses without each of them. Live
+        # (5b4880c0 T5, 2026-11-03 21:40 UTC): `execute_order` with the proposal's fields at the top level and no
+        # `proposal` -- "Proposal 1 missing symbol/side/quantity", nothing said before the sandbox
+        tests = n.test.values if isinstance(n.test, ast.BoolOp) and isinstance(n.test.op, ast.Or) else [n.test]
+        for name in (_refused_name(t) for t in tests):
+            if name and len(paths.get(name, ())) >= 2:
+                pth = paths[name]
+                info = entry(pth[:-1]).setdefault(pth[-1], {})
+                info["needed"] = True
+                if alts.get(name):
+                    info["or"] = alts[name]                      # `symbol` -- or `ticker`
     # §17.1881 — an alias bound into an INSERT: `signal_id = signal.get("signal_id") …` then `{"signal_id": signal_id}`
     for n in stmts:
         if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and len(paths.get(n.id, ())) >= 2
@@ -1214,6 +1228,8 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
     none_given = bool(given and keys and not spread and not set(given) & set(keys))
     for key in sorted(keys):
         info = keys[key]
+        if key not in given and any(a in given for a in info.get("or") or ()):     # §17.1893 `symbol` or `ticker`
+            continue
         if key in given:
             v = given[key]
             v = consts[v.id] if isinstance(v, ast.Name) and consts and v.id in consts else v
@@ -1243,11 +1259,13 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
             continue
         why = _required_column(info["to"], fks, rules) if info.get("to") else ""
         below = _required_below(info.get("sub") or {}, fks, rules)           # §17.1870
-        if info.get("req") or why or below or info.get("values") or info.get("needed"):
+        needed_below = _needed_below(info.get("sub") or {}) if not below else None   # §17.1893
+        if info.get("req") or why or below or needed_below or info.get("values") or info.get("needed"):
             has = ", ".join(f"`{k}`" for k in given) or "no keys"
             out.append(f'{label}: {where} is read for `{key}`'
                        + (f" (written to `{info['to']}`, which {why})" if why else
                           f" (its `{below[0]}` is written to `{below[1]}`, which {below[2]})" if below else
+                          f" (its {needed_below} the function refuses without)" if needed_below else
                           " (as `[\"" + key + "\"]`, which raises without it)" if info.get("req") else
                           " (and refused without it)" if info.get("needed") and not info.get("values") else
                           f" (one of {', '.join(f'`{x}`' for x in info['values'])}; without it the function takes the other way)")
@@ -1258,6 +1276,14 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
         out.append(f"{label}: {where} has none of the keys the function reads ({', '.join(f'`{k}`' for k in sorted(keys))}): "
                    f"it has {', '.join(f'`{k}`' for k in given)}")
     return out
+
+
+def _needed_below(sub: dict) -> str | None:
+    """§17.1893 — the keys under a dict key the function refuses without, as "`symbol` (or `ticker`), `side`,
+    `quantity`"; None when there are none. The key above them must be given too."""
+    parts = [f"`{k}`" + (" (or " + ", ".join(f"`{a}`" for a in info["or"]) + ")" if info.get("or") else "")
+             for k, info in sorted(sub.items()) if info.get("needed") or info.get("req")]
+    return ", ".join(parts) if parts else None
 
 
 def _required_below(sub: dict, fks: dict | None, rules: dict | None) -> tuple[str, str, str] | None:
@@ -1817,6 +1843,7 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         # -- seven, then ten; the §17.1870 exemption covered the fakes gate only.
         from app.modules.engine_contracts import _expects_a_raise
         raises = _expects_a_raise(tree)
+        parents = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}       # §17.1893
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call):
                 continue
@@ -1846,6 +1873,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 sh = (defs[inst[0]].get("classes", {}).get(inst[1], {}).get("methods", {}).get(n.func.attr)
                       if inst else None)
                 if inst and sh:
+                    if (aw := _await_mismatch(n, f"{inst[1]}.{n.func.attr}", sh, parents)) and (_at(code, n) + aw) not in found:
+                        found.append(_at(code, n) + aw + f" (`{inst[0]}`, step {defs[inst[0]]['node']})")
                     for m in _call_mismatches(n, f"{inst[1]}.{n.func.attr}", sh, id(n) in misused, consts, fks, rules):
                         if in_raise and any(k in m for k in _RAISE_EXEMPT):               # `side="hold"` to make it raise
                             continue
@@ -1857,6 +1886,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 shape = defs[leaf]["funcs"].get(fname) or defs[leaf].get("ctors", {}).get(fname)
                 if not shape:
                     continue
+                if (aw := _await_mismatch(n, fname, shape, parents)) and (_at(code, n) + aw) not in found:
+                    found.append(_at(code, n) + aw + f" (`{leaf}`, step {defs[leaf]['node']})")         # §17.1893
                 for m in _call_mismatches(n, fname, shape, id(n) in misused, consts, fks, rules):
                     if in_raise and any(k in m for k in _RAISE_EXEMPT):                   # §17.1874
                         continue
@@ -1872,6 +1903,15 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
 #: argument stays refused: that is a `TypeError`, not the error the test expects.
 _RAISE_EXEMPT = ("is read for `", "a made-up id the scratch database refuses", "has none of the keys the function reads",
                  "is read as a dict (its", " is one of `", "; it was given a `")
+
+
+def _await_mismatch(call: ast.Call, name: str, shape: dict, parents: dict[int, ast.AST]) -> str | None:
+    """§17.1893 — `await f(…)` on a plain `def` ("'RiskDecision' object can't be awaited"). Live (5b4880c0 T5,
+    2026-11-03 21:40 UTC): the risk module's `evaluate_proposal` awaited, one of five sandbox failures."""
+    par = parents.get(id(call))
+    if isinstance(par, ast.Await) and not shape.get("async"):
+        return f"`{name}(…)` under `await`: a plain `def`, whose result cannot be awaited -- drop the `await`"
+    return None                              # a bare call on an `async def` is §17.1757's (`coroutine_misused`)
 
 
 def _instance_of(name: str, assigns: list[ast.Assign], line: int, imported: dict[str, tuple[str, str]],
@@ -2534,6 +2574,12 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += swallowing_exits(files_of({**me, "output_text": output}))
     found += returned_compares(files_of({**me, "output_text": output}), _cur)
     found += narrow_rows(files_of({**me, "output_text": output}), _cur)
+    from app.modules.engine_contracts import fake_sessions, own_helper_calls
+    found += fake_sessions(files_of({**me, "output_text": output}), _cur)             # §17.1892
+    found += own_helper_calls(files_of({**me, "output_text": output}))                # §17.1894
+    from app.modules.engine_contracts import null_inserts
+    found += null_inserts(files_of({**me, "output_text": output}), _fks,
+                          engine_schema.column_rules_in_code(others))                  # §17.1895
     # §17.1872 — a fake `httpx.Response` the module calls `raise_for_status()` on carries its request
     from app.modules.engine_contracts import responses_without_a_request
     found += responses_without_a_request(files_of({**me, "output_text": output}), _cur)
