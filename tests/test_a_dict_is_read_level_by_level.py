@@ -110,8 +110,9 @@ def test_raises():
         # `stream == "trade_updates"` is returned, not gated on (§17.1881): "none of the keys" it is
         "`tests/test_paper_twelve_modules.py:6` calls `is_trade_update(…)`: `envelope` has none of the keys the "
         "function reads (`stream`): it has `T`",
-        "`tests/test_paper_twelve_modules.py:9` calls `parse_fill_event(…)`: `envelope` has none of the keys the "
-        "function reads (`data`): it has `T`, `msg`",
+        # §17.1893 -- `data["qty"]` is refused without, so `data` itself is required: more than "none of the keys"
+        "`tests/test_paper_twelve_modules.py:9` calls `parse_fill_event(…)`: `envelope` is read for `data` (its `qty` "
+        "the function refuses without) -- the dict given has `T`, `msg` and no `data`",
         # one level down, a key compared with values and one read as `["qty"]` say more than "none of the keys"
         "`tests/test_paper_twelve_modules.py:12` calls `parse_fill_event(…)`: `envelope`[\"data\"] is read for `event` "
         "(one of `fill`, `partial_fill`; without it the function takes the other way) -- the dict given has `kind` "
