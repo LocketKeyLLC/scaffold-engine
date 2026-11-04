@@ -809,6 +809,26 @@ def _checks_the_outcome(t: dict) -> bool:
 _TYPE_OF_NODE = {"decision": "decision", "checkpoint": "validation"}
 
 
+def new_in_dependency_order(tasks: list[dict], existing: set[str]) -> list[dict]:
+    """§17.1910 — the steps a plan pass added, each after the new steps it depends on (plan order otherwise):
+    `insert_node` refuses a dependency the job does not have yet. Live (5b4880c0, 2026-11-04 21:31 UTC): DELIVER,
+    placed before T10, came before the five audits it waits on -- "node DELIVER depends on unknown node
+    API_SEC_EDGAR_AUDIT", nothing applied."""
+    new = [t for t in tasks if t["id"] not in existing]
+    ids = {t["id"] for t in new}
+    out: list[dict] = []
+    done: set[str] = set()
+    while len(out) < len(new):
+        ready = [t for t in new if t["id"] not in done
+                 and all(d in done or d not in ids for d in (t.get("depends_on") or []))]
+        if not ready:                                     # a cycle among new steps: plan order, insert_node says why
+            ready = [t for t in new if t["id"] not in done][:1]
+        for t in ready:
+            out.append(t)
+            done.add(t["id"])
+    return out
+
+
 async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_reviews: bool = False) -> dict:
     """Run `complete_engine_plan` over a job's stored plan and apply what it adds to the steps that have not passed:
     new steps are inserted, and a pending or failed step takes its new text and dependencies; a finished step is
@@ -856,9 +876,7 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
             if _REVIEW_STEP_RE.match(next((t["name"] for t in tasks if t["id"] == r[0]), "") or "")}
         changes += add_review_fixes(tasks, reviews, carried, own=sorted(sources))
     inserted, edited, kept = [], [], []
-    for t in tasks:                                       # new steps first: an edit may depend on one
-        if t["id"] in before:
-            continue
+    for t in new_in_dependency_order(tasks, set(before)):   # new steps first: an edit may depend on one
         out = await node_editor.insert_node(job_id, {
             "node_key": t["id"], "title": t["name"], "tool": t.get("tool") or "LLM",
             "node_type": {"decision": "decision", "validation": "checkpoint"}.get(str(t.get("type")), "task"),
