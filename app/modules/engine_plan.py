@@ -268,6 +268,24 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                       + str(t.get("notes") or "").strip())
         changes.append(f"secret_step_made_the_operators: {t.get('id')} asks the operator, after the code exists")
 
+    # 0e'. §17.1903 — and it holds on every pass: a plan read back from the job has the question as an LLM step (0e
+    #      fired once, on the Shell step), so nothing marked it a `decision` again, and a check of the outcome that 0e
+    #      had unhooked stayed unhooked. Live (5b4880c0, 2026-11-04 16:31 UTC): re-applying the plan after §17.1902
+    #      edited nothing. Every keys question is a `decision`, and every LLM step that checks what running the lab
+    #      produced waits on it (unless the question already stands on that step).
+    questions = [t for t in tasks if _KEYS_QUESTION_RE.match(str(t.get("name") or ""))]
+    for q in questions:
+        if str(q.get("type") or "") != "decision":
+            q["type"] = "decision"
+            changes.append(f"keys_question_is_a_decision: {q.get('id')}")
+        upstream = _upstream_of(tasks, q["id"])
+        for u in tasks:
+            if u is q or not _checks_the_outcome(u) or u["id"] in upstream:
+                continue
+            if q["id"] not in (u.get("depends_on") or []):
+                u["depends_on"] = list(u.get("depends_on") or []) + [q["id"]]
+                changes.append(f"outcome_check_waits_on_the_keys: {u.get('id')} waits on {q.get('id')}")
+
     # 0f. §17.1770 — what is left as Shell in a plan for engine code is code the job must write. Live (918b6274's
     #     fourth plan): "Run daily proposal batch", "Execute approved orders", "Acquire point-in-time data", "Run
     #     backtest validation" and three "Verify …" checkpoints were Shell steps -- operating the lab on the Proxmox
@@ -596,6 +614,22 @@ def _drop(tasks: list[dict], gone: dict) -> None:
 # ── §17.1780 applying completion to a plan that has already started ─────────────────────────────────────────────
 
 _OUTCOME_RE = re.compile(r"^\s*(?:validate|verify|confirm|check|inspect|review)\b", re.I)
+
+
+_KEYS_QUESTION_RE = re.compile(r"^Are the .+ keys stored in the engine's secrets\?$")
+
+
+def _upstream_of(tasks: list[dict], key: str) -> set[str]:
+    """Every step `key` stands on, transitively."""
+    by = {t["id"]: list(t.get("depends_on") or []) for t in tasks}
+    out: set[str] = set()
+    todo = list(by.get(key, []))
+    while todo:
+        k = todo.pop()
+        if k not in out:
+            out.add(k)
+            todo.extend(by.get(k, []))
+    return out
 
 
 def _checks_the_outcome(t: dict) -> bool:

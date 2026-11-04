@@ -59,3 +59,29 @@ async def test_the_editor_refuses_a_node_type_outside_the_vocabulary():
         out = await node_editor.edit_node("job", "T2", {"node_type": "question"}, db=AsyncMock())
     assert out == {"error": "node_type must be one of ['checkpoint', 'decision', 'parallel_group', 'task']",
                    "http_status": 400}
+
+
+def test_on_a_plan_read_back_the_question_is_a_decision_and_its_check_waits_again():
+    """§17.1903 — live (5b4880c0, 2026-11-04 16:31 UTC): re-applying the plan after §17.1902 edited nothing -- the
+    plan read back from the job had the question as an LLM `action` and the check unhooked, and 0e fires on Shell
+    steps only."""
+    tasks = [
+        {"id": "T9", "name": "Wire engine entry module", "tool": "CodeGen", "type": "action", "depends_on": []},
+        {"id": "T10", "name": "Are the end-to-end paper trade keys stored in the engine's secrets?", "tool": "LLM",
+         "type": "action", "depends_on": ["T9"], "notes": "Answer when they are stored."},
+        {"id": "T11", "name": "Validate end-to-end result", "tool": "LLM", "type": "validation", "depends_on": ["T9"],
+         "notes": "Check the audit trail records every stage."},
+        {"id": "T12", "name": "Summarize the lab", "tool": "LLM", "type": "action", "depends_on": ["T9"]},
+    ]
+    changes = engine_plan.complete_engine_plan(tasks, BRIEF)
+    by = {t["id"]: t for t in tasks}
+    assert by["T10"]["type"] == "decision" and "T10" in by["T11"]["depends_on"] and "T10" not in by["T12"]["depends_on"]
+    assert "keys_question_is_a_decision: T10" in changes and "outcome_check_waits_on_the_keys: T11 waits on T10" in changes
+    assert not [c for c in engine_plan.complete_engine_plan(tasks, BRIEF)
+                if c.startswith(("keys_question", "outcome_check"))]                  # a second pass is a no-op
+    # a check the question itself stands on is not made to wait on it (no cycle)
+    t2 = [dict(t) for t in tasks]
+    t2[1]["depends_on"] = ["T9", "T11"]
+    t2[2]["depends_on"] = ["T9"]
+    engine_plan.complete_engine_plan(t2, BRIEF)
+    assert "T10" not in {t["id"]: t for t in t2}["T11"]["depends_on"]
