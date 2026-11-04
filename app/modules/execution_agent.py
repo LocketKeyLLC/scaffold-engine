@@ -2966,11 +2966,17 @@ async def execute_next_node(
             # session above). Same dispatch/cache/fail-closed path as the
             # generic verifier. Flip codegen_verifier_strict=False to fall back.
             _others: list[str] = []
+            _job_mods: list[str] = []
             try:                                     # §17.1790 — what the rest of the plan delivers
                 async with async_session() as _vdb:
                     _others = [f"{k}: {t}" for k, t in (await _vdb.execute(text(
                         "SELECT node_key, title FROM dag_nodes WHERE job_id = :j AND node_key <> :k "
                         "ORDER BY execution_order"), {"j": job_id, "k": node_key})).all()]
+                    # §17.1914 — and the modules that already exist, with their public names
+                    from app.modules import engine_source as _es_v
+                    _vcode = [r for r in await _es_v.code_rows(_vdb, job_id) if r.get("node_key") != node_key]
+                    _job_mods = [f"`app.modules.{m}` (step {k}): {_es_v._public_api(c, 300) or '-'}"
+                                 for m, (_p, c, k) in _es_v.current_sources(_vcode).items()]
             except Exception as exc:
                 logger.warning("verify_other_steps_failed node='%s' err=%r", title, exc)
             vstatus, reason, confidence = await _verify_codegen_output(
@@ -2980,6 +2986,7 @@ async def execute_next_node(
                 overrides=model_overrides,
                 step_text=str(node_snapshot.get("prompt_template") or node_snapshot.get("description") or ""),
                 other_steps=_others,
+                job_modules=_job_mods,
             )
             verify_status = vstatus
             if verify_status == "fail":
