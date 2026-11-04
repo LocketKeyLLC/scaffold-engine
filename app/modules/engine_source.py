@@ -2587,7 +2587,9 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import fake_sessions, own_helper_calls
     found += fake_sessions(files_of({**me, "output_text": output}), _cur)             # §17.1892
     found += own_helper_calls(files_of({**me, "output_text": output}))                # §17.1894
-    from app.modules.engine_contracts import null_inserts, stdlib_attrs
+    from app.modules.engine_contracts import async_def_for_a_context, missing_module_attrs, null_inserts, stdlib_attrs
+    found += missing_module_attrs(files_of({**me, "output_text": output}), _cur)        # §17.1901
+    found += async_def_for_a_context(files_of({**me, "output_text": output}), _cur)     # §17.1901
     found += stdlib_attrs(files_of({**me, "output_text": output}))                    # §17.1897
     found += null_inserts(files_of({**me, "output_text": output}), _fks,
                           engine_schema.column_rules_in_code(others))                  # §17.1895
