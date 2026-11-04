@@ -596,7 +596,7 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
             # §17.1911 — an earlier pass's note is replaced: live (5b4880c0 T9 a1) it named `Depends(get_principal)`
             # and not where it lives, and the draft guessed `app.api.deps`
             was = str(t.get("notes") or "")
-            kept = _INSTALL_NOTE_RE.sub("", was).rstrip() if "install(app)" in was else was.rstrip()
+            kept = _INSTALL_NOTE_RE.sub("", was).rstrip()
             t["notes"] = (kept + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
             changes.append(f"wiring_installs_the_lab: {t.get('id')} exposes install(app), listed in app/labs.py")
 
@@ -718,10 +718,11 @@ _INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def
                  "delivery lists `{mod}` in `app/labs.py`, whose `install_labs(app)` calls it when the engine starts. "
                  "Its tests call `install` with a FastAPI app and a stand-in scheduler, patch the stream consumer it "
                  "starts (it reads the operator's secrets and the network), and read the routes and jobs it "
-                 "registered.")
+                 "registered (the routes from `app.openapi()[\"paths\"]`: this engine's FastAPI keeps an included "
+                 "router as one `app.routes` entry with no `.path`).")
 #: §17.1911 — the note as an earlier pass wrote it, replaced by the current one
-_INSTALL_NOTE_RE = re.compile(r"The engine starts the lab through this module:.*?(?:read the routes and jobs it registered\.)",
-                              re.S)
+_INSTALL_NOTE_RE = re.compile(r"The engine starts the lab through this module:.*?read the routes and jobs it registered"
+                              r"(?: \(the routes from[^)]*\)[^)]*\))?\.", re.S)
 #: §17.1908 — the audit of a module's calls against its API's research
 _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fetched now -- and the modules of this "
                "job that call it ({mods}; their current source is shown). For each place the code disagrees with the "

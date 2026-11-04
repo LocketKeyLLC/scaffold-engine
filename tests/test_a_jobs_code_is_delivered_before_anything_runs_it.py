@@ -321,3 +321,26 @@ def test_the_install_note_names_where_its_imports_live_and_replaces_an_older_one
     assert notes.startswith("Python module `lab_wire.py`. Add the commands.") and notes.count("def install(app)") == 1
     assert "from app.authz import get_principal" in notes and "registers …" not in notes
     assert not [c for c in ep.complete_engine_plan(tasks, {"targets_engine": True}, []) if c.startswith("wiring")]
+
+
+def test_an_included_router_read_for_its_path_is_named_and_the_note_says_where_the_paths_are():
+    """§17.1911 — live (T9 a2+a3): "'_IncludedRouter' object has no attribute 'path'" twice, nothing said why."""
+    from fastapi import APIRouter, FastAPI
+
+    from app.sandbox import engine_tests as et
+    app, r = FastAPI(), APIRouter(prefix="/labs/x")
+    r.add_api_route("/run", lambda: 1, methods=["POST"])
+    app.include_router(r)
+    assert "/labs/x/run" in app.openapi()["paths"]                       # what the hint says to read
+    rx, hint = et.KNOWN_CAUSES[-1]
+    assert rx.search("E   AttributeError: '_IncludedRouter' object has no attribute 'path'")
+    assert 'app.openapi()["paths"]' in hint and 'app.openapi()[\"paths\"]' in ep._INSTALL_NOTE
+    # the older note (§17.1911's first) is replaced whole, not appended to
+    older = ("Python module `w.py`. The engine starts the lab through this module: x. Its tests call `install` with a "
+             "FastAPI app and a stand-in scheduler, patch the stream consumer it starts, and read the routes and jobs "
+             "it registered.")
+    tasks = [{"id": "T9", "name": "Wire it", "tool": "CodeGen", "type": "action", "depends_on": [], "notes": older}]
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [])
+    assert tasks[0]["notes"].count("The engine starts the lab") == 1 and "app.openapi()" in tasks[0]["notes"]
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [])
+    assert tasks[0]["notes"].count("The engine starts the lab") == 1
