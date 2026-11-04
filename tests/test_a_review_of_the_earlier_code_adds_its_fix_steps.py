@@ -168,7 +168,8 @@ async def test_reapplying_plan_completion_is_a_no_op():
     _, edits = await _apply([t10])
     first = edits["T10"]
     assert first["title"].startswith("Are the ") and first["tool"] == "LLM"           # the title is written too
+    assert first["node_type"] == "decision"                                             # §17.1902 the type too
     stored = {**t10, "title": first["title"], "tool": first["tool"], "prompt_template": first["prompt_template"],
-              "depends_on": first.get("depends_on", t10["depends_on"])}
+              "depends_on": first.get("depends_on", t10["depends_on"]), "node_type": first["node_type"]}
     _, again = await _apply([stored])
     assert "T10" not in again, again["T10"]                                            # live: it became CodeGen
