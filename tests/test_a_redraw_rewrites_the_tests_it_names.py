@@ -215,4 +215,4 @@ def test_the_executors_ask_takes_the_definitions_to_write_again():
     assert "only: list[str] | None = None" in ask
     assert "Write again ONLY these definitions of `{_path}`, each complete with its decorators" in ask
     assert "Everything else in the file stays exactly as it is -- do not repeat it" in ask
-    assert "if only else" in ask and "Keep every test." in ask                       # the whole-file ask stays
+    assert "if only else" in ask and 'Keep every test" + _kept_note(node_snapshot, _path)' in ask   # the whole-file ask stays (§17.1899: less what is kept)
