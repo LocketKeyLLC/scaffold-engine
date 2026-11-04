@@ -250,7 +250,11 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                     and not _CHECK_STEP_RE.match(str(t.get("name") or ""))]
     for t in secret_steps:
         for u in tasks:
-            if t["id"] in (u.get("depends_on") or []):
+            # §17.1902 — code steps stop waiting on the keys (the sandbox has no secrets, and the code exists before
+            # the keys do); a step that CHECKS what the keys make happen keeps waiting. Live (5b4880c0 T11, 2026-10-25
+            # -> 11-04): "Validate end-to-end result" -- read the audit trail of the trade, confirm the P&L -- was
+            # unhooked from the keys step, ran beside it, and "validated" a trade that never happened
+            if t["id"] in (u.get("depends_on") or []) and not _checks_the_outcome(u):
                 u["depends_on"] = [d for d in u["depends_on"] if d != t["id"]] + [
                     d for d in (t.get("depends_on") or []) if d not in u["depends_on"]]
         t["tool"], t["type"] = "LLM", "decision"
@@ -591,6 +595,16 @@ def _drop(tasks: list[dict], gone: dict) -> None:
 
 # ── §17.1780 applying completion to a plan that has already started ─────────────────────────────────────────────
 
+_OUTCOME_RE = re.compile(r"^\s*(?:validate|verify|confirm|check|inspect|review)\b", re.I)
+
+
+def _checks_the_outcome(t: dict) -> bool:
+    """§17.1902 — a step that reads what running the lab produced (an LLM or checkpoint step named for a check), as
+    opposed to code that will produce it: it waits on the operator's keys."""
+    tool = str(t.get("tool") or "").lower()
+    return tool == "llm" and bool(_OUTCOME_RE.match(str(t.get("name") or "")))   # a Shell check becomes a test (0f)
+
+
 _TYPE_OF_NODE = {"decision": "decision", "checkpoint": "validation"}
 
 
@@ -671,6 +685,13 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
             fields["tool"] = t.get("tool")
         if t.get("tool_config") != b.get("tool_config"):
             fields["tool_config"] = t.get("tool_config")
+        # §17.1902 — and the type: live (5b4880c0 T10, 2026-10-25), §17.1769 made "Run end-to-end paper trade" the
+        # operator's "Are the … keys stored …?" `decision`, the edit carried title, text, tool and dependencies but
+        # not the type, the node stayed a `task`, and on 2026-11-04 it ran as an LLM step, wrote a runbook, and
+        # passed -- with neither Alpaca key in the engine's secrets; the job reported `completed`
+        _nt = {"decision": "decision", "validation": "checkpoint"}.get(str(t.get("type")), "task")
+        if str(t.get("type") or "") != str(b.get("type") or "") and _nt in ("decision", "checkpoint", "task"):
+            fields["node_type"] = _nt
         if not fields:
             continue
         if status.get(t["id"]) not in ("pending", "failed"):
