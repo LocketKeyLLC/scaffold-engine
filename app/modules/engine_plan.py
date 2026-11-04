@@ -619,19 +619,6 @@ _OUTCOME_RE = re.compile(r"^\s*(?:validate|verify|confirm|check|inspect|review)\
 _KEYS_QUESTION_RE = re.compile(r"^Are the .+ keys stored in the engine's secrets\?$")
 
 
-def _upstream_of(tasks: list[dict], key: str) -> set[str]:
-    """Every step `key` stands on, transitively."""
-    by = {t["id"]: list(t.get("depends_on") or []) for t in tasks}
-    out: set[str] = set()
-    todo = list(by.get(key, []))
-    while todo:
-        k = todo.pop()
-        if k not in out:
-            out.add(k)
-            todo.extend(by.get(k, []))
-    return out
-
-
 def _checks_the_outcome(t: dict) -> bool:
     """§17.1902 — a step that reads what running the lab produced (an LLM or checkpoint step named for a check), as
     opposed to code that will produce it: it waits on the operator's keys."""
