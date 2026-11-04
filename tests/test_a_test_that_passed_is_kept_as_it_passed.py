@@ -175,3 +175,21 @@ def test_pytest_itself_names_passing_tests_this_way(tmp_path):
                          cwd=tmp_path, capture_output=True, text=True, timeout=120)
     got = et.passed_tests(run.stdout)
     assert got == ["tests/test_fmt.py::TestK::test_a", "tests/test_fmt.py::test_c"], run.stdout
+
+
+def test_a_whole_file_redraw_is_told_what_is_kept_and_gets_it_back():
+    """§17.1899 — live (5b4880c0 T5 a1, 2026-11-03 23:44 UTC): the whole-file redraw re-emitted all 93 kept tests
+    (28k tokens, two minutes), and nothing put the kept versions back after a redraw."""
+    snap = {"prior_passing": {"tests/test_paper_twelve_modules.py": {"test_b": "def test_b():\n    pass", "TestA": "class TestA:\n    pass"}}}
+    note = ea._kept_note(snap, "tests/test_paper_twelve_modules.py")
+    assert note.startswith(" -- except these, which the engine keeps as they passed and puts back by name, so leave them out: ")
+    assert "`TestA`, `test_b`" in note
+    assert ea._kept_note(snap, "tests/other.py") == "" and ea._kept_note({}, "tests/x.py") == ""
+    big = {"prior_passing": {"tests/t.py": {f"test_{i}": "x" for i in range(45)}}}
+    assert "… (45 in all)" in ea._kept_note(big, "tests/t.py")
+    import inspect
+    src = inspect.getsource(ea.execute_next_node)
+    ask = src[src.index("async def _ask_tests("):src.index("async def _check_tests(")]
+    assert "_kept_note(node_snapshot, _path)" in ask                        # the whole-file ask names them
+    assert "_splice_kept_tests(_answer, node_snapshot, node_key) if _answer and not only else _answer" in ask
+    assert "output = _splice_kept_tests(output, node_snapshot, node_key)        # §17.1899 backstop" in src

@@ -1245,6 +1245,16 @@ def _dict_mismatches(label: str, where: str, lit: ast.Dict, keys: dict, consts: 
                 continue
             table, _, col = (info.get("to") or "").partition(".")
             parent = (fks or {}).get(table, {}).get(col) if info.get("to") else None
+            # §17.1898 — None given for a key the function writes to a column the database refuses NULL in. Live
+            # (5b4880c0 T5, 2026-11-03 23:46 UTC): `{"approval_id": None, …}` into `execute_order`, which writes it to
+            # `broker_order_id.approval_id` -- "null value in column "approval_id" … violates not-null constraint"
+            if isinstance(v, ast.Constant) and v.value is None and info.get("to") and (
+                    (why0 := _required_column(info["to"], fks, rules))
+                    or col in ((rules or {}).get(table) or {}).get("not_null", [])):
+                out.append(f'{label}: {where}["{key}"] is written to `{info["to"]}`, which '
+                           f'{why0 or "is NOT NULL"}; it was given None -- the database refuses the row'
+                           + ("; pass the id its parent's writer returned" if why0.startswith("references") else ""))
+                continue
             if want and got and got not in want:
                 out.append(f'{label}: {where}["{key}"] is `{_kinds_text(want)}`; it was given a `{got}`')
             elif parent and isinstance(v, ast.Constant) and isinstance(v.value, int) and not isinstance(v.value, bool):

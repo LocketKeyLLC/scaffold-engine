@@ -1532,6 +1532,18 @@ async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dic
     return _splice_kept_tests(output, node_snapshot, node_key)
 
 
+def _kept_note(node_snapshot: dict, path: str) -> str:
+    """§17.1899 — what a whole-file redraw need not write: the tests the engine keeps for `path` (§17.1891), put back
+    by name after the answer. Empty when nothing is kept there."""
+    kept = (node_snapshot.get("prior_passing") or {}).get(path) or {}
+    if not kept:
+        return ""
+    names = sorted(kept)
+    shown = ", ".join(f"`{n}`" for n in names[:40]) + (f" … ({len(names)} in all)" if len(names) > 40 else "")
+    return (f" -- except these, which the engine keeps as they passed and puts back by name, so leave them out: "
+            f"{shown}")
+
+
 def _splice_kept_tests(output: str, node_snapshot: dict, node_key: str) -> str:
     """§17.1891 — a test that passed in an earlier attempt is put back as it passed, before any gate reads the file:
     the attempt rewrites only what failed (and what is new), and a passing test cannot regress."""
@@ -2797,7 +2809,8 @@ async def execute_next_node(
                                      "or an import the fix needs goes in the same block. Fix each line named above as it "
                                      "says: a stand-in ") if only else (
                                      f"\nWrite only `{_path}` again: one ```python block whose first line is "
-                                     f"`# {_path}`. Keep every test. Fix each line named above as it says: a stand-in ")
+                                     f"`# {_path}`. Keep every test" + _kept_note(node_snapshot, _path)
+                                     + ". Fix each line named above as it says: a stand-in ")
                             _r = await asyncio.wait_for(chat_until_nonempty(
                                 model_router.chat,
                                 [{"role": "system", "content": _system_for_tool(tool)},
@@ -2824,7 +2837,11 @@ async def execute_next_node(
                                 temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
                                 label=f"node-tests-redraw {node_key}", think_off_rescue=True),
                                 timeout=settings.node_timeout_seconds)
-                            return (_r.text or "").strip() if getattr(_r, "success", False) else ""
+                            _answer = (_r.text or "").strip() if getattr(_r, "success", False) else ""
+                            # §17.1899 — a whole-file answer gets the kept tests back before anything reads it: the
+                            # model was told to leave them out (a1 re-emitted all 93 for 28k tokens), and one it
+                            # re-emits changed would otherwise replace the version that passed
+                            return _splice_kept_tests(_answer, node_snapshot, node_key) if _answer and not only else _answer
 
                         async def _check_tests(_cand: str) -> list[str]:
                             if check_python_syntax(_cand) and not _es.syntax_only_in_tests(_cand):
@@ -2838,6 +2855,7 @@ async def execute_next_node(
                             _is_test(p) for p in _fo({"output_text": output}))             # §17.1874
                         output, _refs = await _ec.redraw_faked_tests(output, _refs, ask=_ask_tests, check=_check_tests,
                                                                      tests_only=_tests_only)
+                        output = _splice_kept_tests(output, node_snapshot, node_key)        # §17.1899 backstop
                         (logger.info if not _refs else logger.warning)(
                             "engine_tests_redrawn: node='%s' test_findings=%d left=%d", title, _before, len(_refs))
                     if _refs:
