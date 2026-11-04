@@ -338,6 +338,19 @@ async def resolve_decision(
             return {"outcome": "upstream_open", "node_key": node_key, "unmet": _unmet,
                     "detail": f"{node_key} depends on {', '.join(_unmet)}, which is not done any more; "
                               f"reask so the run asks about {_unmet[0]} first"}
+    # §17.1907 — a question whose answer is a fact the engine holds (the code is in it, the keys are stored, the run
+    # wrote its tables) is answered when the engine sees it, whatever is typed, and is never the engine's to decide
+    from app.modules import engine_plan
+    if waiting.get("kind") not in ("run", "yours") and engine_plan.answered_by_the_engine(str(waiting.get("title") or "")):
+        if delegate:
+            await db.rollback()
+            return {"outcome": "bad_choice", "choices": [], "current_status": job["status"], "waiting_on": node_key,
+                    "detail": "the engine reads this answer from itself -- answer it when it is done"}
+        unmet = await engine_plan.answer_unmet(db, job_id, str(waiting.get("title") or ""))
+        if unmet:
+            await db.rollback()
+            logger.warning("decision_not_yet job=%s node=%s %s", job_id, node_key, unmet["evidence"])
+            return {"outcome": "not_yet", "current_status": job["status"], "waiting_on": node_key, **unmet}
     now = datetime.now(timezone.utc).isoformat()
     if waiting.get("kind") == "run" and not delegate and (choice or "").strip().lower() == "redraft":
         # §17.1472 — the operator read the block and says what is wrong with it: that review joins the step's own

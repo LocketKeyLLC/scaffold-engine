@@ -98,7 +98,7 @@ async def test_the_earlier_jobs_modules_are_read_in_plan_order():
 async def test_the_planner_hands_the_pass_the_earlier_jobs_modules():
     from tests.test_an_engine_plan_is_complete import _generate
     spy = MagicMock(wraps=engine_plan.complete_engine_plan)
-    with patch.object(engine_source, "carried_modules", new=AsyncMock(return_value=CARRIED)), \
+    with patch.object(engine_source, "carried_modules", new=AsyncMock(return_value=CARRIED)), patch.object(engine_source, "current_code", new=AsyncMock(return_value={})), \
          patch.object(engine_plan, "complete_engine_plan", new=spy):
         await _generate(BRIEF)
     assert spy.call_args.args[2] == CARRIED
@@ -112,7 +112,7 @@ async def test_plan_completion_on_a_started_job_hands_the_pass_the_earlier_jobs_
          "status": "pending", "depends_on": [], "tool_config": None} for t in _plan()]
     no_reviews = MagicMock(); no_reviews.all.return_value = []
     db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows, no_reviews]); db.commit = AsyncMock()
-    with patch.object(engine_source, "carried_modules", new=AsyncMock(return_value=CARRIED)), \
+    with patch.object(engine_source, "carried_modules", new=AsyncMock(return_value=CARRIED)), patch.object(engine_source, "current_code", new=AsyncMock(return_value={})), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})), \
          patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
         await engine_plan.apply_to_job(db, "5b4880c0-0000-4000-8000-000000000000")

@@ -81,8 +81,9 @@ def test_on_a_plan_read_back_the_question_is_a_decision_and_its_check_waits_agai
                 if c.startswith(("keys_question", "outcome_check"))]                  # a second pass is a no-op
     # a check the question itself stands on is not made to wait on it (no cycle)
     t2 = [dict(t) for t in tasks]
-    t2[1]["depends_on"] = ["T9", "T11"]
-    t2[2]["depends_on"] = ["T9"]
+    b2 = {t["id"]: t for t in t2}
+    b2["T10"]["depends_on"] = ["T9", "T11"]
+    b2["T11"]["depends_on"] = ["T9"]
     engine_plan.complete_engine_plan(t2, BRIEF)
     assert "T10" not in {t["id"]: t for t in t2}["T11"]["depends_on"]
 

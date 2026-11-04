@@ -19,6 +19,7 @@ Routes:
 from typing import Annotated
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -190,6 +191,33 @@ async def complete_plan_endpoint(
     if "error" in out:
         raise HTTPException(status_code=out.pop("http_status", 409), detail=out)
     return out
+
+
+@router.get("/jobs/{job_id}/code", tags=["Management"])
+async def job_code_endpoint(
+    job_id: UuidPath,
+    content: bool = False,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1905 — the code a job that writes for the engine delivers into it: every module, test and Alembic revision
+    as its last finished step left it (with ``content=true``, the files themselves), the tables its revisions create,
+    the secrets its code reads (names only), and its wiring module (the one exposing ``install(app)``).
+    ``scripts/deliver_job.py`` writes these onto a branch. 409 for a job that does not write code for the engine."""
+    from app.modules import engine_plan, engine_source
+    await assert_visible(db, principal, str(job_id), detail=f"Job {job_id} not found")
+    brief = (await db.execute(text("SELECT refined_brief FROM jobs WHERE id = :j"), {"j": str(job_id)})).scalar()
+    brief = json.loads(brief) if isinstance(brief, str) else brief
+    if not engine_source.targets_the_engine(brief if isinstance(brief, dict) else {}):
+        raise HTTPException(status_code=409, detail="this job does not write code for the engine")
+    files = engine_source.job_files(await engine_source.code_rows(db, str(job_id)))
+    wiring = [p.rsplit("/", 1)[1][:-3] for p, (code, _k) in files.items()
+              if p.startswith("app/modules/") and re.search(r"^def install\(", code, re.M)]
+    return {"job_id": str(job_id),
+            "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {})}
+                      for p, (code, k) in files.items()],
+            "tables": engine_plan.job_tables(files), "secrets": engine_plan.secrets_the_code_reads(files),
+            "wiring": wiring}
 
 
 @router.post("/jobs/{job_id}/steps/{node_key}/split", tags=["Management"])

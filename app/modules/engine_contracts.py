@@ -769,6 +769,12 @@ def secrets_read(modules: dict[str, str], mod: str, name: str, depth: int = 0,
     local_lists: dict[str, list] = {n.targets[0].id: n.value.elts for n in nodes
                                     if isinstance(n, ast.Assign) and len(n.targets) == 1
                                     and isinstance(n.targets[0], ast.Name) and isinstance(n.value, (ast.List, ast.Tuple))}
+    # §17.1907 — and the module's own lists, below the body's: live (5b4880c0 T6U7) `OPERATOR_SECRET_NAMES =
+    # ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]` at the top, `values_for(db, OPERATOR_SECRET_NAMES)` in the function
+    for n in tree.body:
+        tgt = n.targets[0] if isinstance(n, ast.Assign) and len(n.targets) == 1 else n.target if isinstance(n, ast.AnnAssign) else None
+        if isinstance(tgt, ast.Name) and isinstance(n.value, (ast.List, ast.Tuple)):
+            local_lists.setdefault(tgt.id, n.value.elts)
 
     def _class_of(v: ast.AST) -> str | None:
         """`Class(…)` / `await Class.m(…)` -> Class, when it is a job class (imported or of this module)."""
