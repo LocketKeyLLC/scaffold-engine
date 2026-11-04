@@ -635,6 +635,8 @@ def _merge_uses(dst: dict, src: dict) -> None:
     dst["shown"] = (dst.get("shown") or set()) | (src.get("shown") or set())                     # §17.1886
     if src.get("optional"):
         dst["optional"] = True
+    if src.get("none"):                                                                         # §17.1913
+        dst["none"] = (dst.get("none") or set()) | src["none"]
     if src.get("alt") and not dst.get("alt"):
         dst["alt"] = src["alt"]
     for k in src.get("same_as") or []:
@@ -709,6 +711,7 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
         return None
 
     skip: set[int] = set()
+    guarded = False
     for st in _own_statements(fn):
         if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name) \
                 and (side := none_test(st.value)) is not None:
@@ -716,6 +719,11 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
         elif isinstance(st, ast.If) and (side := none_test(st.test)) is not None:
             for b in (st.body if side else st.orelse):
                 skip.update(id(x) for x in ast.walk(b))
+            guarded = True
+    # §17.1913 — whether this function tests the value for None before it acts on it: then None is a value it takes
+    # (live 5b4880c0 T9: `scheduler = get_scheduler()`, `if scheduler is not None: scheduler.add_job(…)` -- a test's
+    # `get_scheduler` returning None was refused as "the module calls `.add_job()` on it")
+    root["none"] = {guarded}
 
     def node_of(e: ast.AST) -> dict | None:
         e = e.value if isinstance(e, ast.Await) else e

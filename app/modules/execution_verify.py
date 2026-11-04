@@ -342,6 +342,8 @@ async def _verify_codegen_output(
 # ---------------------------------------------------------------------------
 
 _CITATION_TOKEN_RE = __import__("re").compile(r"\bT([0-9]+)\b")
+#: §17.1913 — a step key as written: `T7`, `T6U7`, `T1F2`, `T25E3`
+_STEP_KEY_RE = __import__("re").compile(r"\b(T[0-9]+[A-Z0-9]*)\b")
 
 
 def _is_validation_llm_node(node_type: str | None, tool: str | None, title: str | None) -> bool:
@@ -472,13 +474,15 @@ def check_validation_citation_coverage(
         expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
         return sorted(f"T{n}" for n in expected_numeric)
 
+    # §17.1913 — a whole step key, not its digits: `T6U7`, `T1F2`, `T5U4` (fix steps) are cited as themselves. Live
+    # (5b4880c0 API_REDDIT_AUDIT a1-a3, API_ALPACA_AUDIT, API_SEC_EDGAR_AUDIT, …): eight NOT MET lines each reading
+    # "`paper_reddit_ingestion` (T6U7)" and every attempt refused "MISSING: ['T6U7']" -- `\bT([0-9]+)\b` never
+    # matches inside `T6U7`, and the expected key was compared as `6U7`
     cited_in_claims: set[str] = set()
     for line in output.split("\n"):
         if not _is_claim_line(line):
             continue
-        for m in _CITATION_TOKEN_RE.finditer(line):
-            cited_in_claims.add(m.group(1))
+        cited_in_claims.update(m.group(1) for m in _STEP_KEY_RE.finditer(line))
 
-    expected_numeric = {k.lstrip("T") for k in expected_codegen_keys if k.startswith("T")}
-    missing_numeric = expected_numeric - cited_in_claims
-    return sorted(f"T{n}" for n in missing_numeric)
+    expected = {k for k in expected_codegen_keys if k.startswith("T")}
+    return sorted(expected - cited_in_claims)
