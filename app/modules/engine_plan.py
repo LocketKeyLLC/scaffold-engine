@@ -134,6 +134,8 @@ def _carried_own(t: dict, carried: list[str]) -> str | None:
 #: §17.1818 — a step that reads the earlier job's code and reports on it
 _REVIEW_STEP_RE = re.compile(r"^\s*(?:audit|review|inspect|examine|analy[sz]e|assess|inventory|read)\b", re.I)
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+_MET_RE = re.compile(r"\*{0,2}\bMET\b\*{0,2}")
+_NOT_MET_RE = re.compile(r"\bNOT\s+MET\b|\bUNKNOWN\b")
 
 
 def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
@@ -153,6 +155,11 @@ def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
             continue
         prose = re.sub(r"`[^`]*`", " ", body)
         if len(re.findall(r"[A-Za-z]{2,}", prose)) < 5:
+            continue
+        # §17.1912 — a verdict line that says the module holds is not a finding: the validation-coverage guard
+        # (§17.377) has a review cite every code step it read on a MET / NOT MET / UNKNOWN line, so an audit that
+        # finds a module sound still writes "MET — `paper_reddit_ingestion` (T6U7) …" (live, API_REDDIT_AUDIT a1)
+        if _MET_RE.search(body) and not _NOT_MET_RE.search(body):
             continue
         found.setdefault(hits[0][1], []).append(body)
     return found
@@ -592,8 +599,12 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     for t in tasks:
         if (str(t.get("tool") or "").lower() == "codegen" and _module_of(t)
                 and (str(t.get("id", "")).startswith("WIRE") or _WIRE_STEP_RE.search(str(t.get("name") or "")))
-                and "install(app)" not in _text(t)):
-            t["notes"] = (str(t.get("notes") or "").rstrip() + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
+                and _INSTALL_NOTE.format(mod=_module_of(t)) not in _text(t)):
+            # §17.1911 — an earlier pass's note is replaced: live (5b4880c0 T9 a1) it named `Depends(get_principal)`
+            # and not where it lives, and the draft guessed `app.api.deps`
+            was = str(t.get("notes") or "")
+            kept = _INSTALL_NOTE_RE.sub("", was).rstrip()
+            t["notes"] = (kept + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
             changes.append(f"wiring_installs_the_lab: {t.get('id')} exposes install(app), listed in app/labs.py")
 
     # 6b. §17.1908 — what an outside API says is read again before the code is delivered, and the code is held to it:
@@ -616,15 +627,24 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         audits.append(aid)
         have = next((t for t in tasks if str(t.get("id")) == aid), None)
         code_steps = [str(t["id"]) for t in tasks if _module_of(t) in mods]
+        # §17.1912 — each module with the step that wrote it last: the coverage guard (§17.377) wants every code step
+        # the audit reads cited by its key on a verdict line; live API_REDDIT_AUDIT a1-a3 cited `paper_reddit_ingestion`
+        # and never `T6U7`, which the note did not name
+        owner = {m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods}
+        notes = _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(
+            f"`{m}` (step {owner[m]})" if m in owner else f"`{m}`" for m in mods))
         if have is None:
             tasks.append({"id": aid, "name": f"Audit the code that calls the {api['name']} against its research",
                           "type": "action", "tool": "LLM", "depends_on": [key, *code_steps], "inputs": [], "outputs": [],
-                          "notes": _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(f"`{m}`" for m in mods))})
+                          "notes": notes})
             changes.append(f"api_audit_added: {aid} holds {', '.join(mods)} to {key}")
         else:
             missing = [d for d in [key, *code_steps] if d not in (have.get("depends_on") or [])]
             if missing:
                 have["depends_on"] = list(have.get("depends_on") or []) + missing
+            if have.get("notes") != notes:
+                have["notes"] = notes
+                changes.append(f"api_audit_reworded: {aid} names each module's step")
 
     # 7. §17.1905 — a job that writes code for the engine is delivered into it before anything runs that code: the
     #    engine exports the files (`GET /jobs/{id}/code`), the operator merges the pull request and redeploys, and the
@@ -706,21 +726,28 @@ _DELIVER_NOTE = ("The engine exports this job's code -- every module, its tests 
 #: §17.1909 — the step that wires the lab into the engine, by its title
 _WIRE_STEP_RE = re.compile(r"\bwire[sd]?\b|\bwiring\b", re.I)
 _INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def install(app) -> None`, which "
-                 "registers each recurring run with `app.scheduler.get_scheduler()` (it may return None: then "
-                 "nothing is scheduled), mounts an `APIRouter` (prefix `/labs/<lab>`, the engine's API-key auth "
-                 "`Depends(get_principal)`) with a POST route for each on-demand entry point and a GET route for "
-                 "each view, and starts any stream consumer as a task -- and nothing else (no work at import). The "
+                 "registers each recurring run with `get_scheduler()` (`from app.scheduler import get_scheduler`; it "
+                 "may return None: then nothing is scheduled), mounts an `APIRouter` (prefix `/labs/<lab>`, the "
+                 "engine's API-key auth `Depends(get_principal)`, `from app.authz import get_principal`) with a POST "
+                 "route for each on-demand entry point and a GET route for each view, and starts any stream consumer "
+                 "as a task -- and nothing else (no work at import, no secrets read in `install` itself). The "
                  "delivery lists `{mod}` in `app/labs.py`, whose `install_labs(app)` calls it when the engine starts. "
-                 "Its tests call `install` with a FastAPI app and a stand-in scheduler and read the routes and jobs "
-                 "it registered.")
+                 "Its tests call `install` with a FastAPI app and a stand-in scheduler, patch the stream consumer it "
+                 "starts (it reads the operator's secrets and the network), and read the routes and jobs it "
+                 "registered (the routes from `app.openapi()[\"paths\"]`: this engine's FastAPI keeps an included "
+                 "router as one `app.routes` entry with no `.path`).")
+#: §17.1911 — the note as an earlier pass wrote it, replaced by the current one
+_INSTALL_NOTE_RE = re.compile(r"The engine starts the lab through this module:.*?read the routes and jobs it registered"
+                              r"(?: \(the routes from[^)]*\)[^)]*\))?\.", re.S)
 #: §17.1908 — the audit of a module's calls against its API's research
 _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fetched now -- and the modules of this "
                "job that call it ({mods}; their current source is shown). For each place the code disagrees with the "
                "documentation (a base URL, an endpoint, a parameter, a header, a field name or its nesting, the "
-               "response format, pagination, a rate limit or a term of use) write one bullet that opens with the "
-               "module's name, names the function, quotes the documentation and cites its URL. A module that agrees "
-               "gets no bullet; state nothing the research does not say. Each module with a bullet is fixed by its "
-               "own step before the code is delivered.")
+               "response format, pagination, a rate limit or a term of use) write one bullet `- NOT MET — "
+               "<module> (<step>): …` that names the function, quotes the documentation and cites its URL. A module "
+               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). Every step named above gets at "
+               "least one such line, by its key. State nothing the research does "
+               "not say. Each module with a NOT MET bullet is fixed by its own step before the code is delivered.")
 
 
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names

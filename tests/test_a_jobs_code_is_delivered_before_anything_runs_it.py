@@ -60,7 +60,7 @@ def test_the_run_is_its_own_step_the_code_is_delivered_first_and_a_second_pass_a
     assert "def install(app) -> None" in by["T2"]["notes"] and "`lab_wire` in `app/labs.py`" in by["T2"]["notes"]
     # an API the CODE calls (by its host) is researched and audited, though no step's text names it
     assert by["API_SEC_EDGAR"]["tool"] == "SearXNG" and by["API_SEC_EDGAR_AUDIT"]["depends_on"][0] == "API_SEC_EDGAR"
-    assert "`lab_edgar`" in by["API_SEC_EDGAR_AUDIT"]["notes"] and "`lab_alpaca_client`" in by["API_ALPACA_AUDIT"]["notes"]
+    assert "`lab_edgar`" in by["API_SEC_EDGAR_AUDIT"]["notes"] and "`lab_alpaca_client` (step T1)" in by["API_ALPACA_AUDIT"]["notes"]
     assert any(c.startswith("delivery_added: DELIVER") for c in changes)
     # the audit is not an outcome check (it must not wait on the keys), and is a review (its findings become fixes)
     assert not ep._checks_the_outcome(by["API_ALPACA_AUDIT"]) and ep._REVIEW_STEP_RE.match(by["API_ALPACA_AUDIT"]["name"])
@@ -300,3 +300,59 @@ def test_new_steps_are_inserted_after_the_new_steps_they_depend_on():
     assert sorted(order) == sorted(t["id"] for t in tasks if t["id"] not in {"T1", "T2", "T10", "T11"})
     assert [t["id"] for t in ep.new_in_dependency_order(
         [{"id": "A", "depends_on": ["B"]}, {"id": "B", "depends_on": ["A"]}], set())] == ["A", "B"]   # a cycle: plan order
+
+
+def test_the_install_note_names_where_its_imports_live_and_replaces_an_older_one():
+    """§17.1911 — live (5b4880c0 T9 a1, 22:01 UTC): "`from app.api.deps import …`: the engine has no module
+    `app.api.deps`" -- the note said `Depends(get_principal)` and not where it lives."""
+    import importlib
+    for imp in ("from app.authz import get_principal", "from app.scheduler import get_scheduler"):
+        assert imp in ep._INSTALL_NOTE
+        mod, name = imp.removeprefix("from ").split(" import ")
+        assert hasattr(importlib.import_module(mod), name)
+    old = ("Python module `lab_wire.py`. Add the commands. The engine starts the lab through this module: it exposes "
+           "`def install(app) -> None`, which registers … Its tests call `install` with a FastAPI app and a stand-in "
+           "scheduler and read the routes and jobs it registered.")
+    tasks = [{"id": "T9", "name": "Wire engine entry module", "tool": "CodeGen", "type": "action", "depends_on": [],
+              "notes": old}]
+    assert "wiring_installs_the_lab: T9 exposes install(app), listed in app/labs.py" in ep.complete_engine_plan(
+        tasks, {"targets_engine": True}, [])
+    notes = tasks[0]["notes"]
+    assert notes.startswith("Python module `lab_wire.py`. Add the commands.") and notes.count("def install(app)") == 1
+    assert "from app.authz import get_principal" in notes and "registers …" not in notes
+    assert not [c for c in ep.complete_engine_plan(tasks, {"targets_engine": True}, []) if c.startswith("wiring")]
+
+
+def test_an_included_router_read_for_its_path_is_named_and_the_note_says_where_the_paths_are():
+    """§17.1911 — live (T9 a2+a3): "'_IncludedRouter' object has no attribute 'path'" twice, nothing said why."""
+    from fastapi import APIRouter, FastAPI
+
+    from app.sandbox import engine_tests as et
+    app, r = FastAPI(), APIRouter(prefix="/labs/x")
+    r.add_api_route("/run", lambda: 1, methods=["POST"])
+    app.include_router(r)
+    assert "/labs/x/run" in app.openapi()["paths"]                       # what the hint says to read
+    rx, hint = et.KNOWN_CAUSES[-1]
+    assert rx.search("E   AttributeError: '_IncludedRouter' object has no attribute 'path'")
+    assert 'app.openapi()["paths"]' in hint and 'app.openapi()[\"paths\"]' in ep._INSTALL_NOTE
+    # the older note (§17.1911's first) is replaced whole, not appended to
+    older = ("Python module `w.py`. The engine starts the lab through this module: x. Its tests call `install` with a "
+             "FastAPI app and a stand-in scheduler, patch the stream consumer it starts, and read the routes and jobs "
+             "it registered.")
+    tasks = [{"id": "T9", "name": "Wire it", "tool": "CodeGen", "type": "action", "depends_on": [], "notes": older}]
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [])
+    assert tasks[0]["notes"].count("The engine starts the lab") == 1 and "app.openapi()" in tasks[0]["notes"]
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [])
+    assert tasks[0]["notes"].count("The engine starts the lab") == 1
+
+
+def test_a_met_verdict_line_is_not_a_finding_and_a_not_met_one_is():
+    """§17.1912 — the coverage guard (§17.377) makes an audit write a MET line for a module that agrees."""
+    out = ("- MET — `paper_reddit_ingestion` (T6U7): sends the User-Agent the Reddit rules require of each client\n"
+           "- **MET** — `paper_reddit_ingestion` paginates with `after` exactly as the listing docs describe\n"
+           "- NOT MET — `paper_reddit_ingestion` (T6U7): calls www.reddit.com without OAuth, which the Data API "
+           "terms forbid for apps (https://support.reddithelp.com/…)\n"
+           "- UNKNOWN — `paper_reddit_ingestion` (T6U7): the rate limit the research does not state for this path\n")
+    got = ep.review_findings(out, ["paper_reddit_ingestion"])
+    assert [ln.split(" — ")[0] for ln in got["paper_reddit_ingestion"]] == ["NOT MET", "UNKNOWN"], got
+    assert "`- NOT MET — <module> (<step>): …`" in ep._AUDIT_NOTE and "`- MET — <module> (<step>): …` (no fix)" in ep._AUDIT_NOTE

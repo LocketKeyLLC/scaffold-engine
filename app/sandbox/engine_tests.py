@@ -219,6 +219,13 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "a `Decimal` (what a NUMERIC column reads back as) was mixed with a `float` literal inside the module -- the "
      "module is at fault, not the test: compute in `Decimal` (`Decimal(\"1.0\")`, `Decimal(str(x))`) or convert "
      "once at the edge (`float(close)`), never mix the two"),
+    # §17.1911 — live (5b4880c0 T9 a2+a3, 2026-11-04 22:03 UTC): `[r.path for r in app.routes]` after `install(app)`
+    # -- FastAPI 0.142 keeps an included router as ONE `_IncludedRouter` entry in `app.routes`, with no `.path`; the
+    # same draft twice, nothing told it why
+    (re.compile(r"'_IncludedRouter' object has no attribute '(?:path|methods|endpoint|name)'"),
+     "in this engine's FastAPI an included router is ONE `_IncludedRouter` entry in `app.routes`, with no `.path` -- "
+     "read the mounted paths from `app.openapi()[\"paths\"]` (path -> {method: …}), or call the route with "
+     "`TestClient(app)`; never iterate `app.routes` for paths"),
 )
 
 
