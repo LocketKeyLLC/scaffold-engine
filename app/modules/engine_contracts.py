@@ -4538,6 +4538,94 @@ def stdlib_attrs(files: dict[str, str]) -> list[str]:
     return found
 
 
+def missing_module_attrs(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1901 — `m.x` in a test, where `m` is a job module the file imports by name (`from app.modules import m as
+    w`, `import app.modules.m as w`) -- the step's OWN module included -- and `m` has no top-level `x` (no def, class,
+    assignment or import of that name): `AttributeError` the instant the line runs. Live (5b4880c0 T9, 2026-11-04
+    15:29 UTC): `set(wire.__all__)` and `patch.object(wire.paper_daily_signal_proposal_batch, …)` on the entry module
+    T9 wrote, which loads its siblings lazily by name and defines neither -- four of six sandbox failures."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    dunders = {"__name__", "__file__", "__doc__", "__dict__", "__spec__", "__loader__", "__package__", "__path__"}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        aliases: dict[str, list[str]] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module == "app.modules":
+                for a in n.names:
+                    aliases.setdefault(a.asname or a.name, []).append(a.name)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name.startswith("app.modules.") and a.name.count(".") == 2 and a.asname:
+                        aliases.setdefault(a.asname, []).append(a.name.rsplit(".", 1)[1])
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    if isinstance(t, ast.Name):
+                        aliases.setdefault(t.id, []).append("")           # rebound: not judged
+        names: dict[str, set[str]] = {}
+        for alias, mods in aliases.items():
+            if len(set(mods)) != 1 or not mods[0] or mods[0] not in reach:
+                continue
+            defined, imported = _top_names(reach[mods[0]])
+            names[alias] = set(defined) | set(imported)
+        for n in sorted((x for x in ast.walk(tree) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
+                         and x.value.id in names and isinstance(x.ctx, ast.Load)), key=lambda x: x.lineno):
+            if n.attr in names[n.value.id] or (n.attr in dunders):
+                continue
+            mod = aliases[n.value.id][0]
+            have = sorted(x for x in names[n.value.id] if not x.startswith("_"))[:12]
+            msg = (f"`{path}:{n.lineno}` reads `{n.value.id}.{n.attr}`, but `{mod}` has no top-level `{n.attr}` "
+                   f"(it has {', '.join(f'`{h}`' for h in have) or 'nothing public'}) -- `AttributeError` the instant "
+                   f"it runs: use a name it has, or patch the name where the module looks it up")
+            if msg not in found:
+                found.append(msg)
+    return found
+
+
+def async_def_for_a_context(files: dict[str, str], modules: dict[str, str]) -> list[str]:
+    """§17.1901 — a patch that puts a test's own `async def` (not an `@asynccontextmanager`) in place of a name the
+    code enters with `async with name(…)`: calling an `async def` gives a coroutine, and `async with` on it fails --
+    "'coroutine' object does not support the asynchronous context manager protocol". Live (5b4880c0 T9, 2026-11-04
+    15:29 UTC): `patch("app.database.async_session", new=fake_async_session)` with `async def fake_async_session():
+    … return Ctx()`, two of six sandbox failures; the sandbox's `async_session` is a real scratch database anyway."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    entered = {"async_session"} | {m for c in reach.values() for m in re.findall(r"async with (\w+)\(", c)}
+    found: list[str] = []
+    for path, code in files.items():
+        if not path.startswith("tests/"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        adefs = {n.name for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                 and not any("contextmanager" in ast.unparse(d) for d in n.decorator_list)}
+        for c in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            f = ast.unparse(c.func)
+            target, repl = None, None
+            if f in ("patch", "mock.patch", "unittest.mock.patch") and c.args and isinstance(c.args[0], ast.Constant):
+                target = str(c.args[0].value).rsplit(".", 1)[-1]
+                repl = next((k.value for k in c.keywords if k.arg in ("new", "side_effect")), c.args[1] if len(c.args) > 1 else None)
+            elif f in ("patch.object", "monkeypatch.setattr") and len(c.args) >= 3 and isinstance(c.args[1], ast.Constant):
+                target, repl = str(c.args[1].value), c.args[2]
+            if target in entered and isinstance(repl, ast.Name) and repl.id in adefs:
+                msg = (f"`{path}:{c.lineno}` patches `{target}` with `{repl.id}`, an `async def`: the code enters it "
+                       f"with `async with {target}(…)`, and calling an `async def` gives a coroutine, which `async with` "
+                       f"refuses -- " + ("leave `async_session` alone (the sandbox's is a real scratch database) and "
+                                         "pass `db=` where the function takes one" if target == "async_session" else
+                                         f"decorate `{repl.id}` with `@contextlib.asynccontextmanager` and `yield` the object"))
+                if msg not in found:
+                    found.append(msg)
+    return found
+
+
 def own_helper_calls(files: dict[str, str]) -> list[str]:
     """§17.1894 — each call in a test file to a function THAT FILE defines at module level, checked against the
     definition: a keyword it has no parameter for, a required argument left out, too many positional ones, `await` on
