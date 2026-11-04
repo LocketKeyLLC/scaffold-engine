@@ -35,8 +35,10 @@ EDITABLE_FIELDS = {
     "title", "description", "prompt_template", "tool",
     "depends_on", "assigned_model", "is_deliverable",
     "tool_config",  # §17.772 — an MCP node's {server, tool, args}
+    "node_type",    # §17.1902 — a plan pass that makes a step the operator's question (`decision`) says so on the node
 }
-INVALIDATING_FIELDS = {"prompt_template", "tool", "depends_on", "tool_config"}
+INVALIDATING_FIELDS = {"prompt_template", "tool", "depends_on", "tool_config", "node_type"}
+NODE_TYPES = frozenset({"task", "decision", "parallel_group", "checkpoint"})     # the dag_nodes CHECK
 _TERMINAL = ("done", "failed", "skipped")
 
 
@@ -436,6 +438,8 @@ async def edit_node(
     updates = {k: v for k, v in fields.items() if k in EDITABLE_FIELDS}
     if not updates:
         return {"error": "no editable fields provided", "http_status": 400}
+    if "node_type" in updates and updates["node_type"] not in NODE_TYPES:
+        return {"error": f"node_type must be one of {sorted(NODE_TYPES)}", "http_status": 400}
 
     # If depends_on changes, validate the post-edit graph.
     if "depends_on" in updates:
