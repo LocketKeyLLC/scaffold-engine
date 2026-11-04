@@ -462,12 +462,10 @@ async def edit_node(
     # Build the UPDATE. depends_on is a text[]; the rest are scalar columns.
     set_parts = []
     params: dict = {"j": job_id, "nk": node_key}
-    col_map = {
-        "title": "title", "description": "description",
-        "prompt_template": "prompt_template", "tool": "tool",
-        "assigned_model": "assigned_model", "is_deliverable": "is_deliverable",
-        "depends_on": "depends_on", "tool_config": "tool_config",
-    }
+    # §17.1904 — every editable field is the column of its name: derived, so a field added to EDITABLE_FIELDS is
+    # written (live 2026-11-04 17:08 UTC: §17.1902 added `node_type` there and not here -- `KeyError: 'node_type'`,
+    # every plan re-apply that changed a type a 500)
+    col_map = {f: f for f in EDITABLE_FIELDS}
     for k, v in updates.items():
         col = col_map[k]
         if k == "tool_config":
