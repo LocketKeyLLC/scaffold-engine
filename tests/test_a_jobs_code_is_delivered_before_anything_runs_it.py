@@ -344,3 +344,15 @@ def test_an_included_router_read_for_its_path_is_named_and_the_note_says_where_t
     assert tasks[0]["notes"].count("The engine starts the lab") == 1 and "app.openapi()" in tasks[0]["notes"]
     ep.complete_engine_plan(tasks, {"targets_engine": True}, [])
     assert tasks[0]["notes"].count("The engine starts the lab") == 1
+
+
+def test_a_met_verdict_line_is_not_a_finding_and_a_not_met_one_is():
+    """§17.1912 — the coverage guard (§17.377) makes an audit write a MET line for a module that agrees."""
+    out = ("- MET — `paper_reddit_ingestion` (T6U7): sends the User-Agent the Reddit rules require of each client\n"
+           "- **MET** — `paper_reddit_ingestion` paginates with `after` exactly as the listing docs describe\n"
+           "- NOT MET — `paper_reddit_ingestion` (T6U7): calls www.reddit.com without OAuth, which the Data API "
+           "terms forbid for apps (https://support.reddithelp.com/…)\n"
+           "- UNKNOWN — `paper_reddit_ingestion` (T6U7): the rate limit the research does not state for this path\n")
+    got = ep.review_findings(out, ["paper_reddit_ingestion"])
+    assert [ln.split(" — ")[0] for ln in got["paper_reddit_ingestion"]] == ["NOT MET", "UNKNOWN"], got
+    assert "`- NOT MET — <module> (<step>): …`" in ep._AUDIT_NOTE and "`- MET — <module> (<step>): …` (no fix)" in ep._AUDIT_NOTE

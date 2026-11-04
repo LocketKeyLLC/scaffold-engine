@@ -134,6 +134,8 @@ def _carried_own(t: dict, carried: list[str]) -> str | None:
 #: §17.1818 — a step that reads the earlier job's code and reports on it
 _REVIEW_STEP_RE = re.compile(r"^\s*(?:audit|review|inspect|examine|analy[sz]e|assess|inventory|read)\b", re.I)
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+_MET_RE = re.compile(r"\*{0,2}\bMET\b\*{0,2}")
+_NOT_MET_RE = re.compile(r"\bNOT\s+MET\b|\bUNKNOWN\b")
 
 
 def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
@@ -153,6 +155,11 @@ def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
             continue
         prose = re.sub(r"`[^`]*`", " ", body)
         if len(re.findall(r"[A-Za-z]{2,}", prose)) < 5:
+            continue
+        # §17.1912 — a verdict line that says the module holds is not a finding: the validation-coverage guard
+        # (§17.377) has a review cite every code step it read on a MET / NOT MET / UNKNOWN line, so an audit that
+        # finds a module sound still writes "MET — `paper_reddit_ingestion` (T6U7) …" (live, API_REDDIT_AUDIT a1)
+        if _MET_RE.search(body) and not _NOT_MET_RE.search(body):
             continue
         found.setdefault(hits[0][1], []).append(body)
     return found
@@ -727,10 +734,10 @@ _INSTALL_NOTE_RE = re.compile(r"The engine starts the lab through this module:.*
 _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fetched now -- and the modules of this "
                "job that call it ({mods}; their current source is shown). For each place the code disagrees with the "
                "documentation (a base URL, an endpoint, a parameter, a header, a field name or its nesting, the "
-               "response format, pagination, a rate limit or a term of use) write one bullet that opens with the "
-               "module's name, names the function, quotes the documentation and cites its URL. A module that agrees "
-               "gets no bullet; state nothing the research does not say. Each module with a bullet is fixed by its "
-               "own step before the code is delivered.")
+               "response format, pagination, a rate limit or a term of use) write one bullet `- NOT MET — "
+               "<module> (<step>): …` that names the function, quotes the documentation and cites its URL. A module "
+               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). State nothing the research does "
+               "not say. Each module with a NOT MET bullet is fixed by its own step before the code is delivered.")
 
 
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
