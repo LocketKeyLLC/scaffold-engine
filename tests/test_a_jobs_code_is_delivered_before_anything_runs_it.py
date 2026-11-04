@@ -288,3 +288,15 @@ def test_the_decision_pause_asks_the_engine_before_it_closes_one_of_these():
     src = inspect.getsource(decision_pause.resolve_decision)
     assert src.index("engine_plan.answer_unmet(") < src.index("UPDATE dag_nodes SET status = 'done'")
     assert '"outcome": "not_yet"' in src
+
+
+def test_new_steps_are_inserted_after_the_new_steps_they_depend_on():
+    """§17.1910 — live (2026-11-04 21:31 UTC): "node DELIVER depends on unknown node API_SEC_EDGAR_AUDIT"."""
+    tasks = _plan()
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [], SOURCES)
+    order = [t["id"] for t in ep.new_in_dependency_order(tasks, {"T1", "T2", "T10", "T11"})]
+    assert order.index("DELIVER") > max(order.index("API_ALPACA_AUDIT"), order.index("API_SEC_EDGAR_AUDIT"))
+    assert order.index("API_SEC_EDGAR_AUDIT") > order.index("API_SEC_EDGAR")
+    assert sorted(order) == sorted(t["id"] for t in tasks if t["id"] not in {"T1", "T2", "T10", "T11"})
+    assert [t["id"] for t in ep.new_in_dependency_order(
+        [{"id": "A", "depends_on": ["B"]}, {"id": "B", "depends_on": ["A"]}], set())] == ["A", "B"]   # a cycle: plan order
