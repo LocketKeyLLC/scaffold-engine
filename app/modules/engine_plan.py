@@ -592,8 +592,12 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     for t in tasks:
         if (str(t.get("tool") or "").lower() == "codegen" and _module_of(t)
                 and (str(t.get("id", "")).startswith("WIRE") or _WIRE_STEP_RE.search(str(t.get("name") or "")))
-                and "install(app)" not in _text(t)):
-            t["notes"] = (str(t.get("notes") or "").rstrip() + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
+                and _INSTALL_NOTE.format(mod=_module_of(t)) not in _text(t)):
+            # §17.1911 — an earlier pass's note is replaced: live (5b4880c0 T9 a1) it named `Depends(get_principal)`
+            # and not where it lives, and the draft guessed `app.api.deps`
+            was = str(t.get("notes") or "")
+            kept = _INSTALL_NOTE_RE.sub("", was).rstrip() if "install(app)" in was else was.rstrip()
+            t["notes"] = (kept + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
             changes.append(f"wiring_installs_the_lab: {t.get('id')} exposes install(app), listed in app/labs.py")
 
     # 6b. §17.1908 — what an outside API says is read again before the code is delivered, and the code is held to it:
@@ -706,13 +710,18 @@ _DELIVER_NOTE = ("The engine exports this job's code -- every module, its tests 
 #: §17.1909 — the step that wires the lab into the engine, by its title
 _WIRE_STEP_RE = re.compile(r"\bwire[sd]?\b|\bwiring\b", re.I)
 _INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def install(app) -> None`, which "
-                 "registers each recurring run with `app.scheduler.get_scheduler()` (it may return None: then "
-                 "nothing is scheduled), mounts an `APIRouter` (prefix `/labs/<lab>`, the engine's API-key auth "
-                 "`Depends(get_principal)`) with a POST route for each on-demand entry point and a GET route for "
-                 "each view, and starts any stream consumer as a task -- and nothing else (no work at import). The "
+                 "registers each recurring run with `get_scheduler()` (`from app.scheduler import get_scheduler`; it "
+                 "may return None: then nothing is scheduled), mounts an `APIRouter` (prefix `/labs/<lab>`, the "
+                 "engine's API-key auth `Depends(get_principal)`, `from app.authz import get_principal`) with a POST "
+                 "route for each on-demand entry point and a GET route for each view, and starts any stream consumer "
+                 "as a task -- and nothing else (no work at import, no secrets read in `install` itself). The "
                  "delivery lists `{mod}` in `app/labs.py`, whose `install_labs(app)` calls it when the engine starts. "
-                 "Its tests call `install` with a FastAPI app and a stand-in scheduler and read the routes and jobs "
-                 "it registered.")
+                 "Its tests call `install` with a FastAPI app and a stand-in scheduler, patch the stream consumer it "
+                 "starts (it reads the operator's secrets and the network), and read the routes and jobs it "
+                 "registered.")
+#: §17.1911 — the note as an earlier pass wrote it, replaced by the current one
+_INSTALL_NOTE_RE = re.compile(r"The engine starts the lab through this module:.*?(?:read the routes and jobs it registered\.)",
+                              re.S)
 #: §17.1908 — the audit of a module's calls against its API's research
 _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fetched now -- and the modules of this "
                "job that call it ({mods}; their current source is shown). For each place the code disagrees with the "

@@ -300,3 +300,24 @@ def test_new_steps_are_inserted_after_the_new_steps_they_depend_on():
     assert sorted(order) == sorted(t["id"] for t in tasks if t["id"] not in {"T1", "T2", "T10", "T11"})
     assert [t["id"] for t in ep.new_in_dependency_order(
         [{"id": "A", "depends_on": ["B"]}, {"id": "B", "depends_on": ["A"]}], set())] == ["A", "B"]   # a cycle: plan order
+
+
+def test_the_install_note_names_where_its_imports_live_and_replaces_an_older_one():
+    """§17.1911 — live (5b4880c0 T9 a1, 22:01 UTC): "`from app.api.deps import …`: the engine has no module
+    `app.api.deps`" -- the note said `Depends(get_principal)` and not where it lives."""
+    import importlib
+    for imp in ("from app.authz import get_principal", "from app.scheduler import get_scheduler"):
+        assert imp in ep._INSTALL_NOTE
+        mod, name = imp.removeprefix("from ").split(" import ")
+        assert hasattr(importlib.import_module(mod), name)
+    old = ("Python module `lab_wire.py`. Add the commands. The engine starts the lab through this module: it exposes "
+           "`def install(app) -> None`, which registers … Its tests call `install` with a FastAPI app and a stand-in "
+           "scheduler and read the routes and jobs it registered.")
+    tasks = [{"id": "T9", "name": "Wire engine entry module", "tool": "CodeGen", "type": "action", "depends_on": [],
+              "notes": old}]
+    assert "wiring_installs_the_lab: T9 exposes install(app), listed in app/labs.py" in ep.complete_engine_plan(
+        tasks, {"targets_engine": True}, [])
+    notes = tasks[0]["notes"]
+    assert notes.startswith("Python module `lab_wire.py`. Add the commands.") and notes.count("def install(app)") == 1
+    assert "from app.authz import get_principal" in notes and "registers …" not in notes
+    assert not [c for c in ep.complete_engine_plan(tasks, {"targets_engine": True}, []) if c.startswith("wiring")]
