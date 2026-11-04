@@ -1839,6 +1839,8 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         return f"{done}a `{cls}` instance{at}, which has no `{attr}`, and the module {how}"
     if val.kind == "instance-called":
         return f"{done}a `{getattr(val.node, 'name', 'class')}` instance{at}, which the module calls"
+    if val.kind == "None" and uses.get("none") == {True}:            # §17.1913 every binding tests it for None first
+        return None
     if val.kind:
         needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         if val.kind == "dict":

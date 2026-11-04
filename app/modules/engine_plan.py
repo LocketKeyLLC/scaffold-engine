@@ -626,11 +626,14 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         aid = f"{key}_AUDIT"
         audits.append(aid)
         have = next((t for t in tasks if str(t.get("id")) == aid), None)
-        code_steps = [str(t["id"]) for t in tasks if _module_of(t) in mods]
         # §17.1912 — each module with the step that wrote it last: the coverage guard (§17.377) wants every code step
         # the audit reads cited by its key on a verdict line; live API_REDDIT_AUDIT a1-a3 cited `paper_reddit_ingestion`
         # and never `T6U7`, which the note did not name
         owner = {m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods}
+        # §17.1913 — and it stands on those writers alone: an earlier writer's code is not what it reads, and the guard
+        # wanted it cited too (live API_ALPACA_AUDIT a1: "MISSING: ['T1F2', 'T3', 'T5U4']" -- T3 and T5U4 both wrote
+        # the SPY tracker)
+        code_steps = list(dict.fromkeys(owner[m] for m in mods if m in owner))
         notes = _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(
             f"`{m}` (step {owner[m]})" if m in owner else f"`{m}`" for m in mods))
         if have is None:
@@ -639,9 +642,9 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                           "notes": notes})
             changes.append(f"api_audit_added: {aid} holds {', '.join(mods)} to {key}")
         else:
-            missing = [d for d in [key, *code_steps] if d not in (have.get("depends_on") or [])]
-            if missing:
-                have["depends_on"] = list(have.get("depends_on") or []) + missing
+            if list(have.get("depends_on") or []) != [key, *code_steps]:
+                have["depends_on"] = [key, *code_steps]
+                changes.append(f"api_audit_stands_on: {aid} on {key} and the current writers {', '.join(code_steps)}")
             if have.get("notes") != notes:
                 have["notes"] = notes
                 changes.append(f"api_audit_reworded: {aid} names each module's step")

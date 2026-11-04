@@ -356,3 +356,19 @@ def test_a_met_verdict_line_is_not_a_finding_and_a_not_met_one_is():
     got = ep.review_findings(out, ["paper_reddit_ingestion"])
     assert [ln.split(" — ")[0] for ln in got["paper_reddit_ingestion"]] == ["NOT MET", "UNKNOWN"], got
     assert "`- NOT MET — <module> (<step>): …`" in ep._AUDIT_NOTE and "`- MET — <module> (<step>): …` (no fix)" in ep._AUDIT_NOTE
+
+
+def test_an_audit_stands_on_each_modules_current_writer_only():
+    """§17.1913 — live API_ALPACA_AUDIT a1: the coverage guard wanted T3 cited, an earlier writer of the SPY tracker."""
+    tasks = [{"id": "T3", "name": "Fix SPY tracker", "tool": "CodeGen", "type": "action", "depends_on": [],
+              "notes": "Python module `lab_spy.py`."},
+             {"id": "T5U4", "name": "Fix lab_spy (found by T5's tests)", "tool": "CodeGen", "type": "action",
+              "depends_on": ["T3"], "notes": "Python module `lab_spy.py`."}]
+    sources = {"lab_spy": 'URL = "https://data.alpaca.markets/v2/stocks/bars"  # alpaca\n'}
+    ep.complete_engine_plan(tasks, {"targets_engine": True}, [], sources)
+    audit = next(t for t in tasks if t["id"] == "API_ALPACA_AUDIT")
+    assert audit["depends_on"] == ["API_ALPACA", "T5U4"] and "`lab_spy` (step T5U4)" in audit["notes"]
+    audit["depends_on"] = ["API_ALPACA", "T3", "T5U4"]                       # as an earlier pass left it
+    assert "api_audit_stands_on: API_ALPACA_AUDIT on API_ALPACA and the current writers T5U4" in ep.complete_engine_plan(
+        tasks, {"targets_engine": True}, [], sources)
+    assert audit["depends_on"] == ["API_ALPACA", "T5U4"]
