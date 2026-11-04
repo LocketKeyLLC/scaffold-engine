@@ -2042,8 +2042,19 @@ async def code_rows(db, job_id: str) -> list[dict]:
 
 async def carried_modules(db, job_id: str) -> list[str]:
     """§17.1814 — the modules the jobs this one builds on finished (`paper_order_executor`, …), in plan order."""
+    return carried_from(await code_rows(db, job_id))
+
+
+async def current_code(db, job_id: str) -> dict[str, str]:
+    """§17.1908 — each finished module's code as it is now (module -> code), for the plan pass that reads what the
+    code calls."""
+    return {m: code for m, (_p, code, _k) in current_sources(await code_rows(db, job_id)).items()}
+
+
+def carried_from(rows: list[dict]) -> list[str]:
+    """`carried_modules` over `code_rows` already read."""
     out: list[str] = []
-    for r in await code_rows(db, job_id):
+    for r in rows:
         m = step_module(r) if is_carried(r) else ""
         if m and m not in out:
             out.append(m)
@@ -2129,6 +2140,26 @@ def current_sources(rows: list[dict]) -> dict[str, tuple[str, str, str]]:
             if path.startswith("app/") and not is_test(path):
                 out[Path(path).stem] = (path, code, str(r.get("node_key") or ""))
     return out
+
+
+#: §17.1905 — the files a delivery may write: the job's modules, their tests and its Alembic revisions
+_DELIVERABLE_RE = re.compile(r"^(?:app/modules/[a-z_][a-z0-9_]*\.py|tests/test_[a-z0-9_]+\.py|alembic/versions/\w+\.py)$")
+
+
+def job_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
+    """§17.1905 — the code a job delivers into the engine: path -> (code, step), each file as its last finished writer
+    left it (`code_rows` order, as `current_sources`), tests and Alembic revisions included. A path outside the job's
+    own modules, tests and revisions is never delivered (a step that wrote `app/main.py` does not edit the engine's
+    start by delivery; the lab registry line is the delivery's own)."""
+    from app.sandbox.engine_tests import files_of
+    out: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        if r.get("status") != "done":
+            continue
+        for path, code in files_of(r).items():
+            if _DELIVERABLE_RE.match(path):
+                out[path] = (code if code.endswith("\n") else code + "\n", str(r.get("node_key") or ""))
+    return dict(sorted(out.items()))
 
 
 def tested_modules(rows: list[dict]) -> set[str]:

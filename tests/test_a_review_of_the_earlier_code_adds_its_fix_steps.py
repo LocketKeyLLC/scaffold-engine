@@ -99,7 +99,7 @@ async def test_plan_completion_reads_the_finished_reviews():
         ("T1", REVIEW),
         ("T10", "- `paper_alpaca_paper_client` keys are not stored yet on the Machines page.")]   # not a review step
     db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows, reviews]); db.commit = AsyncMock()
-    with patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=CARRIED)), \
+    with patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=CARRIED)), patch("app.modules.engine_source.current_code", new=AsyncMock(return_value={})), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})) as ins, \
          patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})), \
          patch.object(engine_plan, "complete_engine_plan", return_value=[]) as cep:
@@ -152,9 +152,10 @@ async def _apply(rows):
         "refined_brief": {"title": "Finish paper-trading lab", "targets_engine": True}}
     plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = rows
     db = MagicMock(); db.execute = AsyncMock(side_effect=[brief_row, plan_rows]); db.commit = AsyncMock()
-    with patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), \
+    with patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), patch("app.modules.engine_source.current_code", new=AsyncMock(return_value={})), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})), \
-         patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
+         patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed, \
+         patch.object(engine_plan, "refresh_stale_research", new=AsyncMock(return_value=[])):
         out = await engine_plan.apply_to_job(db, "5b4880c0-0000-4000-8000-000000000000")
     return out, {c.args[1]: c.args[2] for c in ed.await_args_list}
 

@@ -583,6 +583,12 @@ async def lifespan(app: FastAPI):
         await init_scheduler()
     except Exception as exc:
         logger.error('event="scheduler_init_failed" error=%s', exc)
+    # §17.1905 — the labs delivered into the engine start here, once the scheduler they register with is up
+    try:
+        from app.labs import install_labs
+        install_labs(app)
+    except Exception as exc:
+        logger.error('event="labs_install_failed" error=%s', exc)
 
     # Sprint X.26 — OTel init is strictly opt-in and a no-op unless
     # `otel_enabled` + an OTLP HTTP endpoint are configured. Failures

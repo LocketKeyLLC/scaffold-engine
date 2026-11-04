@@ -238,7 +238,7 @@ def test_the_third_live_plan_is_completed():
     assert "T29" not in by and by["T30"]["depends_on"] == ["T28"]                 # the sandbox runs T28's tests
     assert by["T4"]["type"] == "decision" and by["T4"]["tool"] == "LLM"
     assert by["T4"]["name"] == "Are the Alpaca paper keys stored in the engine's secrets?"
-    assert by["T4"]["depends_on"] == ["WIRE"] and by["T5"]["depends_on"] == ["T3", "API_ALPACA"]  # asked last; schema + API research
+    assert by["T4"]["depends_on"] == ["DELIVER", "WIRE"] and by["T5"]["depends_on"] == ["T3", "API_ALPACA"]  # asked last, once delivered (§17.1905); schema + API research
     assert {c.split(":")[0] for c in changes} >= {"ddl_made_a_migration", "test_run_dropped", "secret_step_made_the_operators"}
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
 
@@ -521,7 +521,7 @@ async def test_apply_to_job_carries_status_so_a_skipped_step_is_left_out():
     plan_rows = MagicMock(); plan_rows.mappings.return_value.all.return_value = rows
     db.execute = AsyncMock(side_effect=[brief_row, plan_rows])
     with patch("app.modules.engine_source.targets_the_engine", return_value=True), \
-         patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), \
+         patch("app.modules.engine_source.carried_modules", new=AsyncMock(return_value=[])), patch("app.modules.engine_source.current_code", new=AsyncMock(return_value={})), \
          patch("app.modules.node_editor.insert_node", new=AsyncMock(return_value={"status": "ok"})) as ins, \
          patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})) as ed:
         out = await engine_plan.apply_to_job(db, str(uuid4()))

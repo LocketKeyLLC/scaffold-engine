@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from app.modules.engine_source import module_index
 
@@ -157,21 +158,47 @@ def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
     return found
 
 
-def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[str]) -> list[str]:
+def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[str],
+                     own: list[str] | None = None) -> list[str]:
     """§17.1818 — each module of the earlier job a review step found defects in, and no step fixes, gets a fix step
     (that module, edited in place, with its tests); the code steps not yet run wait for the fixes. Live (follow-up
     5b4880c0): T1 "Audit existing paper modules" found `paper_trade_proposer` returning proposals with no `signal_id`
     and inserting rejected ones with NULL `signal_id` and quantity 0 -- both refused by the schema -- and nothing in the
-    plan fixed it; T6, the daily batch built on it, failed nine attempts on those rows."""
+    plan fixed it; T6, the daily batch built on it, failed nine attempts on those rows.
+
+    §17.1908 — ``own``: this job's own modules, which an audit of the finished code (an API audit) finds defects in
+    too; and a step that wrote a module BEFORE the review ran (one the review stands on) cannot have fixed what the
+    review found in it -- only a step after it, or one already opened for this review, owns the finding."""
     changes: list[str] = []
-    if not carried or not reviews:
+    own = [m for m in own or [] if m not in carried]
+    if not (carried or own) or not reviews:
         return changes
-    owned = {own for t in tasks if (own := _carried_own(t, carried))}
+    names = [*carried, *own]
     existing = {t["id"] for t in tasks}
+    titles = {str(t.get("name") or "") for t in tasks}
     fixes: list[str] = []
     for key, output in reviews.items():
+        upstream = _upstream_of(tasks, key)
+        owned = {m for t in tasks if str(t["id"]) not in upstream and str(t["id"]) != key
+                 and (m := (_carried_own(t, carried) or (_module_of(t) if _module_of(t) in own else None)))}
         n = 0
-        for leaf, lines in review_findings(output, carried).items():
+        for leaf, lines in review_findings(output, names).items():
+            if f"Fix {leaf} (review {key} findings)" in titles:
+                continue
+            # §17.1908 — a module another review's fix step still has open takes these findings too (two API audits
+            # finding the one client); a step that is not a review's fix keeps owning it as before
+            open_fix = next((t for t in tasks if re.match(rf"^Fix {re.escape(leaf)} \(review \S+ findings\)$",
+                                                             str(t.get("name") or ""))
+                             and t.get("status", "pending") in ("pending", "failed")
+                             and str(t["id"]) not in upstream), None)
+            if open_fix is not None:
+                marker = f"Also fix what review step {key} found in it:"
+                if marker not in str(open_fix.get("notes") or ""):
+                    open_fix["notes"] = (str(open_fix.get("notes") or "").rstrip() + f"\n{marker}\n"
+                                         + "".join(f"- {ln}\n" for ln in lines))
+                    open_fix["depends_on"] = list(dict.fromkeys([*(open_fix.get("depends_on") or []), key]))
+                    changes.append(f"review_fix_extended: {open_fix['id']} also fixes what {key} found in `{leaf}.py`")
+                continue
             if leaf in owned:
                 continue
             n += 1
@@ -183,23 +210,28 @@ def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[s
             owned.add(leaf)
             tasks.append({"id": fid, "name": f"Fix {leaf} (review {key} findings)", "tool": "CodeGen",
                           "type": "action", "status": "pending", "depends_on": [key],
-                          "notes": (f"Python module `{leaf}.py` -- the earlier job's module: edit it in place (the whole "
+                          "notes": (f"Python module `{leaf}.py` -- "
+                                    + ("the earlier job's module" if leaf in carried else "this job's module")
+                                    + ": edit it in place (the whole "
                                     f"file, its public names kept). Fix what review step {key} found in it:\n"
                                     + "".join(f"- {ln}\n" for ln in lines) + _tests_note(leaf))})
             fixes.append(fid)
             changes.append(f"review_fix_added: {fid} fixes `{leaf}.py` ({len(lines)} finding(s) of {key})")
     if fixes:
         for t in tasks:
-            if (t["id"] not in fixes and str(t.get("tool") or "").lower() == "codegen"
-                    and t.get("status", "pending") in ("pending", "failed")):
+            if (t["id"] not in fixes and t.get("status", "pending") in ("pending", "failed")
+                    and (str(t.get("tool") or "").lower() == "codegen"
+                         or _DELIVER_QUESTION_RE.match(str(t.get("name") or "")))):     # §17.1908 — delivered fixed
                 t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *fixes]))
     return changes
 
 
-def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[str] | None = None) -> list[str]:
+def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[str] | None = None,
+                         sources: dict[str, str] | None = None) -> list[str]:
     """Complete ``tasks`` in place; return what was changed, one line each (the plan's validator warnings).
     ``carried`` (§17.1814): the modules a job this one builds on finished -- a step that fixes one writes it in
-    place, and the job's new modules take their prefix."""
+    place, and the job's new modules take their prefix. ``sources`` (§17.1908): each finished module's code as it is
+    now (`current_sources`), so an outside API the code calls is researched even when no step's text names it."""
     changes: list[str] = []
     engine_leaves = {m.rsplit(".", 1)[-1] for m in module_index() if m.startswith("app.modules.")}
     carried = list(carried or [])
@@ -216,7 +248,11 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     num = int(head[:4]) + 1 if head[:4].isdigit() else 0
     schema = [t for t in tasks if str(t.get("tool") or "").lower() in ("shell", "codegen")
               and (_DDL_RE.search(_text(t)) or _MIGRATION_STEP_RE.search(_text(t)))
-              and "alembic/versions/" not in _text(t) and not _CHECK_STEP_RE.match(str(t.get("name") or ""))]
+              and "alembic/versions/" not in _text(t) and not _CHECK_STEP_RE.match(str(t.get("name") or ""))
+              # §17.1908 — a step already given its module is that module, whatever its findings say: live
+              # (5b4880c0, re-applying the plan) T1F1 "Fix paper_p_l_calculator", whose finding quotes "Migration
+              # 0010's `fill` table has no `ticker` column", was read as a schema step and made a revision
+              and not str(t.get("notes") or "").startswith("Python module `")]
     appliers = [t for t in schema if _APPLY_DDL_RE.search(_text(t))]
     writers = [t for t in schema if t not in appliers]
     if appliers and not writers:
@@ -262,10 +298,7 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                          r"existing|store)\b", " ", _VERB_RE.sub("", str(t.get("name") or "")), flags=re.I)
         subject = " ".join(subject.split()) or "this lab"
         t["name"] = f"Are the {subject} keys stored in the engine's secrets?"
-        t["notes"] = ("The operator stores the keys only they hold on the engine's Machines page → Secrets, under the "
-                      "UPPER_SNAKE names this job's code reads (`values_for(db, [...])` in its client step); the "
-                      "engine never asks for a value in a step and never logs one. Answer when they are stored. "
-                      + str(t.get("notes") or "").strip())
+        t["notes"] = (_KEYS_NOTE + " " + str(t.get("notes") or "").strip()).strip()
         changes.append(f"secret_step_made_the_operators: {t.get('id')} asks the operator, after the code exists")
 
     # 0e'. §17.1903 — and it holds on every pass: a plan read back from the job has the question as an LLM step (0e
@@ -285,6 +318,32 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
             if q["id"] not in (u.get("depends_on") or []):
                 u["depends_on"] = list(u.get("depends_on") or []) + [q["id"]]
                 changes.append(f"outcome_check_waits_on_the_keys: {u.get('id')} waits on {q.get('id')}")
+
+    # 0e''. §17.1906 — the run that the keys are FOR is its own step, the operator's, after the question. Live
+    #       (5b4880c0 T10): 0e made "Run end-to-end paper trade" the keys question and kept its text -- "Execute one
+    #       end-to-end trade on the real Alpaca paper account … operator-approved, sent, filled, and visible in the
+    #       audit trail and P&L" -- so answering "the keys are stored" was the whole of the trade: no step made it,
+    #       and T11 was left to check an audit trail nothing had written.
+    for q in questions:
+        rest = str(q.get("notes") or "").removeprefix(_KEYS_NOTE).strip()
+        if not _LIVE_WORK_RE.search(rest) or any(_RUN_QUESTION_RE.match(str(t.get("name") or "")) for t in tasks):
+            continue
+        subject = str(q.get("name") or "").removeprefix("Are the ").split(" keys stored")[0]
+        ids = {str(t.get("id")) for t in tasks}
+        rid, n = "RUN", 2
+        while rid in ids:
+            rid, n = f"RUN{n}", n + 1
+        keys = re.findall(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b", rest)
+        q["notes"] = _KEYS_NOTE + (f" The names: {', '.join(f'`{k}`' for k in dict.fromkeys(keys))}." if keys else "")
+        tasks.insert(tasks.index(q) + 1, {
+            "id": rid, "name": f"Has the {subject} been made on the real account?", "type": "decision", "tool": "LLM",
+            "depends_on": [q["id"]], "inputs": [], "outputs": [],
+            "notes": (_RUN_NOTE + " " + rest).strip()})
+        for u in tasks:
+            if _checks_the_outcome(u) and rid not in (u.get("depends_on") or []) and u["id"] != rid:
+                u["depends_on"] = list(u.get("depends_on") or []) + [rid]
+        changes.append(f"live_run_made_its_own_step: {rid} -- the operator makes the run {q.get('id')} asked the "
+                       "keys for, through the lab's own entry points")
 
     # 0f. §17.1770 — what is left as Shell in a plan for engine code is code the job must write. Live (918b6274's
     #     fourth plan): "Run daily proposal batch", "Execute approved orders", "Acquire point-in-time data", "Run
@@ -513,19 +572,7 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                     and not str(t.get("notes") or "").startswith("An Alembic revision")
                     and not str(t.get("id", "")).startswith("WIRE")]
         if key not in ids:
-            tasks.append({
-                "id": key, "name": f"Research the {api['name']} as its documentation states it", "type": "research",
-                "tool": "SearXNG", "depends_on": [], "inputs": [], "outputs": [],
-                # §17.1781 — its official documentation, read first (measured: each URL loads from the engine and
-                # carries what the code steps guessed -- Alpaca's trade_updates fields, the SEC's User-Agent rule)
-                **({"tool_config": {"urls": list(api["docs"])}} if api.get("docs") else {}),
-                "notes": (f"Read the {api['name']}'s own documentation ({api['scope']}; official pages first) and state, "
-                          "for what this lab calls: the base URLs; each endpoint (method, path, parameters); the headers "
-                          "it requires (authentication, User-Agent / contact rules); the response FORMAT (JSON or XML) "
-                          "and its exact field names and nesting, with a short real example; pagination; rate limits and "
-                          "terms of use. Quote the documentation for each point and cite its URL; state nothing a "
-                          "source does not say."),
-            })
+            tasks.append(_research_step(api))
             ids.add(key)
             changes.append(f"api_research_added: {key} ({api['name']}) for {', '.join(str(c['id']) for c in callers)}")
         else:
@@ -538,6 +585,79 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                 c["depends_on"] = [*(c.get("depends_on") or []), key]
                 changes.append(f"api_research_first: {c.get('id')} stands on {key}")
 
+    # 4b. §17.1909 — the step that wires the lab in STARTS it in the running engine. Live (5b4880c0 T9 "Wire engine
+    #     entry module"): its title satisfied 4 (no WIRE step added), its text asked only for "the commands to run the
+    #     daily batch, the execution entry point, and the operator view", and it wrote four functions nothing calls --
+    #     merged as it was, the lab would sit in the engine with no schedule, no route and no stream consumer.
+    for t in tasks:
+        if (str(t.get("tool") or "").lower() == "codegen" and _module_of(t)
+                and (str(t.get("id", "")).startswith("WIRE") or _WIRE_STEP_RE.search(str(t.get("name") or "")))
+                and "install(app)" not in _text(t)):
+            t["notes"] = (str(t.get("notes") or "").rstrip() + " " + _INSTALL_NOTE.format(mod=_module_of(t))).strip()
+            changes.append(f"wiring_installs_the_lab: {t.get('id')} exposes install(app), listed in app/labs.py")
+
+    # 6b. §17.1908 — what an outside API says is read again before the code is delivered, and the code is held to it:
+    #     each API the job's code calls gets an audit of its callers against its research, whose findings become fix
+    #     steps (§17.1818). Live (5b4880c0, 2026-11-04): five modules call the SEC, FINRA and House/Senate sources
+    #     that no step of this job researched (their research ran 10-24, in the earlier job), the Alpaca research was
+    #     ten days old, and nothing had compared any module with what its research said.
+    audits: list[str] = []
+    for api in _APIS_NAMED(tasks, sources):
+        key = f"API_{api['key']}"
+        if key not in {str(t.get("id")) for t in tasks}:
+            tasks.append(_research_step(api))
+            changes.append(f"api_research_added: {key} ({api['name']}) for the code that calls it")
+        mods = sorted(m for m, code in (sources or {}).items() if api["re"].search(code)
+                      and (not api.get("host") or api["host"].search(code)))
+        mods = mods or sorted({m for t in tasks if (m := _module_of(t)) and api["re"].search(_text(t))})
+        if not mods:
+            continue
+        aid = f"{key}_AUDIT"
+        audits.append(aid)
+        have = next((t for t in tasks if str(t.get("id")) == aid), None)
+        code_steps = [str(t["id"]) for t in tasks if _module_of(t) in mods]
+        if have is None:
+            tasks.append({"id": aid, "name": f"Audit the code that calls the {api['name']} against its research",
+                          "type": "action", "tool": "LLM", "depends_on": [key, *code_steps], "inputs": [], "outputs": [],
+                          "notes": _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(f"`{m}`" for m in mods))})
+            changes.append(f"api_audit_added: {aid} holds {', '.join(mods)} to {key}")
+        else:
+            missing = [d for d in [key, *code_steps] if d not in (have.get("depends_on") or [])]
+            if missing:
+                have["depends_on"] = list(have.get("depends_on") or []) + missing
+
+    # 7. §17.1905 — a job that writes code for the engine is delivered into it before anything runs that code: the
+    #    engine exports the files (`GET /jobs/{id}/code`), the operator merges the pull request and redeploys, and the
+    #    answer is checked against the running engine -- whenever the plan runs the code for real (the keys question,
+    #    the run); a plan that only writes code ends with it written, which is what its completion says. Live (5b4880c0, 2026-11-04): T10 asked for the keys of an
+    #    end-to-end trade while every one of the job's 29 modules lived only in its output.
+    live = [t for t in tasks if _KEYS_QUESTION_RE.match(str(t.get("name") or ""))
+            or _RUN_QUESTION_RE.match(str(t.get("name") or ""))]
+    if live:
+        deliver = next((t for t in tasks if _DELIVER_QUESTION_RE.match(str(t.get("name") or ""))), None)
+        before = [str(t["id"]) for t in tasks if (str(t.get("tool") or "").lower() == "codegen" or str(t["id"]) in audits)
+                  and t is not deliver and t not in live]
+        if deliver is None:
+            ids = {str(t.get("id")) for t in tasks}
+            did, n = "DELIVER", 2
+            while did in ids:
+                did, n = f"DELIVER{n}", n + 1
+            deliver = {"id": did, "name": "Is this job's code merged into the engine and running?", "type": "decision",
+                       "tool": "LLM", "depends_on": before, "inputs": [], "outputs": [], "notes": _DELIVER_NOTE}
+            at = min([tasks.index(t) for t in live] or [len(tasks)])
+            tasks.insert(at, deliver)
+            changes.append(f"delivery_added: {did} -- the code is merged and running before anything runs it")
+        else:
+            missing = [d for d in before if d not in (deliver.get("depends_on") or [])]
+            if missing:
+                deliver["depends_on"] = list(deliver.get("depends_on") or []) + missing
+                changes.append(f"delivery_waits: {deliver['id']} waits on {', '.join(missing)}")
+        for t in live:
+            if (deliver["id"] not in _upstream_of(tasks, str(t["id"]))
+                    and str(t["id"]) not in _upstream_of(tasks, deliver["id"])):
+                t["depends_on"] = list(t.get("depends_on") or []) + [deliver["id"]]
+                changes.append(f"delivered_first: {t.get('id')} waits on {deliver['id']}")
+
     # the operator's credentials come after the code that reads them, wired (0e)
     wires = [str(t["id"]) for t in tasks if str(t.get("id", "")).startswith("WIRE")]
     for t in secret_steps:
@@ -546,21 +666,78 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     return changes
 
 
+def _research_step(api: dict) -> dict:
+    return {
+        "id": f"API_{api['key']}", "name": f"Research the {api['name']} as its documentation states it",
+        "type": "research", "tool": "SearXNG", "depends_on": [], "inputs": [], "outputs": [],
+        # §17.1781 — its official documentation, read first (measured: each URL loads from the engine and
+        # carries what the code steps guessed -- Alpaca's trade_updates fields, the SEC's User-Agent rule)
+        **({"tool_config": {"urls": list(api["docs"])}} if api.get("docs") else {}),
+        "notes": (f"Read the {api['name']}'s own documentation ({api['scope']}; official pages first) and state, "
+                  "for what this lab calls: the base URLs; each endpoint (method, path, parameters); the headers "
+                  "it requires (authentication, User-Agent / contact rules); the response FORMAT (JSON or XML) "
+                  "and its exact field names and nesting, with a short real example; pagination; rate limits and "
+                  "terms of use. Quote the documentation for each point and cite its URL; state nothing a "
+                  "source does not say."),
+    }
+
+
+#: §17.1769 — what the keys question says, before the planner's own text of the step it was
+_KEYS_NOTE = ("The operator stores the keys only they hold on the engine's Machines page → Secrets, under the "
+              "UPPER_SNAKE names this job's code reads (`values_for(db, [...])` in its client step); the "
+              "engine never asks for a value in a step and never logs one. Answer when they are stored.")
+#: §17.1906 — a step's text that runs the lab for real: "Execute one end-to-end trade on the real … account"
+_LIVE_WORK_RE = re.compile(r"\b(?:execute|run|place|send|submit|make)s?\b[^.]{0,60}\b(?:end-to-end|live|real)\b"
+                           r"|\bend-to-end\b[^.]{0,40}\b(?:trade|order|run)\b"
+                           r"|\b(?:execute|place|send|submit)s?\b[^.]{0,40}\b(?:trades?|orders?)\b", re.I)
+_RUN_QUESTION_RE = re.compile(r"^Has the .+ been made on the real account\?$")
+_RUN_NOTE = ("The operator's part, now that the code runs in the engine and the keys are stored: make the run through "
+             "the lab's own entry points (the routes, schedule and decisions its `install(app)` started) -- no step "
+             "of this job places an order or calls the outside service itself. Answer when it is done; the engine "
+             "then reads the job's own tables for what the run wrote, and refuses the answer while any is empty.")
+#: §17.1905 — the delivery question, and what it says
+_DELIVER_QUESTION_RE = re.compile(r"^Is this job's code merged into the engine and running\?$")
+_DELIVER_NOTE = ("The engine exports this job's code -- every module, its tests and its Alembic revisions, each as "
+                 "its last finished step left it (`GET /jobs/{id}/code`); `scripts/deliver_job.py <job>` writes them "
+                 "onto a branch with the lab's line in `app/labs.py`. The operator reviews the pull request, merges "
+                 "it and redeploys. Answer when the engine runs it: the engine checks that each of this job's modules "
+                 "is the engine's own, its tables exist, and its wiring module was installed when the engine started, "
+                 "and refuses the answer until they are.")
+#: §17.1909 — the step that wires the lab into the engine, by its title
+_WIRE_STEP_RE = re.compile(r"\bwire[sd]?\b|\bwiring\b", re.I)
+_INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def install(app) -> None`, which "
+                 "registers each recurring run with `app.scheduler.get_scheduler()` (it may return None: then "
+                 "nothing is scheduled), mounts an `APIRouter` (prefix `/labs/<lab>`, the engine's API-key auth "
+                 "`Depends(get_principal)`) with a POST route for each on-demand entry point and a GET route for "
+                 "each view, and starts any stream consumer as a task -- and nothing else (no work at import). The "
+                 "delivery lists `{mod}` in `app/labs.py`, whose `install_labs(app)` calls it when the engine starts. "
+                 "Its tests call `install` with a FastAPI app and a stand-in scheduler and read the routes and jobs "
+                 "it registered.")
+#: §17.1908 — the audit of a module's calls against its API's research
+_AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fetched now -- and the modules of this "
+               "job that call it ({mods}; their current source is shown). For each place the code disagrees with the "
+               "documentation (a base URL, an endpoint, a parameter, a header, a field name or its nesting, the "
+               "response format, pagination, a rate limit or a term of use) write one bullet that opens with the "
+               "module's name, names the function, quotes the documentation and cites its URL. A module that agrees "
+               "gets no bullet; state nothing the research does not say. Each module with a bullet is fixed by its "
+               "own step before the code is delivered.")
+
+
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
 _KNOWN_APIS = (
-    {"key": "SEC_EDGAR", "name": "SEC EDGAR APIs", "re": re.compile(r"\bedgar\b|\bform\s*4\b|\b13f\b|\bsec\s+filings?\b", re.I),
+    {"key": "SEC_EDGAR", "host": re.compile(r"\bsec\.gov\b"), "name": "SEC EDGAR APIs", "re": re.compile(r"\bedgar\b|\bform\s*4\b|\b13f\b|\bsec\s+filings?\b", re.I),
      "docs": ["https://www.sec.gov/search-filings/edgar-application-programming-interfaces", "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data", "https://www.sec.gov/divisions/investment/13ffaq"],
      "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
-    {"key": "ALPACA", "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
+    {"key": "ALPACA", "host": re.compile(r"\balpaca\.markets\b|\bAlpacaPaperClient\b"), "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
      "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming"],
      "scope": "the paper REST API (account, orders, positions) and the trade_updates websocket stream"},
-    {"key": "REDDIT", "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
+    {"key": "REDDIT", "host": re.compile(r"\breddit\.com\b"), "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
      "docs": ["https://github.com/reddit-archive/reddit/wiki/OAuth2", "https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki"],
      "scope": "OAuth app-only access, listing endpoints, User-Agent and rate-limit rules, personal-use terms"},
-    {"key": "FINRA", "name": "FINRA data APIs", "re": re.compile(r"\bfinra\b", re.I),
+    {"key": "FINRA", "host": re.compile(r"\bfinra\.org\b"), "name": "FINRA data APIs", "re": re.compile(r"\bfinra\b", re.I),
      "docs": ["https://developer.finra.org/docs"],
      "scope": "short interest and ATS / OTC transparency data: where it is published, its format and fields"},
-    {"key": "CONGRESS_TRADES", "name": "Congressional trade disclosures",
+    {"key": "CONGRESS_TRADES", "host": re.compile(r"\bhouse\.gov\b|\bsenate\.gov\b"), "name": "Congressional trade disclosures",
      "re": re.compile(r"\bcongress(?:ional)?\b|\bsenate\b.{0,30}\bdisclos|\bhouse\b.{0,30}\bdisclos", re.I),
      "docs": ["https://disclosures-clerk.house.gov/FinancialDisclosure", "https://efdsearch.senate.gov/search/home/"],
      "scope": "the official House and Senate periodic transaction report sources: URLs, formats, fields"},
@@ -573,9 +750,12 @@ _GENERIC_API_RE = re.compile(r"\b(?:the|via|through|using|from|with|calls?|queri
 _ENGINE_SERVICES = {"searxng", "ollama", "scaffold", "engine", "openai", "the", "this", "rest", "public"}
 
 
-def _APIS_NAMED(tasks: list[dict]) -> list[dict]:
+def _APIS_NAMED(tasks: list[dict], sources: dict[str, str] | None = None) -> list[dict]:
+    """The outside APIs the plan's code steps name -- and (§17.1908) the ones the job's finished code calls, by the
+    service's own host in the source (`data.sec.gov`, `paper-api.alpaca.markets`)."""
     code = " ".join(_text(t) for t in tasks if str(t.get("tool") or "").lower() == "codegen")
-    found = [a for a in _KNOWN_APIS if a["re"].search(code)]
+    src = "\n".join((sources or {}).values())
+    found = [a for a in _KNOWN_APIS if a["re"].search(code) or (src and a["host"].search(src))]
     known = " ".join(a["name"].lower() for a in found)
     for m in _GENERIC_API_RE.finditer(code):
         name = m.group(1)
@@ -667,13 +847,14 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
              for r in rows]
     before = {t["id"]: dict(t) for t in tasks}
     carried = await engine_source.carried_modules(db, job_id)
-    changes = [] if only_reviews else complete_engine_plan(tasks, brief, carried)                   # §17.1814
-    if carried:                                                                                     # §17.1818
+    sources = await engine_source.current_code(db, job_id)                                        # §17.1908
+    changes = [] if only_reviews else complete_engine_plan(tasks, brief, carried, sources)        # §17.1814
+    if carried or sources:                                                                          # §17.1818
         reviews = {r[0]: r[1] for r in (await db.execute(_text_sql(
             "SELECT node_key, output_text FROM dag_nodes WHERE job_id = :j AND status = 'done' "
             "AND lower(tool) = 'llm' AND output_text IS NOT NULL ORDER BY execution_order"), {"j": job_id})).all()
             if _REVIEW_STEP_RE.match(next((t["name"] for t in tasks if t["id"] == r[0]), "") or "")}
-        changes += add_review_fixes(tasks, reviews, carried)
+        changes += add_review_fixes(tasks, reviews, carried, own=sorted(sources))
     inserted, edited, kept = [], [], []
     for t in tasks:                                       # new steps first: an edit may depend on one
         if t["id"] in before:
@@ -722,7 +903,47 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         if out.get("error"):
             return {**out, "changes": changes, "inserted": inserted, "edited": edited}
         edited.append(t["id"])
-    return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept}
+    refreshed = [] if only_reviews else await refresh_stale_research(db, job_id, tasks, edited_by=edited_by)
+    changes += [f"research_refreshed: {k} (read more than {RESEARCH_FRESH_DAYS} days ago; its audit reads it again)"
+                for k in refreshed if not k.endswith("_AUDIT")]
+    return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept, "refreshed": refreshed}
+
+
+#: §17.1908 — an API's research older than this is read again before the code that calls it is delivered
+RESEARCH_FRESH_DAYS = 7
+
+
+async def refresh_stale_research(db, job_id: str, tasks: list[dict], *, edited_by: str | None = None,
+                                 now=None) -> list[str]:
+    """§17.1908 — while the job's code is not yet delivered, an API research step finished more than
+    `RESEARCH_FRESH_DAYS` ago is reset to read the documentation again, and its audit with it (so the code is held to
+    what the service says now). Nothing else is reset: the code steps that stood on the old research stay done, and
+    what the new research contradicts in them is the audit's finding, fixed by its own step. Returns the keys reset."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import text as _text_sql
+
+    from app.modules import node_editor
+    deliver = next((t for t in tasks if _DELIVER_QUESTION_RE.match(str(t.get("name") or ""))), None)
+    if deliver is None or deliver.get("status") == "done":
+        return []
+    rows = (await db.execute(_text_sql(
+        "SELECT node_key, status, completed_at FROM dag_nodes WHERE job_id = :j AND node_key LIKE 'API\\_%'"),
+        {"j": job_id})).mappings().all()
+    by_key = {r["node_key"]: r for r in rows}
+    cut = (now or datetime.now(timezone.utc)) - timedelta(days=RESEARCH_FRESH_DAYS)
+    keys: list[str] = []
+    for k, r in by_key.items():
+        if k.endswith("_AUDIT") or r["status"] != "done" or not r["completed_at"] or r["completed_at"] >= cut:
+            continue
+        keys.append(k)
+        if f"{k}_AUDIT" in by_key and by_key[f"{k}_AUDIT"]["status"] != "pending":
+            keys.append(f"{k}_AUDIT")
+    if keys:
+        await node_editor._reset_keys(db, job_id, keys, edited_by="engine §17.1908" + (f" for {edited_by}" if edited_by else ""))
+        await db.commit()
+        logger.info("research_refreshed job=%s keys=%s", job_id, keys)
+    return keys
 
 
 # ── §17.1831 a step whose tests fail inside an earlier module gets that module fixed first ──────────────────
@@ -1229,3 +1450,107 @@ async def split_oversized_step(db, job_id: str, node_key: str, *, min_omissions:
         return None
     logger.warning("engine_step_split job=%s node=%s data_step=%s omissions=%d", job_id, node_key, data_key, omissions)
     return {"node_key": node_key, "data_step": data_key, "data_module": data_mod, "omissions": omissions}
+
+
+# ── §17.1907 the operator's three answers are checked against the engine ─────────────────────────────────────
+
+_TABLE_RE = re.compile(r"\bop\.create_table\(\s*[\"'](\w+)[\"']")
+
+
+def answered_by_the_engine(title: str) -> str | None:
+    """Which of the questions whose answer the engine reads for itself `title` is: delivered | keys | run."""
+    if _DELIVER_QUESTION_RE.match(title or ""):
+        return "delivered"
+    if _KEYS_QUESTION_RE.match(title or ""):
+        return "keys"
+    if _RUN_QUESTION_RE.match(title or ""):
+        return "run"
+    return None
+
+
+def job_tables(files: dict[str, tuple[str, str]]) -> list[str]:
+    """The tables a job's own Alembic revisions create, in order."""
+    out: list[str] = []
+    for path, (code, _k) in files.items():
+        if path.startswith("alembic/versions/"):
+            out += [t for t in _TABLE_RE.findall(code) if t not in out]
+    return out
+
+
+def secrets_the_code_reads(files: dict[str, tuple[str, str]]) -> list[str]:
+    """Every operator secret the job's modules read through `values_for` (§17.1857), from any public function or
+    class -- what the keys question is answered by."""
+    import ast as _ast
+
+    from app.modules.engine_contracts import secrets_read
+    mods = {Path(p).stem: code for p, (code, _k) in files.items() if p.startswith("app/modules/")}
+    names: set[str] = set()
+    for mod, code in mods.items():
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError:
+            continue
+        for n in tree.body:
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                names |= set(secrets_read(mods, mod, n.name))
+            elif isinstance(n, _ast.ClassDef):
+                for m in n.body:
+                    if isinstance(m, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        names |= set(secrets_read(mods, mod, f"{n.name}.{m.name}"))
+    return sorted(k for k in names if k)
+
+
+async def answer_unmet(db, job_id: str, title: str) -> dict | None:
+    """§17.1907 — what the engine does not see yet for a question it reads the answer of itself: None when it sees
+    it all, else {"evidence", "verdicts"} (the `not_yet` refusal of §17.1458). Live (5b4880c0 T10, 2026-11-04):
+    "Are the … keys stored?" was a question any answer closed -- with no Alpaca key stored and no module in the engine
+    -- and the check after it would have read an audit trail nothing had written.
+
+    - delivered: each of the job's modules is in the running engine (importable from `app.modules`), each table its
+      revisions create exists, and its wiring module was installed when the engine started (`app.labs`);
+    - keys: every secret the job's code reads is stored (names only -- never a value);
+    - run: every table the job created holds a row."""
+    import importlib.util
+
+    from sqlalchemy import text as _text_sql
+
+    from app import labs
+    from app.modules import engine_source
+    kind = answered_by_the_engine(title)
+    if kind is None:
+        return None
+    files = engine_source.job_files(await engine_source.code_rows(db, job_id))
+    tables = job_tables(files)
+    verdicts: list[str] = []
+    if kind == "delivered":
+        mods = [Path(p).stem for p in files if p.startswith("app/modules/")]
+        verdicts += [f"`app.modules.{m}` is not in the running engine" for m in mods
+                     if importlib.util.find_spec(f"app.modules.{m}") is None]
+        have = {r[0] for r in (await db.execute(_text_sql(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"))).all()}
+        verdicts += [f"table `{t}` does not exist (the job's revision has not run)" for t in tables if t not in have]
+        wiring = [m for m in mods if re.search(r"^def install\(", files[f"app/modules/{m}.py"][0], re.M)]
+        if not wiring:
+            verdicts.append("no module of this job exposes `install(app)` -- nothing would start the lab")
+        for m in wiring:
+            state = labs.INSTALLED.get(m)
+            if state != "installed":
+                verdicts.append(f"`{m}` was not installed when the engine started ("
+                                + (state or "not listed in `app/labs.py`") + ")")
+    elif kind == "keys":
+        stored = {r[0] for r in (await db.execute(_text_sql("SELECT name FROM runner_secrets"))).all()}
+        verdicts += [f"secret `{k}` is not stored (Machines → Secrets)" for k in secrets_the_code_reads(files)
+                     if k not in stored]
+    else:
+        for t in tables:
+            try:
+                async with db.begin_nested():
+                    n = (await db.execute(_text_sql(f'SELECT count(*) FROM "{t}"'))).scalar_one()
+            except Exception as exc:
+                verdicts.append(f"table `{t}` cannot be read: {type(exc).__name__}")
+                continue
+            if not n:
+                verdicts.append(f"table `{t}` holds no row -- the run has not written it")
+    if not verdicts:
+        return None
+    return {"evidence": "; ".join(verdicts), "verdicts": verdicts}

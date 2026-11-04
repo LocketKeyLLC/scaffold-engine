@@ -9998,6 +9998,66 @@
         ]
       }
     },
+    "/jobs/{job_id}/code": {
+      "get": {
+        "description": "§17.1905 — the code a job that writes for the engine delivers into it: every module, test and Alembic revision\nas its last finished step left it (with ``content=true``, the files themselves), the tables its revisions create,\nthe secrets its code reads (names only), and its wiring module (the one exposing ``install(app)``).\n``scripts/deliver_job.py`` writes these onto a branch. 409 for a job that does not write code for the engine.",
+        "operationId": "job_code_endpoint_jobs__job_id__code_get",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "content",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Content",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Job Code Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/complete-plan": {
       "post": {
         "description": "§17.1780 — apply the engine's plan completion (engine_plan) to a job whose plan has already started: new steps\nare inserted and pending or failed steps updated; finished steps are never touched. Engine-code jobs only.",
