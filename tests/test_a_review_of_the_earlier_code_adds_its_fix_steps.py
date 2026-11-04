@@ -174,3 +174,27 @@ async def test_reapplying_plan_completion_is_a_no_op():
               "depends_on": first.get("depends_on", t10["depends_on"]), "node_type": first["node_type"]}
     _, again = await _apply([stored])
     assert "T10" not in again, again["T10"]                                            # live: it became CodeGen
+
+
+# ── §17.1914 — both loops: the parallel frontier opened no fix step for five finished audits ──────────────────
+
+def test_both_run_loops_add_a_reviews_fix_steps():
+    import inspect
+    for fn in (ea.execute_all_nodes, ea._run_parallel_frontier):
+        src = inspect.getsource(fn)
+        assert "await _add_review_fixes(job_id, " in src, fn.__name__
+    assert "apply_to_job(" not in inspect.getsource(ea.execute_all_nodes)          # one copy, in the helper
+
+
+@pytest.mark.asyncio
+async def test_the_helper_applies_reviews_for_a_review_step_only():
+    apply = AsyncMock(return_value={"inserted": ["API_REDDIT_AUDITF1"]})
+    session = MagicMock()
+    session.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    session.return_value.__aexit__ = AsyncMock(return_value=False)
+    with patch("app.modules.execution_agent.async_session", session), patch.object(engine_plan, "apply_to_job", new=apply):
+        got = await ea._add_review_fixes("j", {"tool": "LLM", "title": "Audit the code that calls the Reddit API against its research"})
+        assert got == ["API_REDDIT_AUDITF1"] and apply.await_args.kwargs["only_reviews"] is True
+        assert await ea._add_review_fixes("j", {"tool": "CodeGen", "title": "Audit x"}) == []
+        assert await ea._add_review_fixes("j", {"tool": "LLM", "title": "Document the lab"}) == []
+    assert apply.await_count == 1

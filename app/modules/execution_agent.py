@@ -4590,6 +4590,27 @@ def _brief_text(job: dict | None) -> str:
     return str((job or {}).get("input_text") or "")[:2000]
 
 
+async def _add_review_fixes(job_id: str, result: dict) -> list[str]:
+    """§17.1818 — a review step that finished adds the fix steps its findings call for, now. §17.1914 — called by
+    BOTH loops: it lived in the serial loop alone, and live (5b4880c0, 2026-11-04 23:3x UTC, parallel frontier) five
+    API audits finished -- API_REDDIT_AUDIT with nine NOT MET findings -- and no fix step was opened. Returns the
+    steps inserted."""
+    if (result.get("tool") or "").lower() != "llm":
+        return []
+    try:
+        from app.modules import engine_plan as _ep
+        if not _ep._REVIEW_STEP_RE.match(str(result.get("title") or "")):
+            return []
+        async with async_session() as _rdb:
+            _rf = await _ep.apply_to_job(_rdb, job_id, edited_by="engine:review_fixes", only_reviews=True)
+        if _rf.get("inserted"):
+            logger.warning("review_fixes_added job=%s %s", job_id, _rf["inserted"])
+        return list(_rf.get("inserted") or [])
+    except Exception as exc:
+        logger.warning("review_fixes_failed job=%s node=%s err=%r", job_id, result.get("node_key"), exc)
+        return []
+
+
 def _quota_hit(error) -> bool:
     """§17.1889 — a node failure whose cause is the model account's usage limit (see `model_router.quota_exhausted`)."""
     from app.model_router import quota_exhausted
@@ -4772,6 +4793,7 @@ async def _run_parallel_frontier(
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                     "evidence": res.get("evidence"),  # §17.1040
                 })
+                await _add_review_fixes(job_id, res)                          # §17.1914 — the serial loop's too
                 if _prog is not None:  # §17.811
                     _prog_done.append(res.get("title") or res.get("node_key") or "step")
                     snap = _prog.tick(done_items=_prog_done)
@@ -5281,17 +5303,7 @@ async def execute_all_nodes(
                     "evidence": result.get("evidence"),  # §17.1040
                 })
                 # §17.1818 — a review of the earlier job's code adds the fix steps its findings call for, now
-                if _done_tool == "llm":
-                    try:
-                        from app.modules import engine_plan as _ep
-                        if _ep._REVIEW_STEP_RE.match(str(result.get("title") or "")):
-                            async with async_session() as _rdb:
-                                _rf = await _ep.apply_to_job(_rdb, job_id, edited_by="engine:review_fixes",
-                                                             only_reviews=True)
-                            if _rf.get("inserted"):
-                                logger.warning("review_fixes_added job=%s %s", job_id, _rf["inserted"])
-                    except Exception as exc:
-                        logger.warning("review_fixes_failed job=%s node=%s err=%r", job_id, result.get("node_key"), exc)
+                await _add_review_fixes(job_id, result)
                 if _prog is not None:  # §17.811
                     _prog_done.append(result.get("title") or result.get("node_key") or "step")
                     snap = _prog.tick(done_items=_prog_done)
