@@ -60,7 +60,7 @@ def test_the_run_is_its_own_step_the_code_is_delivered_first_and_a_second_pass_a
     assert "def install(app) -> None" in by["T2"]["notes"] and "`lab_wire` in `app/labs.py`" in by["T2"]["notes"]
     # an API the CODE calls (by its host) is researched and audited, though no step's text names it
     assert by["API_SEC_EDGAR"]["tool"] == "SearXNG" and by["API_SEC_EDGAR_AUDIT"]["depends_on"][0] == "API_SEC_EDGAR"
-    assert "`lab_edgar`" in by["API_SEC_EDGAR_AUDIT"]["notes"] and "`lab_alpaca_client`" in by["API_ALPACA_AUDIT"]["notes"]
+    assert "`lab_edgar`" in by["API_SEC_EDGAR_AUDIT"]["notes"] and "`lab_alpaca_client` (step T1)" in by["API_ALPACA_AUDIT"]["notes"]
     assert any(c.startswith("delivery_added: DELIVER") for c in changes)
     # the audit is not an outcome check (it must not wait on the keys), and is a review (its findings become fixes)
     assert not ep._checks_the_outcome(by["API_ALPACA_AUDIT"]) and ep._REVIEW_STEP_RE.match(by["API_ALPACA_AUDIT"]["name"])

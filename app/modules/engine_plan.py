@@ -627,15 +627,24 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         audits.append(aid)
         have = next((t for t in tasks if str(t.get("id")) == aid), None)
         code_steps = [str(t["id"]) for t in tasks if _module_of(t) in mods]
+        # §17.1912 — each module with the step that wrote it last: the coverage guard (§17.377) wants every code step
+        # the audit reads cited by its key on a verdict line; live API_REDDIT_AUDIT a1-a3 cited `paper_reddit_ingestion`
+        # and never `T6U7`, which the note did not name
+        owner = {m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods}
+        notes = _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(
+            f"`{m}` (step {owner[m]})" if m in owner else f"`{m}`" for m in mods))
         if have is None:
             tasks.append({"id": aid, "name": f"Audit the code that calls the {api['name']} against its research",
                           "type": "action", "tool": "LLM", "depends_on": [key, *code_steps], "inputs": [], "outputs": [],
-                          "notes": _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(f"`{m}`" for m in mods))})
+                          "notes": notes})
             changes.append(f"api_audit_added: {aid} holds {', '.join(mods)} to {key}")
         else:
             missing = [d for d in [key, *code_steps] if d not in (have.get("depends_on") or [])]
             if missing:
                 have["depends_on"] = list(have.get("depends_on") or []) + missing
+            if have.get("notes") != notes:
+                have["notes"] = notes
+                changes.append(f"api_audit_reworded: {aid} names each module's step")
 
     # 7. §17.1905 — a job that writes code for the engine is delivered into it before anything runs that code: the
     #    engine exports the files (`GET /jobs/{id}/code`), the operator merges the pull request and redeploys, and the
@@ -736,7 +745,8 @@ _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fet
                "documentation (a base URL, an endpoint, a parameter, a header, a field name or its nesting, the "
                "response format, pagination, a rate limit or a term of use) write one bullet `- NOT MET — "
                "<module> (<step>): …` that names the function, quotes the documentation and cites its URL. A module "
-               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). State nothing the research does "
+               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). Every step named above gets at "
+               "least one such line, by its key. State nothing the research does "
                "not say. Each module with a NOT MET bullet is fixed by its own step before the code is delivered.")
 
 
