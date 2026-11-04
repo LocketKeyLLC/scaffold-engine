@@ -110,3 +110,41 @@ def test_a_compound_refusal_marks_each_name_and_an_or_records_the_other_key():
     assert "needed" not in sub["order_type"] and "needed" not in sub["ticker"]
     assert es._needed_below(sub) == "`quantity`, `side`, `symbol` (or `ticker`)"
     assert es._needed_below({"a": {"to": "t.c"}}) is None
+
+
+def test_none_given_for_a_key_written_to_a_column_the_database_refuses_null_in():
+    """§17.1898 — live (5b4880c0 T5, 2026-11-03 23:46 UTC): `{"approval_id": None, "proposal_id": pid, "proposal":
+    {…}}` into `execute_order`, which writes it to `broker_order_id.approval_id` -- the keys gate read missing keys
+    and kinds, not an explicit None."""
+    module = '''# app/modules/paper_order_executor.py
+from typing import Any
+from sqlalchemy import text
+
+async def execute_order(approval: dict[str, Any], db) -> dict[str, Any]:
+    proposal = approval.get("proposal", {})
+    await db.execute(text("INSERT INTO broker_order_id (approval_id, proposal_id, broker_order_id) "
+                          "VALUES (:approval_id, :proposal_id, :b)"),
+                     {"approval_id": approval.get("approval_id"), "proposal_id": approval.get("proposal_id"), "b": "x"})
+    return {"status": "submitted", "note": approval.get("note")}
+'''
+    test = '''# tests/test_paper_twelve_modules.py
+from app.modules.paper_order_executor import execute_order
+
+async def test_none_id(db):
+    result = await execute_order({"approval_id": None, "proposal_id": 1, "proposal": {"symbol": "SPY"}, "note": None}, db)
+'''
+    defs = es.sibling_definitions([_row("T2", module)])
+    fks = {"broker_order_id": {"approval_id": "approval.id"}}
+    rules = {"broker_order_id": {"json": [], "checks": [], "required": ["proposal_id"], "unique": [],
+                                 "not_null": ["approval_id", "proposal_id", "broker_order_id"]}}
+    got = [f.split(" -- the signature")[0] for f in es.sibling_refs(f"```python\n{test}```", defs, fks=fks, rules=rules)]
+    assert got == [
+        "`tests/test_paper_twelve_modules.py:5` calls `execute_order(…)`: `approval`[\"approval_id\"] is written to "
+        "`broker_order_id.approval_id`, which references `approval`; it was given None -- the database refuses the row; "
+        "pass the id its parent's writer returned"], got           # `note` is read, never written: None is fine
+    none_rules = {"broker_order_id": {"json": [], "checks": [], "required": [], "unique": [], "not_null": ["proposal_id"]}}
+    test2 = test.replace('"approval_id": None, ', "").replace('{"proposal_id": 1', '{"proposal_id": None')
+    got2 = [f.split(" -- the signature")[0] for f in es.sibling_refs(f"```python\n{test2}```", defs, fks={}, rules=none_rules)]
+    assert got2 == [
+        "`tests/test_paper_twelve_modules.py:5` calls `execute_order(…)`: `approval`[\"proposal_id\"] is written to "
+        "`broker_order_id.proposal_id`, which is NOT NULL; it was given None -- the database refuses the row"], got2

@@ -863,19 +863,60 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
             tree = ast.parse(code)
         except SyntaxError:
             continue
-        scopes, raises = _scopes(tree), _expects_a_raise(tree)
+        raises = _expects_a_raise(tree)
+        # §17.1900 — a scope is a function AT a line: two tests may share a name (a class's and a module-level one, a
+        # redraw appending its version), and one's patches are not the other's
+        fn_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        scopes = [(min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno or n.lineno, f"{n.name}@{n.lineno}")
+                  for n in fn_nodes]
         # a patch counts for the test function it is in (its decorators too); one outside any test -- a fixture, a
         # helper, module level -- for the whole file. Live (5b4880c0 T8): other tests patched the SPY tracker, the
         # one at line 457 ran it for real; a file-wide set would have hidden it
         by_scope: dict[str, set[tuple[str, str]]] = {}
         for m, name, ln in _patch_targets(code):
-            sc = _scope_of(scopes, ln)
-            by_scope.setdefault(sc if sc.startswith("test") else "", set()).add((m, name))
+            by_scope.setdefault(_scope_of(scopes, ln), set()).add((m, name))     # §17.1900 each function's own
+        # §17.1900 — a patch made in a helper covers the tests that CALL the helper; one made in a fixture, the tests
+        # that take it (an autouse fixture, every test); the file-wide bucket is module level alone. Live (5b4880c0
+        # T5 a3, 2026-11-03 23:56 UTC): `patch_values_for(...)` called by OTHER tests counted for the whole file, and
+        # `run_backtest` ran the Alpaca client for real -- "Missing Alpaca paper trading secrets"
+        fns = {f"{n.name}@{n.lineno}": n for n in fn_nodes}
+        by_name: dict[str, list[str]] = {}
+        for k, n in fns.items():
+            by_name.setdefault(n.name, []).append(k)
+
+        def _deco_name(d: ast.AST) -> str | None:
+            f = d.func if isinstance(d, ast.Call) else d
+            return getattr(f, "attr", None) or getattr(f, "id", None)
+        fixtures = {k for k, n in fns.items() if any(_deco_name(d) == "fixture" for d in n.decorator_list)}
+        fixture_names = {fns[k].name: k for k in fixtures}
+        autouse = {k for k in fixtures if any(isinstance(d, ast.Call) and any(
+            kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value for kw in d.keywords)
+            for d in fns[k].decorator_list)}
+
+        def covering(test: str) -> frozenset:
+            out = set(by_scope.get("", set())) | set(by_scope.get(test, set()))
+            for k in autouse:
+                out |= by_scope.get(k, set())
+            fn = fns.get(test)
+            if fn is not None:
+                for a in fn.args.args + fn.args.kwonlyargs:
+                    if a.arg in fixture_names:
+                        out |= by_scope.get(fixture_names[a.arg], set())
+                for c in _own_nodes(fn):
+                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in by_name:
+                        for k in by_name[c.func.id]:                     # a helper the test calls, by its name
+                            if not fns[k].name.startswith("test"):
+                                out |= by_scope.get(k, set())
+            return frozenset(out)
+
         seen: set[tuple[str, str]] = set()
         for mod, fname, line in _test_calls(code):
             if mod not in reach or (mod, fname) in seen or any(a <= line <= b for a, b in raises):
                 continue
-            patched = frozenset(by_scope.get("", set()) | by_scope.get(_scope_of(scopes, line), set()))
+            scope = _scope_of(scopes, line)
+            if scope and not scope.split("@")[0].startswith("test"):
+                continue                                   # a call inside a helper is judged where the helper is called
+            patched = covering(scope)
             # `values_for` patched on the module that reads it, or on `runner_secrets` itself (every reader) -- live
             # (5b4880c0 T5, attempt 4): patched on the 13F and Reddit ingesters, not on the EDGAR one it also ran
             covered = {m for m, name in patched if name == "values_for"}
