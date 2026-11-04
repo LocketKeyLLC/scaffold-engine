@@ -85,3 +85,28 @@ def test_on_a_plan_read_back_the_question_is_a_decision_and_its_check_waits_agai
     t2[2]["depends_on"] = ["T9"]
     engine_plan.complete_engine_plan(t2, BRIEF)
     assert "T10" not in {t["id"]: t for t in t2}["T11"]["depends_on"]
+
+
+async def test_an_edit_of_the_node_type_is_written_to_its_column():
+    """§17.1904 — live (2026-11-04 17:08 UTC): `KeyError: 'node_type'` in `edit_node`'s column map; the test above
+    stopped at the vocabulary check and never reached the write."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    node = {"node_key": "T10", "status": "pending", "depends_on": [], "edit_version": 1}
+    sql: list[str] = []
+
+    async def execute(q, params=None):
+        sql.append(str(q))
+        r = MagicMock()
+        r.mappings.return_value.first.return_value = {"node_type": "task"}
+        r.mappings.return_value.all.return_value = []
+        r.fetchone.return_value = None
+        r.scalar.return_value = None
+        return r
+
+    db = MagicMock(); db.execute = execute; db.commit = AsyncMock(); db.flush = AsyncMock()
+    with patch.object(node_editor, "_load_nodes", AsyncMock(return_value=[node])), \
+         patch.object(node_editor, "_audit", AsyncMock()):
+        out = await node_editor.edit_node("job", "T10", {"node_type": "decision"}, db=db)
+    assert "error" not in out, out
+    assert any("UPDATE dag_nodes SET" in q and "node_type = :node_type" in q for q in sql), sql
