@@ -297,3 +297,29 @@ def _clear_searxng_probe_cache():
     health._searxng_probe_cache.update(at=0.0, result=None)
     yield
     health._searxng_probe_cache.update(at=0.0, result=None)
+
+
+# §17.1935 — a lab delivered into the engine (`app/labs.py`) adds real modules under the names the engine's own tests
+# use as fixtures for the jobs that wrote it (`paper_trade_proposer`, `paper_fill_tracker`, …): live, delivering the
+# paper-trading lab turned 28 of those tests red -- the gates read the delivered module where the test hands in its
+# own. The engine's tests see the engine without its delivered labs; a lab's own tests (tests/labs/) see it whole.
+def _lab_prefixes() -> tuple[str, ...]:
+    try:
+        from app.labs import LABS
+    except Exception:
+        return ()
+    return tuple(f"app.modules.{lab.split('_', 1)[0]}_" for lab in LABS)
+
+
+@pytest.fixture(autouse=True)
+def _the_engine_without_its_delivered_labs(request, monkeypatch):
+    prefixes = _lab_prefixes()
+    if not prefixes or "tests/labs/" in str(request.node.path).replace("\\", "/"):
+        yield
+        return
+    from app.modules import engine_plan, engine_source
+    whole = engine_source.module_index
+    index = {k: v for k, v in whole().items() if not k.startswith(prefixes)}
+    monkeypatch.setattr(engine_source, "module_index", lambda: index)
+    monkeypatch.setattr(engine_plan, "module_index", lambda: index)
+    yield

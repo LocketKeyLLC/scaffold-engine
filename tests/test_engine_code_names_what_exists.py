@@ -146,9 +146,10 @@ def test_the_engines_own_sql_passes_against_its_own_database():
     """Measured: the engine's own source, read against the tables it creates (db/init.sql, db/migrations, alembic),
     gives no finding -- and the corpus is not empty (it has INSERTs the check reads)."""
     root = es.ENGINE_PKG.parent
-    ddl = [p.read_text() for p in sorted((root / "db").rglob("*.sql"))]
-    ddl += [p.read_text() for p in sorted((root / "alembic" / "versions").glob("*.py"))]
-    tables = sch.tables_in_code(["```sql\n" + d + "\n```" for d in ddl])
+    ddl = ["```sql\n" + p.read_text() + "\n```" for p in sorted((root / "db").rglob("*.sql"))]
+    # §17.1935 — a revision is Python (`op.create_table(...)`, as the paper lab's 0010 writes it), read as Python
+    ddl += ["```python\n" + p.read_text() + "\n```" for p in sorted((root / "alembic" / "versions").glob("*.py"))]
+    tables = sch.tables_in_code(ddl)
     for t in ("procrastinate_jobs", "procrastinate_events", "procrastinate_periodic_defers"):
         tables[t] = None                   # the task queue's own schema (procrastinate applies it, not the repo)
     assert len(tables) > 20
