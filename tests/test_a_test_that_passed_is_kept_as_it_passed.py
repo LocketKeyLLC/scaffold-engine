@@ -272,3 +272,15 @@ def test_a_kept_test_whose_fixture_is_defined_nowhere_is_not_put_back():
     out2, names2 = splice_kept(new, {"tests/test_x.py": {**kept["tests/test_x.py"],
                                                           "patched": "@pytest.fixture\ndef patched():\n    return 1"}})
     assert "tests/test_x.py::test_api_error" in names2 and "def patched():" in out2      # kept with it: put back
+
+
+
+def test_a_kept_test_that_reads_a_helper_defined_nowhere_is_not_put_back():
+    """§17.1920 — live (API_ALPACA_AUDITF3 a1): kept tests calling `_mock_websocket`, recorded without it."""
+    from app.modules.engine_contracts import splice_kept
+    kept = {"tests/test_x.py": {
+        "test_ws": "async def test_ws():\n    ws = _mock_websocket()\n    assert ws",
+        "test_ok": "def test_ok():\n    assert _helper() == 1"}}
+    new = "```python\n# tests/test_x.py\ndef _helper():\n    return 1\n\n\ndef test_new():\n    assert _helper()\n```"
+    out, names = splice_kept(new, kept)
+    assert names == ["tests/test_x.py::test_ok"] and "_mock_websocket" not in out

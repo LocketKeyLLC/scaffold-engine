@@ -4167,6 +4167,19 @@ def _fixtures_taken(src: str) -> set[str]:
     return out
 
 
+def _undefined_name(finding: str) -> str:
+    """The name an `undefined_names` finding is about (its first backticked name after `reads`)."""
+    return finding.split(" reads `", 1)[1].split("`", 1)[0] if " reads `" in finding else ""
+
+
+def _loads(src: str) -> set[str]:
+    """Every name a definition's source reads."""
+    try:
+        return {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    except SyntaxError:
+        return set()
+
+
 def _is_kept_test(name: str, src: str) -> bool:
     """A kept definition that is a test (or a test class), as opposed to a fixture or helper it stands on."""
     return name.startswith("test") or (src.lstrip().startswith(("class ", "@")) and name.startswith("Test"))
@@ -4203,6 +4216,19 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
         if not any(_is_kept_test(k, v) for k, v in defs.items()):
             continue
         spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
+        # §17.1920 — and one that reads a name the spliced file binds nowhere (a helper recorded without it): live
+        # (API_ALPACA_AUDITF3 a1) "NameError: name '_mock_websocket' is not defined" from kept fill-tracker tests
+        if spliced is not None:
+            before = {_undefined_name(f) for f in undefined_names({path: code})}
+            new_gaps = {_undefined_name(f) for f in undefined_names({path: spliced})} - before
+            if new_gaps:
+                gone = [k for k, v in defs.items() if _is_kept_test(k, v) and _loads(v) & new_gaps]
+                logger.info("kept_tests_not_spliced path=%s tests=%s (they read %s, defined nowhere)", path, gone,
+                            sorted(new_gaps))
+                defs = {k: v for k, v in defs.items() if k not in gone}
+                if not any(_is_kept_test(k, v) for k, v in defs.items()):
+                    continue
+                spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
         output = replace_file_block(output, path, spliced)
