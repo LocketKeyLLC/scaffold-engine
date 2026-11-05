@@ -202,6 +202,12 @@ def _extract_text_and_date(html: str) -> tuple[str, str]:
     pass is a second parse; bounded by the same byte cap as the fetch."""
     from app.utils.html_extract import extract_text, extract_metadata  # §17.1442 — one parse at a time
     text_out = extract_text(html, output_format="txt", with_metadata=False)
+    # §17.1929 — an API reference page's endpoint as its embedded OpenAPI document states it (method, path, parameters,
+    # body and response fields): text extraction keeps only the summary line of such a page
+    from app.utils.openapi_embedded import SECTION_HEAD, embedded_openapi_text
+    api = embedded_openapi_text(html)
+    if api:
+        text_out = (text_out or "").rstrip() + "\n\n" + SECTION_HEAD + api
     date = ""
     if text_out:
         try:

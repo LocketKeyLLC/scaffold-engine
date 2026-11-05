@@ -90,8 +90,12 @@ async def official_pages(urls: list[str], query: str, *, budget: int = 6000) -> 
         content = (p.get("content") or "").strip()
         if len(content) < 400:                       # a script-rendered shell, a login wall
             continue
+        # §17.1929 — the endpoint's own reference (its parameters and fields) is kept whole, the prose focused
+        from app.utils.openapi_embedded import SECTION_HEAD
+        prose, _, api = content.partition(SECTION_HEAD)
+        text = focus_page(prose, query, budget) + (f"\n\n{SECTION_HEAD}{api[:12000]}" if api else "")
         out.append({"query": query, "kind": "web", "official": True, "url": p.get("url", ""),
-                    "title": p.get("title") or p.get("url", ""), "text": focus_page(content, query, budget),
+                    "title": p.get("title") or p.get("url", ""), "text": text,
                     "date": (p.get("date") or "")[:10]})
     logger.info("official_pages urls=%d kept=%d", len(urls), len(out))
     return out
