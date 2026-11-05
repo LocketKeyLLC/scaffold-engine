@@ -1325,6 +1325,61 @@ _REFUSAL_KINDS = (("stand-in", re.compile(r"\breplaces `\w+` \(`\w+`, a finished
                   ("syntax", re.compile(r"Python-syntax gate")))
 
 
+#: §17.1923 — the sandbox's own count line: "3 failed, 19 passed in 2.42s", "1 failed, 23 errors in 2.55s"
+_PYTEST_COUNTS_RE = re.compile(r"(?:(\d+) failed)?(?:, )?(?:(\d+) passed)?(?:, )?(?:\d+ skipped, )?(?:(\d+) errors?)? in [\d.]+s")
+CONVERGING_ROUNDS = 2
+
+
+def sandbox_counts(reason: str) -> tuple[int, int] | None:
+    """(failing, passing) from a sandbox refusal's pytest count line -- failed and errors both fail; None when the
+    reason is not a sandbox run (a gate's refusal)."""
+    for m in _PYTEST_COUNTS_RE.finditer(reason or ""):
+        failed, passed, errors = (int(x) if x else 0 for x in m.groups())
+        if failed or passed or errors:
+            return failed + errors, passed
+    return None
+
+
+async def extend_converging_step(db, job_id: str, node_key: str, *, asked_by: str = "engine §17.1923") -> dict | None:
+    """§17.1923 — a code step that used its attempts while CONVERGING -- its last sandbox run failed fewer tests than
+    the first of the round, and passed at least as many as it failed -- gets another round (fresh attempts; what
+    passed is kept, §17.1891), at most `CONVERGING_ROUNDS` times. Live (5b4880c0 API_ALPACA_AUDITF3, 2026-11-05
+    03:4x UTC): a round ended at 3 failed / 19 passed, the step was marked failed, and the operator's agent reset it
+    by hand. None when it does not apply."""
+    import json as _json
+
+    from sqlalchemy import text as _t
+
+    from app.modules import node_editor
+    row = (await db.execute(_t("SELECT id, tool, tool_config, max_retries FROM dag_nodes "
+                               "WHERE job_id = :j AND node_key = :k"), {"j": job_id, "k": node_key})).mappings().first()
+    if not row or str(row["tool"] or "").lower() != "codegen":
+        return None
+    cfg = row["tool_config"] if isinstance(row["tool_config"], dict) else _json.loads(row["tool_config"] or "{}")
+    rounds = int(cfg.get("converging_rounds") or 0)
+    if rounds >= CONVERGING_ROUNDS:
+        return None
+    reasons = (await db.execute(_t(
+        "SELECT details->>'reason' FROM execution_logs WHERE job_id = :j AND node_id = :n AND message LIKE :f "
+        "ORDER BY created_at DESC LIMIT :m"),
+        {"j": job_id, "n": row["id"], "f": "%-> failed", "m": int(row["max_retries"] or 3) + 1})).scalars().all()
+    runs = [c for r in reversed(reasons) if (c := sandbox_counts(r or ""))]          # oldest first
+    if len(runs) < 2:
+        return None
+    (first_fail, _p0), (last_fail, last_pass) = runs[0], runs[-1]
+    if not (last_fail < first_fail and last_pass >= last_fail):
+        return None
+    out = await node_editor.edit_node(job_id, node_key, {
+        "tool_config": {**cfg, "converging_rounds": rounds + 1,
+                        "converging_from": [f"{f} failed / {p} passed" for f, p in runs]}},
+        edited_by=asked_by, db=db)
+    if out.get("error"):
+        logger.warning("converging_round_failed job=%s node=%s err=%s", job_id, node_key, out)
+        return None
+    logger.warning("engine_converging_round job=%s node=%s round=%d runs=%s", job_id, node_key, rounds + 1, runs)
+    return {"node_key": node_key, "round": rounds + 1, "runs": runs}
+
+
 async def switch_code_model(db, job_id: str, node_key: str, *, asked_by: str = "engine §17.1848") -> dict | None:
     """When a CodeGen step has used its attempts and at least two of its last round's refusals are the same kind of
     engine refusal, its next round runs on the other code model (`model_coder` <-> `model_general`), with fresh
