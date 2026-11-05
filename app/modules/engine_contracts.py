@@ -16,7 +16,10 @@ reader cannot follow makes the producer unknown, and an unknown producer is neve
 from __future__ import annotations
 
 import ast
+import logging
 import re
+
+logger = logging.getLogger("scaffold")
 
 _MAX_DEPTH = 6
 
@@ -1449,9 +1452,13 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         return _Val()
     if isinstance(e, ast.ClassDef):                                            # §17.1870 a class the test wrote
         return _Val(mock="class", node=e, line=e.lineno)
+    if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture(e):
+        # §17.1921 — a fixture is never called by a test: a name bound to one (a parameter pytest fills) is its VALUE,
+        # what it returns or yields
+        rv = _first_return(e)
+        return _resolve(rv, fakes, 10 ** 9, _hops + 1) if rv is not None else _Val()
     if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):      # §17.1869 a function the test wrote
-        rv = e.body if isinstance(e, ast.Lambda) else next(
-            (r.value for r in ast.walk(e) if isinstance(r, ast.Return) and r.value is not None), None)
+        rv = e.body if isinstance(e, ast.Lambda) else _first_return(e)     # §17.1921 its own, not a nested one
         return _Val(mock="async def" if isinstance(e, ast.AsyncFunctionDef) else "def", node=e, line=e.lineno, rv=rv)
     if isinstance(e, ast.Call):
         name = _call_name(e)
@@ -1521,13 +1528,37 @@ def _class_attr(cls: ast.ClassDef, name: str) -> ast.AST | None:
     return None
 
 
+def _is_fixture(fn: ast.AST) -> bool:
+    """`@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture`, called or bare."""
+    for d in getattr(fn, "decorator_list", []):
+        f = d.func if isinstance(d, ast.Call) else d
+        if (isinstance(f, ast.Attribute) and f.attr == "fixture") or (isinstance(f, ast.Name) and f.id == "fixture"):
+            return True
+    return False
+
+
 def _first_return(fn: ast.AST) -> ast.AST | None:
     """§17.1885 — the first `return <value>` of a function in SOURCE order (not breadth-first: a fallthrough `return`
     at the end of the body came before the one inside an `if` above it -- live, 5b4880c0 T5 a4, 2026-10-31: a fake
     client's `get` returned the submissions response under `if "submissions" in url:` and a bare document response
     after it; the gate read the bare one, `json()` None)."""
-    rets = [r for r in ast.walk(fn) if isinstance(r, ast.Return) and r.value is not None]
-    return min(rets, key=lambda r: (r.lineno, r.col_offset)).value if rets else None
+    # §17.1921 — the function's OWN returns (never one of a class or function nested in it), and for a generator --
+    # a `yield` fixture -- what it yields. Live (5b4880c0 API_ALPACA_AUDITF1 a3, 2026-11-05 02:3x UTC): fixture
+    # `patched(fake_client)` defined `class DummySession: async def __aenter__(self): return None` and yielded
+    # `fake_client`; the gate read the nested `return None` as the fixture's value -- "patches `AsyncClient` … with a
+    # fake whose call returns None (line 55)"
+    own: list[ast.AST] = []
+    todo = list(ast.iter_child_nodes(fn))
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        own.append(n)
+        todo.extend(ast.iter_child_nodes(n))
+    rets = [r for r in own if isinstance(r, ast.Return) and r.value is not None]
+    yields = [y for y in own if isinstance(y, ast.Yield) and y.value is not None]
+    pick = rets or yields
+    return min(pick, key=lambda r: (r.lineno, r.col_offset)).value if pick else None
 
 
 def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
@@ -4136,6 +4167,47 @@ def kept_test_sources(output: str, passed: list[str]) -> dict[str, dict[str, str
     return out
 
 
+#: §17.1920 — fixtures a test may take that no file of the job defines: pytest's own, its async plugins', the engine's
+#: test conftest's
+_EXTERNAL_FIXTURES = frozenset({
+    "request", "monkeypatch", "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory", "capsys", "capsysbinary",
+    "capfd", "capfdbinary", "caplog", "recwarn", "pytestconfig", "cache", "record_property", "record_xml_attribute",
+    "record_testsuite_property", "doctest_namespace", "event_loop", "event_loop_policy", "anyio_backend",
+    "unused_tcp_port", "unused_tcp_port_factory", "realistic_settings"})
+
+
+def _fixtures_taken(src: str) -> set[str]:
+    """The fixture names a kept test (or each test method of a kept class) takes: its parameters, less `self`/`cls` and
+    the names its own `parametrize` supplies."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+    fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test")]
+    for fn in fns:
+        given: set[str] = set()
+        for d in fn.decorator_list:
+            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "parametrize"
+                    and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
+                given |= {x.strip() for x in d.args[0].value.split(",")}
+        out |= {a.arg for a in fn.args.args + fn.args.kwonlyargs if a.arg not in ("self", "cls")} - given
+    return out
+
+
+def _undefined_name(finding: str) -> str:
+    """The name an `undefined_names` finding is about (its first backticked name after `reads`)."""
+    return finding.split(" reads `", 1)[1].split("`", 1)[0] if " reads `" in finding else ""
+
+
+def _loads(src: str) -> set[str]:
+    """Every name a definition's source reads."""
+    try:
+        return {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    except SyntaxError:
+        return set()
+
+
 def _is_kept_test(name: str, src: str) -> bool:
     """A kept definition that is a test (or a test class), as opposed to a fixture or helper it stands on."""
     return name.startswith("test") or (src.lstrip().startswith(("class ", "@")) and name.startswith("Test"))
@@ -4161,7 +4233,30 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
         except SyntaxError:
             have = set()
         defs = {k: v for k, v in defs.items() if _is_kept_test(k, v) or k not in have}
+        # §17.1920 — a kept test that takes a fixture nothing defines (the new file, what is kept with it, pytest, the
+        # sandbox) is not put back: it would break the file. Live (5b4880c0 API_ALPACA_AUDITF1 a1, 2026-11-05 02:16
+        # UTC): tests kept before §17.1916 carried no fixture; spliced back, "fixture 'patched' not found" x23
+        defined = have | set(defs) | _EXTERNAL_FIXTURES
+        gone = [k for k, v in defs.items() if _is_kept_test(k, v) and (_fixtures_taken(v) - defined)]
+        if gone:
+            logger.info("kept_tests_not_spliced path=%s tests=%s (their fixtures are defined nowhere)", path, gone)
+            defs = {k: v for k, v in defs.items() if k not in gone}
+        if not any(_is_kept_test(k, v) for k, v in defs.items()):
+            continue
         spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
+        # §17.1920 — and one that reads a name the spliced file binds nowhere (a helper recorded without it): live
+        # (API_ALPACA_AUDITF3 a1) "NameError: name '_mock_websocket' is not defined" from kept fill-tracker tests
+        if spliced is not None:
+            before = {_undefined_name(f) for f in undefined_names({path: code})}
+            new_gaps = {_undefined_name(f) for f in undefined_names({path: spliced})} - before
+            if new_gaps:
+                gone = [k for k, v in defs.items() if _is_kept_test(k, v) and _loads(v) & new_gaps]
+                logger.info("kept_tests_not_spliced path=%s tests=%s (they read %s, defined nowhere)", path, gone,
+                            sorted(new_gaps))
+                defs = {k: v for k, v in defs.items() if k not in gone}
+                if not any(_is_kept_test(k, v) for k, v in defs.items()):
+                    continue
+                spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
         output = replace_file_block(output, path, spliced)
@@ -4326,7 +4421,12 @@ def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST
     alias_name = fixture_name or next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
     if new is None and _call_name(pc) == "setattr":
         return
+    # §17.1921 — a patch given `return_value=` / `side_effect=` installs a mock whose call answers THAT, whatever the
+    # fixture around it yields (live: `patch("…httpx.AsyncClient", return_value=fake_client)` inside fixture
+    # `patched`, read as the fixture's own value)
+    says = any(k.arg in ("return_value", "side_effect") for k in pc.keywords)
     val = (_resolve(new, fk, pc.lineno) if new is not None else
+           _resolve(pc, fk, pc.lineno) if says else
            _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
     if (bad := _check_uses(val, uses, fk, 10 ** 9)):
         # §17.1872 — a bare mock the module awaits on a path this test never calls into directly: the test

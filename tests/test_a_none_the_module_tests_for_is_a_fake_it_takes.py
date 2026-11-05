@@ -126,3 +126,47 @@ async def ingest(db, rows: list[Any]) -> int:
     assert got[0].startswith("`app/modules/lab_reddit.py:23` reads `text`") and "`from sqlalchemy import text`" in got[0]
     assert undefined_names({"app/modules/lab_reddit.py": mod.replace("import json\n", "import json\nfrom sqlalchemy import text\nmissing_thing = 1\n")}) == []
     assert undefined_names({"app/x.py": "from os.path import *\nprint(join)\n"}) == []         # a star import: left alone
+
+
+def test_a_patch_given_a_return_value_inside_a_yield_fixture_is_held_to_that_value():
+    """§17.1921 — live (API_ALPACA_AUDITF1 a3): `patch("…httpx.AsyncClient", return_value=fake_client)` inside fixture
+    `patched`, which also nests `class DummySession: async def __aenter__(self): return None` -- the gate read that
+    nested `return None` as the patch's value: "a fake whose call returns None (line 55)"."""
+    mod = ("import httpx\n\n\nasync def fetch():\n    client = httpx.AsyncClient()\n"
+           "    r = await client.request('GET', 'x')\n    await client.aclose()\n    return r\n")
+    test = '''# tests/test_lab_c.py
+from unittest.mock import patch
+import pytest
+from app.modules.lab_c import fetch
+
+
+class FakeClient:
+    async def request(self, method, url):
+        return 1
+
+    async def aclose(self):
+        pass
+
+
+@pytest.fixture
+def fake_client():
+    return FakeClient()
+
+
+@pytest.fixture
+def patched(fake_client):
+    class Dummy:
+        async def __aenter__(self):
+            return None
+
+    with patch("app.modules.lab_c.httpx.AsyncClient", return_value=fake_client):
+        yield fake_client
+
+
+async def test_fetch(patched):
+    assert await fetch() == 1
+'''
+    assert wrong_fakes({"tests/test_lab_c.py": test}, {"lab_c": mod}, {"lab_c"}) == []
+    bad = test.replace("return_value=fake_client", "return_value=None")
+    got = wrong_fakes({"tests/test_lab_c.py": bad}, {"lab_c": mod}, {"lab_c"})
+    assert len(got) == 1 and "returns None" in got[0], got                   # a real None is still refused
