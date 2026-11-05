@@ -16,7 +16,10 @@ reader cannot follow makes the producer unknown, and an unknown producer is neve
 from __future__ import annotations
 
 import ast
+import logging
 import re
+
+logger = logging.getLogger("scaffold")
 
 _MAX_DEPTH = 6
 
@@ -4136,6 +4139,34 @@ def kept_test_sources(output: str, passed: list[str]) -> dict[str, dict[str, str
     return out
 
 
+#: §17.1920 — fixtures a test may take that no file of the job defines: pytest's own, its async plugins', the engine's
+#: test conftest's
+_EXTERNAL_FIXTURES = frozenset({
+    "request", "monkeypatch", "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory", "capsys", "capsysbinary",
+    "capfd", "capfdbinary", "caplog", "recwarn", "pytestconfig", "cache", "record_property", "record_xml_attribute",
+    "record_testsuite_property", "doctest_namespace", "event_loop", "event_loop_policy", "anyio_backend",
+    "unused_tcp_port", "unused_tcp_port_factory", "realistic_settings"})
+
+
+def _fixtures_taken(src: str) -> set[str]:
+    """The fixture names a kept test (or each test method of a kept class) takes: its parameters, less `self`/`cls` and
+    the names its own `parametrize` supplies."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+    fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test")]
+    for fn in fns:
+        given: set[str] = set()
+        for d in fn.decorator_list:
+            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "parametrize"
+                    and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
+                given |= {x.strip() for x in d.args[0].value.split(",")}
+        out |= {a.arg for a in fn.args.args + fn.args.kwonlyargs if a.arg not in ("self", "cls")} - given
+    return out
+
+
 def _is_kept_test(name: str, src: str) -> bool:
     """A kept definition that is a test (or a test class), as opposed to a fixture or helper it stands on."""
     return name.startswith("test") or (src.lstrip().startswith(("class ", "@")) and name.startswith("Test"))
@@ -4161,6 +4192,16 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
         except SyntaxError:
             have = set()
         defs = {k: v for k, v in defs.items() if _is_kept_test(k, v) or k not in have}
+        # §17.1920 — a kept test that takes a fixture nothing defines (the new file, what is kept with it, pytest, the
+        # sandbox) is not put back: it would break the file. Live (5b4880c0 API_ALPACA_AUDITF1 a1, 2026-11-05 02:16
+        # UTC): tests kept before §17.1916 carried no fixture; spliced back, "fixture 'patched' not found" x23
+        defined = have | set(defs) | _EXTERNAL_FIXTURES
+        gone = [k for k, v in defs.items() if _is_kept_test(k, v) and (_fixtures_taken(v) - defined)]
+        if gone:
+            logger.info("kept_tests_not_spliced path=%s tests=%s (their fixtures are defined nowhere)", path, gone)
+            defs = {k: v for k, v in defs.items() if k not in gone}
+        if not any(_is_kept_test(k, v) for k, v in defs.items()):
+            continue
         spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
