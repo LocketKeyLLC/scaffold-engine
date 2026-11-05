@@ -51,8 +51,12 @@ def test_a_research_step_carries_its_apis_official_pages_and_an_old_one_gains_th
     assert "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data" in by["API_SEC_EDGAR"]["tool_config"]["urls"]
     del by["API_ALPACA"]["tool_config"]                                  # a step added before §17.1781
     changes = engine_plan.complete_engine_plan(tasks, BRIEF)
-    assert changes == ["api_research_docs: API_ALPACA reads 3 official pages"]
+    assert changes == ["api_research_docs: API_ALPACA reads 10 official pages"]
     assert engine_plan.complete_engine_plan(tasks, BRIEF) == []
+    # §17.1928 — a step that read the first three gains the reference pages added since
+    by["API_ALPACA"]["tool_config"]["urls"] = by["API_ALPACA"]["tool_config"]["urls"][:3]
+    assert engine_plan.complete_engine_plan(tasks, BRIEF) == ["api_research_docs: API_ALPACA reads 7 more official pages"]
+    assert by["API_ALPACA"]["tool_config"]["urls"][3] == "https://docs.alpaca.markets/reference/postorder"
 
 
 @pytest.mark.asyncio

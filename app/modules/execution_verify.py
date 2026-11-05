@@ -401,7 +401,7 @@ def check_validation_citations(
 # check requires each expected upstream to appear in at least one
 # CLAIM LINE (a line containing MET / NOT MET / UNKNOWN), not just
 # anywhere in the prose.
-_CLAIM_MARKERS = (": MET", "MET.", "MET ", "NOT MET", "UNKNOWN")
+_CLAIM_MARKERS = (": MET", "MET.", "MET ", "NOT MET", "UNKNOWN", "UNVERIFIED")   # §17.1928 UNVERIFIED
 
 
 def _is_claim_line(line: str) -> bool:
