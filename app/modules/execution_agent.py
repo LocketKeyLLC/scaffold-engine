@@ -1280,17 +1280,31 @@ async def prior_passing_tests(db, job_id: str, node_id: str) -> dict[str, dict[s
     fails in the sandbox and is not kept again. Live (5b4880c0 T5, 2026-11-03 23:09 UTC): a cycle converged
     5 -> 4 -> 2 -> 1 failures with 13 of 14 tests kept, then the job blocked, and the operator's reset would have
     started the step from nothing."""
+    # §17.1923 — and the latest verdict of each name really wins: a later attempt the sandbox RAN, in which a kept
+    # test failed, takes it off. Live (5b4880c0 API_ALPACA_AUDITF1, 2026-11-05 03:41 UTC): all 18 failing tests of
+    # its last attempt were kept tests -- each had passed once under an earlier draft's fixtures, failed in every
+    # attempt since, and was spliced back into each new draft (the merge only ever added); 21 -> 24 -> 17 -> 22 failing
     rows = (await db.execute(text(
-        "SELECT l.details->>'passed_tests' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
-        "AND l.message LIKE :failed AND l.details->>'passed_tests' IS NOT NULL "
+        "SELECT l.details->>'passed_tests', l.details->>'tests', l.details->>'reason' FROM execution_logs l "
+        "WHERE l.job_id = :j AND l.node_id = :n AND l.message LIKE :failed "
+        "AND (l.details->>'passed_tests' IS NOT NULL OR l.details->>'tests' IS NOT NULL) "
         + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at"),
-        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().all()
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).all()
+    from app.modules.engine_plan import sandbox_counts
     out: dict[str, dict[str, str]] = {}
-    for r in rows:
+    for passed_raw, tests_raw, reason in rows:
         try:
-            for path, defs in (json.loads(r or "{}") or {}).items():
+            passed = json.loads(passed_raw or "{}") or {}
+            for path, defs in passed.items():
                 if isinstance(defs, dict):
                     out.setdefault(str(path), {}).update({str(k): str(v) for k, v in defs.items()})
+            if sandbox_counts(reason or "") is None:
+                continue                                  # refused before the sandbox: no verdict on any test
+            for path, names in (json.loads(tests_raw or "{}") or {}).items():
+                ok = set((passed.get(path) or {}) if isinstance(passed.get(path), dict) else [])
+                for name in names if isinstance(names, list) else []:
+                    if str(name) not in ok:
+                        out.get(str(path), {}).pop(str(name), None)
         except (TypeError, ValueError, AttributeError):
             continue
     return out

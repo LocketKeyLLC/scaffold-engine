@@ -141,10 +141,19 @@ async def test_the_latest_verdict_of_each_name_wins_and_survives_a_reset():
             self.sql = str(q)
             return _Res(self.rows)
 
-    db = _DB([json.dumps({"tests/t.py": {"test_a": "def test_a():\n    assert 1", "test_b": "def test_b():\n    pass"}}),
-              json.dumps({"tests/t.py": {"test_a": "def test_a():\n    assert 2"}}), "not json"])
+    db = _DB([(json.dumps({"tests/t.py": {"test_a": "def test_a():\n    assert 1", "test_b": "def test_b():\n    pass"}}),
+               None, "1 failed, 2 passed in 1s"),
+              (json.dumps({"tests/t.py": {"test_a": "def test_a():\n    assert 2"}}), None, "§17.1749 refused"),
+              ("not json", None, "")])
     got = await ea.prior_passing_tests(db, "job", "node")
     assert got == {"tests/t.py": {"test_a": "def test_a():\n    assert 2", "test_b": "def test_b():\n    pass"}}
+    # §17.1923 — a later attempt the sandbox RAN, in which a kept test failed, takes it off; a refusal before the
+    # sandbox is no verdict on any test
+    db2 = _DB([(json.dumps({"tests/t.py": {"test_a": "A1", "test_b": "B1"}}), None, "1 failed, 2 passed in 1s"),
+               (json.dumps({"tests/t.py": {"test_c": "C"}}), json.dumps({"tests/t.py": ["test_a", "test_c"]}),
+                "1 failed, 1 passed in 1s"),
+               (None, json.dumps({"tests/t.py": ["test_b"]}), "§17.1749 refused before the sandbox")])
+    assert await ea.prior_passing_tests(db2, "job", "node") == {"tests/t.py": {"test_b": "B1", "test_c": "C"}}
     # §17.1896 -- what passed survives a reset of either kind: the window is the step's own (replan, restore, a new text)
     assert "passed_tests" in db.sql and "e.op IN ('replan', 'restore')" in db.sql and "'reset'" not in db.sql
 
