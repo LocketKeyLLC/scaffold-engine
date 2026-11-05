@@ -136,14 +136,40 @@ _REVIEW_STEP_RE = re.compile(r"^\s*(?:audit|review|inspect|examine|analy[sz]e|as
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
 _MET_RE = re.compile(r"\*{0,2}\bMET\b\*{0,2}")
 _NOT_MET_RE = re.compile(r"\bNOT\s+MET\b|\bUNKNOWN\b")
+#: §17.1928 — a verdict the documentation as read cannot give: a question for the research, not a defect
+_UNVERIFIED_VERDICT_RE = re.compile(r"^\W*(?:UNVERIFIED|UNKNOWN)\b")
+_UNVERIFIED_RE = re.compile(r"\bunverified\b|\bnot\s+verified\b|\bcannot\s+be\s+verified\b"
+                            r"|\bno\s+(?:retrieved\s+)?source\s+(?:states|documents|lists|shows|gives|names)\b"
+                            r"|\b(?:does|do)\s+not\s+(?:state|list|document|mention|print|show|give)\b"
+                            r"|\bare\s+not\s+(?:listed|printed|stated|documented)\b", re.I)
+#: §17.1928 — a NOT MET that says the code agrees: no finding and no question
+_AGREES_RE = re.compile(r"\bno\s+disagreement\b|\bagrees\s+with\s+the\s+(?:research|documentation)\b", re.I)
+_VERDICT_RE = re.compile(r"\b(?:NOT\s+MET|MET|UNKNOWN|UNVERIFIED)\b")
+_DISAGREES_RE = re.compile(r"\bdisagree|\bcontradict|\bdiffers?\b|\bdifferent\b|\bwrong\b|\bincorrect\b"
+                           r"|\binstead\s+of\b|\brather\s+than\b|,\s*not\s+`", re.I)
 
 
-def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
+def _is_unverified(body: str) -> bool:
+    """§17.1928 — a review line that holds the code to nothing the documentation says: an UNVERIFIED / UNKNOWN verdict,
+    or a NOT MET whose own text says only that no source states it (and names no disagreement). Live (5b4880c0
+    API_ALPACA_AUDIT, 2026-11-05): 11 of 13 NOT MET lines were "No retrieved source states the REST order-request
+    parameter names ... Unverified." -- and one "matches the research's [3] ... No disagreement" -- each a fix step's
+    finding; no code change can verify a field name, and the verifier refused every passing attempt as a no-op."""
+    lead = re.sub(r"^[\W_]*", "", body)
+    if _UNVERIFIED_VERDICT_RE.match(lead):
+        return True
+    return bool(_NOT_MET_RE.search(body) and _UNVERIFIED_RE.search(body) and not _DISAGREES_RE.search(body))
+
+
+def review_findings(output: str, carried: list[str], gaps: bool = False) -> dict[str, list[str]]:
     """§17.1818 — what a review step found in each of the earlier job's modules: every bullet whose subject (the first
     module it names) is one of them and that says something about it; a bare
     list of paths -- "the twelve untested modules" -- is an inventory, not a finding (five words or more beside the
     code; a bare path has none)."""
     found: dict[str, list[str]] = {}
+    # §17.1928 — an audit that writes verdicts: a bullet with none is its inventory (`paper_order_executor (T2):
+    # submits orders via …`), not a finding
+    verdicts = sum(1 for ln in (output or "").splitlines() if _BULLET_RE.match(ln) and _VERDICT_RE.search(ln)) >= 2
     for line in (output or "").splitlines():
         m = _BULLET_RE.match(line)
         if not m:
@@ -161,12 +187,104 @@ def review_findings(output: str, carried: list[str]) -> dict[str, list[str]]:
         # finds a module sound still writes "MET — `paper_reddit_ingestion` (T6U7) …" (live, API_REDDIT_AUDIT a1)
         if _MET_RE.search(body) and not _NOT_MET_RE.search(body):
             continue
+        if verdicts and not _VERDICT_RE.search(body) or _NOT_MET_RE.search(body) and _AGREES_RE.search(body):
+            continue
+        if _is_unverified(body) != gaps:                                   # §17.1928 a question, not a defect
+            continue
         found.setdefault(hits[0][1], []).append(body)
     return found
 
 
+def review_gaps(output: str, carried: list[str]) -> dict[str, list[str]]:
+    """§17.1928 — what a review could not verify in each module, for want of a source (`_is_unverified`)."""
+    return review_findings(output, carried, gaps=True)
+
+
+_FIX_TITLE_RE = re.compile(r"^Fix (\S+) \(review (\S+) findings\)$")
+_FIX_BLOCK_RE = re.compile(r"(?:Fix|Also fix) what review step (\S+) found in it:\n((?:- [^\n]*\n)*)")
+
+
+def _restate_open_fixes(tasks: list[dict], key: str, now: dict[str, list[str]]) -> list[str]:
+    """§17.1928 — every open fix step holds what review `key` finds in its module as the review reads NOW: its block
+    of that review's findings is rewritten (an unverified line is no finding, `_is_unverified`), and a fix step left
+    with no finding of any review is skipped. Live (5b4880c0 API_ALPACA_AUDITF1, 2026-11-05): every finding was an
+    "Unverified." line; four attempts passed the sandbox and the verifier refused each as a no-op against them."""
+    changes: list[str] = []
+    for t in tasks:
+        fm = _FIX_TITLE_RE.match(str(t.get("name") or ""))
+        dropped = t.get("status") == "skipped" and (t.get("tool_config") or {}).get("dropped_by_review")
+        if not fm or (t.get("status", "pending") not in ("pending", "failed") and not dropped):
+            continue
+        leaf, notes = fm.group(1), str(t.get("notes") or "")
+        lines = now.get(leaf, [])
+
+        def _one(m: re.Match) -> str:
+            if m.group(1) != key:
+                return m.group(0)
+            if not lines:
+                return "" if m.group(0).startswith("Also") else m.group(0).split("\n", 1)[0] + "\n"
+            return m.group(0).split("\n", 1)[0] + "\n" + "".join(f"- {ln}\n" for ln in lines)
+
+        new = _FIX_BLOCK_RE.sub(_one, notes)
+        left = any(b.group(2).strip() for b in _FIX_BLOCK_RE.finditer(new))
+        if dropped and left:                                        # the review found something again: reopened
+            t["status"] = "pending"
+            t["tool_config"] = {k: v for k, v in (t.get("tool_config") or {}).items() if k != "dropped_by_review"}
+            t["notes"] = new
+            changes.append(f"review_fix_reopened: {t['id']} -- {key} finds `{leaf}.py` wanting again")
+            continue
+        if new == notes or dropped:
+            continue
+        t["notes"] = new
+        if not left:
+            t["status"] = "skipped"
+            t["tool_config"] = {**(t.get("tool_config") or {}), "dropped_by_review": key}
+            changes.append(f"review_fix_dropped: {t['id']} -- no review finds anything left to fix in `{leaf}.py`")
+        else:
+            changes.append(f"review_fix_restated: {t['id']} holds what {key} finds in `{leaf}.py` now")
+    return changes
+
+
+#: §17.1928 — what the research step is asked again, the audit's open questions after it
+_GAPS_NOTE = ("\n\nThe audit {audit} could not verify these against the pages read -- answer each from the {api}'s "
+              "reference pages (each endpoint's own page: its parameters, its response fields and their nesting), "
+              "quoting the page and citing its URL, or say plainly that the documentation does not state it:\n")
+
+
+def ask_research_gaps(tasks: list[dict], reviews: dict[str, str], names: list[str]) -> tuple[list[str], list[str]]:
+    """§17.1928 — an API audit that could not verify what the code relies on (its UNVERIFIED lines) sends the questions
+    back to its research step, ONCE: the research step's text takes them and the two are read again (the keys
+    returned, to reset); the fix steps wait on the audit. The engine's research component answers what a source does
+    not yet say -- never a code step guessing at it. Live (5b4880c0, 2026-11-05): the Alpaca research had read the
+    paper-trading, auth and streaming pages; 11 of the audit's 13 findings were "no retrieved source states" the order
+    fields, the bars endpoint or the data host -- all documented on the reference pages it never read."""
+    changes: list[str] = []
+    reset: list[str] = []
+    by_id = {str(t["id"]): t for t in tasks}
+    for key, output in reviews.items():
+        m = re.match(r"^(API_\w+)_AUDIT$", key)
+        research = by_id.get(m.group(1)) if m else None
+        if research is None or (research.get("tool_config") or {}).get("gaps_asked"):
+            continue
+        gaps = [ln for lines in review_gaps(output, names).values() for ln in lines]
+        if not gaps:
+            continue
+        api = re.sub(r"^Research the (.+?) as its documentation states it$", r"\1", str(research.get("name") or ""))
+        known = next((a for a in _KNOWN_APIS if f"API_{a['key']}" == str(research["id"])), None)
+        had = list((research.get("tool_config") or {}).get("urls") or [])
+        research["tool_config"] = {**(research.get("tool_config") or {}),
+                                   **({"urls": had + [u for u in known.get("docs") or [] if u not in had]} if known else {})}
+        research["notes"] = (str(research.get("notes") or "").rstrip() + _GAPS_NOTE.format(audit=key, api=api)
+                             + "".join(f"- {ln}\n" for ln in gaps))
+        research["tool_config"] = {**(research.get("tool_config") or {}), "gaps_asked": key}
+        reset += [str(research["id"]), key]
+        changes.append(f"research_gaps_asked: {research['id']} reads again for {len(gaps)} question(s) {key} "
+                       "could not verify; the audit reads it again")
+    return changes, reset
+
+
 def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[str],
-                     own: list[str] | None = None) -> list[str]:
+                     own: list[str] | None = None, reviewed_at: dict | None = None) -> list[str]:
     """§17.1818 — each module of the earlier job a review step found defects in, and no step fixes, gets a fix step
     (that module, edited in place, with its tests); the code steps not yet run wait for the fixes. Live (follow-up
     5b4880c0): T1 "Audit existing paper modules" found `paper_trade_proposer` returning proposals with no `signal_id`
@@ -182,15 +300,30 @@ def add_review_fixes(tasks: list[dict], reviews: dict[str, str], carried: list[s
         return changes
     names = [*carried, *own]
     existing = {t["id"] for t in tasks}
-    titles = {str(t.get("name") or "") for t in tasks}
     fixes: list[str] = []
     for key, output in reviews.items():
         upstream = _upstream_of(tasks, key)
-        owned = {m for t in tasks if str(t["id"]) not in upstream and str(t["id"]) != key
+        at = (reviewed_at or {}).get(key)
+
+        def _stale(t: dict) -> bool:
+            # §17.1928 — a step that finished before this review's latest reading cannot have fixed what it finds now
+            # (the review read again: its research asked again, or refreshed, §17.1908)
+            return bool(at and t.get("status") == "done" and t.get("_done_at") and t["_done_at"] < at)
+        owned = {m for t in tasks if str(t["id"]) not in upstream and str(t["id"]) != key and not _stale(t)
                  and (m := (_carried_own(t, carried) or (_module_of(t) if _module_of(t) in own else None)))}
         n = 0
-        for leaf, lines in review_findings(output, names).items():
-            if f"Fix {leaf} (review {key} findings)" in titles:
+        now = review_findings(output, names)
+        changes += _restate_open_fixes(tasks, key, now)
+        # §17.1928 — a step after this review that rewrote the module (not an open fix of a review) owns what the
+        # review found in it: live (5b4880c0, the re-applied plan), T1's 10-25 finding of a placeholder price URL in
+        # `paper_spy_benchmark_tracker` went to the open API_ALPACA_AUDITF5 though T5U4 had rewritten the module since
+        rewrote = {m for t in tasks if str(t["id"]) not in upstream and str(t["id"]) != key and not _stale(t)
+                   and not (_FIX_TITLE_RE.match(str(t.get("name") or "")) and t.get("status", "pending") in ("pending", "failed"))
+                   and (m := (_carried_own(t, carried) or (_module_of(t) if _module_of(t) in own else None)))}
+        for leaf, lines in now.items():
+            if leaf in rewrote:
+                continue
+            if any(str(t.get("name") or "") == f"Fix {leaf} (review {key} findings)" and not _stale(t) for t in tasks):
                 continue
             # §17.1908 — a module another review's fix step still has open takes these findings too (two API audits
             # finding the one client); a step that is not a review's fix keeps owning it as before
@@ -584,9 +717,11 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
             changes.append(f"api_research_added: {key} ({api['name']}) for {', '.join(str(c['id']) for c in callers)}")
         else:
             have = next(t for t in tasks if str(t.get("id")) == key)
-            if api.get("docs") and not ((have.get("tool_config") or {}).get("urls")):
-                have["tool_config"] = {**(have.get("tool_config") or {}), "urls": list(api["docs"])}
-                changes.append(f"api_research_docs: {key} reads {len(api['docs'])} official pages")
+            had = list((have.get("tool_config") or {}).get("urls") or [])
+            more = [u for u in api.get("docs") or [] if u not in had]
+            if more:            # §17.1928 — and the pages added to the API since (its reference pages), not only none
+                have["tool_config"] = {**(have.get("tool_config") or {}), "urls": had + more}
+                changes.append(f"api_research_docs: {key} reads {len(more)} {'more ' if had else ''}official pages")
         for c in callers:
             if key not in (c.get("depends_on") or []):
                 c["depends_on"] = [*(c.get("depends_on") or []), key]
@@ -629,11 +764,17 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         # §17.1912 — each module with the step that wrote it last: the coverage guard (§17.377) wants every code step
         # the audit reads cited by its key on a verdict line; live API_REDDIT_AUDIT a1-a3 cited `paper_reddit_ingestion`
         # and never `T6U7`, which the note did not name
-        owner = {m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods}
+        # §17.1928 — a skipped step wrote nothing: the module is its last writer that was not skipped
+        owner = {m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods and t.get("status") != "skipped"}
+        owner.update({m: str(t["id"]) for t in tasks if (m := _module_of(t)) in mods and t.get("status") == "done"
+                      and aid in _upstream_of(tasks, owner.get(m, ""))})   # its own fix not run: the code it reads
         # §17.1913 — and it stands on those writers alone: an earlier writer's code is not what it reads, and the guard
         # wanted it cited too (live API_ALPACA_AUDIT a1: "MISSING: ['T1F2', 'T3', 'T5U4']" -- T3 and T5U4 both wrote
         # the SPY tracker)
-        code_steps = list(dict.fromkeys(owner[m] for m in mods if m in owner))
+        # §17.1928 — and never on a step after it (its own fix steps depend on it): live (5b4880c0, the plan re-applied
+        # 2026-11-05) the Alpaca audit was to stand on API_ALPACA_AUDITF1–F6, each standing on the audit -- a cycle,
+        # harmless while the audit was done (never edited), written the moment its research was read again
+        code_steps = list(dict.fromkeys(owner[m] for m in mods if m in owner and aid not in _upstream_of(tasks, owner[m])))
         notes = _AUDIT_NOTE.format(key=key, api=api["name"], mods=", ".join(
             f"`{m}` (step {owner[m]})" if m in owner else f"`{m}`" for m in mods))
         if have is None:
@@ -644,7 +785,8 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         else:
             if list(have.get("depends_on") or []) != [key, *code_steps]:
                 have["depends_on"] = [key, *code_steps]
-                changes.append(f"api_audit_stands_on: {aid} on {key} and the current writers {', '.join(code_steps)}")
+                changes.append(f"api_audit_stands_on: {aid} on {key}"
+                               + (f" and the current writers {', '.join(code_steps)}" if code_steps else " alone"))
             if have.get("notes") != notes:
                 have["notes"] = notes
                 changes.append(f"api_audit_reworded: {aid} names each module's step")
@@ -749,9 +891,12 @@ _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fet
                "documentation (a base URL, an endpoint, a parameter, a header, a field name or its nesting, the "
                "response format, pagination, a rate limit or a term of use) write one bullet `- NOT MET — "
                "<module> (<step>): …` that names the function, quotes the documentation and cites its URL. A module "
-               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). Every step named above gets at "
-               "least one such line, by its key. State nothing the research does "
-               "not say. Each module with a NOT MET bullet is fixed by its own step before the code is delivered.")
+               "that agrees gets one line `- MET — <module> (<step>): …` (no fix). Where the research does not say "
+               "(no page it read states the field, path or parameter), write `- UNVERIFIED — <module> (<step>): …` "
+               "naming what the documentation would have to state -- never NOT MET: the research is asked it again, "
+               "no code is changed for it. Every step named above gets at least one such line, by its key. State "
+               "nothing the research does not say. Each module with a NOT MET bullet is fixed by its own step before "
+               "the code is delivered.")
 
 
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
@@ -760,8 +905,15 @@ _KNOWN_APIS = (
      "docs": ["https://www.sec.gov/search-filings/edgar-application-programming-interfaces", "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data", "https://www.sec.gov/divisions/investment/13ffaq"],
      "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
     {"key": "ALPACA", "host": re.compile(r"\balpaca\.markets\b|\bAlpacaPaperClient\b"), "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
-     "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming"],
-     "scope": "the paper REST API (account, orders, positions) and the trade_updates websocket stream"},
+     "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming",
+              # §17.1928 — each endpoint's own reference page (measured 2026-11-05: each loads and states the order
+              # fields / the data host and paths the audit could not verify from the three guides above)
+              "https://docs.alpaca.markets/reference/postorder", "https://docs.alpaca.markets/reference/getallorders-1",
+              "https://docs.alpaca.markets/reference/getaccount-1", "https://docs.alpaca.markets/docs/about-market-data-api",
+              "https://docs.alpaca.markets/reference/stockbars", "https://docs.alpaca.markets/reference/stocklatestquotes-1",
+              "https://docs.alpaca.markets/reference/stocklatesttrades-1"],
+     "scope": "the paper REST API (account, orders, positions), the market data REST API (bars, latest quotes and "
+              "trades) and the trade_updates websocket stream"},
     {"key": "REDDIT", "host": re.compile(r"\breddit\.com\b"), "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
      "docs": ["https://github.com/reddit-archive/reddit/wiki/OAuth2", "https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki"],
      "scope": "OAuth app-only access, listing endpoints, User-Agent and rate-limit rules, personal-use terms"},
@@ -887,11 +1039,12 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
     if not engine_source.targets_the_engine(brief):
         return {"error": "this job does not write code for the engine", "http_status": 409}
     rows = (await db.execute(_text_sql(
-        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on, tool_config FROM dag_nodes "
-        "WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
+        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on, tool_config, completed_at "
+        "FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
     status = {r["node_key"]: r["status"] for r in rows}
     tasks = [{"id": r["node_key"], "name": r["title"], "notes": r["prompt_template"] or "", "tool": r["tool"],
               "status": r["status"],                                              # §17.1799 skipped entry points
+              "_done_at": r.get("completed_at"),                                   # §17.1928
               "type": _TYPE_OF_NODE.get(r["node_type"] or "", "action"), "depends_on": list(r["depends_on"] or []),
               **({"tool_config": (r["tool_config"] if isinstance(r["tool_config"], dict)
                                   else _json.loads(r["tool_config"]))} if r["tool_config"] else {})}
@@ -905,7 +1058,20 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
             "SELECT node_key, output_text FROM dag_nodes WHERE job_id = :j AND status = 'done' "
             "AND lower(tool) = 'llm' AND output_text IS NOT NULL ORDER BY execution_order"), {"j": job_id})).all()
             if _REVIEW_STEP_RE.match(next((t["name"] for t in tasks if t["id"] == r[0]), "") or "")}
-        changes += add_review_fixes(tasks, reviews, carried, own=sorted(sources))
+        reviewed_at = {t["id"]: t.get("_done_at") for t in tasks if t["id"] in reviews}
+        changes += add_review_fixes(tasks, reviews, carried, own=sorted(sources), reviewed_at=reviewed_at)
+        _gc, _gaps_reset = ask_research_gaps(tasks, reviews, [*carried, *sorted(sources)])     # §17.1928
+        changes += _gc
+    else:
+        _gaps_reset = []
+    # §17.1928 — the research read again and its audit, and the fix steps a review finds wanting again, go back to
+    # pending first: the edits below apply only to steps that have not passed
+    _reopen = [t["id"] for t in tasks if t.get("status") == "pending" and before.get(t["id"], {}).get("status") == "skipped"]
+    if _gaps_reset or _reopen:
+        await node_editor._reset_keys(db, job_id, [*_gaps_reset, *_reopen],
+                                      edited_by="engine §17.1928" + (f" for {edited_by}" if edited_by else ""))
+        for k in [*_gaps_reset, *_reopen]:
+            status[k] = "pending"
     inserted, edited, kept = [], [], []
     for t in new_in_dependency_order(tasks, set(before)):   # new steps first: an edit may depend on one
         out = await node_editor.insert_node(job_id, {
@@ -952,6 +1118,18 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         if out.get("error"):
             return {**out, "changes": changes, "inserted": inserted, "edited": edited}
         edited.append(t["id"])
+    for t in tasks:                                     # §17.1928 a fix step no review finds anything left for
+        if t.get("status") == "skipped" and status.get(t["id"]) in ("pending", "failed"):
+            await db.execute(_text_sql(
+                "UPDATE dag_nodes SET status = 'skipped', completed_at = NOW(), updated_at = NOW(), "
+                "last_verification_reason = :why WHERE job_id = :j AND node_key = :k AND status IN ('pending', 'failed')"),
+                {"j": job_id, "k": t["id"], "why": "§17.1928 no review finds anything left to fix in its module"})
+            await node_editor._audit(db, job_id, t["id"], "skipped", {"status": status[t["id"]]},
+                                     {"status": "skipped"}, edited_by)
+            status[t["id"]] = "skipped"
+            edited.append(t["id"])
+    if _gaps_reset or any(status.get(t["id"]) == "skipped" for t in tasks if t["id"] in edited):
+        await db.commit()
     refreshed = [] if only_reviews else await refresh_stale_research(db, job_id, tasks, edited_by=edited_by)
     changes += [f"research_refreshed: {k} (read more than {RESEARCH_FRESH_DAYS} days ago; its audit reads it again)"
                 for k in refreshed if not k.endswith("_AUDIT")]

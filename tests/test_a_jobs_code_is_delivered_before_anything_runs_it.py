@@ -354,7 +354,9 @@ def test_a_met_verdict_line_is_not_a_finding_and_a_not_met_one_is():
            "terms forbid for apps (https://support.reddithelp.com/…)\n"
            "- UNKNOWN — `paper_reddit_ingestion` (T6U7): the rate limit the research does not state for this path\n")
     got = ep.review_findings(out, ["paper_reddit_ingestion"])
-    assert [ln.split(" — ")[0] for ln in got["paper_reddit_ingestion"]] == ["NOT MET", "UNKNOWN"], got
+    assert [ln.split(" — ")[0] for ln in got["paper_reddit_ingestion"]] == ["NOT MET"], got
+    # §17.1928 — UNKNOWN (the research does not state it) is a question for the research, not a finding
+    assert [ln.split(" — ")[0] for ln in ep.review_gaps(out, ["paper_reddit_ingestion"])["paper_reddit_ingestion"]] == ["UNKNOWN"]
     assert "`- NOT MET — <module> (<step>): …`" in ep._AUDIT_NOTE and "`- MET — <module> (<step>): …` (no fix)" in ep._AUDIT_NOTE
 
 
