@@ -1631,7 +1631,15 @@ def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
             if any((getattr(d, "id", None) or getattr(d, "attr", None)) == "property" for d in member.decorator_list):
                 return _step(method, ("call", False), fakes, before, None)   # §17.1890 a property is its value
             return method
-        return _resolve(member, val.scope or fakes, 10 ** 9, val.hops + 1)
+        out = _resolve(member, val.scope or fakes, 10 ** 9, val.hops + 1)
+        if out.root is None and out.mock:
+            # §17.1926 — `self.request = AsyncMock()` is reached as `self.request`: what the class then sets on it
+            # (`self.request.return_value = FakeResponse()`) is looked up. Live (5b4880c0 API_ALPACA_AUDITF1,
+            # 2026-11-05, three rounds): the response's `async def json` was read as an AsyncMock child, and the
+            # finding asked for a `MagicMock` where the fix was a plain `def` -- the model never found the object
+            out.root, out.path = "self", (str(arg),)
+            out.scope = out.scope or val.scope
+        return out
     if val.mock in ("def", "async def", "method", "async method"):           # §17.1869 a function the test wrote
         if what != "call":
             return _Val()
