@@ -4105,7 +4105,32 @@ def kept_test_sources(output: str, passed: list[str]) -> dict[str, dict[str, str
                 continue
             start = min([n.lineno] + [d.lineno for d in n.decorator_list])
             out.setdefault(path, {})[n.name] = "\n".join(lines[start - 1:(n.end_lineno or n.lineno)])
+        # §17.1916 — and what the kept tests stand on in that file: the fixtures they take and the helpers they call,
+        # transitively (a fixture's own fixtures). Live (5b4880c0 API_ALPACA_AUDITF1 a3, 2026-11-05 00:18 UTC): six
+        # kept tests taking `patched`, spliced into a draft whose fixtures were `client` / `fake_client` -- "fixture
+        # 'patched' not found", five errors, the attempt lost
+        if path in out:
+            defs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            todo = [defs[k] for k in out[path] if k in defs]
+            seen = set(out[path])
+            while todo:
+                n = todo.pop()
+                wanted = {a.arg for a in getattr(getattr(n, "args", None), "args", [])} | {
+                    x.id for x in ast.walk(n) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
+                for w in sorted(wanted - seen):
+                    d = defs.get(w)
+                    if d is None or w.startswith("test"):
+                        continue
+                    seen.add(w)
+                    start = min([d.lineno] + [x.lineno for x in d.decorator_list])
+                    out[path][w] = "\n".join(lines[start - 1:(d.end_lineno or d.lineno)])
+                    todo.append(d)
     return out
+
+
+def _is_kept_test(name: str, src: str) -> bool:
+    """A kept definition that is a test (or a test class), as opposed to a fixture or helper it stands on."""
+    return name.startswith("test") or (src.lstrip().startswith(("class ", "@")) and name.startswith("Test"))
 
 
 def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list[str]]:
@@ -4120,11 +4145,19 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
         code = files_of({"output_text": output}).get(path)
         if code is None:
             continue
+        # §17.1916 — a fixture or helper a kept test stands on goes in only where the new file lacks that name: the
+        # new draft's own version of it is what its new tests were written against
+        try:
+            have = {n.name for n in ast.parse(code).body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        except SyntaxError:
+            have = set()
+        defs = {k: v for k, v in defs.items() if _is_kept_test(k, v) or k not in have}
         spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
         output = replace_file_block(output, path, spliced)
-        names.extend(f"{path}::{n}" for n in defs)
+        names.extend(f"{path}::{n}" for n, v in defs.items() if _is_kept_test(n, v))
     return output, names
 
 

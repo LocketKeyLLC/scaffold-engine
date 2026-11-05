@@ -74,11 +74,12 @@ def test_the_sandbox_names_every_passing_test_and_the_report_does_not_repeat_the
 def test_a_passing_top_level_test_is_kept_with_its_decorators_and_a_class_only_whole():
     kept = kept_test_sources(OUTPUT, et.passed_tests(STDOUT))
     assert kept == {"tests/test_paper_twelve_modules.py": {
-        "test_c": "@pytest.mark.asyncio\nasync def test_c():\n    assert is_trade_update(_envelope()) is True"}}
+        "test_c": "@pytest.mark.asyncio\nasync def test_c():\n    assert is_trade_update(_envelope()) is True",
+        "_envelope": 'def _envelope():\n    return {"stream": "trade_updates"}'}}     # §17.1916 what it calls
     # every method of the class passed: the class is kept whole
     both = kept_test_sources(OUTPUT, ["tests/test_paper_twelve_modules.py::TestK::test_a",
                                       "tests/test_paper_twelve_modules.py::TestK::test_b"])
-    assert set(both["tests/test_paper_twelve_modules.py"]) == {"TestK"}
+    assert set(both["tests/test_paper_twelve_modules.py"]) == {"TestK", "_envelope"}          # §17.1916 its helper
     assert both["tests/test_paper_twelve_modules.py"]["TestK"].startswith("class TestK:\n    def test_a(self):")
     assert kept_test_sources(OUTPUT, ["tests/other.py::test_c"]) == {}    # another file: nothing of this one
     assert kept_test_sources("no code here", ["tests/test_paper_twelve_modules.py::test_c"]) == {}
@@ -193,3 +194,64 @@ def test_a_whole_file_redraw_is_told_what_is_kept_and_gets_it_back():
     assert "_kept_note(node_snapshot, _path)" in ask                        # the whole-file ask names them
     assert "_splice_kept_tests(_answer, node_snapshot, node_key) if _answer and not only else _answer" in ask
     assert "output = _splice_kept_tests(output, node_snapshot, node_key)        # §17.1899 backstop" in src
+
+
+def test_a_kept_test_brings_the_fixture_and_helpers_it_stands_on_where_the_new_file_lacks_them():
+    """§17.1916 — live (API_ALPACA_AUDITF1 a3): six kept tests taking `patched`, spliced into a draft whose fixtures
+    were `client` / `fake_client` -- "fixture 'patched' not found"."""
+    from app.modules.engine_contracts import kept_test_sources, splice_kept
+    old = """```python
+# tests/test_x.py
+import pytest
+
+
+def _order_json():
+    return {"id": "o1"}
+
+
+@pytest.fixture
+def base():
+    return 1
+
+
+@pytest.fixture
+def patched(base):
+    return {"n": base, "order": _order_json()}
+
+
+def _unused():
+    return 0
+
+
+def test_api_error(patched):
+    assert patched["order"]["id"] == "o1"
+
+
+def test_failed(patched):
+    assert False
+```"""
+    kept = kept_test_sources(old, ["tests/test_x.py::test_api_error"])
+    assert sorted(kept["tests/test_x.py"]) == ["_order_json", "base", "patched", "test_api_error"]   # not _unused
+    new = """```python
+# tests/test_x.py
+import pytest
+
+
+def _order_json():
+    return {"id": "NEW"}
+
+
+@pytest.fixture
+def client():
+    return 2
+
+
+def test_get_account(client):
+    assert client == 2
+```"""
+    out, names = splice_kept(new, kept)
+    assert names == ["tests/test_x.py::test_api_error"]
+    assert "def patched(base):" in out and "def base():" in out and "def test_api_error(patched):" in out
+    assert out.count("def _order_json") == 1 and '"NEW"' in out      # the new file's own helper wins
+    import ast
+    ast.parse(out.split("```python\n", 1)[1].rsplit("```", 1)[0])       # the spliced file is whole
