@@ -1328,6 +1328,8 @@ _REFUSAL_KINDS = (("stand-in", re.compile(r"\breplaces `\w+` \(`\w+`, a finished
 #: §17.1923 — the sandbox's own count line: "3 failed, 19 passed in 2.42s", "1 failed, 23 errors in 2.55s"
 _PYTEST_COUNTS_RE = re.compile(r"(?:(\d+) failed)?(?:, )?(?:(\d+) passed)?(?:, )?(?:\d+ skipped, )?(?:(\d+) errors?)? in [\d.]+s")
 CONVERGING_ROUNDS = 2
+#: §17.1925 — a round whose best sandbox run failed at most this many tests (or 5%) was near passing
+NEAR_PASS_FAILS = 3
 
 
 def sandbox_counts(reason: str) -> tuple[int, int] | None:
@@ -1367,7 +1369,12 @@ async def extend_converging_step(db, job_id: str, node_key: str, *, asked_by: st
     if len(runs) < 2:
         return None
     (first_fail, _p0), (last_fail, last_pass) = runs[0], runs[-1]
-    if not (last_fail < first_fail and last_pass >= last_fail):
+    # §17.1925 — or the round came within a few tests of passing at its best (live: API_ALPACA_AUDITF1, 2026-11-05
+    # 04:28-04:36 UTC, 1 -> 5 -> 15 -> 8 failing of 76: the first draw nearly passed, the redraws regressed; last
+    # against first said "not converging")
+    best_fail, best_pass = min(runs, key=lambda r: (r[0], -r[1]))
+    near = best_fail <= max(NEAR_PASS_FAILS, int(0.05 * (best_fail + best_pass)))
+    if not ((last_fail < first_fail and last_pass >= last_fail) or near):
         return None
     out = await node_editor.edit_node(job_id, node_key, {
         "tool_config": {**cfg, "converging_rounds": rounds + 1,
