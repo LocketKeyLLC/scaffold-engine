@@ -49,3 +49,16 @@ async def test_a_converging_round_is_extended_and_one_that_is_not_is_left_failed
 def test_the_retry_path_tries_it_after_the_model_switch():
     src = inspect.getsource(er.retry_failed_node)
     assert src.index("switch_code_model(") < src.index("extend_converging_step(") < src.index("split_oversized_step(")
+
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_nearly_passed_at_its_best_gets_another():
+    """§17.1925 — live (API_ALPACA_AUDITF1, 04:28-04:36 UTC): 1 -> 5 -> 15 -> 8 failing of 76."""
+    near = ["1 failed, 75 passed in 5s", "5 failed, 71 passed in 5s", "15 failed, 61 passed in 5s", "8 failed, 68 passed in 5s"]
+    with patch("app.modules.node_editor.edit_node", new=AsyncMock(return_value={"status": "ok"})):
+        got = await ep.extend_converging_step(_db(near), "j", "F1")
+    assert got and got["round"] == 1
+    far = ["20 failed, 56 passed in 5s", "25 failed, 51 passed in 5s", "22 failed, 54 passed in 5s"]
+    with patch("app.modules.node_editor.edit_node", new=AsyncMock()):
+        assert await ep.extend_converging_step(_db(far), "j", "F1") is None        # never near, not converging
