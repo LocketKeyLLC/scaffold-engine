@@ -73,3 +73,17 @@ def test_a_bare_mock_compared_with_a_number_is_named_and_a_real_response_is_offe
     assert "httpx.Response(200, json={...}" in hint
     r = httpx.Response(200, json={"id": "a"}, request=httpx.Request("GET", "https://paper-api.alpaca.markets/v2/account"))
     assert r.status_code == 200 and r.json() == {"id": "a"}              # the stand-in the hint names works as written
+
+
+def test_a_builtin_value_is_held_to_what_it_really_has():
+    """§17.1917 — live (API_ALPACA_AUDITF3 a2): a set refused for the module's `.add()`."""
+    mod = ("def _flush_buffered(seen, items):\n"
+           "    for i in items:\n"
+           "        seen.add(i)\n"
+           "    return seen\n")
+    test = ('# tests/test_lab_fill.py\nfrom app.modules.lab_fill import _flush_buffered\n\n\n'
+            'def test_flush():\n    seen = set()\n    _flush_buffered(seen, [1])\n')
+    assert wrong_fakes({"tests/test_lab_fill.py": test}, {"lab_fill": mod}, {"lab_fill"}) == []
+    bad = test.replace("seen = set()", "seen = 3")                    # an int has no `.add`: still refused
+    got = wrong_fakes({"tests/test_lab_fill.py": bad}, {"lab_fill": mod}, {"lab_fill"})
+    assert len(got) == 1 and "`.add()`" in got[0], got

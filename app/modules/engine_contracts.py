@@ -1711,6 +1711,12 @@ _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool"
            "list": "a list", "dict": "a dict", "set": "a set", "date": "a date", "datetime": "a datetime",
            "Decimal": "a Decimal"}
 _DICT_OK = frozenset({"get", "keys", "items", "values", "pop", "setdefault", "update", "copy"})
+#: §17.1917 — what each builtin value really has, from Python itself. Live (5b4880c0 API_ALPACA_AUDITF3 a2, 2026-11-05
+#: 00:2x UTC): "hands `_flush_buffered(…)` `seen` = a set …, and the module calls `.add()` on it" -- a set has `.add`
+_BUILTIN_HAS: dict[str, frozenset[str]] = {
+    k: frozenset(n for n in dir(t) if not n.startswith("__"))
+    for k, t in {"dict": dict, "list": list, "set": set, "tuple": tuple, "str": str, "bytes": bytes, "int": int,
+                 "float": float, "bool": bool}.items()}
 
 
 def _dict_literal_misuse(lit: ast.Dict, keys: dict, where: str) -> tuple[str, str] | None:
@@ -1845,6 +1851,8 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         if val.kind == "dict":
             needs = [n for n in needs if n.rstrip("()") not in _DICT_OK]
+        if val.kind in _BUILTIN_HAS:                                       # §17.1917 what the value really has
+            needs = [n for n in needs if n.rstrip("()") not in _BUILTIN_HAS[val.kind]]
         if needs:
             return (f"{done}{_CANNOT.get(val.kind, 'a ' + val.kind)}{at}, and the module "
                     + ("calls it" if needs[0] == "()" else "enters it with `async with`" if needs[0] == "__aenter__()"
