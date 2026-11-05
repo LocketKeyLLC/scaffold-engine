@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -176,3 +177,58 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
         _JUST_RESET.add(job_id)
         logger.warning("lab_tests_stale_step_reset job=%s step=%s file=%s failed=%d", job_id, step, path, len(names))
     return reset
+
+
+async def lint_fix_steps(job_id: str, deliver_key: str) -> list[str]:
+    """§17.1936 — before delivery, every file the job delivers passes the repo's linter: each module the linter
+    refuses gets a fix step (once; the delivery waits on it). Live (5b4880c0, 2026-11-05): two modules carried from
+    the earlier job, which no step of this one wrote, failed the commit hook -- a repeated dict key, a `zip()`
+    without `strict=`. Returns the steps added."""
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source, node_editor
+    from app.modules.engine_plan import _tests_note
+    async with async_session() as db:
+        rows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+        titles = {r[0] for r in (await db.execute(_t("SELECT title FROM dag_nodes WHERE job_id = :j"),
+                                                  {"j": job_id})).all()}
+    files = engine_source.job_files(rows)
+    found = await engine_source.lint_findings({p: c for p, (c, _s) in files.items()})
+    by_path: dict[str, list[str]] = {}
+    for f in found:
+        by_path.setdefault(f[1:].split("`", 1)[0].split(":", 1)[0], []).append(f)
+    added: list[str] = []
+    for path, lines in sorted(by_path.items()):
+        if path.startswith("tests/"):
+            # a test file's writer is read again by the together-run's rule; one with no tests-only writer is logged
+            logger.warning("lab_lint_test_file job=%s file=%s findings=%d", job_id, path, len(lines))
+            continue
+        leaf = Path(path).stem
+        title = f"Fix {leaf} (the repo's linter)"
+        if title in titles or not path.startswith("app/modules/"):
+            continue
+        step = files[path][1]
+        key = f"{deliver_key}L{len(added) + 1}"
+        while key in {str(r.get('node_key')) for r in rows} or key in added:
+            key += "x"
+        async with async_session() as db:
+            out = await node_editor.insert_node(job_id, {
+                "node_key": key, "title": title, "tool": "CodeGen", "node_type": "task", "depends_on": [],
+                "prompt_template": (f"Python module `{leaf}.py` -- "
+                                    + ("the earlier job's module" if ":" in step else f"step {step}'s module")
+                                    + ": edit it in place (the whole file, its public names kept). Fix what the repo's "
+                                    "linter (ruff, the commit hook's rules) refuses in it, and nothing else:\n"
+                                    + "".join(f"- {ln}\n" for ln in lines) + _tests_note(leaf))},
+                edited_by="engine §17.1936", db=db)
+            if out.get("error"):
+                logger.warning("lab_lint_fix_not_added job=%s file=%s err=%s", job_id, path, out["error"])
+                continue
+            await db.execute(_t(
+                "UPDATE dag_nodes SET depends_on = array_append(depends_on, CAST(:k AS TEXT)) "
+                "WHERE job_id = :j AND node_key = :d AND NOT (CAST(:k AS TEXT) = ANY(depends_on))"),
+                {"j": job_id, "k": key, "d": deliver_key})
+            await db.commit()
+        added.append(key)
+        _JUST_RESET.add(job_id)
+        logger.warning("lab_lint_fix_added job=%s step=%s file=%s findings=%d", job_id, key, path, len(lines))
+    return added

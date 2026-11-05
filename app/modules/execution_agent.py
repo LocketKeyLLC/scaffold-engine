@@ -3488,10 +3488,12 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1933 — the delivery question waits until the job's tests pass together, as the engine's CI runs them
         from app.modules import engine_plan as _ep_d
         if _ep_d._DELIVER_QUESTION_RE.match(str(node.get("title") or "")):
-            from app.modules.lab_together import stale_test_steps
+            from app.modules.lab_together import lint_fix_steps, stale_test_steps
             try:
                 if await stale_test_steps(job_id, str(node.get("node_key"))):
                     return None                     # the steps read again come first; the run claims them now
+                if await lint_fix_steps(job_id, str(node.get("node_key"))):                  # §17.1936
+                    return None
             except Exception as exc:
                 logger.error("lab_tests_together_failed job=%s err=%r", job_id, exc)
     if node is not None:

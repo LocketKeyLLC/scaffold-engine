@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import logging
 import re
 import sys
 from functools import lru_cache
 from pathlib import Path
 
 from app.modules.execution_codegen_gate import PYTHON_LANGS, extract_code_blocks
+
+logger = logging.getLogger("scaffold")
 
 #: the package that is running -- read, never imported module by module
 ENGINE_PKG = Path(__file__).resolve().parent.parent
@@ -2539,6 +2542,56 @@ def placeholder_refs(output: str) -> list[str]:
     return found
 
 
+#: §17.1936 — the repo's ruff rules (pyproject.toml [tool.ruff.lint]; a test holds them equal)
+LINT_SELECT = ("F", "E9", "W605", "B905")
+LINT_IGNORE = ("F401", "F841")
+LINT_TESTS_IGNORE = ("F403", "F405", "F401", "F811", "F841")
+
+
+async def lint_findings(files: dict[str, str]) -> list[str]:
+    """§17.1936 — what the repo's linter refuses in the Python files a step writes, one finding per line it names:
+    "`app/modules/x.py:57` ruff F601: Dictionary key literal `"k"` repeated -- ...". Fail-soft: no ruff, no findings.
+    Live (follow-up 5b4880c0, 2026-11-05): the delivered paper lab passed every gate and its 370 tests, and the
+    commit hook refused it -- a dict literal repeating `"spy_benchmark_return"` (the second value silently wins) and
+    a `zip()` without `strict=`, in two modules carried from the earlier job that no gate had ever linted."""
+    import asyncio
+    import json as _json
+    import shutil
+    import tempfile
+    py = {p: c for p, c in files.items() if p.endswith(".py") and re.match(r"^(?:app|tests|alembic)/", p)}
+    exe = shutil.which("ruff")
+    if not py or not exe:
+        return []
+    with tempfile.TemporaryDirectory() as tmp:
+        for p, c in py.items():
+            dest = Path(tmp) / p
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(c)
+        (Path(tmp) / "ruff.toml").write_text(
+            'line-length = 100\ntarget-version = "py311"\n[lint]\n'
+            f"select = {list(LINT_SELECT)!r}\nignore = {list(LINT_IGNORE)!r}\n[lint.per-file-ignores]\n"
+            f'"tests/**" = {list(LINT_TESTS_IGNORE)!r}\n"**/__init__.py" = ["F401"]\n'.replace("'", '"'))
+        args = [exe, "check", "--no-cache", "--output-format=json", *sorted(py)]
+        try:
+            proc = await asyncio.create_subprocess_exec(*args, cwd=tmp, stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.PIPE)
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+            if proc.returncode not in (0, 1):                      # 1: findings; anything else: ruff itself failed
+                raise RuntimeError(err.decode()[:300])
+            items = _json.loads(out.decode() or "[]")
+        except Exception as exc:
+            logger.warning("engine_lint_failed err=%r", exc)
+            return []
+    found = []
+    for it in items:
+        rel = Path(str(it.get("filename") or "")).as_posix()
+        rel = rel.split(Path(tmp).as_posix().rstrip("/") + "/", 1)[-1]
+        line = (it.get("location") or {}).get("row") or 0
+        found.append(f"`{rel}:{line}` ruff {it.get('code')}: {it.get('message')} -- fix it: the repo's linter "
+                     "(the commit hook) refuses the file as it is")
+    return found
+
+
 def _module_names(code: str) -> set[str] | None:
     """The names a module binds at its top level (defs, classes, assignments, imports; inside a top-level `if` /
     `try` too); None when it does not parse."""
@@ -2671,6 +2724,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     found += importers_left_without(files_of({**me, "output_text": output}), current_sources(_others))   # §17.1931
+    found += await lint_findings(files_of({**me, "output_text": output}))                            # §17.1936
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
     # §17.1876 — a result is used as what its annotation says it is; every name a test uses is bound
     from app.modules.engine_contracts import undefined_test_names, wrong_result_uses
