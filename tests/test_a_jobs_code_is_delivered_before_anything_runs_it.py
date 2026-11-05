@@ -57,7 +57,7 @@ def test_the_run_is_its_own_step_the_code_is_delivered_first_and_a_second_pass_a
     assert "DELIVER" in by["T10"]["depends_on"] and "RUN" in by["T11"]["depends_on"]
     assert [t["id"] for t in tasks].index("DELIVER") < [t["id"] for t in tasks].index("T10")
     # the wiring step starts the lab
-    assert "def install(app) -> None" in by["T2"]["notes"] and "`lab_wire` in `app/labs.py`" in by["T2"]["notes"]
+    assert "def install(app) -> None" in by["T2"]["notes"] and "does NOT write `app/labs.py`: the delivery adds `lab_wire` there" in by["T2"]["notes"]
     # an API the CODE calls (by its host) is researched and audited, though no step's text names it
     assert by["API_SEC_EDGAR"]["tool"] == "SearXNG" and by["API_SEC_EDGAR_AUDIT"]["depends_on"][0] == "API_SEC_EDGAR"
     assert "`lab_edgar`" in by["API_SEC_EDGAR_AUDIT"]["notes"] and "`lab_alpaca_client` (step T1)" in by["API_ALPACA_AUDIT"]["notes"]
@@ -372,3 +372,19 @@ def test_an_audit_stands_on_each_modules_current_writer_only():
     assert "api_audit_stands_on: API_ALPACA_AUDIT on API_ALPACA and the current writers T5U4" in ep.complete_engine_plan(
         tasks, {"targets_engine": True}, [], sources)
     assert audit["depends_on"] == ["API_ALPACA", "T5U4"]
+
+
+async def test_the_code_verifier_is_shown_the_modules_that_already_exist(monkeypatch):
+    """§17.1914 — live (T9, 23:28 UTC): tests passed; the verifier refused an import of the earlier job's
+    `paper_fill_tracker` as "a module/symbol that no upstream block or plan step defines"."""
+    from app.modules import execution_verify as ev
+    seen = {}
+
+    async def _run(messages, role, overrides):
+        seen["user"] = messages[1]["content"]
+        return "pass", "", 1.0
+    monkeypatch.setattr(ev, "_run_verification", _run)
+    await ev._verify_codegen_output("Wire it", "code", job_modules=["`app.modules.paper_fill_tracker` (step f00ea97f:T18): track_fills(db)"])
+    assert "MODULES THAT ALREADY EXIST" in seen["user"] and "`app.modules.paper_fill_tracker` (step f00ea97f:T18)" in seen["user"]
+    await ev._verify_codegen_output("Wire it", "code")
+    assert "MODULES THAT ALREADY EXIST" not in seen["user"]

@@ -301,6 +301,7 @@ async def _verify_codegen_output(
     overrides: dict | None = None,
     step_text: str = "",
     other_steps: list[str] | None = None,
+    job_modules: list[str] | None = None,
 ) -> tuple[Literal["pass", "fail"], str, float]:
     """Stricter verifier for CodeGen nodes (§17.429).
 
@@ -320,6 +321,13 @@ async def _verify_codegen_output(
     if other_steps:
         parts.append("\nOTHER STEPS OF THE PLAN (they deliver the rest of the brief -- not this step's to do):\n"
                      + "\n".join(f"- {t}" for t in other_steps[:60]))
+    # §17.1914 — the modules that already exist for this job (its own finished steps and the job it builds on), with
+    # their public names. Live (5b4880c0 T9, 2026-11-04 23:28 UTC): the sandbox ran its tests and they passed, and
+    # the verifier refused it for importing "`app.modules.paper_fill_tracker.track_fills`, a module/symbol that no
+    # upstream block or plan step defines" -- written by the earlier job (f00ea97f T18), which the verifier never saw
+    if job_modules:
+        parts.append("\nMODULES THAT ALREADY EXIST (this job's finished steps and the job it builds on -- an import of "
+                     "one of these, by these names, is real):\n" + "\n".join(f"- {m}" for m in job_modules[:80]))
     if upstream_code:
         blocks = "\n\n".join(
             f"### upstream {key}\n```python\n{code}\n```"
