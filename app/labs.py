@@ -14,7 +14,7 @@ import logging
 logger = logging.getLogger("scaffold")
 
 #: wiring modules under `app.modules`, one per delivered lab, each exposing `install(app) -> None`
-LABS: tuple[str, ...] = ()
+LABS: tuple[str, ...] = ("paper_wire_engine_entry_module",)
 #: what `install_labs` did for each lab when the engine started (read by the delivery question, §17.1907)
 INSTALLED: dict[str, str] = {}
 
