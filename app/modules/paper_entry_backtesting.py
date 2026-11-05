@@ -18,7 +18,6 @@ from app.modules.paper_walk_forward_backtester import run_backtest
 logger = logging.getLogger("scaffold")
 
 DEFAULT_LOOKBACK_DAYS = 60
-DEFAULT_FORWARD_DAYS = 20
 
 
 async def _latest_data_timestamp(db: object) -> Optional[datetime]:
@@ -36,7 +35,6 @@ async def run_backtesting_entry_point(
     *,
     db: Optional[object] = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    forward_days: int = DEFAULT_FORWARD_DAYS,
 ) -> dict[str, Any]:
     """Run a walk-forward backtest over the latest data window.
 

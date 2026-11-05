@@ -116,10 +116,10 @@ def _compute_positions(fills: list[dict[str, Any]]) -> dict[str, _Position]:
 def _average_entry_price(pos: _Position) -> Decimal | None:
     if not pos.lots:
         return None
-    total_qty = sum(qty for qty, _ in pos.lots)
+    total_qty = sum((qty for qty, _ in pos.lots), ZERO)
     if total_qty == ZERO:
         return None
-    total_cost = sum(qty * price for qty, price in pos.lots)
+    total_cost = sum((qty * price for qty, price in pos.lots), ZERO)
     return total_cost / total_qty
 
 
