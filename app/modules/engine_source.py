@@ -2539,6 +2539,68 @@ def placeholder_refs(output: str) -> list[str]:
     return found
 
 
+def _module_names(code: str) -> set[str] | None:
+    """The names a module binds at its top level (defs, classes, assignments, imports; inside a top-level `if` /
+    `try` too); None when it does not parse."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    out: set[str] = set()
+    todo: list[ast.stmt] = list(tree.body)
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                out |= {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out |= {(a.asname or a.name).split(".")[0] for a in n.names}
+        elif isinstance(n, (ast.If, ast.Try, ast.With)):
+            todo += [*n.body, *getattr(n, "orelse", []), *getattr(n, "finalbody", []),
+                     *[x for h in getattr(n, "handlers", []) for x in h.body]]
+    return out
+
+
+def importers_left_without(files: dict[str, str], current: dict) -> list[str]:
+    """§17.1931 — a module this step rewrites keeps every name another finished module of the job imports from it.
+    ``current``: `current_sources` (module -> (path, code, step)). Live (follow-up 5b4880c0, 2026-11-05):
+    API_ALPACA_AUDITF6 rewrote `paper_trade_proposer` "its public names kept" and dropped `MAX_PROPOSALS_PER_BATCH`;
+    its own tests passed, the step was done, and `paper_walk_forward_backtester` -- and with it the lab's wiring
+    module, everything it starts -- no longer imported: found only when the delivered branch's tests were collected."""
+    out: list[str] = []
+    for path, code in sorted(files.items()):
+        m = re.match(r"^app/modules/(\w+)\.py$", path)
+        if not m:
+            continue
+        mod = m.group(1)
+        have = _module_names(code)
+        if have is None:
+            continue
+        old = (current.get(mod) or (None, "", None))[1] or ""
+        for other, (opath, ocode, okey) in sorted(current.items()):
+            if other == mod or f"app/modules/{other}.py" in files:
+                continue
+            try:
+                tree = ast.parse(ocode or "")
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                if not (isinstance(n, ast.ImportFrom) and n.module == f"app.modules.{mod}"):
+                    continue
+                for a in n.names:
+                    if a.name == "*" or a.name in have:
+                        continue
+                    was = next((ln.strip() for ln in old.splitlines()
+                                if re.match(rf"^(?:{re.escape(a.name)}\s*[:=]|(?:async\s+)?def\s+{re.escape(a.name)}\b"
+                                            rf"|class\s+{re.escape(a.name)}\b)", ln)), "")
+                    out.append(f"`{opath}:{n.lineno}` (step {okey}) imports `{a.name}` from `{mod}`, which this rewrite "
+                               f"no longer defines -- keep it" + (f" (it was `{was[:120]}`)" if was else "")
+                               + ": every finished module that imports from it must still import")
+    return out
+
+
 async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[str]:
     """Every §17.1749–1760 refusal for one CodeGen output written for the engine."""
     from sqlalchemy import text
@@ -2608,6 +2670,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import uncommitted_parents, unknown_result_attributes, wrong_fakes
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
+    found += importers_left_without(files_of({**me, "output_text": output}), current_sources(_others))   # §17.1931
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
     # §17.1876 — a result is used as what its annotation says it is; every name a test uses is bound
     from app.modules.engine_contracts import undefined_test_names, wrong_result_uses
