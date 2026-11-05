@@ -226,6 +226,14 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str], ...] = (
      "in this engine's FastAPI an included router is ONE `_IncludedRouter` entry in `app.routes`, with no `.path` -- "
      "read the mounted paths from `app.openapi()[\"paths\"]` (path -> {method: …}), or call the route with "
      "`TestClient(app)`; never iterate `app.routes` for paths"),
+    # §17.1915 — live (5b4880c0 API_ALPACA_AUDITF1 a2, 2026-11-05 00:11 UTC): ten tests, one fixture -- `response_mock
+    # = AsyncMock()` returned by a patched `httpx.AsyncClient`, read by `if response.status_code >= 400:`; the fake
+    # came through `monkeypatch.setattr(…, lambda *a, **k: fake_client)` and a fixture's dict, past the fake checks
+    (re.compile(r"'(?:[<>]=?)' not supported between instances of '(?:Async|Magic)?Mock' and '(?:int|float|str|Decimal)'"),
+     "a bare mock stands in for a value the module COMPARES (`response.status_code >= 400`, `qty > 0`): a mock's "
+     "attribute is another mock, never a number -- give the fake every value the module reads before the call; an "
+     "HTTP response is best a real one, `httpx.Response(200, json={...}, request=httpx.Request(\"GET\", url))` (its "
+     "`.json()` and `.status_code` are what the module reads, and it is not awaited), never an `AsyncMock`"),
 )
 
 

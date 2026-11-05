@@ -57,3 +57,19 @@ def test_a_fix_steps_key_is_cited_as_itself_on_a_verdict_line():
     assert check_validation_citation_coverage(out, ["T6U7", "T5U4"]) == []
     assert check_validation_citation_coverage(out, ["T6U7", "T1F2", "T7"]) == ["T1F2", "T7"]
     assert check_validation_citation_coverage("- MET — T2 lines 5-15", ["T2", "T3"]) == ["T3"]   # numeric keys as before
+
+
+
+def test_a_bare_mock_compared_with_a_number_is_named_and_a_real_response_is_offered():
+    """§17.1915 — live (API_ALPACA_AUDITF1 a2): "'>=' not supported between instances of 'AsyncMock' and 'int'" x8."""
+    import httpx
+
+    from app.sandbox import engine_tests as et
+    rx, hint = et.KNOWN_CAUSES[12]                                        # stable index
+    for line in ("E   TypeError: '>=' not supported between instances of 'AsyncMock' and 'int'",
+                 "E   TypeError: '<' not supported between instances of 'MagicMock' and 'float'"):
+        assert rx.search(line), line
+    assert not rx.search("E   TypeError: '>=' not supported between instances of 'str' and 'int'")
+    assert "httpx.Response(200, json={...}" in hint
+    r = httpx.Response(200, json={"id": "a"}, request=httpx.Request("GET", "https://paper-api.alpaca.markets/v2/account"))
+    assert r.status_code == 200 and r.json() == {"id": "a"}              # the stand-in the hint names works as written

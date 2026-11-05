@@ -332,7 +332,7 @@ def test_an_included_router_read_for_its_path_is_named_and_the_note_says_where_t
     r.add_api_route("/run", lambda: 1, methods=["POST"])
     app.include_router(r)
     assert "/labs/x/run" in app.openapi()["paths"]                       # what the hint says to read
-    rx, hint = et.KNOWN_CAUSES[-1]
+    rx, hint = et.KNOWN_CAUSES[11]                                        # stable index (§17.1911)
     assert rx.search("E   AttributeError: '_IncludedRouter' object has no attribute 'path'")
     assert 'app.openapi()["paths"]' in hint and 'app.openapi()[\"paths\"]' in ep._INSTALL_NOTE
     # the older note (§17.1911's first) is replaced whole, not appended to
