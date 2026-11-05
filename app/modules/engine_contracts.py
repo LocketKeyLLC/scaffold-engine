@@ -1452,9 +1452,13 @@ def _resolve_at(e: ast.AST, fakes: _Fakes, before: int, _hops: int) -> _Val:
         return _Val()
     if isinstance(e, ast.ClassDef):                                            # §17.1870 a class the test wrote
         return _Val(mock="class", node=e, line=e.lineno)
+    if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture(e):
+        # §17.1921 — a fixture is never called by a test: a name bound to one (a parameter pytest fills) is its VALUE,
+        # what it returns or yields
+        rv = _first_return(e)
+        return _resolve(rv, fakes, 10 ** 9, _hops + 1) if rv is not None else _Val()
     if isinstance(e, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):      # §17.1869 a function the test wrote
-        rv = e.body if isinstance(e, ast.Lambda) else next(
-            (r.value for r in ast.walk(e) if isinstance(r, ast.Return) and r.value is not None), None)
+        rv = e.body if isinstance(e, ast.Lambda) else _first_return(e)     # §17.1921 its own, not a nested one
         return _Val(mock="async def" if isinstance(e, ast.AsyncFunctionDef) else "def", node=e, line=e.lineno, rv=rv)
     if isinstance(e, ast.Call):
         name = _call_name(e)
@@ -1524,13 +1528,37 @@ def _class_attr(cls: ast.ClassDef, name: str) -> ast.AST | None:
     return None
 
 
+def _is_fixture(fn: ast.AST) -> bool:
+    """`@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture`, called or bare."""
+    for d in getattr(fn, "decorator_list", []):
+        f = d.func if isinstance(d, ast.Call) else d
+        if (isinstance(f, ast.Attribute) and f.attr == "fixture") or (isinstance(f, ast.Name) and f.id == "fixture"):
+            return True
+    return False
+
+
 def _first_return(fn: ast.AST) -> ast.AST | None:
     """§17.1885 — the first `return <value>` of a function in SOURCE order (not breadth-first: a fallthrough `return`
     at the end of the body came before the one inside an `if` above it -- live, 5b4880c0 T5 a4, 2026-10-31: a fake
     client's `get` returned the submissions response under `if "submissions" in url:` and a bare document response
     after it; the gate read the bare one, `json()` None)."""
-    rets = [r for r in ast.walk(fn) if isinstance(r, ast.Return) and r.value is not None]
-    return min(rets, key=lambda r: (r.lineno, r.col_offset)).value if rets else None
+    # §17.1921 — the function's OWN returns (never one of a class or function nested in it), and for a generator --
+    # a `yield` fixture -- what it yields. Live (5b4880c0 API_ALPACA_AUDITF1 a3, 2026-11-05 02:3x UTC): fixture
+    # `patched(fake_client)` defined `class DummySession: async def __aenter__(self): return None` and yielded
+    # `fake_client`; the gate read the nested `return None` as the fixture's value -- "patches `AsyncClient` … with a
+    # fake whose call returns None (line 55)"
+    own: list[ast.AST] = []
+    todo = list(ast.iter_child_nodes(fn))
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        own.append(n)
+        todo.extend(ast.iter_child_nodes(n))
+    rets = [r for r in own if isinstance(r, ast.Return) and r.value is not None]
+    yields = [y for y in own if isinstance(y, ast.Yield) and y.value is not None]
+    pick = rets or yields
+    return min(pick, key=lambda r: (r.lineno, r.col_offset)).value if pick else None
 
 
 def _step(val: _Val, step: tuple[str, str | bool], fakes: _Fakes, before: int,
@@ -4393,7 +4421,12 @@ def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST
     alias_name = fixture_name or next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
     if new is None and _call_name(pc) == "setattr":
         return
+    # §17.1921 — a patch given `return_value=` / `side_effect=` installs a mock whose call answers THAT, whatever the
+    # fixture around it yields (live: `patch("…httpx.AsyncClient", return_value=fake_client)` inside fixture
+    # `patched`, read as the fixture's own value)
+    says = any(k.arg in ("return_value", "side_effect") for k in pc.keywords)
     val = (_resolve(new, fk, pc.lineno) if new is not None else
+           _resolve(pc, fk, pc.lineno) if says else
            _resolve(ast.Name(id=alias_name, ctx=ast.Load()), fk, 10 ** 9) if alias_name else _resolve(pc, fk, pc.lineno))
     if (bad := _check_uses(val, uses, fk, 10 ** 9)):
         # §17.1872 — a bare mock the module awaits on a path this test never calls into directly: the test
