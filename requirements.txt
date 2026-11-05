@@ -107,3 +107,6 @@ psycopg[binary,pool]==3.3.6
 # A runtime gate, not a dev tool: it runs inside the orchestrator, pure Python
 # (no node runtime), offline (--ignore-missing-imports), 0.16 s warm.
 mypy==2.4.0
+# §17.1936 — the repo's own linter, run by the engine over the code it writes for itself (the rules mirror
+# pyproject's [tool.ruff.lint]; the version is pre-commit's): a delivered lab must pass the commit hook
+ruff==0.16.3
