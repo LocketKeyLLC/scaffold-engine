@@ -87,3 +87,42 @@ def test_a_builtin_value_is_held_to_what_it_really_has():
     bad = test.replace("seen = set()", "seen = 3")                    # an int has no `.add`: still refused
     got = wrong_fakes({"tests/test_lab_fill.py": bad}, {"lab_fill": mod}, {"lab_fill"})
     assert len(got) == 1 and "`.add()`" in got[0], got
+
+
+def test_a_name_nothing_binds_is_refused_before_the_sandbox_and_a_bound_one_is_not():
+    """§17.1918 — live (API_REDDIT_AUDITF1 a1): `text(insert_sql)` with no `from sqlalchemy import text`."""
+    from app.modules.engine_contracts import undefined_names
+    mod = '''# app/modules/lab_reddit.py
+import json
+from typing import Any
+
+LIMIT = 5
+
+
+class Store:
+    kind = "x"
+
+    def put(self, row: dict) -> str:
+        return self.kind + json.dumps(row)
+
+
+def _helper(x):
+    return [y for y in x if y] + [len(x), LIMIT]
+
+
+async def ingest(db, rows: list[Any]) -> int:
+    global _COUNT
+    _COUNT = len(rows)
+    sql = "INSERT INTO t VALUES (:v)"
+    await db.execute(text(sql), {"v": json.dumps(rows)})
+    try:
+        pass
+    except ValueError as exc:
+        print(exc, Store, _helper, __name__)
+    return missing_thing + 1
+'''
+    got = undefined_names({"app/modules/lab_reddit.py": mod})
+    assert [g.split(" reads ")[1].split(",")[0] for g in got] == ["`text`", "`missing_thing`"], got
+    assert got[0].startswith("`app/modules/lab_reddit.py:23` reads `text`") and "`from sqlalchemy import text`" in got[0]
+    assert undefined_names({"app/modules/lab_reddit.py": mod.replace("import json\n", "import json\nfrom sqlalchemy import text\nmissing_thing = 1\n")}) == []
+    assert undefined_names({"app/x.py": "from os.path import *\nprint(join)\n"}) == []         # a star import: left alone

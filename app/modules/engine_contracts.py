@@ -4512,6 +4512,64 @@ def null_inserts(files: dict[str, str], fks: dict | None, rules: dict | None) ->
     return _by_line(found)
 
 
+def undefined_names(files: dict[str, str]) -> list[str]:
+    """§17.1918 — a name a file reads as a global that nothing binds: not imported, assigned, defined, a parameter or
+    a builtin -- `NameError` the instant that line runs, readable from the file alone (Python's own `symtable`). A file
+    with `from x import *` is left alone. Live (5b4880c0 API_REDDIT_AUDITF1 a1, 2026-11-05 00:3x UTC): the module's
+    `ingest_reddit_posts` called `text(insert_sql)` with no `from sqlalchemy import text` -- "NameError: name 'text'
+    is not defined" in eight tests, caught only by the sandbox."""
+    import builtins
+    import symtable
+    known = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__package__", "__loader__",
+                                  "__builtins__", "__path__", "__annotations__", "__dict__", "__module__",
+                                  "__qualname__", "__class__", "__debug__"}
+    out: list[str] = []
+    for path, code in sorted(files.items()):
+        if not path.endswith(".py"):
+            continue
+        try:
+            top = symtable.symtable(code, path, "exec")
+            tree = ast.parse(code)
+        except (SyntaxError, ValueError):
+            continue
+        if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
+            continue
+        bound = {s.get_name() for s in top.get_symbols()
+                 if s.is_assigned() or s.is_imported() or s.is_namespace() or s.is_parameter()}
+        # a `global x` in a function binds `x` at module level too
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Global):
+                bound.update(n.names)
+        missing: set[str] = set()
+
+        def walk(t: symtable.SymbolTable) -> None:
+            for sym in t.get_symbols():
+                name = sym.get_name()
+                if not sym.is_referenced() or name in known or name in bound or (
+                        name.startswith("__") and name.endswith("__")):     # Python's own (3.14 symtable reports some)
+                    continue
+                if t is top:
+                    if not (sym.is_assigned() or sym.is_imported() or sym.is_namespace()):
+                        missing.add(name)
+                elif sym.is_global() and not sym.is_declared_global():
+                    missing.add(name)
+            for c in t.get_children():
+                walk(c)
+        walk(top)
+        if not missing:
+            continue
+        lines: dict[str, int] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in missing:
+                lines[n.id] = min(lines.get(n.id, n.lineno), n.lineno)
+        for name in sorted((m for m in missing if m in lines), key=lambda x: (lines[x], x)):   # read in the source
+            hint = (" -- `from sqlalchemy import text`" if name == "text" else
+                    f" -- import it or define it (`import {name}` / `from … import {name}`)")
+            out.append(f"`{path}:{lines[name]}` reads `{name}`, which nothing in the file imports, assigns or "
+                       f"defines -- `NameError` the instant that line runs{hint}")
+    return out
+
+
 def stdlib_attrs(files: dict[str, str]) -> list[str]:
     """§17.1897 — each `m.attr` read in a file where `m` is a standard-library module the file imports and the module
     has no such attribute (`import time` then `time.min`: `AttributeError: module 'time' has no attribute 'min'`), and
