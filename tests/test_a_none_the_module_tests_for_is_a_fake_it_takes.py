@@ -57,3 +57,72 @@ def test_a_fix_steps_key_is_cited_as_itself_on_a_verdict_line():
     assert check_validation_citation_coverage(out, ["T6U7", "T5U4"]) == []
     assert check_validation_citation_coverage(out, ["T6U7", "T1F2", "T7"]) == ["T1F2", "T7"]
     assert check_validation_citation_coverage("- MET — T2 lines 5-15", ["T2", "T3"]) == ["T3"]   # numeric keys as before
+
+
+
+def test_a_bare_mock_compared_with_a_number_is_named_and_a_real_response_is_offered():
+    """§17.1915 — live (API_ALPACA_AUDITF1 a2): "'>=' not supported between instances of 'AsyncMock' and 'int'" x8."""
+    import httpx
+
+    from app.sandbox import engine_tests as et
+    rx, hint = et.KNOWN_CAUSES[12]                                        # stable index
+    for line in ("E   TypeError: '>=' not supported between instances of 'AsyncMock' and 'int'",
+                 "E   TypeError: '<' not supported between instances of 'MagicMock' and 'float'"):
+        assert rx.search(line), line
+    assert not rx.search("E   TypeError: '>=' not supported between instances of 'str' and 'int'")
+    assert "httpx.Response(200, json={...}" in hint
+    r = httpx.Response(200, json={"id": "a"}, request=httpx.Request("GET", "https://paper-api.alpaca.markets/v2/account"))
+    assert r.status_code == 200 and r.json() == {"id": "a"}              # the stand-in the hint names works as written
+
+
+def test_a_builtin_value_is_held_to_what_it_really_has():
+    """§17.1917 — live (API_ALPACA_AUDITF3 a2): a set refused for the module's `.add()`."""
+    mod = ("def _flush_buffered(seen, items):\n"
+           "    for i in items:\n"
+           "        seen.add(i)\n"
+           "    return seen\n")
+    test = ('# tests/test_lab_fill.py\nfrom app.modules.lab_fill import _flush_buffered\n\n\n'
+            'def test_flush():\n    seen = set()\n    _flush_buffered(seen, [1])\n')
+    assert wrong_fakes({"tests/test_lab_fill.py": test}, {"lab_fill": mod}, {"lab_fill"}) == []
+    bad = test.replace("seen = set()", "seen = 3")                    # an int has no `.add`: still refused
+    got = wrong_fakes({"tests/test_lab_fill.py": bad}, {"lab_fill": mod}, {"lab_fill"})
+    assert len(got) == 1 and "`.add()`" in got[0], got
+
+
+def test_a_name_nothing_binds_is_refused_before_the_sandbox_and_a_bound_one_is_not():
+    """§17.1918 — live (API_REDDIT_AUDITF1 a1): `text(insert_sql)` with no `from sqlalchemy import text`."""
+    from app.modules.engine_contracts import undefined_names
+    mod = '''# app/modules/lab_reddit.py
+import json
+from typing import Any
+
+LIMIT = 5
+
+
+class Store:
+    kind = "x"
+
+    def put(self, row: dict) -> str:
+        return self.kind + json.dumps(row)
+
+
+def _helper(x):
+    return [y for y in x if y] + [len(x), LIMIT]
+
+
+async def ingest(db, rows: list[Any]) -> int:
+    global _COUNT
+    _COUNT = len(rows)
+    sql = "INSERT INTO t VALUES (:v)"
+    await db.execute(text(sql), {"v": json.dumps(rows)})
+    try:
+        pass
+    except ValueError as exc:
+        print(exc, Store, _helper, __name__)
+    return missing_thing + 1
+'''
+    got = undefined_names({"app/modules/lab_reddit.py": mod})
+    assert [g.split(" reads ")[1].split(",")[0] for g in got] == ["`text`", "`missing_thing`"], got
+    assert got[0].startswith("`app/modules/lab_reddit.py:23` reads `text`") and "`from sqlalchemy import text`" in got[0]
+    assert undefined_names({"app/modules/lab_reddit.py": mod.replace("import json\n", "import json\nfrom sqlalchemy import text\nmissing_thing = 1\n")}) == []
+    assert undefined_names({"app/x.py": "from os.path import *\nprint(join)\n"}) == []         # a star import: left alone

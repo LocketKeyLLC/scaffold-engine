@@ -1711,6 +1711,12 @@ _CANNOT = {"str": "a str", "int": "an int", "float": "a float", "bool": "a bool"
            "list": "a list", "dict": "a dict", "set": "a set", "date": "a date", "datetime": "a datetime",
            "Decimal": "a Decimal"}
 _DICT_OK = frozenset({"get", "keys", "items", "values", "pop", "setdefault", "update", "copy"})
+#: §17.1917 — what each builtin value really has, from Python itself. Live (5b4880c0 API_ALPACA_AUDITF3 a2, 2026-11-05
+#: 00:2x UTC): "hands `_flush_buffered(…)` `seen` = a set …, and the module calls `.add()` on it" -- a set has `.add`
+_BUILTIN_HAS: dict[str, frozenset[str]] = {
+    k: frozenset(n for n in dir(t) if not n.startswith("__"))
+    for k, t in {"dict": dict, "list": list, "set": set, "tuple": tuple, "str": str, "bytes": bytes, "int": int,
+                 "float": float, "bool": bool}.items()}
 
 
 def _dict_literal_misuse(lit: ast.Dict, keys: dict, where: str) -> tuple[str, str] | None:
@@ -1845,6 +1851,8 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
         needs = [m + "()" for m in sorted(uses["calls"])] + sorted(uses["attrs"]) + (["()"] if uses["called"] else [])
         if val.kind == "dict":
             needs = [n for n in needs if n.rstrip("()") not in _DICT_OK]
+        if val.kind in _BUILTIN_HAS:                                       # §17.1917 what the value really has
+            needs = [n for n in needs if n.rstrip("()") not in _BUILTIN_HAS[val.kind]]
         if needs:
             return (f"{done}{_CANNOT.get(val.kind, 'a ' + val.kind)}{at}, and the module "
                     + ("calls it" if needs[0] == "()" else "enters it with `async with`" if needs[0] == "__aenter__()"
@@ -4105,7 +4113,32 @@ def kept_test_sources(output: str, passed: list[str]) -> dict[str, dict[str, str
                 continue
             start = min([n.lineno] + [d.lineno for d in n.decorator_list])
             out.setdefault(path, {})[n.name] = "\n".join(lines[start - 1:(n.end_lineno or n.lineno)])
+        # §17.1916 — and what the kept tests stand on in that file: the fixtures they take and the helpers they call,
+        # transitively (a fixture's own fixtures). Live (5b4880c0 API_ALPACA_AUDITF1 a3, 2026-11-05 00:18 UTC): six
+        # kept tests taking `patched`, spliced into a draft whose fixtures were `client` / `fake_client` -- "fixture
+        # 'patched' not found", five errors, the attempt lost
+        if path in out:
+            defs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            todo = [defs[k] for k in out[path] if k in defs]
+            seen = set(out[path])
+            while todo:
+                n = todo.pop()
+                wanted = {a.arg for a in getattr(getattr(n, "args", None), "args", [])} | {
+                    x.id for x in ast.walk(n) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
+                for w in sorted(wanted - seen):
+                    d = defs.get(w)
+                    if d is None or w.startswith("test"):
+                        continue
+                    seen.add(w)
+                    start = min([d.lineno] + [x.lineno for x in d.decorator_list])
+                    out[path][w] = "\n".join(lines[start - 1:(d.end_lineno or d.lineno)])
+                    todo.append(d)
     return out
+
+
+def _is_kept_test(name: str, src: str) -> bool:
+    """A kept definition that is a test (or a test class), as opposed to a fixture or helper it stands on."""
+    return name.startswith("test") or (src.lstrip().startswith(("class ", "@")) and name.startswith("Test"))
 
 
 def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list[str]]:
@@ -4120,11 +4153,19 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
         code = files_of({"output_text": output}).get(path)
         if code is None:
             continue
+        # §17.1916 — a fixture or helper a kept test stands on goes in only where the new file lacks that name: the
+        # new draft's own version of it is what its new tests were written against
+        try:
+            have = {n.name for n in ast.parse(code).body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        except SyntaxError:
+            have = set()
+        defs = {k: v for k, v in defs.items() if _is_kept_test(k, v) or k not in have}
         spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
         output = replace_file_block(output, path, spliced)
-        names.extend(f"{path}::{n}" for n in defs)
+        names.extend(f"{path}::{n}" for n, v in defs.items() if _is_kept_test(n, v))
     return output, names
 
 
@@ -4469,6 +4510,64 @@ def null_inserts(files: dict[str, str], fks: dict | None, rules: dict | None) ->
                         if msg not in found:
                             found.append(msg)
     return _by_line(found)
+
+
+def undefined_names(files: dict[str, str]) -> list[str]:
+    """§17.1918 — a name a file reads as a global that nothing binds: not imported, assigned, defined, a parameter or
+    a builtin -- `NameError` the instant that line runs, readable from the file alone (Python's own `symtable`). A file
+    with `from x import *` is left alone. Live (5b4880c0 API_REDDIT_AUDITF1 a1, 2026-11-05 00:3x UTC): the module's
+    `ingest_reddit_posts` called `text(insert_sql)` with no `from sqlalchemy import text` -- "NameError: name 'text'
+    is not defined" in eight tests, caught only by the sandbox."""
+    import builtins
+    import symtable
+    known = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__package__", "__loader__",
+                                  "__builtins__", "__path__", "__annotations__", "__dict__", "__module__",
+                                  "__qualname__", "__class__", "__debug__"}
+    out: list[str] = []
+    for path, code in sorted(files.items()):
+        if not path.endswith(".py"):
+            continue
+        try:
+            top = symtable.symtable(code, path, "exec")
+            tree = ast.parse(code)
+        except (SyntaxError, ValueError):
+            continue
+        if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
+            continue
+        bound = {s.get_name() for s in top.get_symbols()
+                 if s.is_assigned() or s.is_imported() or s.is_namespace() or s.is_parameter()}
+        # a `global x` in a function binds `x` at module level too
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Global):
+                bound.update(n.names)
+        missing: set[str] = set()
+
+        def walk(t: symtable.SymbolTable) -> None:
+            for sym in t.get_symbols():
+                name = sym.get_name()
+                if not sym.is_referenced() or name in known or name in bound or (
+                        name.startswith("__") and name.endswith("__")):     # Python's own (3.14 symtable reports some)
+                    continue
+                if t is top:
+                    if not (sym.is_assigned() or sym.is_imported() or sym.is_namespace()):
+                        missing.add(name)
+                elif sym.is_global() and not sym.is_declared_global():
+                    missing.add(name)
+            for c in t.get_children():
+                walk(c)
+        walk(top)
+        if not missing:
+            continue
+        lines: dict[str, int] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in missing:
+                lines[n.id] = min(lines.get(n.id, n.lineno), n.lineno)
+        for name in sorted((m for m in missing if m in lines), key=lambda x: (lines[x], x)):   # read in the source
+            hint = (" -- `from sqlalchemy import text`" if name == "text" else
+                    f" -- import it or define it (`import {name}` / `from … import {name}`)")
+            out.append(f"`{path}:{lines[name]}` reads `{name}`, which nothing in the file imports, assigns or "
+                       f"defines -- `NameError` the instant that line runs{hint}")
+    return out
 
 
 def stdlib_attrs(files: dict[str, str]) -> list[str]:
