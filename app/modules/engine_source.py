@@ -3035,9 +3035,37 @@ def test_syntax_findings(output: str) -> list[str]:
         path = _header_path(code)
         if not path.startswith("tests/"):
             continue
+        if "outside async function" in (f.message or "") and (every := _sync_defs_that_await(code)):
+            # §17.1927 — the compiler names the first plain `def` that awaits; the file may have many. Live (5b4880c0
+            # API_ALPACA_AUDITF1, 2026-11-05 09:17): 27 tests written `def` with `await` inside, one named per redraw,
+            # five mended before the asks ran out -- the attempt, the step's last, refused for the 22 never named
+            out.extend(f"`{path}:{ln}` does not compile: 'await' outside async function (`def {name}` awaits) -- make "
+                       f"it `async def` with `@pytest.mark.asyncio`; the file must compile" for name, ln in every)
+            continue
         out.append(f"`{path}:{f.lineno or 0}` does not compile: {f.message}"
                    + (f" (`{f.text.strip()}`)" if f.text else "") + " -- fix that line; the file must compile")
     return out
+
+
+def _sync_defs_that_await(code: str) -> list[tuple[str, int]]:
+    """§17.1927 — every plain `def` of `code` whose own body awaits (a nested `async def`'s awaits are its own)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    found = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        todo: list[ast.AST] = list(fn.body)
+        while todo:
+            n = todo.pop()
+            if isinstance(n, (ast.Await, ast.AsyncFor, ast.AsyncWith)):
+                found.append((fn.name, fn.lineno))
+                break
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                todo.extend(ast.iter_child_nodes(n))
+    return sorted(found, key=lambda x: x[1])
 
 
 def syntax_only_in_tests(output: str) -> bool:
