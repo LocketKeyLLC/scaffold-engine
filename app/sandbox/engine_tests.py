@@ -66,7 +66,47 @@ def after_reasoning(text: str) -> str:
     text = text or ""
     if "</think>" not in text:
         return text
-    return text.rsplit("</think>", 1)[1].lstrip()
+    reasoning, answer = text.rsplit("</think>", 1)
+    answer = answer.lstrip()
+    # §17.1926 — and a file the draft wrote whole that the answer then left out is the step's: the answer is the
+    # draft's other file alone. Live (5b4880c0 API_SEC_EDGAR_AUDITF1, 2026-11-05 07:38): the 13F module (with its new
+    # `MissingSecretError`) in the draft, "Now output both files.", then the test file only -- the tests were read
+    # against the module carried from T6U8 and refused for importing what it lacks, the attempt spent
+    have = set(_block_paths(answer))
+    lost: dict[str, str] = {}
+    for path, block in _named_blocks(reasoning):
+        if path not in have:
+            lost[path] = block                              # the draft's LAST block for the path
+    return "".join(b + "\n\n" for b in lost.values()) + answer if lost else answer
+
+
+_FENCE_RE = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
+
+
+def _named_blocks(text: str) -> list[tuple[str, str]]:
+    """The fenced Python blocks of `text` headed `# path.py` that compile, as (path, the fenced block)."""
+    import ast
+    out = []
+    for m in _FENCE_RE.finditer(text):
+        if m.group(1).lower() not in PYTHON_LANGS or not m.group(2).strip():
+            continue
+        hm = _HEADER_RE.match(m.group(2).lstrip().splitlines()[0])
+        if not hm:
+            continue
+        try:
+            ast.parse(m.group(2))
+        except SyntaxError:
+            continue                                        # a half-written draft is not a file
+        out.append((hm.group(1), m.group(0)))
+    return out
+
+
+def _block_paths(text: str) -> list[str]:
+    paths = []
+    for m in _FENCE_RE.finditer(text):
+        if m.group(2).strip() and (hm := _HEADER_RE.match(m.group(2).lstrip().splitlines()[0])):
+            paths.append(hm.group(1))
+    return paths
 
 
 def files_of(row: dict) -> dict[str, str]:
