@@ -2474,6 +2474,7 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
             # `patch("…httpx.AsyncClient")` was read in the fixture, which calls nothing -- exempt -- and two tests
             # awaited the MagicMock it installed
             contexts: list[tuple[_Fakes, str | None, ast.AST | None]] = []
+            fixture_fn, fixture_fk = (fn, fakes_for(fn)) if fn is not None and fn.name in fixtures else (None, None)  # type: ignore[attr-defined]
             if fn is not None and fn.name in fixtures:                                   # type: ignore[attr-defined]
                 for t in fns:
                     ta = t.args                                                           # type: ignore[attr-defined]
@@ -2485,7 +2486,8 @@ def wrong_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]) -
                 contexts.append((fakes_for(fn), None, fn))
             new = _patch_new(pc)
             for fk, fixture_name, fn in contexts:
-                _check_patch_site(pc, mod, owner, name, fn, fk, fixture_name, uses, new, reach, code, say)
+                _check_patch_site(pc, mod, owner, name, fn, fk, fixture_name, uses, new, reach, code, say,
+                                  fixture_fn=fixture_fn, fixture_fk=fixture_fk)
         # (the patch-site body continues in `_check_patch_site`)
         # §17.1881 — an attribute set on an instance of a job class (`client._client = AsyncMock()`): what the class's
         # methods do with `self.<attr>` is what the fake must do. Live (5b4880c0 T5 a1, 2026-10-31): three Alpaca
@@ -4446,7 +4448,7 @@ async def redraw_faked_tests(output: str, findings: list[str], *, ask, check, tr
 
 def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST | None, fk: "_Fakes",
                       fixture_name: str | None, uses: dict | None, new: ast.AST | None, reach: dict[str, str],
-                      code: str, say) -> None:
+                      code: str, say, fixture_fn: ast.AST | None = None, fixture_fk: "_Fakes | None" = None) -> None:
     """§17.1882 — one patch site read in one scope (a test's, or a test's for a fixture it takes)."""
     from app.modules.engine_source import _uses_text
     if not uses and not owner and name in _top_names(reach[mod])[1]:
@@ -4467,6 +4469,16 @@ def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST
         return  # the mock the patch installs: the value given, else the `as m` / decorator name (its chains apply), else
     # the call itself (a `setattr` without a value is not a patch)
     alias_name = fixture_name or next((n for n, hits in fk.bound.items() for _ln, v in hits if v is pc), None)
+    if fixture_name and fixture_fn is not None and fixture_fk is not None:
+        # §17.1937 — a fixture that patches `as m` and yields something else (`yield mock_propose, mock_spy`) does
+        # not hand the test the mock: the mock is `m`, read in the fixture's own scope (its `m.return_value = …`).
+        # Live (5b4880c0 DELIVERL2, 2026-11-05 19:5x UTC): two `new_callable=AsyncMock` patches, each set up, the
+        # pair yielded -- refused as "patches `propose_trades` … with a tuple", the step's third attempt spent
+        as_var = next((it.optional_vars.id for w in ast.walk(fixture_fn) if isinstance(w, (ast.With, ast.AsyncWith))
+                       for it in w.items if it.context_expr is pc and isinstance(it.optional_vars, ast.Name)), None)
+        gives = [n.value for n in ast.walk(fixture_fn) if isinstance(n, (ast.Yield, ast.Return)) and n.value is not None]
+        if as_var and not any(isinstance(g, ast.Name) and g.id == as_var for g in gives):
+            alias_name, fk = as_var, fixture_fk
     if new is None and _call_name(pc) == "setattr":
         return
     # §17.1921 — a patch given `return_value=` / `side_effect=` installs a mock whose call answers THAT, whatever the
