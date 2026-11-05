@@ -41,10 +41,19 @@ class EngineTestResult:
     reason: str
     ran: list[str]
     passed: list[str] = field(default_factory=list)      # §17.1891 the tests that passed, as pytest names them
+    failed: list[str] = field(default_factory=list)      # §17.1933 and the ones that failed or errored
 
 
 #: §17.1891 — pytest's `-rA` summary names every passing test: `PASSED tests/test_x.py::test_a` (`::Cls::test_a`)
 _PASSED_RE = re.compile(r"^PASSED (tests/\S+)", re.M)
+
+
+_FAILED_RE = re.compile(r"^(?:FAILED|ERROR) (tests/\S+?)(?: - .*)?$", re.M)
+
+
+def failed_tests(stdout: str) -> list[str]:
+    """§17.1933 — the node ids pytest's `-rA` summary reported FAILED or ERROR, in order, each once."""
+    return list(dict.fromkeys(_FAILED_RE.findall(stdout or "")))
 
 
 def passed_tests(stdout: str) -> list[str]:
@@ -526,4 +535,4 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "in tests. ")
         + "Fix the code (or the test, when the test is what is wrong):"
         + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran,
-        passed=passed_tests(res.stdout) if tests else [])
+        passed=passed_tests(res.stdout) if tests else [], failed=failed_tests(res.stdout) if tests else [])
