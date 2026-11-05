@@ -442,3 +442,37 @@ E   when serializing dict item 'quantity'
     from app.modules import engine_plan
     src = inspect.getsource(engine_plan)
     assert 'reversed(d.get("modules") or [d["module"]])' in src            # the deepest frame that is the job's own
+
+
+# ---------------------------------------------------------------------------- §17.1919 a cancelled worker's step is put back
+
+@pytest.mark.asyncio
+async def test_a_step_whose_worker_the_block_cancelled_goes_back_to_pending():
+    """§17.1919 — live (5b4880c0, 2026-11-05 00:48 UTC): the quota block ended the parallel loop while
+    API_SEC_EDGAR_AUDITF2's worker was drawing; the step stayed `running`, no worker behind it."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.config import settings
+    claims = [[{"node_key": "A", "title": "a"}, {"node_key": "B", "title": "b"}]]
+
+    async def claim(job_id, free, held):
+        return claims.pop(0) if claims else []
+
+    async def run(job_id, model_overrides=None, preclaimed_node=None):
+        if preclaimed_node["node_key"] == "A":
+            await asyncio.sleep(0.05)
+            return {"status": "failed", "node_key": "A", "error": "HTTP 429: you have reached your session usage limit"}
+        await asyncio.Event().wait()                                   # B is still drawing when the block lands
+
+    async def block(job_id, node_key, res):
+        if False:
+            yield ""
+    released = AsyncMock(return_value=1)
+    with patch.object(settings, "parallel_execution_max_inflight", 4), \
+         patch.object(ea, "_make_dag_progress_tracker", AsyncMock(return_value=None)), \
+         patch.object(ea, "_claim_frontier", claim), patch.object(ea, "execute_next_node", run), \
+         patch.object(ea, "_quota_hit", lambda e: "429" in str(e or "")), patch.object(ea, "_block_for_quota", block), \
+         patch.object(ea, "_release_claims", released):
+        [e async for e in ea._run_parallel_frontier("job", model_overrides=None, t0=0.0, retry_budget=3)]
+    released.assert_awaited_once_with("job", ["B"])                    # A finished (failed); B was cut

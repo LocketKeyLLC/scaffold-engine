@@ -4641,6 +4641,24 @@ async def _block_for_quota(job_id: str, node_key: str, res: dict):
         "job_id": job_id, "reason": "model_quota_exhausted", "node_key": node_key})
 
 
+async def _release_claims(job_id: str, keys: list[str]) -> int:
+    """§17.1919 — put back to pending the steps a run claimed and did not finish (its worker cancelled), keeping
+    nothing they wrote: a step left `running` with no worker is invisible to every later run. Returns how many."""
+    try:
+        async with async_session() as db:
+            res = await db.execute(text(
+                "UPDATE dag_nodes SET status = 'pending', started_at = NULL, updated_at = NOW() "
+                "WHERE job_id = :j AND node_key = ANY(:keys) AND status = 'running'"), {"j": job_id, "keys": keys})
+            await db.commit()
+        n = int(getattr(res, "rowcount", 0) or 0)
+        if n:
+            logger.warning("claims_released job=%s keys=%s", job_id, keys)
+        return n
+    except Exception as exc:
+        logger.error("claims_release_failed job=%s keys=%s err=%r", job_id, keys, exc)
+        return 0
+
+
 async def _run_parallel_frontier(
     job_id: str,
     *,
@@ -4665,6 +4683,7 @@ async def _run_parallel_frontier(
     sem = asyncio.Semaphore(cap)
     results_q: asyncio.Queue = asyncio.Queue()
     inflight: set[asyncio.Task] = set()
+    claimed_by: dict[asyncio.Task, str] = {}   # §17.1919 — the step each worker holds
     held: set[str] = set()     # §17.1186 — hands-on nodes handed back for approval this run
     node_results: list[dict] = []
     # §17.811 — progress + ETA (parallel path). Emitted ONLY from the drain loop
@@ -4704,7 +4723,9 @@ async def _run_parallel_frontier(
                         "job_id": job_id, "node_key": n["node_key"],
                         "title": n["title"], "tool": n.get("tool", "LLM"),
                     })
-                    inflight.add(asyncio.create_task(_worker(n)))
+                    _t = asyncio.create_task(_worker(n))
+                    claimed_by[_t] = str(n["node_key"])
+                    inflight.add(_t)
 
             # 2. Terminal — ONLY the loop finalizes, only when nothing is
             #    running and nothing was claimable. Decide all-done DIRECTLY:
@@ -4851,10 +4872,16 @@ async def _run_parallel_frontier(
                             status, job_id, res.get("node_key"))
     finally:
         # R8 — cancel any inflight workers so none keep writing to a dying job.
+        cut = [claimed_by[t] for t in inflight if not t.done() and t in claimed_by]
         for t in list(inflight):
             t.cancel()
         if inflight:
             await asyncio.gather(*inflight, return_exceptions=True)
+        # §17.1919 — and the step a cancelled worker held goes back to pending: live (5b4880c0, 2026-11-05 00:48 UTC)
+        # the quota block ended the loop while API_SEC_EDGAR_AUDITF2's worker was drawing; the worker was cancelled,
+        # the step stayed `running` with no model call behind it under a `blocked` job
+        if cut:
+            await _release_claims(job_id, cut)
 
 
 async def execute_all_nodes(
