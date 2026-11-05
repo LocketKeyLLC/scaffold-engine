@@ -4264,6 +4264,46 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
     return output, names
 
 
+def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: list[str]) -> tuple[str, list[str]]:
+    """§17.1922 — a kept test a gate refuses is dropped, not the attempt: it passed against the module as it WAS, and
+    the module has changed under it. Returns the output without the kept tests (or kept classes) a finding points
+    into (`path:line` inside their lines) and their `path::name`s. Live (5b4880c0 API_FINRA_AUDITF1, 2026-11-05 03:0x
+    UTC): the fix renamed `source` to `finra_short_interest` / `finra_ats_volume`; nine kept tests still passed
+    `'short_interest'`, the gate refused them before the sandbox (so they were never run, and never un-kept), every
+    attempt the same way."""
+    from app.sandbox.engine_tests import files_of
+    at: dict[str, set[int]] = {}
+    for f in findings:
+        m = re.match(r"`([^`:]+\.py):(\d+)`", f)
+        if m:
+            at.setdefault(m.group(1), set()).add(int(m.group(2)))
+    dropped: list[str] = []
+    for path, lines in sorted(at.items()):
+        names = set((kept or {}).get(path) or {})
+        code = files_of({"output_text": output}).get(path)
+        if not names or code is None:
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        cut: list[tuple[int, int, str]] = []
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in names \
+                    and _is_kept_test(n.name, ast.unparse(n)):
+                start = min([n.lineno] + [d.lineno for d in n.decorator_list])
+                if any(start <= ln <= (n.end_lineno or n.lineno) for ln in lines):
+                    cut.append((start, n.end_lineno or n.lineno, n.name))
+        if not cut:
+            continue
+        src = code.splitlines()
+        for start, end, name in sorted(cut, reverse=True):
+            del src[start - 1:end]
+            dropped.append(f"{path}::{name}")
+        output = replace_file_block(output, path, "\n".join(src).rstrip() + "\n")
+    return output, sorted(dropped)
+
+
 def splice_definitions(code: str, new: str) -> str | None:
     """§17.1877 — `code` with each top-level function or class of `new` put in place of its namesake, a new name
     appended, and an import `new` has that `code` lacks inserted after the last import; everything else byte for

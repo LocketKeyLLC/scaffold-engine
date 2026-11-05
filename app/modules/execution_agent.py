@@ -1544,6 +1544,25 @@ def _kept_note(node_snapshot: dict, path: str) -> str:
             f"{shown}")
 
 
+async def _drop_refused_kept_tests(output: str, refs: list[str], test_syntax: list[str], node_snapshot: dict,
+                                   job_id: str, node_key: str) -> tuple[str, list[str]]:
+    """§17.1922 — a kept test the gates refuse is dropped (from this output and from what is kept for the next
+    draw), and the gates read the output again: it passed against the module as it was, which has changed."""
+    if not refs or not node_snapshot.get("prior_passing"):
+        return output, refs
+    from app.modules import engine_contracts as _kd
+    from app.modules import engine_source as _es
+    output, gone = _kd.drop_refused_kept(output, node_snapshot["prior_passing"], refs)
+    if not gone:
+        return output, refs
+    for g in gone:
+        gp, gn = g.split("::", 1)
+        node_snapshot["prior_passing"].get(gp, {}).pop(gn, None)
+    logger.warning("kept_tests_refused_dropped node=%s %s", node_key, gone)
+    async with async_session() as db:
+        return output, test_syntax + await _es.engine_findings(db, job_id, node_key, output)
+
+
 def _splice_kept_tests(output: str, node_snapshot: dict, node_key: str) -> str:
     """§17.1891 — a test that passed in an earlier attempt is put back as it passed, before any gate reads the file:
     the attempt rewrites only what failed (and what is new), and a passing test cannot regress."""
@@ -2790,6 +2809,9 @@ async def execute_next_node(
                     # engine's history, and no sample value or note handing its unfinished work on
                     async with async_session() as _esdb:
                         _refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output)
+                    # §17.1922 — a kept test the gates refuse is dropped, and the gates read the output again
+                    output, _refs = await _drop_refused_kept_tests(output, _refs, _test_syntax, node_snapshot,
+                                                                   job_id, node_key)
                     # §17.1852 — a stand-in in the tests, and nothing else wrong: the module passed every check, so
                     # the test file is asked for again, alone, with the module in hand and the rows to insert named
                     # -- before this attempt is spent on it. §17.1859 — every finding that is about the test file's

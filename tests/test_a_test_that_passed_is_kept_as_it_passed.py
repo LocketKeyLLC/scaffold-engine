@@ -284,3 +284,40 @@ def test_a_kept_test_that_reads_a_helper_defined_nowhere_is_not_put_back():
     new = "```python\n# tests/test_x.py\ndef _helper():\n    return 1\n\n\ndef test_new():\n    assert _helper()\n```"
     out, names = splice_kept(new, kept)
     assert names == ["tests/test_x.py::test_ok"] and "_mock_websocket" not in out
+
+
+def test_a_kept_test_a_gate_refuses_is_dropped_and_the_drafts_own_are_not():
+    """§17.1922 — live (API_FINRA_AUDITF1): nine kept tests still passing `'short_interest'` after the fix renamed the
+    source values; refused before the sandbox, never un-kept, every attempt the same way."""
+    import inspect
+
+    from app.modules import execution_agent as ea
+    from app.modules.engine_contracts import drop_refused_kept
+    out = """```python
+# tests/test_x.py
+import pytest
+
+
+def test_old_source():
+    assert ingest(source="short_interest")
+
+
+def test_new(client):
+    assert ingest(source="finra_short_interest")
+
+
+class TestKept:
+    def test_a(self):
+        assert ingest(source="short_interest")
+```"""
+    kept = {"tests/test_x.py": {"test_old_source": "", "TestKept": "", "_helper": ""}}
+    findings = ["`tests/test_x.py:6` calls `ingest(…)`: `source` is one of …",
+                "`tests/test_x.py:10` calls `ingest(…)`: the draft's own test",
+                "`tests/test_x.py:15` calls `ingest(…)`: inside the kept class"]
+    got, dropped = drop_refused_kept(out, kept, findings)
+    assert dropped == ["tests/test_x.py::TestKept", "tests/test_x.py::test_old_source"]
+    assert "def test_old_source" not in got and "class TestKept" not in got and "def test_new(client):" in got
+    assert drop_refused_kept(out, {}, findings) == (out, [])                       # nothing kept: nothing dropped
+    src = inspect.getsource(ea)
+    assert src.index("await _drop_refused_kept_tests(output, _refs, _test_syntax") < src.index(
+        "_ec.findings_in_tests(_refs) == _refs")                                    # before the findings are acted on
