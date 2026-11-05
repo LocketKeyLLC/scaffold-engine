@@ -4892,16 +4892,32 @@ def own_helper_calls(files: dict[str, str]) -> list[str]:
         helpers = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                    and not any((getattr(d, "id", None) or getattr(getattr(d, "func", None), "attr", None)
                                 or getattr(d, "attr", None)) in ("fixture",) for d in n.decorator_list)}
-        if not helpers:
+        # §17.1924 — and each class it defines, called as its `__init__` is written (a plain class: no base, no
+        # decorator, its own `__init__`). Live (5b4880c0 API_ALPACA_AUDITF3, 2026-11-05 03:53 UTC): four tests
+        # `FakeWebSocket(recv_side_effect=…)` against the draft's own `FakeWebSocket(self, messages)` -- "got an
+        # unexpected keyword argument 'recv_side_effect'", seen only by the sandbox
+        inits: dict[str, ast.AST] = {}
+        for n in tree.body:
+            if isinstance(n, ast.ClassDef) and not n.bases and not n.decorator_list and not n.keywords:
+                init = next((m for m in n.body if isinstance(m, ast.FunctionDef) and m.name == "__init__"), None)
+                if init is not None and init.args.args and init.args.args[0].arg == "self":
+                    inits[n.name] = init
+        if not helpers and not inits:
             continue
         shapes = {name: _call_shape(fn) for name, fn in helpers.items()}
+        for name, init in inits.items():
+            sh = _call_shape(init, deep=False)                                  # `self` is the instance, not an argument
+            sh["pos"], sh["required_pos"] = sh["pos"][1:], [p for p in sh["required_pos"] if p != "self"]
+            sh["posonly"], sh["async"] = [p for p in sh["posonly"] if p != "self"], False
+            shapes[name] = sh
+        helpers = {**helpers, **inits}
         parents = {id(c): par for par in ast.walk(tree) for c in ast.iter_child_nodes(par)}
         for call in sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                             and n.func.id in helpers), key=lambda n: n.lineno):
             name, shape = call.func.id, shapes[call.func.id]
             msgs = [m for m in _call_mismatches_bare(call, name, shape, False)
                     if "takes at most" in m or "has no parameter" in m or "is missing required argument" in m]
-            if (aw := _await_mismatch(call, name, shape, parents)):
+            if name not in inits and (aw := _await_mismatch(call, name, shape, parents)):
                 msgs.append(aw)
             par = parents.get(id(call))
             if shape["async"] and not isinstance(par, ast.Await) and isinstance(par, (ast.Assign, ast.AnnAssign, ast.Return,

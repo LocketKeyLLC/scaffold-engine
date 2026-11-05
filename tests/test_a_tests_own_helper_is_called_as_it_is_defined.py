@@ -57,3 +57,37 @@ async def test_uses_fixture(db_session):
         + tail.format(h="_insert_ingested_item", ln=5)], got
     assert own_helper_calls({"app/modules/x.py": test}) == []
     assert own_helper_calls({PATH: "def test_a():\n    assert True\n"}) == []
+
+
+def test_a_class_the_file_defines_is_constructed_as_its_init_is_written():
+    """§17.1924 — live (API_ALPACA_AUDITF3): `FakeWebSocket(recv_side_effect=…)` against `__init__(self, messages)`."""
+    test = '''# tests/test_paper_fill_tracker.py
+from dataclasses import dataclass
+
+
+class FakeWebSocket:
+    def __init__(self, messages, *, closed=False):
+        self.messages = messages
+
+
+class Sub(FakeWebSocket):
+    pass
+
+
+@dataclass
+class Row:
+    a: int
+
+
+def test_ws():
+    ws = FakeWebSocket([], recv_side_effect=[1])
+    ok = FakeWebSocket(["m"], closed=True)
+    sub = Sub(anything=1)
+    row = Row(a=1, b=2)
+    missing = FakeWebSocket()
+'''
+    got = own_helper_calls({"tests/test_paper_fill_tracker.py": test})
+    assert [g.split(" -- `FakeWebSocket`")[0] for g in got] == [
+        "`tests/test_paper_fill_tracker.py:20` calls `FakeWebSocket(…)` has no parameter `recv_side_effect` (it takes "
+        "messages, *, closed)",
+        "`tests/test_paper_fill_tracker.py:24` calls `FakeWebSocket(…)` is missing required argument(s) `messages`"], got
