@@ -3484,6 +3484,16 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     op_node.get("node_key"), bool(op_node.get("engine_half")), len(frame.get("verify") or []))
         async with async_session() as db:
             return await decision_pause.park_awaiting_decision(db, job_id, op_node, frame)
+    if node is not None and _depth == 0:
+        # §17.1933 — the delivery question waits until the job's tests pass together, as the engine's CI runs them
+        from app.modules import engine_plan as _ep_d
+        if _ep_d._DELIVER_QUESTION_RE.match(str(node.get("title") or "")):
+            from app.modules.lab_together import stale_test_steps
+            try:
+                if await stale_test_steps(job_id, str(node.get("node_key"))):
+                    return None                     # the steps read again come first; the run claims them now
+            except Exception as exc:
+                logger.error("lab_tests_together_failed job=%s err=%r", job_id, exc)
     if node is not None:
         frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
     else:
@@ -4790,6 +4800,9 @@ async def _run_parallel_frontier(
                 if _asked is not None:
                     yield _sse("awaiting_decision", _asked)
                     return
+                from app.modules.lab_together import take_reset
+                if take_reset(job_id):
+                    continue                    # §17.1933 the pause check reset steps (the delivery waits): claim them
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 async with async_session() as _term_db:
                     all_done = await _all_nodes_done(_term_db, job_id)
