@@ -3267,6 +3267,7 @@ async def execute_next_node(
         "evidence": _evidence_summary,
         "awaiting_approval": True,
         "job_complete": job_complete,
+        "tool": tool,               # §17.1930 — what the loops' after-step hooks read (`_add_review_fixes`)
     }
 
 async def skip_node(job_id: str, node_key: str, db: AsyncSession) -> dict:
@@ -4631,11 +4632,21 @@ async def _add_review_fixes(job_id: str, result: dict) -> list[str]:
     BOTH loops: it lived in the serial loop alone, and live (5b4880c0, 2026-11-04 23:3x UTC, parallel frontier) five
     API audits finished -- API_REDDIT_AUDIT with nine NOT MET findings -- and no fix step was opened. Returns the
     steps inserted."""
-    if (result.get("tool") or "").lower() != "llm":
-        return []
     try:
         from app.modules import engine_plan as _ep
         if not _ep._REVIEW_STEP_RE.match(str(result.get("title") or "")):
+            return []
+        tool = result.get("tool")
+        if not tool and result.get("node_key"):
+            # §17.1930 — a result that does not carry its tool is looked up: the step's own result never carried it
+            # (only the skip paths did), so this returned before every review that ran -- live (5b4880c0, 2026-11-05
+            # 12:05–12:13 UTC) five API audits found 12 NOT MET lines, no fix step opened, and the job went on to
+            # DELIVER; the morning's fix steps had all come from a hand-run complete-plan
+            async with async_session() as _tdb:
+                tool = (await _tdb.execute(text(
+                    "SELECT tool FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+                    {"j": job_id, "k": result["node_key"]})).scalar()
+        if (tool or "").lower() != "llm":
             return []
         async with async_session() as _rdb:
             _rf = await _ep.apply_to_job(_rdb, job_id, edited_by="engine:review_fixes", only_reviews=True)

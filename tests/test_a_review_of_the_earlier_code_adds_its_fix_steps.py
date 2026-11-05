@@ -198,3 +198,32 @@ async def test_the_helper_applies_reviews_for_a_review_step_only():
         assert await ea._add_review_fixes("j", {"tool": "CodeGen", "title": "Audit x"}) == []
         assert await ea._add_review_fixes("j", {"tool": "LLM", "title": "Document the lab"}) == []
     assert apply.await_count == 1
+
+
+# ── §17.1930 — the step's own result never carried its tool: the helper returned before every review that ran ──
+
+def test_a_steps_result_carries_its_tool():
+    import ast
+    import inspect
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ea.execute_next_node)))
+    returns = [n.value for n in ast.walk(tree) if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)
+               and any(isinstance(k, ast.Constant) and k.value == "job_complete" for k in n.value.keys)]
+    assert returns, "the success return of execute_next_node moved"
+    for d in returns:
+        assert "tool" in {k.value for k in d.keys if isinstance(k, ast.Constant)}
+
+
+@pytest.mark.asyncio
+async def test_a_result_without_its_tool_is_looked_up():
+    apply = AsyncMock(return_value={"inserted": ["API_FINRA_AUDITF2"]})
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar=MagicMock(return_value="LLM")))
+    session = MagicMock()
+    session.return_value.__aenter__ = AsyncMock(return_value=db)
+    session.return_value.__aexit__ = AsyncMock(return_value=False)
+    with patch("app.modules.execution_agent.async_session", session), patch.object(engine_plan, "apply_to_job", new=apply):
+        got = await ea._add_review_fixes("j", {"node_key": "API_FINRA_AUDIT",
+                                               "title": "Audit the code that calls the FINRA data APIs against its research"})
+    assert got == ["API_FINRA_AUDITF2"]
+    assert db.execute.await_args.args[1] == {"j": "j", "k": "API_FINRA_AUDIT"}
