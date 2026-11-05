@@ -1062,6 +1062,10 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         changes += add_review_fixes(tasks, reviews, carried, own=sorted(sources), reviewed_at=reviewed_at)
         _gc, _gaps_reset = ask_research_gaps(tasks, reviews, [*carried, *sorted(sources)])     # §17.1928
         changes += _gc
+        from app.modules.lab_together import RERAN_KEY, narrow_stale_test_steps            # §17.1934
+        if any((t.get("tool_config") or {}).get(RERAN_KEY) for t in tasks):
+            _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+            changes += narrow_stale_test_steps(tasks, _crows, engine_source.job_files(_crows))
     else:
         _gaps_reset = []
     # §17.1928 — the research read again and its audit, and the fix steps a review finds wanting again, go back to

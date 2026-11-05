@@ -37,6 +37,59 @@ def take_reset(job_id: str) -> bool:
     return False
 
 
+#: §17.1934 — a stale tests-only step's text, once it is narrowed to the modules no current test file covers
+NARROWED_KEY = "stale_tests_narrowed"
+_NARROW_NOTE = ("\n\n§17.1934 — write this file's tests for {mods} only. Every other module it tested has its own tests "
+                "now, from the step that last rewrote it ({covered}); a test of one of those here would test it as it "
+                "was. Test each of these as its current code is (its source is shown), in this file.")
+
+
+def uncovered_modules(draft: str, files: dict[str, tuple[str, str]]) -> tuple[list[str], list[str]]:
+    """§17.1934 — of the job modules a test file's draft imports, (those with no test file of their own written by
+    the module's current writer, those with one). ``files``: `job_files` (path -> (code, step))."""
+    import ast
+    import re
+    m = re.search(r"```python\n#\s*tests/\S+\.py\n(.*?)```", draft or "", re.S)
+    try:
+        tree = ast.parse(m.group(1) if m else (draft or ""))
+    except SyntaxError:
+        return [], []
+    mods = sorted({n.module.rsplit(".", 1)[-1] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                   and (n.module or "").startswith("app.modules.") and f"app/modules/{n.module.rsplit('.', 1)[-1]}.py" in files})
+    covered = [x for x in mods if (own := files.get(f"tests/test_{x}.py")) and own[1] == files[f"app/modules/{x}.py"][1]]
+    return [x for x in mods if x not in covered], covered
+
+
+def narrowed_notes(notes: str, draft: str, files: dict[str, tuple[str, str]]) -> tuple[str, list[str]] | None:
+    """The step's text held to the modules no current test file covers, and those modules; None when none of its
+    modules is covered elsewhere (nothing to narrow) or all are (then the step has nothing of its own left)."""
+    left, covered = uncovered_modules(draft, files)
+    if not covered or not left:
+        return None
+    return (notes.rstrip() + _NARROW_NOTE.format(mods=", ".join(f"`{x}`" for x in left),
+                                                 covered=", ".join(f"`{x}`" for x in covered)), left)
+
+
+def narrow_stale_test_steps(tasks: list[dict], rows: list[dict], files: dict[str, tuple[str, str]]) -> list[str]:
+    """§17.1934 — the plan pass: a tests-only step read again for stale tests (`RERAN_KEY`) that has not passed since
+    is narrowed (once) to the modules no current test file covers. Live (5b4880c0 T5, 2026-11-05 15:10–15:35 UTC):
+    read again for its 10 stale tests, it redrew its 2,712-line file for 23 modules three times and failed -- 21 of
+    them had their own tests by their current writers; only the Alpaca client and the walk-forward backtester did not."""
+    changes: list[str] = []
+    drafts = {str(r.get("node_key")): str(r.get("output_text") or "") for r in rows}
+    for t in tasks:
+        cfg = t.get("tool_config") or {}
+        if not cfg.get(RERAN_KEY) or cfg.get(NARROWED_KEY) or t.get("status", "pending") not in ("pending", "failed"):
+            continue
+        got = narrowed_notes(str(t.get("notes") or ""), drafts.get(str(t["id"]), ""), files)
+        if got is None:
+            continue
+        t["notes"], left = got
+        t["tool_config"] = {**cfg, NARROWED_KEY: left}
+        changes.append(f"stale_tests_narrowed: {t['id']} writes tests for {', '.join(left)} only")
+    return changes
+
+
 def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str],
                         by_key: dict[str, dict]) -> list[tuple[str, str, list[str]]]:
     """(step, test file, failing test names) for each failing file whose writer is a tests-only step of this job not
@@ -83,6 +136,11 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
     # the count line marks the record as a sandbox verdict (`sandbox_counts`): the run's own, else one built from it
     counts = cm.group(0).strip() if cm else f"{len(res.failed)} failed, {len(res.passed)} passed in 0.0s"
     by_key = {str(r.get("node_key")): r for r in rows}
+    async with async_session() as db:                         # `code_rows` carries no tool_config: the marks
+        for k, cfg in (await db.execute(text("SELECT node_key, tool_config FROM dag_nodes WHERE job_id = :j"),
+                                        {"j": job_id})).all():
+            if k in by_key and cfg:
+                by_key[k] = {**by_key[k], "tool_config": cfg if isinstance(cfg, dict) else json.loads(cfg)}
     reset: list[str] = []
     for step, path, names in steps_to_read_again(tests, res.failed, by_key):
         row = by_key[step]
@@ -102,10 +160,13 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
                                             f"`{path}` {len(names)} failed, {len(ok)} passed: " + ", ".join(names[:40]),
                                   "tests": {path: names}, "passed_tests": {}})})
             await node_editor._reset_keys(db, job_id, [step], edited_by="engine §17.1933")
+            # §17.1934 — and held to the modules no current test file covers (the rest have their own tests now)
+            narrowed = narrowed_notes(str(row.get("prompt_template") or ""), str(row.get("output_text") or ""), files)
+            mark = {RERAN_KEY: names[:200], **({NARROWED_KEY: narrowed[1]} if narrowed else {})}
             await db.execute(text(
-                "UPDATE dag_nodes SET tool_config = COALESCE(tool_config, '{}'::jsonb) || CAST(:c AS JSONB) "
-                "WHERE job_id = :j AND node_key = :k"),
-                {"j": job_id, "k": step, "c": json.dumps({RERAN_KEY: names[:200]})})
+                "UPDATE dag_nodes SET tool_config = COALESCE(tool_config, '{}'::jsonb) || CAST(:c AS JSONB), "
+                "prompt_template = COALESCE(:pt, prompt_template) WHERE job_id = :j AND node_key = :k"),
+                {"j": job_id, "k": step, "c": json.dumps(mark), "pt": narrowed[0] if narrowed else None})
             await db.execute(text(
                 "UPDATE dag_nodes SET depends_on = array_append(depends_on, CAST(:k AS TEXT)) "
                 "WHERE job_id = :j AND node_key = :d AND NOT (CAST(:k AS TEXT) = ANY(depends_on))"),

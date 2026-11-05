@@ -76,3 +76,29 @@ def test_a_delivered_labs_tests_go_under_their_own_folder_with_its_tables_emptie
     src = dj._CONFTEST.format(lab="paper", tables=["signal", "pnl"])
     ast.parse(src)
     assert "TABLES = ['signal', 'pnl']" in src and "RESTART IDENTITY CASCADE" in src and "autouse=True" in src
+
+
+# ── §17.1934 — a stale tests-only step is held to the modules no current test file covers ──────────────────────
+
+FILES = {"app/modules/paper_a.py": ("A = 1\n", "F1"), "tests/test_paper_a.py": ("def test_a():\n    pass\n", "F1"),
+         "app/modules/paper_b.py": ("B = 1\n", "T9"), "tests/test_paper_b.py": ("def test_b():\n    pass\n", "T3"),
+         "app/modules/paper_c.py": ("C = 1\n", "f00ea97f:T5")}
+DRAFT = ("```python\n# tests/test_paper_twelve_modules.py\nfrom app.modules.paper_a import A\n"
+         "from app.modules.paper_b import B\nfrom app.modules.paper_c import C\nfrom app.config import settings\n```")
+
+
+def test_the_modules_a_current_test_file_covers_are_left_to_it():
+    assert lt.uncovered_modules(DRAFT, FILES) == (["paper_b", "paper_c"], ["paper_a"])   # b's tests are older than it
+    notes, left = lt.narrowed_notes("Python test module `tests/test_paper_twelve_modules.py`.", DRAFT, FILES)
+    assert left == ["paper_b", "paper_c"] and "write this file's tests for `paper_b`, `paper_c` only" in notes
+    assert lt.narrowed_notes("x", DRAFT.replace("from app.modules.paper_a import A\n", ""), FILES) is None   # none covered
+
+
+def test_the_plan_pass_narrows_a_stale_step_once():
+    tasks = [{"id": "T5", "name": "Write tests for twelve modules", "status": "failed", "notes": "Python test module.",
+              "tool_config": {lt.RERAN_KEY: ["test_x"]}},
+             {"id": "T6", "name": "Other", "status": "failed", "notes": "n", "tool_config": {}}]
+    rows = [{"node_key": "T5", "output_text": DRAFT}, {"node_key": "T6", "output_text": DRAFT}]
+    assert lt.narrow_stale_test_steps(tasks, rows, FILES) == ["stale_tests_narrowed: T5 writes tests for paper_b, paper_c only"]
+    assert tasks[0]["tool_config"][lt.NARROWED_KEY] == ["paper_b", "paper_c"] and "§17.1934" in tasks[0]["notes"]
+    assert lt.narrow_stale_test_steps(tasks, rows, FILES) == []                         # once; T6 was never read again
