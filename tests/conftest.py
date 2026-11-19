@@ -312,6 +312,22 @@ def _lab_prefixes() -> tuple[str, ...]:
 
 
 @pytest.fixture(autouse=True)
+def _no_tool_audit_unless_asked(request, monkeypatch):
+    """§17.1939 — `engine_findings` runs pyright and vulture over the code a step writes (~12 s a call, the engine's
+    own app/ tree copied in). Every test that reaches `engine_findings` would pay it, and under load crossed the
+    30 s per-test timeout; only a test marked `tool_audit` runs the real gate, the rest see no findings."""
+    if request.node.get_closest_marker("tool_audit"):
+        yield
+        return
+    from app.modules import engine_source
+
+    async def _none(_files):
+        return []
+    monkeypatch.setattr(engine_source, "tool_audit_findings", _none)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _the_engine_without_its_delivered_labs(request, monkeypatch):
     prefixes = _lab_prefixes()
     if not prefixes or "tests/labs/" in str(request.node.path).replace("\\", "/"):

@@ -28,6 +28,10 @@ COPY requirements.txt requirements-dev.txt ./
 # its own cache layer so a requirements change does not re-download it (§17.1141).
 RUN pip install --no-cache-dir "torch==2.14.0" --index-url https://download.pytorch.org/whl/cpu  # §17.1141 — pinned (was floating; hadolint DL3013)
 RUN pip install --no-cache-dir -r requirements.txt
+# §17.1939 — the engine's type gate runs offline: the pyright wheel carries its npm package and
+# nodejs-wheel-binaries its Node. IGNORE_WARNINGS: no version check over the network. The RUN proves both.
+ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
+RUN pyright --version
 # Dev deps live in the same venv but only the runtime stage prunes them.
 RUN pip install --no-cache-dir -r requirements-dev.txt
 
@@ -113,6 +117,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # and `cd /code/cli && python -m scaffold_cli ...` work without compose
 # having to re-declare them on every service.
 ENV PYTHONPATH="/code:/code/sdk"
+# §17.1939 — pyright never checks for a newer version over the network (see the builder stage)
+ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
 # §17.243 — image-intrinsic HF_HOME (matches the builder pre-bake path
 # above). Compose still sets this for clarity, but the image is now
 # self-contained — a fresh `docker run scaffold-engine:dev` will find
@@ -191,6 +197,8 @@ ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHONPATH="/code:/code/sdk"
+# §17.1939 — pyright never checks for a newer version over the network (see the builder stage)
+ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
 # §17.243 — same HF_HOME as runtime stage. Dev image is also a sidecar
 # substrate; harness sidecars need to find the cached reranker.
 ENV HF_HOME="/code/.cache/huggingface"

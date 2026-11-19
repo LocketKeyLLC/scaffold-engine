@@ -3488,8 +3488,10 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         # §17.1933 — the delivery question waits until the job's tests pass together, as the engine's CI runs them
         from app.modules import engine_plan as _ep_d
         if _ep_d._DELIVER_QUESTION_RE.match(str(node.get("title") or "")):
-            from app.modules.lab_together import lint_fix_steps, stale_test_steps
+            from app.modules.lab_together import lint_fix_steps, review_fix_steps, stale_test_steps
             try:
+                if await review_fix_steps(job_id):                                           # §17.1941
+                    return None
                 if await stale_test_steps(job_id, str(node.get("node_key"))):
                     return None                     # the steps read again come first; the run claims them now
                 if await lint_fix_steps(job_id, str(node.get("node_key"))):                  # §17.1936
@@ -4671,8 +4673,14 @@ async def _add_review_fixes(job_id: str, result: dict) -> list[str]:
 
 
 def _quota_hit(error) -> bool:
-    """§17.1889 — a node failure whose cause is the model account's usage limit (see `model_router.quota_exhausted`)."""
+    """§17.1889 — a node failure whose cause is the model account's usage limit (see `model_router.quota_exhausted`).
+    §17.1945 — given a step's result, its `error` OR its `verification_reason`: the limit is reached by whichever call
+    comes next, and a verifier's 429 lands in the reason. Live (5b4880c0 API_REDDIT_AUDIT, 2026-11-05 11:16 UTC):
+    "verifier response error: … HTTP 429 … session usage limit" recorded the step failed, an attempt spent, and the
+    run went on drawing other steps into the same limit instead of blocking."""
     from app.model_router import quota_exhausted
+    if isinstance(error, dict):
+        return any(quota_exhausted(str(error.get(k) or "")) for k in ("error", "verification_reason"))
     return quota_exhausted(error if isinstance(error, str) else str(error or ""))
 
 
@@ -4684,6 +4692,8 @@ async def _block_for_quota(job_id: str, node_key: str, res: dict):
     `node_failed` (retries exhausted), the status write, a `warning` the operator's page renders."""
     from app.modules import job_state as _js
     msg = str(res.get("error") or "")
+    if not _quota_hit(msg):                                       # §17.1945 the limit named in the verifier's reason
+        msg = str(res.get("verification_reason") or msg)
     yield _sse_event("node_failed", {
         "job_id": job_id, "node_key": node_key, "title": res.get("title"), "error": msg,
         "verification_reason": res.get("verification_reason"), "model_used": res.get("model_used"),
@@ -4885,7 +4895,7 @@ async def _run_parallel_frontier(
             elif status == "failed":
                 _failed_key = res.get("node_key", "")
                 _retried = False
-                if _quota_hit(res.get("error")):                              # §17.1889
+                if _quota_hit(res):                              # §17.1889
                     async for _qev in _block_for_quota(job_id, _failed_key, res):
                         yield _qev
                     return
@@ -5401,7 +5411,7 @@ async def execute_all_nodes(
             elif status == "failed":
                 _failed_key = result.get("node_key", "")
                 _retried = False
-                if _quota_hit(result.get("error")):                           # §17.1889
+                if _quota_hit(result):                           # §17.1889
                     async for _qev in _block_for_quota(job_id, _failed_key, result):
                         yield _qev
                     return

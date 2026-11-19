@@ -111,3 +111,10 @@ mypy==2.4.1
 # §17.1936 — the repo's own linter, run by the engine over the code it writes for itself (the rules mirror
 # pyproject's [tool.ruff.lint]; the version is pre-commit's): a delivered lab must pass the commit hook
 ruff==0.16.3
+# §17.1939 — CI's tool-audit gate (pyright basic over app/, vulture at 100 %), run by the engine over the code it
+# writes for itself: a delivered lab must pass the gate that holds the merge. Versions are CI's. pyright runs on
+# its own Node (`nodejs-wheel-binaries`, pyright's `nodejs` extra) and the wheel carries its npm package, so it
+# never fetches at runtime.
+pyright==1.1.414
+nodejs-wheel-binaries==24.19.0
+vulture==2.16

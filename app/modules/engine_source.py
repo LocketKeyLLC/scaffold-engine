@@ -612,6 +612,14 @@ def _is_tested(e: ast.AST, parents: dict[int, ast.AST]) -> bool:
         return False
 
 
+def _is_ordered(e: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """§17.1944 — whether an expression is ordered against something (`<`, `<=`, `>`, `>=`): read as a number. A
+    mock cannot be ordered -- "'>=' not supported between instances of 'AsyncMock' and 'int'"."""
+    par = parents.get(id(e))
+    return (isinstance(par, ast.Compare) and (par.left is e or e in par.comparators)
+            and any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in par.ops))
+
+
 def _merge_uses(dst: dict, src: dict) -> None:
     dst["attrs"] |= src["attrs"]
     for m, info in src["calls"].items():
@@ -635,6 +643,7 @@ def _merge_uses(dst: dict, src: dict) -> None:
             dst["item"] = _new_use()
         _merge_uses(dst["item"], src["item"])
     dst["tested"] = (dst.get("tested") or set()) | (src.get("tested") or set())                 # §17.1881
+    dst["ordered"] = (dst.get("ordered") or set()) | (src.get("ordered") or set())              # §17.1944
     dst["shown"] = (dst.get("shown") or set()) | (src.get("shown") or set())                     # §17.1886
     if src.get("optional"):
         dst["optional"] = True
@@ -801,6 +810,8 @@ def _uses(fn: ast.AST, name: str, local: dict[str, ast.AST] | None = None, resul
             base["attrs"].add(e.attr)
             if _is_tested(e, parents):                   # §17.1881 `if self._client.is_closed:` -- a flag
                 base["tested"].add(e.attr)
+            if _is_ordered(e, parents):                  # §17.1944 `if response.status_code >= 400:` -- a number
+                base.setdefault("ordered", set()).add(e.attr)
             if _is_shown(e, parents):                    # §17.1886 `raise X(response.text[:500])` -- only shown
                 base.setdefault("shown", set()).add(e.attr)
             return None
@@ -2592,6 +2603,107 @@ async def lint_findings(files: dict[str, str]) -> list[str]:
     return found
 
 
+
+#: §17.1939 — CI's tool-audit settings (pyrightconfig.json), held here so the engine checks what CI checks; a test
+#: compares this with the repo's file
+PYRIGHT_CONFIG = {"typeCheckingMode": "basic", "pythonVersion": "3.12", "reportMissingImports": False,
+                  "reportMissingModuleSource": False, "reportAttributeAccessIssue": False,
+                  "reportOptionalMemberAccess": False, "reportOptionalSubscript": False, "reportArgumentType": False,
+                  "reportCallIssue": False, "reportIndexIssue": False, "reportOptionalIterable": False,
+                  "reportUndefinedVariable": True, "reportUnusedExpression": True}
+
+
+async def _run_tool(args: list[str], cwd: str, timeout: int) -> tuple[int, str]:
+    import asyncio
+    proc = await asyncio.create_subprocess_exec(*args, cwd=cwd, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        raise
+    return proc.returncode or 0, out.decode() + err.decode()
+
+
+async def tool_audit_findings(files: dict[str, str]) -> list[str]:
+    """§17.1939 — what CI's tool-audit gate refuses in the engine modules a step writes: pyright (basic, the repo's
+    pyrightconfig) errors and vulture's 100 %-confidence dead code, one finding per line. Live (5b4880c0, the lab PR
+    #1161, 2026-11-05): every engine gate and 398 tests passed, and CI went red twice -- `sum()` over Decimals typed
+    `Decimal | float`, then a parameter nothing read. CI checks `app/` only, so only `app/` files are checked.
+    Fail-soft: a tool missing or failing is no finding."""
+    import json as _json
+    import shutil
+    import tempfile
+    py = {p: c for p, c in files.items() if p.endswith(".py") and p.startswith("app/")}
+    if not py:
+        return []
+    found: list[str] = []
+    engine_app = Path(__file__).resolve().parents[1]                 # the engine's own app/, as CI's checkout has it
+    with tempfile.TemporaryDirectory() as tmp:
+        # CI checks the job's modules AS PART OF the engine: vulture counts a name used anywhere in app/ (alone, a
+        # handler's `node_key` parameter read nowhere in the job's 28 modules is "dead"), and pyright resolves the
+        # engine's own imports. So the engine's app/ goes in first and the job's files over it.
+        shutil.copytree(engine_app, Path(tmp) / "app", ignore=shutil.ignore_patterns("__pycache__", "static", "*.pyc"))
+        for p, c in py.items():
+            dest = Path(tmp) / p
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(c)
+        names = sorted(py)
+        whitelist = engine_app.parent / "scripts" / "vulture_whitelist.py"
+        pyright = shutil.which("pyright")
+        if pyright:
+            (Path(tmp) / "pyrightconfig.json").write_text(_json.dumps({**PYRIGHT_CONFIG, "include": names}))
+            try:
+                rc, out = await _run_tool([pyright, "--outputjson", "--level", "error"], tmp, 180)
+                if rc not in (0, 1):                               # 1: errors; anything else: pyright itself failed
+                    raise RuntimeError(out[:300])
+                diags = _json.loads(out[out.index("{"):] if "{" in out else "{}").get("generalDiagnostics") or []
+            except Exception as exc:
+                logger.warning("engine_pyright_failed err=%r", exc)
+                diags = []
+            for d in diags:
+                if d.get("severity") != "error":
+                    continue
+                rel = Path(str(d.get("file") or "")).as_posix().split(Path(tmp).as_posix().rstrip("/") + "/", 1)[-1]
+                line = ((d.get("range") or {}).get("start") or {}).get("line", -1) + 1
+                msg = " ".join(str(d.get("message") or "").split())
+                found.append(f"`{rel}:{line}` pyright: {msg} -- fix it: CI's tool-audit gate (pyright, basic) refuses "
+                             "the file as it is")
+        vulture = shutil.which("vulture")
+        if vulture:
+            try:
+                rc, out = await _run_tool([vulture, "app", *([str(whitelist)] if whitelist.exists() else []),
+                                           "--min-confidence", "100"], tmp, 120)
+                if rc not in (0, 3):                               # 3: dead code found
+                    raise RuntimeError(out[:300])
+            except Exception as exc:
+                logger.warning("engine_vulture_failed err=%r", exc)
+                out = ""
+            for ln in out.splitlines():
+                m = re.match(r"^(app/\S+\.py):(\d+): (.+?) \(100% confidence\)$", ln.strip())
+                if m and m[1] in py:                               # only the job's files: the engine's are CI's
+                    found.append(f"`{m[1]}:{m[2]}` vulture: {m[3]} -- remove it (or use it): CI's tool-audit gate "
+                                 "(vulture, 100 % confidence) refuses dead code")
+    return found
+
+
+def without_repeated_names(found: list[str]) -> list[str]:
+    """§17.1939 — ruff's F821 says again what the engine's own finding already says about the same line ("`p:9`
+    reads `x`, which nothing in the file imports ..."): one finding per undefined name, the engine's (it carries the
+    fix)."""
+    own = set()
+    for f in found:
+        m = re.match(r"^`([^`:]+):(\d+)` reads `([^`]+)`, which nothing", f)
+        if m:
+            own.add((m[1], m[2], m[3]))
+    out = []
+    for f in found:
+        m = re.match(r"^`([^`:]+):(\d+)` ruff F821: Undefined name `([^`]+)`", f)
+        if m and (m[1], m[2], m[3]) in own:
+            continue
+        out.append(f)
+    return out
+
 def _module_names(code: str) -> set[str] | None:
     """The names a module binds at its top level (defs, classes, assignments, imports; inside a top-level `if` /
     `try` too); None when it does not parse."""
@@ -2725,6 +2837,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     found += importers_left_without(files_of({**me, "output_text": output}), current_sources(_others))   # §17.1931
     found += await lint_findings(files_of({**me, "output_text": output}))                            # §17.1936
+    found += await tool_audit_findings(files_of({**me, "output_text": output}))                    # §17.1939
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870
     # §17.1876 — a result is used as what its annotation says it is; every name a test uses is bound
     from app.modules.engine_contracts import undefined_test_names, wrong_result_uses
@@ -2738,6 +2851,12 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     # §17.1889 — an exit that swallows; a returned compare / literal read against the test's values; narrow rows
     from app.modules.engine_contracts import narrow_rows, returned_compares, swallowing_exits
     found += swallowing_exits(files_of({**me, "output_text": output}))
+    from app.modules.engine_contracts import helpers_taken_as_fixtures
+    found += helpers_taken_as_fixtures(files_of({**me, "output_text": output}))          # §17.1943
+    from app.modules.engine_contracts import fake_attrs_missing
+    found += fake_attrs_missing(files_of({**me, "output_text": output}))                 # §17.1946
+    from app.modules.engine_contracts import redefined_test_names
+    found += redefined_test_names(files_of({**me, "output_text": output}))               # §17.1951
     found += returned_compares(files_of({**me, "output_text": output}), _cur)
     found += narrow_rows(files_of({**me, "output_text": output}), _cur)
     from app.modules.engine_contracts import fake_sessions, own_helper_calls
@@ -2767,7 +2886,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import append_only_tables, raw_dict_binds
     found += raw_dict_binds(files_of({**me, "output_text": output}))                 # §17.1843
     found += deletes_in_tests(files_of({**me, "output_text": output}), append_only_tables(others) & set(jobs_own))
-    return found
+    return without_repeated_names(found)                                              # §17.1939
 
 
 def answers_read_where_asked(output: str) -> list[str]:

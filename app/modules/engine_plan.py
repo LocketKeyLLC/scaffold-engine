@@ -253,7 +253,8 @@ _GAPS_NOTE = ("\n\nThe audit {audit} could not verify these against the pages re
 
 def ask_research_gaps(tasks: list[dict], reviews: dict[str, str], names: list[str]) -> tuple[list[str], list[str]]:
     """§17.1928 — an API audit that could not verify what the code relies on (its UNVERIFIED lines) sends the questions
-    back to its research step, ONCE: the research step's text takes them and the two are read again (the keys
+    back to its research step, ONCE (§17.1948: again when the engine has pages for the API it has not read): the
+    research step's text takes them and the two are read again (the keys
     returned, to reset); the fix steps wait on the audit. The engine's research component answers what a source does
     not yet say -- never a code step guessing at it. Live (5b4880c0, 2026-11-05): the Alpaca research had read the
     paper-trading, auth and streaming pages; 11 of the audit's 13 findings were "no retrieved source states" the order
@@ -264,14 +265,21 @@ def ask_research_gaps(tasks: list[dict], reviews: dict[str, str], names: list[st
     for key, output in reviews.items():
         m = re.match(r"^(API_\w+)_AUDIT$", key)
         research = by_id.get(m.group(1)) if m else None
-        if research is None or (research.get("tool_config") or {}).get("gaps_asked"):
+        if research is None:
+            continue
+        known = next((a for a in _KNOWN_APIS if f"API_{a['key']}" == str(research["id"])), None)
+        had = list((research.get("tool_config") or {}).get("urls") or [])
+        # §17.1948 — asked once; again only when the engine knows pages for this API the research has not read
+        # (seeds added since, §17.1947). Live (5b4880c0): the SEC, Reddit and FINRA audits kept their UNVERIFIED lines
+        # after the one ask, every page that could answer them unknown to the engine at the time
+        unread = [u for u in (known.get("docs") or [])] if known else []
+        unread = [u for u in unread if u not in had]
+        if (research.get("tool_config") or {}).get("gaps_asked") and not unread:
             continue
         gaps = [ln for lines in review_gaps(output, names).values() for ln in lines]
         if not gaps:
             continue
         api = re.sub(r"^Research the (.+?) as its documentation states it$", r"\1", str(research.get("name") or ""))
-        known = next((a for a in _KNOWN_APIS if f"API_{a['key']}" == str(research["id"])), None)
-        had = list((research.get("tool_config") or {}).get("urls") or [])
         research["tool_config"] = {**(research.get("tool_config") or {}),
                                    **({"urls": had + [u for u in known.get("docs") or [] if u not in had]} if known else {})}
         research["notes"] = (str(research.get("notes") or "").rstrip() + _GAPS_NOTE.format(audit=key, api=api)
@@ -902,7 +910,11 @@ _AUDIT_NOTE = ("Read the research step {key} -- the {api}'s documentation as fet
 #: §17.1780 — outside services a lab calls, by what a step's text says; plus any "<Name> API" a step names
 _KNOWN_APIS = (
     {"key": "SEC_EDGAR", "host": re.compile(r"\bsec\.gov\b"), "name": "SEC EDGAR APIs", "re": re.compile(r"\bedgar\b|\bform\s*4\b|\b13f\b|\bsec\s+filings?\b", re.I),
-     "docs": ["https://www.sec.gov/search-filings/edgar-application-programming-interfaces", "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data", "https://www.sec.gov/divisions/investment/13ffaq"],
+     "docs": ["https://www.sec.gov/search-filings/edgar-application-programming-interfaces", "https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data", "https://www.sec.gov/divisions/investment/13ffaq",
+              # §17.1947 — a submissions document itself (one filer's): its own field names (`filings.recent.form`,
+              # `accessionNumber`, `primaryDocument`, `filingDate`, `tickers`), which no guide page states (measured
+              # 2026-11-19: loads, 3 kB of field outline)
+              "https://data.sec.gov/submissions/CIK0000320193.json"],
      "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
     {"key": "ALPACA", "host": re.compile(r"\balpaca\.markets\b|\bAlpacaPaperClient\b"), "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
      "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming",
@@ -915,10 +927,18 @@ _KNOWN_APIS = (
      "scope": "the paper REST API (account, orders, positions), the market data REST API (bars, latest quotes and "
               "trades) and the trade_updates websocket stream"},
     {"key": "REDDIT", "host": re.compile(r"\breddit\.com\b"), "name": "Reddit API", "re": re.compile(r"\breddit\b", re.I),
-     "docs": ["https://github.com/reddit-archive/reddit/wiki/OAuth2", "https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki"],
+     "docs": ["https://github.com/reddit-archive/reddit/wiki/OAuth2", "https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki",
+              # §17.1947 — the listing endpoints' parameters (`limit`, `after`, `raw_json`) and the Listing JSON shape
+              # (`kind`, `data.children[]`) (measured 2026-11-19: 71 kB and 14 kB)
+              "https://www.reddit.com/dev/api/", "https://github.com/reddit-archive/reddit/wiki/JSON"],
      "scope": "OAuth app-only access, listing endpoints, User-Agent and rate-limit rules, personal-use terms"},
     {"key": "FINRA", "host": re.compile(r"\bfinra\.org\b"), "name": "FINRA data APIs", "re": re.compile(r"\bfinra\b", re.I),
-     "docs": ["https://developer.finra.org/docs"],
+     "docs": ["https://developer.finra.org/docs",
+              # §17.1947 — the short-interest reporting dates, and a daily short-sale volume file itself: its header
+              # states the pipe-delimited fields (`Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market`)
+              # (measured 2026-11-19)
+              "https://www.finra.org/filing-reporting/regulatory-filing-systems/short-interest",
+              "https://cdn.finra.org/equity/regsho/daily/CNMSshvol20251103.txt"],
      "scope": "short interest and ATS / OTC transparency data: where it is published, its format and fields"},
     {"key": "CONGRESS_TRADES", "host": re.compile(r"\bhouse\.gov\b|\bsenate\.gov\b"), "name": "Congressional trade disclosures",
      "re": re.compile(r"\bcongress(?:ional)?\b|\bsenate\b.{0,30}\bdisclos|\bhouse\b.{0,30}\bdisclos", re.I),

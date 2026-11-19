@@ -196,10 +196,59 @@ def _specifics_for_contradiction(content: str) -> list[dict]:
 # Web fetch + extract
 # =============================================================================
 
+def _json_outline(v, path: str = "", depth: int = 0, out: list[str] | None = None) -> list[str]:
+    """§17.1947 — a JSON document as the fields it has: `filings.recent.accessionNumber: list of str, e.g.
+    "0000320193-25-000079"` -- one line per key, a list read by its first item, a value cut short."""
+    out = [] if out is None else out
+    if len(out) >= 400 or depth > 6:
+        return out
+    if isinstance(v, dict):
+        for k, x in list(v.items())[:80]:
+            _json_outline(x, f"{path}.{k}" if path else str(k), depth + 1, out)
+    elif isinstance(v, list):
+        first = v[0] if v else None
+        if isinstance(first, (dict, list)):
+            _json_outline(first, f"{path}[]", depth + 1, out)
+        else:
+            kind = type(first).__name__ if v else "empty"
+            out.append(f"{path}: list of {kind}" + (f", e.g. {str(first)[:80]!r}" if v else ""))
+    else:
+        out.append(f"{path}: {type(v).__name__}, e.g. {str(v)[:80]!r}")
+    return out
+
+
+def _non_html_text(body: str) -> str | None:
+    """§17.1947 — a body that is not HTML, as text the research can read: a JSON document as its field outline, plain
+    text (a pipe-delimited file, a CSV) as its first lines. None for HTML. Live (5b4880c0, 2026-11-19): the SEC's own
+    submissions JSON (`data.sec.gov/submissions/CIK….json`, the field names three audit lines called UNVERIFIED) and
+    FINRA's daily short-sale file (`Date|Symbol|ShortVolume|…`) both loaded and both came back empty -- trafilatura
+    extracts HTML only."""
+    head = body.lstrip()[:1]
+    if head == "<" or body.lstrip().startswith("%PDF"):
+        return None
+    sample = body[:4000]
+    if sample and sum(1 for ch in sample if not ch.isprintable() and ch not in "\r\n\t") > len(sample) // 20:
+        return None                                                    # a binary body read as text
+    if head in "{[":
+        import json as _json
+        try:
+            doc = _json.loads(body)
+        except ValueError:
+            return None
+        return "JSON document; its fields (a list read by its first item):\n" + "\n".join(_json_outline(doc))
+    lines = body.splitlines()
+    if not lines:
+        return None
+    shown = lines[:40]
+    return (f"Plain-text file, {len(lines)} lines; the first {len(shown)}:\n" + "\n".join(x[:300] for x in shown))
+
+
 def _extract_text_and_date(html: str) -> tuple[str, str]:
     """Body text plus the page's declared publication date (§17.1027), in ONE
     worker thread — trafilatura parses the tree once per call, so the metadata
     pass is a second parse; bounded by the same byte cap as the fetch."""
+    if (plain := _non_html_text(html)) is not None:                  # §17.1947 a JSON document, a data file
+        return plain, ""
     from app.utils.html_extract import extract_text, extract_metadata  # §17.1442 — one parse at a time
     text_out = extract_text(html, output_format="txt", with_metadata=False)
     # §17.1929 — an API reference page's endpoint as its embedded OpenAPI document states it (method, path, parameters,
