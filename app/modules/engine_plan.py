@@ -1591,7 +1591,7 @@ async def extend_converging_step(db, job_id: str, node_key: str, *, asked_by: st
 
 async def switch_code_model(db, job_id: str, node_key: str, *, asked_by: str = "engine §17.1848") -> dict | None:
     """When a CodeGen step has used its attempts and at least two of its last round's refusals are the same kind of
-    engine refusal, its next round runs on the other code model (`model_coder` <-> `model_general`), with fresh
+    engine refusal, its next round runs on another code model (§17.1953: from the coder, `model_cloud_heavy`), with fresh
     attempts. Live (follow-up 5b4880c0 T6, 2026-10-27): deepseek-v4-pro (pinned by the planner) stood in for a finished
     data module in its tests in every attempt of four rounds -- through exact refusals (§17.1836, verbatim since
     §17.1845) and the list of what may be mocked (§17.1839). Operator choice: switch the model. Once per step: a step
@@ -1623,8 +1623,14 @@ async def switch_code_model(db, job_id: str, node_key: str, *, asked_by: str = "
         return None
     current = str(row["assigned_model"] or "").strip() or get_model("model_coder", None)
     coder, general = get_model("model_coder", None), get_model("model_general", None)
-    other = coder if current != coder else general
-    if not other or other == current:
+    heavy = get_model("model_cloud_heavy", None)
+    # §17.1953 — from the coder, the step escalates to the HEAVY model (then general): the coder is the cheap first
+    # draw, the heavy one is paid for only by the steps that keep being refused. With coder and general on one model
+    # (2026-11-19: both deepseek-v4.1-flash) the old coder <-> general swap had nowhere to go. A step on another model
+    # (pinned) goes to the coder first, as before.
+    order = (heavy, general) if current == coder else (coder, heavy, general)
+    other = next((m for m in order if m and m != current), None)
+    if not other:
         return None
     out = await node_editor.edit_node(job_id, node_key, {
         "assigned_model": other, "tool_config": {**cfg, "model_switched_from": current, "switched_for": repeated}},

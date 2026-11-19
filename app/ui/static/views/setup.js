@@ -18,11 +18,11 @@ import { storage } from "../storage.js";
 // picks. Applied only for tags actually pulled on the target daemon; missing
 // tags keep the current value.
 const CLOUD_PICKS = {
-  model_general: "deepseek-v4-pro:cloud",
-  model_coder: "kimi-k2.7-code:cloud",
+  model_general: "deepseek-v4.1-flash:cloud",
+  model_coder: "deepseek-v4.1-flash:cloud",
   model_verifier: "glm-5.3-flash:cloud",
   model_router: "gemma4:cloud",
-  model_research_extract: "deepseek-v4-pro:cloud",
+  model_research_extract: "inkling-2-small:cloud",
   model_cloud_heavy: "deepseek-v4-pro:cloud",
   model_cloud_alt: "deepseek-v4-pro:cloud",
   model_triage: "gemma4:cloud",

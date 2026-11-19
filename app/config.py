@@ -401,7 +401,7 @@ class Settings(BaseSettings):
     # scores (corr 0.21). Scores are raw-logit → sigmoid for every family
     # (app/rerankers.py), so the 0.8 confidence threshold keeps its meaning.
     model_reranker: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
-    model_coder: str = "qwen2.5-coder:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.575/498)
+    model_coder: str = "qwen2.5-coder:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4.1-flash:cloud, §17.1953)
     # §17.632 — was qwen3.5:397b-cloud; A/B'd (synthesis probe, 5 reps) →
     # deepseek-v4-pro:cloud is 3.4× faster (5.6s vs 19.2s) at equal reliability
     # (5/5 non-empty) and equal/better synthesis quality with clean punctuation.
@@ -419,7 +419,7 @@ class Settings(BaseSettings):
     # level on their own gates, taking the engine from 4-roles-on-one-model to
     # 5 distinct models, max 2 roles each. Verified end to end with gemma4
     # removed ENTIRELY: 3/3 grounded, 9-10 facts, DAGs of 10-12 nodes.
-    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.999)
+    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4.1-flash:cloud, §17.1953)
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
     # #6.1 default, slower on CPU). "model_general" = the flagship cloud
@@ -503,7 +503,7 @@ class Settings(BaseSettings):
     # deepseek-v4-flash 24/24 @3.75s and glm-5.1 24/24 @10.27s were the only
     # perfect scorers; gemma4 scored 9/12 and failed confidence-grading 3/3,
     # glm-5.3-flash took the §17.854 attribution bait 2/3.
-    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.1624)
+    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: inkling-2-small:cloud, §17.1953)
     model_cloud_heavy: str = "qwen3.5:latest"  # §17.819 local-safe: escalation target = biggest local tag
     model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.1624)
     model_fallback: str = "qwen3.5:latest"

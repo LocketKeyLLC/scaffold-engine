@@ -1087,13 +1087,29 @@ def template_of(runbook: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+#: §17.1952 — `<<'EOF'`, `<<"EOF"`, `<<EOF`, `<<-EOF` (not `<<<`, a here-string)
+_HEREDOC_START_RE = re.compile(r"(?<!<)<<(-?)\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+
+
 def model_fence(text: str) -> str:
     """The commands the model wrote for the one free parameter: the first
     fenced block, stripped of prompts and comments."""
     m = _FENCE_RE.search(text or "")
     body = m.group(1) if m else (text or "")
     out = []
+    heredoc: Optional[tuple[str, bool]] = None              # (its terminator, `<<-` strips leading tabs)
     for ln in body.split("\n"):
+        if heredoc is not None:
+            # §17.1952 — a heredoc's body is a FILE's content, kept as written: its comments and blank lines are part of
+            # it. Live (job 0fb4ea7f LM2, 2026-11-19): `tee /root/lm_bench.sh <<'EOF'` lost its `#!/bin/bash` line here,
+            # and `systemd-run /root/lm_bench.sh` would have failed "Exec format error"
+            if ln.rstrip() == "```" or ln.strip().startswith("```"):
+                heredoc = None                              # an unclosed heredoc never swallows the fence
+                continue
+            out.append(ln.rstrip("\r"))
+            if (ln.lstrip("\t") if heredoc[1] else ln).rstrip() == heredoc[0]:
+                heredoc = None
+            continue
         ln = re.sub(r"^\s*\$\s+", "", ln.rstrip())
         # §17.1310 — a fence marker is never content. Live, ADD100's draw opened a
         # second fence the regex did not pair; the raw text kept a "```bash" line,
@@ -1104,6 +1120,9 @@ def model_fence(text: str) -> str:
             continue
         if ln.strip() and not ln.strip().startswith("#"):
             out.append(ln)
+            hd = _HEREDOC_START_RE.search(ln)
+            if hd:
+                heredoc = (hd.group(2), hd.group(1) == "-")
     return "\n".join(out)
 
 

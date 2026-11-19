@@ -67,7 +67,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
       "depends_on": [],
       "tool": "LLM | SearXNG | Milvus | CodeGen | Shell",
       "domain": "prompt | rag | eng | llm | spec | null",
-      "assigned_model": "model name or null",
+      "assigned_model": null,
       "notes": "optional execution hint",
       "is_deliverable": false
     }
@@ -2425,7 +2425,12 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
                 task["tool_config"] = cfg
         raw_model = str(raw.get("assigned_model", "")).strip()
         if raw_model and raw_model.lower() not in ("none", "null", ""):
-            task["assigned_model"] = raw_model
+            # §17.1950 — a model the PLANNER names is its own guess, not the operator's choice (that is a node edit):
+            # dropped, so the step runs on its role's model. Live (2026-10-15 → 11-05): the planner, itself
+            # deepseek-v4-pro, wrote its own tag on 68 CodeGen steps of four jobs -- every one bypassed `model_coder`
+            # (§17.427's rule) and drew on the account's costliest model: 43M of DeepSeek's 67M prompt tokens in 35
+            # days were CodeGen, the weekly usage limit reached after a few days of work
+            logger.info("planner_model_pin_dropped: node_key=%s tool=%s model=%s", task_id, task["tool"], raw_model)
         # §17.427 — do NOT auto-assign a model to CodeGen nodes. Leaving
         # assigned_model unset lets execution_agent route them through the
         # `model_coder` role (config.py:196 → execution_agent.py:799). The old
