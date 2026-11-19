@@ -392,11 +392,11 @@ services:
       # wizard's "Ollama Cloud (tuned)" preset; pin them in .env to opt in:
       #   (canon: presets/tuned-cloud.env — `make apply-preset PRESET=tuned-cloud`;
       #    `make check-tuned-picks` fails the build if this list drifts from it)
-      #   MODEL_GENERAL=deepseek-v4-pro:cloud
-      #   MODEL_CODER=kimi-k2.7-code:cloud
+      #   MODEL_GENERAL=deepseek-v4.1-flash:cloud
+      #   MODEL_CODER=deepseek-v4.1-flash:cloud
       #   MODEL_VERIFIER=glm-5.3-flash:cloud
       #   MODEL_ROUTER=gemma4:cloud
-      #   MODEL_RESEARCH_EXTRACT=deepseek-v4-pro:cloud
+      #   MODEL_RESEARCH_EXTRACT=inkling-2-small:cloud
       #   MODEL_CLOUD_HEAVY=deepseek-v4-pro:cloud
       #   MODEL_CLOUD_ALT=deepseek-v4-pro:cloud
       #   MODEL_TRIAGE=gemma4:cloud
