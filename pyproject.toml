@@ -83,6 +83,8 @@ markers = [
     # (not just its database). The conftest skips them when it is unreachable,
     # so the Postgres-only CI lane runs the rest.
     "needs_orchestrator: Calls the running orchestrator at ORCHESTRATOR_URL; skipped when unreachable",
+    # §17.1939 — the engine's pyright/vulture gate runs for real only in tests so marked (tests/conftest.py stubs it)
+    "tool_audit: Runs the engine's pyright/vulture gate (~12 s a call); every other test sees no findings",
 ]
 # Known noise: ~6-8 RuntimeWarnings per full-suite run with messages
 # `coroutine 'AsyncMockMixin._execute_mock_call' was never awaited` and

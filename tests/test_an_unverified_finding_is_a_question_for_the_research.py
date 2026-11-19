@@ -116,3 +116,19 @@ def test_an_audit_never_stands_on_its_own_fix_steps_and_a_skipped_step_wrote_not
     audit = next(t for t in tasks if t["id"] == "API_ALPACA_AUDIT")
     assert audit["depends_on"] == ["API_ALPACA"]                     # not its own fix (a cycle), not the skipped T7
     assert "`lab_spy` (step API_ALPACA_AUDITF1)" in audit["notes"] and "(step T7)" not in audit["notes"]
+
+
+def test_a_research_asked_once_is_asked_again_only_for_pages_it_has_not_read(monkeypatch):
+    """§17.1948 — the seed pages the engine gained since (§17.1947) earn one more ask; nothing new, no more asks."""
+    research = ep._research_step(next(a for a in ep._KNOWN_APIS if a["key"] == "ALPACA"))
+    tasks = [research, {"id": "API_ALPACA_AUDIT", "name": "Audit", "tool": "LLM", "status": "done",
+                        "depends_on": ["API_ALPACA"]}]
+    ep.ask_research_gaps(tasks, {"API_ALPACA_AUDIT": AUDIT}, MODS)
+    assert ep.ask_research_gaps(tasks, {"API_ALPACA_AUDIT": AUDIT}, MODS) == ([], [])
+    grown = [dict(a, docs=[*a["docs"], "https://docs.alpaca.markets/reference/getallpositions"]) if a["key"] == "ALPACA"
+             else a for a in ep._KNOWN_APIS]
+    monkeypatch.setattr(ep, "_KNOWN_APIS", tuple(grown))
+    changes, reset = ep.ask_research_gaps(tasks, {"API_ALPACA_AUDIT": AUDIT}, MODS)
+    assert reset == ["API_ALPACA", "API_ALPACA_AUDIT"] and len(changes) == 1
+    assert "https://docs.alpaca.markets/reference/getallpositions" in research["tool_config"]["urls"]
+    assert ep.ask_research_gaps(tasks, {"API_ALPACA_AUDIT": AUDIT}, MODS) == ([], [])      # read: no more asks

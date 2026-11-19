@@ -1910,6 +1910,14 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
                         " -- iterating a dict yields its keys, strings")
             if val.kind == "list" and isinstance(val.node, ast.List) and (bad := _list_literal_misuse(val.node, item, "")):
                 return f"{done}{bad[0]}{at}{bad[1]}"
+        if (item is not None and (item["attrs"] or item["calls"]) and val.kind == "list" and isinstance(val.node, ast.List)
+                and val.node.elts and not isinstance(val.node.elts[0], ast.Starred)):
+            # §17.1940 — each item read on as an object (`for row in await fetch_rows(): row.symbol`): the first item
+            # the test's list holds, judged as the module uses it (a `FakeRow` with no `symbol`). Only a fake the test
+            # built (a mock, an instance of its own class): a real value (`date(2026, 11, 3)`) has what its type has
+            first = _resolve(val.node.elts[0], fakes, before)
+            if first.mock:
+                return _check_uses(first, item, fakes, before, done + f"a list{at} whose first item is ")
         return None
     if not val.mock:
         return None
@@ -1944,6 +1952,16 @@ def _check_uses(val: _Val, uses: dict, fakes: _Fakes, before: int, done: str = "
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module writes `.{a}` to a database column, and a "
                     f"mock is not a value -- set `fake.{a} = \"…\"` on the object the call returns "
                     f"(`AsyncMock(return_value=SimpleNamespace({a}=\"…\"))`)")
+        if (a in (uses.get("ordered") or ()) and got.mock and got.kind is None       # §17.1944 read as a number
+                and not val.path and not _set_on(val, fakes)):
+            # only on an object the test bound itself (`response_mock = AsyncMock()` handed back by `get`): a bare
+            # mock's own children (`mock_instance.request()`) stand on a path the test may never take; and one the
+            # test set fields on is named below with every field it lacks at once (§17.1887)
+            kind = val.mock if val.mock in ("MagicMock", "AsyncMock") else "MagicMock"
+            return (f"{done}a fake whose `.{a}` is a mock{at}: the module compares it with a number (`.{a} >= …`), and "
+                    f"a mock cannot be ordered (\"'>=' not supported between instances of '{kind}' and 'int'\") -- "
+                    f"set `fake.{a} = …` to the number the real one has (for an HTTP response, a real "
+                    "`httpx.Response(200, json=…, request=httpx.Request(\"GET\", url))`)")
         if a in (uses.get("tested") or ()) and got.mock and got.kind is None:        # §17.1881 read for its truth
             return (f"{done}a fake whose `.{a}` is a mock{at}: the module tests it (`if … .{a}`), and a mock attribute "
                     f"is always truthy -- set `fake.{a} = False` (or what the real one would say)")
@@ -2028,6 +2046,18 @@ def _result_uses(code: str, matches, local_of=None) -> dict | None:
                     take(fn, t.id, isinstance(n.value, ast.Await))
                 elif isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self":
                     take(fn, f"self.{t.attr}", isinstance(n.value, ast.Await))
+            elif (isinstance(n, (ast.For, ast.AsyncFor)) and isinstance((call := _unwrap(n.iter)), ast.Call)
+                  and matches(call)):
+                # §17.1940 — `for row in await fetch_rows():`: the result is iterated, each item read on as `row`
+                # (live, 5b4880c0 DELIVERL2: no use was recorded, so nothing checked the fake the test handed in)
+                it = _new_use()
+                it["as"] = "list"
+                if isinstance(n.target, ast.Name):
+                    it["item"] = _uses(fn, n.target.id, local_of(fn) if local_of else local)
+                if not root["called"]:
+                    root["called"] = {"await": isinstance(n.iter, ast.Await), "then": _new_use()}
+                root["called"]["await"] = root["called"]["await"] or isinstance(n.iter, ast.Await)
+                _merge_uses(root["called"]["then"], it)
             elif isinstance(n, (ast.With, ast.AsyncWith)):                   # §17.1869 `async with X() as c:`
                 for item in n.items:
                     call = _unwrap(item.context_expr)
@@ -4481,6 +4511,12 @@ def _check_patch_site(pc: ast.Call, mod: str, owner: str, name: str, fn: ast.AST
             alias_name, fk = as_var, fixture_fk
     if new is None and _call_name(pc) == "setattr":
         return
+    if new is not None and fixture_fn is not None and fixture_fk is not None:
+        # §17.1944 — the value a fixture's patch installs (`monkeypatch.setattr(…, "AsyncClient", lambda *a, **k:
+        # fake_client)`) is the fixture's own: its names are bound in the fixture, not in the test that takes it.
+        # Live (5b4880c0 API_ALPACA_AUDITF1 a2, 2026-11-05): the lambda's `fake_client` read in the test's scope was
+        # unknown, and eight tests failed in the sandbox on a mock `status_code` compared with 400
+        fk = fixture_fk
     # §17.1921 — a patch given `return_value=` / `side_effect=` installs a mock whose call answers THAT, whatever the
     # fixture around it yields (live: `patch("…httpx.AsyncClient", return_value=fake_client)` inside fixture
     # `patched`, read as the fixture's own value)
@@ -5397,3 +5433,175 @@ def narrow_rows(files: dict[str, str], modules: dict[str, str]) -> list[str]:
                         found.append(msg)
                     break
     return _by_line(found)
+
+
+# ── §17.1943 a test takes a plain helper as a fixture ─────────────────────────────────────────────────────────
+
+def helpers_taken_as_fixtures(files: dict[str, str]) -> list[str]:
+    """A test whose parameter names a plain function of its own file (no `@pytest.fixture`): pytest looks the
+    parameter up as a fixture, finds none, and errors the test at setup ("fixture 'make_fill' not found"). Live
+    (5b4880c0 API_REDDIT_AUDITF1, 2026-11-05): helpers taken as fixtures, caught only by the sandbox, one attempt
+    each. Only a parameter a plain `def` of the same file is named after is read: anything else may be a conftest
+    or plugin fixture."""
+    out: list[str] = []
+    for path, code in files.items():
+        if not (path.startswith("tests/") and path.endswith(".py")):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        def _is_fixture(fn: ast.AST) -> bool:
+            return any("fixture" in ast.unparse(d) for d in getattr(fn, "decorator_list", []))
+
+        top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for c in tree.body:                                  # test classes: their methods too
+            if isinstance(c, ast.ClassDef):
+                top += [m for m in c.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        plain = {f.name: f for f in tree.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and not _is_fixture(f) and not f.name.startswith("test")}
+        for fn in top:
+            if not (fn.name.startswith("test") or _is_fixture(fn)):
+                continue
+            params = fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs
+            for a in params:
+                if a.arg in plain and a.arg != fn.name:
+                    h = plain[a.arg]
+                    out.append(f"`{path}:{fn.lineno}` `{fn.name}` takes `{a.arg}` as a fixture, and `{a.arg}` is a "
+                               f"plain function (line {h.lineno}): pytest finds no fixture by that name and errors the "
+                               f"test at setup -- call `{a.arg}(…)` inside the test (drop the parameter), or make it "
+                               "a `@pytest.fixture`")
+    return out
+
+
+# ── §17.1946 a test reads an attribute its own fake class never has ───────────────────────────────────────────
+
+def _class_attrs(c: ast.ClassDef, classes: dict[str, ast.ClassDef], _seen: frozenset = frozenset()) -> set[str] | None:
+    """Every attribute an instance of a test file's own class has: its methods, its class-level names, every
+    `self.<a> = …` in any method, and its local bases' (None when a base is not the file's own, or it answers any
+    name -- `__getattr__`)."""
+    out: set[str] = set()
+    for b in c.bases:
+        if isinstance(b, ast.Name) and b.id == "object":
+            continue
+        if not (isinstance(b, ast.Name) and b.id in classes and b.id not in _seen):
+            return None
+        sub = _class_attrs(classes[b.id], classes, _seen | {c.name})
+        if sub is None:
+            return None
+        out |= sub
+    for n in c.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if n.name in ("__getattr__", "__getattribute__"):
+                return None
+            out.add(n.name)
+            for x in ast.walk(n):
+                if isinstance(x, ast.Attribute) and isinstance(x.ctx, ast.Store) and isinstance(x.value, ast.Name) \
+                        and x.value.id == "self":
+                    out.add(x.attr)
+        elif isinstance(n, ast.ClassDef):
+            out.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                out |= {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
+    return out
+
+
+def fake_attrs_missing(files: dict[str, str]) -> list[str]:
+    """A test reads an attribute of an instance of its own fake class that the class never has. Live (5b4880c0
+    API_ALPACA_AUDITF1, 2026-11-05 03:39 UTC): `fake_client._responses.append(FakeResponse(…))` on a `FakeAsyncClient`
+    that keeps no `_responses` -- "AttributeError: 'FakeAsyncClient' object has no attribute '_responses'", caught
+    only by the sandbox, a round each. Read: names bound to `Cls(…)` in the test, or a fixture that returns or
+    yields one, taken by name; classes the file defines, whose bases are its own."""
+    out: list[str] = []
+    for path, code in files.items():
+        if not (path.startswith("tests/") and path.endswith(".py")):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        classes = {c.name: c for c in tree.body if isinstance(c, ast.ClassDef)}
+        if not classes:
+            continue
+        attrs = {k: _class_attrs(c, classes) for k, c in classes.items()}
+
+        def _made(e: ast.AST | None) -> str | None:
+            return (e.func.id if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in classes
+                    and attrs.get(e.func.id) is not None else None)
+
+        fixtures: dict[str, str] = {}
+        for f in tree.body:
+            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    any("fixture" in ast.unparse(d) for d in f.decorator_list):
+                gives = [x.value for x in ast.walk(f) if isinstance(x, (ast.Return, ast.Yield)) and x.value is not None]
+                local = {t.id: _made(a.value) for a in ast.walk(f) if isinstance(a, ast.Assign)
+                         for t in a.targets if isinstance(t, ast.Name)}
+                kinds = {(_made(g) or (local.get(g.id) if isinstance(g, ast.Name) else None)) for g in gives}
+                if len(kinds) == 1 and (k := kinds.pop()):
+                    fixtures[f.name] = k
+        funcs = [f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and not any(f in c.body for c in classes.values())]
+        for fn in funcs:
+            bound: dict[str, str] = {a.arg: fixtures[a.arg] for a in fn.args.args + fn.args.kwonlyargs
+                                     if a.arg in fixtures}
+            set_here: dict[str, set[str]] = {}
+            for n in sorted((x for x in ast.walk(fn) if isinstance(x, (ast.Assign, ast.Attribute))),
+                            key=lambda x: (getattr(x, "lineno", 0), getattr(x, "col_offset", 0))):
+                if isinstance(n, ast.Assign):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name):
+                            if (k := _made(n.value)):
+                                bound[t.id] = k
+                            else:
+                                bound.pop(t.id, None)
+                    continue
+                if not (isinstance(n.value, ast.Name) and n.value.id in bound) or n.attr.startswith("__"):
+                    continue
+                if isinstance(n.ctx, ast.Store):
+                    set_here.setdefault(n.value.id, set()).add(n.attr)
+                    continue
+                cls = bound[n.value.id]
+                if n.attr in (attrs[cls] or set()) or n.attr in set_here.get(n.value.id, set()):
+                    continue
+                msg = (f"`{path}:{n.lineno}` reads `{n.value.id}.{n.attr}`, and `{n.value.id}` is a `{cls}` (its own "
+                       f"class, line {classes[cls].lineno}), which has no `{n.attr}` -- `AttributeError` the instant "
+                       f"that line runs: give `{cls}` the attribute (`self.{n.attr} = …` in `__init__`) or use one it has")
+                if msg not in out:
+                    out.append(msg)
+    return out
+
+
+# ── §17.1951 a test file binds one top-level name twice ───────────────────────────────────────────────────────
+
+def redefined_test_names(files: dict[str, str]) -> list[str]:
+    """A test file that defines the same top-level function, fixture or class twice, with different bodies: the later
+    one replaces the earlier for EVERY test in the file, those written for the first included (the repo's ruff rules
+    leave F811 off in tests). Live (5b4880c0 T5, 2026-11-03 22:40 UTC, the "spy-test regression"): three
+    SPY-benchmark tests, byte-identical to their passing versions of the attempt before, failed with Decimal/float in
+    the module -- no module had changed, the tests call the module's functions directly on prices the file builds,
+    and the attempt had added two new test classes to the same file; a second same-named prices helper is the one
+    mechanism that fits (the draft itself was not kept)."""
+    out: list[str] = []
+    for path, code in files.items():
+        if not (path.startswith("tests/") and path.endswith(".py")):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        first: dict[str, ast.AST] = {}
+        for n in tree.body:
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            prev = first.get(n.name)
+            if prev is None:
+                first[n.name] = n
+                continue
+            if ast.dump(prev) == ast.dump(n, include_attributes=False) or ast.unparse(prev) == ast.unparse(n):
+                continue                                    # the same body twice: harmless
+            out.append(f"`{path}:{n.lineno}` defines `{n.name}` again (first at line {prev.lineno}), with another body: "
+                       f"the later one replaces the earlier for every test in the file, those written for the first "
+                       f"too -- give each its own name")
+    return out

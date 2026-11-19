@@ -578,7 +578,8 @@ def test_a_script_nobody_runs_in_this_block_is_not_flagged():
     assert sr.script_secret_not_passed([WRITE_SCRIPT, "ls -l /tmp"]) == []
 
 
-def test_it_is_a_shape_the_redraft_can_fix():
+def test_a_secret_not_passed_is_a_shape_the_redraft_can_fix():
+    # §17.1951 — was a second `test_it_is_a_shape_the_redraft_can_fix`, replaced by the later one and never run
     note = sr.shape_retry_note({"refused": sr.script_secret_not_passed(
         [WRITE_SCRIPT, "python3 /tmp/add_indexers.py"])})
     assert note and "only passes a stored value" in note
@@ -701,7 +702,7 @@ def test_the_superseded_gates_are_gone():
     assert "payload_will_not_compile(cmds)" in src
 
 
-def test_it_is_a_shape_the_redraft_can_fix():
+def test_a_payload_that_will_not_compile_is_a_shape_the_redraft_can_fix():
     note = sr.shape_retry_note({"refused": sr.payload_will_not_compile([BAD_SCRIPT])})
     assert note and "not valid Python" in note
 

@@ -91,10 +91,11 @@ def narrow_stale_test_steps(tasks: list[dict], rows: list[dict], files: dict[str
     return changes
 
 
-def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str],
-                        by_key: dict[str, dict]) -> list[tuple[str, str, list[str]]]:
+def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str], by_key: dict[str, dict],
+                        owned: list[tuple[str, str, list[str]]] | None = None) -> list[tuple[str, str, list[str]]]:
     """(step, test file, failing test names) for each failing file whose writer is a tests-only step of this job not
-    yet read again for this; the rest are logged (the operator's to see)."""
+    yet read again for this. §17.1942 — a file whose writer also writes a module goes into ``owned`` (a fix step of
+    its own); the rest are logged (the operator's to see)."""
     from app.sandbox.engine_tests import files_of, is_test
     by_file: dict[str, list[str]] = {}
     for nid in failed:
@@ -107,6 +108,10 @@ def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str],
         written = files_of(row) if row else {}
         cfg = row.get("tool_config") or {}
         cfg = cfg if isinstance(cfg, dict) else json.loads(cfg)
+        if (owned is not None and ":" not in step and written and not all(is_test(p) for p in written)
+                and not cfg.get(RERAN_KEY)):
+            owned.append((step, path, list(dict.fromkeys(names))))
+            continue
         if ":" in step or not written or not all(is_test(p) for p in written) or cfg.get(RERAN_KEY):
             logger.warning("lab_tests_together_failing file=%s step=%s tests=%s -- not a tests-only step of this job, "
                            "or read again once already", path, step, names[:20])
@@ -143,7 +148,8 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
             if k in by_key and cfg:
                 by_key[k] = {**by_key[k], "tool_config": cfg if isinstance(cfg, dict) else json.loads(cfg)}
     reset: list[str] = []
-    for step, path, names in steps_to_read_again(tests, res.failed, by_key):
+    owned: list[tuple[str, str, list[str]]] = []
+    for step, path, names in steps_to_read_again(tests, res.failed, by_key, owned):
         row = by_key[step]
         async with async_session() as db:
             node_id = (await db.execute(text("SELECT id FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
@@ -176,59 +182,125 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
         reset.append(step)
         _JUST_RESET.add(job_id)
         logger.warning("lab_tests_stale_step_reset job=%s step=%s file=%s failed=%d", job_id, step, path, len(names))
+    reset += await failing_test_fix_steps(job_id, deliver_key, owned, counts)                     # §17.1942
     return reset
 
 
-async def lint_fix_steps(job_id: str, deliver_key: str) -> list[str]:
-    """§17.1936 — before delivery, every file the job delivers passes the repo's linter: each module the linter
-    refuses gets a fix step (once; the delivery waits on it). Live (5b4880c0, 2026-11-05): two modules carried from
-    the earlier job, which no step of this one wrote, failed the commit hook -- a repeated dict key, a `zip()`
-    without `strict=`. Returns the steps added."""
+_TEST_FIX_NOTE = ("They run before the step passes, with no network or secrets; `async_session` is a scratch database "
+                  "with this job's tables (each test starts with them empty and inserts the rows it needs; never DELETE "
+                  "from them yourself); HTTP clients and model calls are mocked. Change the tests only: the modules "
+                  "they test are finished.")
+
+
+async def _insert_fix_step(job_id: str, deliver_key: str, taken: set[str], title: str, prompt: str) -> str | None:
+    """A CodeGen fix step the delivery waits on (§17.1936's shape, shared since §17.1942). None when it is not added."""
     from sqlalchemy import text as _t
 
-    from app.modules import engine_source, node_editor
+    from app.modules import node_editor
+    n = 1
+    while f"{deliver_key}L{n}" in taken:
+        n += 1
+    key = f"{deliver_key}L{n}"
+    async with async_session() as db:
+        out = await node_editor.insert_node(job_id, {"node_key": key, "title": title, "tool": "CodeGen",
+                                                     "node_type": "task", "depends_on": [], "prompt_template": prompt},
+                                            edited_by="engine §17.1936", db=db)
+        if out.get("error"):
+            logger.warning("lab_fix_step_not_added job=%s title=%r err=%s", job_id, title, out["error"])
+            return None
+        await db.execute(_t(
+            "UPDATE dag_nodes SET depends_on = array_append(depends_on, CAST(:k AS TEXT)) "
+            "WHERE job_id = :j AND node_key = :d AND NOT (CAST(:k AS TEXT) = ANY(depends_on))"),
+            {"j": job_id, "k": key, "d": deliver_key})
+        await db.commit()
+    taken.add(key)
+    _JUST_RESET.add(job_id)
+    return key
+
+
+async def failing_test_fix_steps(job_id: str, deliver_key: str, files: list[tuple[str, str, list[str]]],
+                                 counts: str) -> list[str]:
+    """§17.1942 — a test file that fails with the job's tests, whose writer also writes a module, gets a tests-only
+    fix step (once per file; the delivery waits on it): resetting the writer would redraw its finished module too.
+    Live (5b4880c0, 2026-11-05): such a file was only logged, and the question parked. ``files``: (writer step, test
+    file, failing test names)."""
+    from sqlalchemy import text as _t
+    async with async_session() as db:
+        nodes = (await db.execute(_t("SELECT node_key, title FROM dag_nodes WHERE job_id = :j"), {"j": job_id})).all()
+    taken, titles = {str(r[0]) for r in nodes}, {str(r[1]) for r in nodes}
+    added: list[str] = []
+    for step, path, names in files:
+        title = f"Fix {Path(path).stem} (its tests fail with the job's)"
+        if title in titles:
+            logger.warning("lab_tests_together_failing file=%s step=%s -- its fix step ran once already", path, step)
+            continue
+        prompt = (f"Python test module `{path}` -- step {step}'s tests: edit it in place (the whole file, every test "
+                  f"kept). Run with the job's other tests before delivery ({counts}), these fail:\n"
+                  + "".join(f"- `{x}`\n" for x in names[:40])
+                  + "Each passes alone or did when its step ran: look for what one test leaves behind for the next "
+                    "(rows, a patched name, an open transaction, a module-level cache) or assumes about order. "
+                  + _TEST_FIX_NOTE)
+        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt)
+        if key:
+            added.append(key)
+            logger.warning("lab_test_fix_added job=%s step=%s file=%s failed=%d", job_id, key, path, len(names))
+    return added
+
+async def review_fix_steps(job_id: str) -> list[str]:
+    """§17.1941 — before delivery, every finished review's findings have their fix steps: the same pass a review runs
+    when it finishes (`apply_to_job(only_reviews=True)`, which also makes the delivery wait on what it opens). Live
+    (5b4880c0, 2026-11-04 and 11-05): twice the five API audits finished with NOT MET findings, no fix step opened
+    (a hook in one loop only, then a result without its tool), and the run parked at DELIVER -- each time found by
+    hand. Returns the steps added."""
+    from app.modules import engine_plan
+    async with async_session() as db:
+        out = await engine_plan.apply_to_job(db, job_id, edited_by="engine §17.1941", only_reviews=True)
+    added = list(out.get("inserted") or [])
+    if added:
+        _JUST_RESET.add(job_id)
+        logger.warning("lab_review_fixes_added job=%s steps=%s", job_id, added)
+    return added
+
+async def lint_fix_steps(job_id: str, deliver_key: str) -> list[str]:
+    """§17.1936 — before delivery, every file the job delivers passes the repo's linter (§17.1939: and CI's tool-audit
+    gate; §17.1942: test files too): each file either refuses gets a fix step (once; the delivery waits on it). Live
+    (5b4880c0, 2026-11-05): two modules carried from the earlier job, which no step of this one wrote, failed the
+    commit hook -- a repeated dict key, a `zip()` without `strict=`. Returns the steps added."""
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source
     from app.modules.engine_plan import _tests_note
     async with async_session() as db:
         rows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
         titles = {r[0] for r in (await db.execute(_t("SELECT title FROM dag_nodes WHERE job_id = :j"),
                                                   {"j": job_id})).all()}
     files = engine_source.job_files(rows)
-    found = await engine_source.lint_findings({p: c for p, (c, _s) in files.items()})
+    _all = {p: c for p, (c, _s) in files.items()}
+    found = await engine_source.lint_findings(_all) + await engine_source.tool_audit_findings(_all)   # §17.1939
     by_path: dict[str, list[str]] = {}
     for f in found:
         by_path.setdefault(f[1:].split("`", 1)[0].split(":", 1)[0], []).append(f)
+    taken = {str(r.get("node_key")) for r in rows}
     added: list[str] = []
     for path, lines in sorted(by_path.items()):
-        if path.startswith("tests/"):
-            # a test file's writer is read again by the together-run's rule; one with no tests-only writer is logged
-            logger.warning("lab_lint_test_file job=%s file=%s findings=%d", job_id, path, len(lines))
-            continue
         leaf = Path(path).stem
         title = f"Fix {leaf} (the repo's linter)"
-        if title in titles or not path.startswith("app/modules/"):
+        if title in titles or not path.startswith(("app/modules/", "tests/")):
             continue
         step = files[path][1]
-        key = f"{deliver_key}L{len(added) + 1}"
-        while key in {str(r.get('node_key')) for r in rows} or key in added:
-            key += "x"
-        async with async_session() as db:
-            out = await node_editor.insert_node(job_id, {
-                "node_key": key, "title": title, "tool": "CodeGen", "node_type": "task", "depends_on": [],
-                "prompt_template": (f"Python module `{leaf}.py` -- "
-                                    + ("the earlier job's module" if ":" in step else f"step {step}'s module")
-                                    + ": edit it in place (the whole file, its public names kept). Fix what the repo's "
-                                    "linter (ruff, the commit hook's rules) refuses in it, and nothing else:\n"
-                                    + "".join(f"- {ln}\n" for ln in lines) + _tests_note(leaf))},
-                edited_by="engine §17.1936", db=db)
-            if out.get("error"):
-                logger.warning("lab_lint_fix_not_added job=%s file=%s err=%s", job_id, path, out["error"])
-                continue
-            await db.execute(_t(
-                "UPDATE dag_nodes SET depends_on = array_append(depends_on, CAST(:k AS TEXT)) "
-                "WHERE job_id = :j AND node_key = :d AND NOT (CAST(:k AS TEXT) = ANY(depends_on))"),
-                {"j": job_id, "k": key, "d": deliver_key})
-            await db.commit()
-        added.append(key)
-        _JUST_RESET.add(job_id)
-        logger.warning("lab_lint_fix_added job=%s step=%s file=%s findings=%d", job_id, key, path, len(lines))
+        owner = "the earlier job's" if ":" in step else f"step {step}'s"
+        if path.startswith("tests/"):
+            # §17.1942 — a test file's findings get a tests-only fix step (they were only logged)
+            prompt = (f"Python test module `{path}` -- {owner} tests: edit it in place (the whole file, every test kept). "
+                      "Fix what the repo's linter (ruff, the commit hook's rules) refuses in it, and nothing else:\n"
+                      + "".join(f"- {ln}\n" for ln in lines) + _TEST_FIX_NOTE)
+        else:
+            prompt = (f"Python module `{leaf}.py` -- {owner} module: edit it in place (the whole file, its public "
+                      "names kept). Fix what the repo's linter (ruff, the commit hook's rules) and CI's tool-audit gate "
+                      "(pyright, vulture) refuse in it, and nothing else:\n"
+                      + "".join(f"- {ln}\n" for ln in lines) + _tests_note(leaf))
+        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt)
+        if key:
+            added.append(key)
+            logger.warning("lab_lint_fix_added job=%s step=%s file=%s findings=%d", job_id, key, path, len(lines))
     return added
