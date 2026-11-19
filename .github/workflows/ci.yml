@@ -238,29 +238,15 @@ jobs:
           pip install pip-audit==2.10.1
 
       - name: pip-audit (requirements.txt, requirements-ci.txt, requirements-dev.txt)
-        # §17.585 — torch 2.10.0 carries PYSEC-2026-139 + CVE-2025-3000 with NO
-        # fixed release available (unfixable-upstream). torch is a required,
-        # non-optional transitive of sentence-transformers (the CrossEncoder
-        # reranker). Suppressed via --ignore-vuln (pip-audit's intended
-        # mechanism for unfixable CVEs) so the gate reflects deps we can act on.
-        # §17.812 (audit 1.6) — the suppressions now carry an EXPIRY: past
-        # PIP_AUDIT_REVISIT this step fails, forcing a re-check for a patched
-        # torch instead of the ignore living forever with no owner.
+        # §17.585 / §17.812 suppressed two torch advisories (PYSEC-2026-139, CVE-2025-3000) with an expiry.
+        # §17.1949 (2026-11-19) — re-checked on OSV when the expiry tripped: PYSEC-2026-139 is torch <= 2.10.0,
+        # CVE-2025-3000 is torch 2.6.0 only, and the torch every lane resolves (2.14.x) has no advisory; with no
+        # suppression all three files report "No known vulnerabilities found". The ignores and their expiry are
+        # gone: an advisory against a pinned dep fails this step until it is fixed or a new, dated ignore is added.
         run: |
-          # §17.1889 (2026-11-02) — re-checked: PYSEC-2026-139 lists torch <= 2.10.0 (a later torch is clear),
-          # CVE-2025-3000 still has no versioned fix in OSV; the torch bump is its own dependency PR
-          PIP_AUDIT_REVISIT="2026-11-16"
-          today="$(date -u +%F)"
-          echo "pip-audit CVE suppressions (expire $PIP_AUDIT_REVISIT): PYSEC-2026-139, CVE-2025-3000 — torch, unfixable-upstream (§17.585)"
-          if [[ "$today" > "$PIP_AUDIT_REVISIT" ]]; then
-            echo "::error::pip-audit ignore allowlist expired on $PIP_AUDIT_REVISIT. Re-check PYSEC-2026-139 / CVE-2025-3000 for a fixed torch, then refresh PIP_AUDIT_REVISIT."
-            exit 1
-          fi
           for f in requirements.txt requirements-ci.txt requirements-dev.txt; do
             printf '\n== pip-audit -r %s ==\n' "$f"
-            pip-audit --strict -r "$f" \
-              --ignore-vuln PYSEC-2026-139 \
-              --ignore-vuln CVE-2025-3000
+            pip-audit --strict -r "$f"
           done
 
   # ──────────────────────────────────────────────────────────
