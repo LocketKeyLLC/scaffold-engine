@@ -396,6 +396,10 @@ _NEGATED_GUEST_RE = re.compile(
     r"(?:(?:on|in|inside|into|at|from|to|within)\s+)?(?:the\s+)?(?:VM|CT|LXC|container|guest)\s*#?\s*\d{3,5}\b", re.I)
 
 
+#: §17.1959b — "via Caddy", "through the caddy proxy": the route a request takes, named by its service
+_ROUTE_WORD_RE = re.compile(r"\b(?:via|through)\s+(?:the\s+)?[\w.-]+", re.I)
+
+
 def without_excluded_guests(text: str) -> str:
     """§17.1959 — the step's words with every guest they EXCLUDE removed, so "on the lab runner (not on CT 111)" places
     the work on no guest. Live (job 7cc2a7ac T7 "Install Playwright toolchain", 2026-11-20): `_PLACE_RE` read "on CT
@@ -468,7 +472,11 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
     if len(named) > 1:
         return None
     names = (inventory or {}).get("names") or {}
-    hits = [gid for gid, name in names.items() if name and _mentions_guest(text, gid, str(name))]
+    # §17.1959b — a service named as the ROUTE ("Curl API routes via Caddy", "through the proxy") is what the step's
+    # requests pass through, not where it works: live (job 7cc2a7ac T8), `caddy` matched CT 120 `caddy-proxy`, the step
+    # was wrapped in CT 120's in-guest template, and the drafter's host-side curls were dropped (the body became `true`)
+    by_name = _ROUTE_WORD_RE.sub(" ", text)
+    hits = [gid for gid, name in names.items() if name and _mentions_guest(by_name, gid, str(name))]
     return hits[0] if len(hits) == 1 else None
 
 

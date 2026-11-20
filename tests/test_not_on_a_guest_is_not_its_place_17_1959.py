@@ -30,3 +30,11 @@ def test_each_negation_form_is_dropped():
 
 def test_plain_mentions_are_kept():
     assert without_excluded_guests("reach CT 111 from CT 120") == "reach CT 111 from CT 120"
+
+
+def test_a_service_named_as_the_route_is_not_the_guest():
+    # the live T8 (job 7cc2a7ac "Curl API routes via Caddy"); CT 120 is caddy-proxy
+    inv = {"names": {"120": "caddy-proxy", "111": "control-panel"}}
+    node = {"title": "Curl API routes via Caddy", "description": ""}
+    assert subject_guest(node, inv) is None
+    assert subject_guest({"title": "Restart Caddy", "description": ""}, inv) == "120"
