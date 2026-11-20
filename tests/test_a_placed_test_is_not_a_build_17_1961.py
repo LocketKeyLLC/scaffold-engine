@@ -26,3 +26,13 @@ def test_a_step_placed_on_the_proxmox_host_is_never_developed():
     # a placed GUEST build is still developed
     assert host_for({"title": "CT 111: add the media error state to the control-panel UI", "tool": "CodeGen",
                      "prompt_template": "edit /opt/control-panel-backend"}, [svc]) is not None
+
+
+def test_the_engines_done_when_boilerplate_is_not_a_route_inventory():
+    from app.modules.supervised_runs import rewrite_inventory_service_routes
+    node = {"title": "Proxmox host: exercise the Palworld start/stop control and confirm the effect",
+            "prompt_template": "Call the Palworld control that stops the server, then the one that starts it. On container "
+                               "111. Done when it WORKS: exercise it and read a real value back (call the route and check "
+                               "the answer carries the real data)."}
+    cmds, ver, notes = rewrite_inventory_service_routes(node, ["curl -s http://192.168.1.25:3001/api/palworld/status"], [])
+    assert cmds == ["curl -s http://192.168.1.25:3001/api/palworld/status"] and not notes

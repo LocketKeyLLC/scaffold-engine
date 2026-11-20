@@ -11325,7 +11325,11 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     with no check — refused, `suggested: myself`. The engine already knows the service, its guest and
     its directories (service_truth / develop.read_workspace); a model cannot read remote files and need
     not guess where they are. A read, settled by STATE-OK when at least one route was found."""
-    text = _node_text(node)
+    # §17.1961c — only the step's own words, before its "Done when": the engine's acceptance boilerplate ("Done when it
+    # WORKS: exercise it and read a real value back (call the route …") matched "read … route", and every split step
+    # carrying it was rewritten into a route inventory (live, job 7cc2a7ac ADD5 "exercise the Palworld start/stop
+    # control" became an inventory of /opt/palworld* on VM 106)
+    text = re.split(r"\bDone when\b", _node_text(node), maxsplit=1)[0]
     title = str((node or {}).get("title") or "")
     if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
         return list(commands or []), list(verify or []), []
