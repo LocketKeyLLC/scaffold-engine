@@ -110,3 +110,54 @@ def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
                 "(`| grep -o '\"name\": *\"[^\"]*\"'`); or send the body nowhere (`-o /dev/null -w '%{http_code}'`) (§17.1673).")})
             break
     return out
+
+
+#: §17.1958 — a whole systemd unit printed: `systemctl cat <unit>`, or a reader of a unit file or drop-in
+_UNIT_PRINT_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*cat\b|\b(?:cat|head|tail|less|more)\s+(?:-\S+\s+)*[\"']?\S*"
+                            r"(?:\.service|\.socket|\.timer|/systemd/system/\S+\.d/\S+\.conf)\b")
+#: …and `systemctl show`, which prints the same values as `Environment=` unless its properties are chosen without it
+_UNIT_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b[^|;&\n]*")
+#: …filtered so the Environment lines never reach the output: dropped, counted, chosen lines that are not them, or nowhere
+_UNIT_FILTERED_RE = re.compile(r"\|\s*grep\s+-[A-Za-z]*v[A-Za-z]*\s+['\"]?\^?\s*Environment|\|\s*(?:grep\s+-[A-Za-z]*[cq]|wc)\b"
+                               r"|>\s*/dev/null|\|\s*grep\s+(?:-[A-Za-z]+\s+)*(?P<pat>'[^']*'|\"[^\"]*\"|\S+)")
+
+
+def _shows_the_environment(call: str) -> bool:
+    """A `systemctl show` call prints `Environment=` when it chooses no property, or chooses that one."""
+    props = [p for ps in re.findall(r"(?:-p|--property)[\s=]+([\w,=-]+)", call) for p in ps.split(",")]
+    return not props or any(p.startswith("Environment") for p in props)
+
+
+def prints_a_units_environment(commands: list[str], verify: list[str]) -> list[dict]:
+    """§17.1958 — a read that PRINTS a whole systemd unit prints its `Environment=` lines, and a unit is where a service's
+    keys often live.
+
+    Live (job 7cc2a7ac T4 "Create restore point", 2026-11-20): the backup step ran `pct exec 111 -- systemctl cat
+    control-panel.service` and, as its check, `cat /root/panel-backup-…/etc/systemd/system/control-panel.service` -- the
+    control panel keeps the *arr and Proxmox keys it uses in that unit's `Environment=` lines, so both would have put
+    them into the run's record and the job. A unit read whose output drops those lines, counts, chooses other lines, or
+    goes nowhere is fine."""
+    out: list[dict] = []
+    for c in list(commands or []) + list(verify or []):
+        s = str(c)
+        show = next((m for m in _UNIT_SHOW_RE.finditer(s) if _shows_the_environment(m.group(0))), None)
+        if show:
+            out.append({"command": s[:200], "why": (
+                "this `systemctl show` PRINTS the unit's environment (`Environment=` -- every property when none is chosen, "
+                "or `-p Environment`), which is where a service keeps the keys it uses (live, T4's redraft read "
+                "control-panel.service's Environment this way). Choose the properties the step needs without it: "
+                "`systemctl show <unit> -p ExecStart -p WorkingDirectory -p User -p FragmentPath` (§17.1958).")})
+            continue
+        for m in _UNIT_PRINT_RE.finditer(s):
+            rest = re.split(r"\|\||&&|;", s[m.start():], maxsplit=1)[0]
+            f = _UNIT_FILTERED_RE.search(rest)
+            if f and not (f.group("pat") and re.search(r"Environment|key|pass|token|secret", f.group("pat"), re.I)):
+                continue
+            out.append({"command": s[:200], "why": (
+                "this read PRINTS a whole systemd unit, and its `Environment=` lines are where a service keeps the keys it "
+                "uses (live, T4 printed control-panel.service, which holds the panel's *arr and Proxmox keys) -- they would "
+                "land in the run's record and the job. Read what the step needs: `systemctl show <unit> -p ExecStart -p "
+                "WorkingDirectory -p User -p FragmentPath`, or `systemctl cat <unit> | grep -v '^Environment'`; a copy is "
+                "checked by `cmp` or `sha256sum` against its source, not by printing it (§17.1958).")})
+            break
+    return out
