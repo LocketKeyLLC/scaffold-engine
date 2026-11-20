@@ -2999,8 +2999,11 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     Only the drafter's own lines are judged: a template's frame is the engine's (its host-side `write /tmp/…sh`
     and ssh lines are how it reaches the guest) and §17.1634 already strips a read-only block's own options.
     """
-    if not commands or not declares_read_only(node):
+    if not commands:
         return []
+    if not declares_read_only(node):
+        # §17.1956 — a CHECK (verify/confirm/check… with no change in its text) is judged only on its in-guest body
+        return a_check_body_that_changes_the_machine(node, files) if _is_template_run(commands, runbook) else []
     if read_only_pushed_programs(commands, files):                   # §17.1694d/1699 — one read program, in any form
         return []
     # §17.1705 — the engine's own completeness read (§17.1504: `curl … | python3 -c "<its program>"`) is the engine's frame
@@ -3013,7 +3016,7 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
     # seeing the template's runbook -- stood aside for them
     if template_of(runbook or "") and all(re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:boot|start|wait|last)\b",
                                                     str(c)) for c in commands):
-        return []
+        return a_check_body_that_changes_the_machine(node, files)      # §17.1956 — the frame is the engine's, its body is not
     # §17.1678 — the engine's own API/section check (§17.1641/1651/1674: GETs only, composed from the service's code) is
     # the engine's frame like a template's. Live (job 5db1b088 PW1, 2026-10-19): "Verify control panel Palworld boxes",
     # declared read only, was refused because the whole `pct exec 111 -- sh -c '…'` check is one segment no read table holds.
@@ -3042,6 +3045,49 @@ def writes_in_a_read_only_step(commands: list[str], node: Optional[dict], runboo
                 f"report (`command -v <tool> || echo '<tool>: not installed'`), never something to install; and a "
                 f"read the machine answers locally is written in its plain local form, with no address, login or "
                 f"password of its own." + here)}]
+    return []
+
+
+def _is_template_run(commands: list[str], runbook: str) -> bool:
+    from app.modules.runbook_templates import template_of
+    return bool(template_of(runbook or "")) and all(
+        re.search(r"\bbash\s+/tmp/in_(?:ct|vm)_\d+(?:_agent)?\.sh\s+(?:boot|start|wait|last)\b", str(c)) for c in commands)
+
+
+#: §17.1956 — a line that changes the machine whatever it reads: a package install/removal or a service's state
+_MACHINE_CHANGE_RE = re.compile(
+    r"(?:^|[;&|(]\s*|\b(?:then|do|else)\s+)(?:sudo\s+)?(?:[A-Z_]+=\S*\s+)*"
+    r"(?:(?:apt-get|apt|aptitude|dnf|yum|zypper)\s+(?:-\S+\s+)*(?:install|reinstall|remove|purge|upgrade|dist-upgrade|autoremove)\b"
+    r"|apk\s+(?:add|del)\b|pip3?\s+install\b|npm\s+(?:install|i|ci)\b"
+    r"|systemctl\s+(?:--\S+\s+)*(?:start|stop|restart|reload|enable|disable|mask|unmask)\b"
+    r"|service\s+\S+\s+(?:start|stop|restart|reload)\b)")
+
+
+def a_check_body_that_changes_the_machine(node: Optional[dict], files: Optional[list[dict]]) -> list[dict]:
+    """§17.1956 — the in-guest body of a step that only READS installs nothing and starts or stops nothing.
+
+    Live (job 7cc2a7ac T2v2 "Verify the Caddy vhost on CT 120", 2026-11-20): the drafter wrote `apt-get install -y curl
+    jq` into the `in_ct_120` template's body, the engine prefixed its own dpkg repair (`dpkg --purge
+    --force-remove-reinstreq` on anything half-installed), and nothing refused it: §17.1637 stood aside for the
+    template's frame -- which is the engine's -- and with it for the body, which is the model's; and it judged only
+    steps that SAY "read only", while §17.1695's verify-titled checks were never judged at all. A check that installs
+    its own tools changes the machine it reports on; a missing tool is a finding."""
+    if not only_reads(node):
+        return []
+    from app.modules.runbook_templates import APT_REPAIR_PRELUDE
+    for f in files or []:
+        for body in (m.group("body") for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or ""))):
+            for ln in body.splitlines():
+                code = _strip_comment_shell(ln).strip()
+                if not code or ln.strip() in APT_REPAIR_PRELUDE:
+                    continue
+                if _MACHINE_CHANGE_RE.search(code):
+                    return [{"command": code[:200], "why": (
+                        f"this step only READS (\"{str((node or {}).get('title') or '')[:80]}\"), and `{code[:80]}` "
+                        "changes the machine it reports on. Use only what the guest already has: a tool that may be "
+                        "missing is a finding to report (`command -v <tool> || echo '<tool>: not installed'`), never "
+                        "something to install; and a service's state is read (`systemctl is-active <unit>`), never "
+                        "set (§17.1956).")}]
     return []
 
 
