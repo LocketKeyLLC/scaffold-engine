@@ -40,3 +40,14 @@ def test_the_frame_gate_runs_it():
     import inspect
     from app.modules import supervised_runs
     assert "_prints_a_units_environment(cmds, verify)" in inspect.getsource(supervised_runs)
+
+
+def test_systemctl_show_prints_the_environment_unless_properties_leave_it_out():
+    # the live T4 redraft
+    assert prints_a_units_environment(["pct exec 111 -- systemctl show control-panel.service -p WorkingDirectory "
+                                       "-p ExecStart -p User -p Environment --no-pager | tee /root/b/p.txt"], [])
+    assert prints_a_units_environment(["systemctl show control-panel.service"], [])
+    assert prints_a_units_environment(["systemctl show control-panel.service --property=ExecStart,Environment"], [])
+    assert prints_a_units_environment(["systemctl show control-panel.service -p ExecStart -p WorkingDirectory",
+                                       "systemctl show caddy -p ExecStart --value",
+                                       "systemctl show caddy.service -p ActiveState,SubState"], []) == []

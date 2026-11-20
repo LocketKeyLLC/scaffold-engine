@@ -115,9 +115,17 @@ def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
 #: §17.1958 — a whole systemd unit printed: `systemctl cat <unit>`, or a reader of a unit file or drop-in
 _UNIT_PRINT_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*cat\b|\b(?:cat|head|tail|less|more)\s+(?:-\S+\s+)*[\"']?\S*"
                             r"(?:\.service|\.socket|\.timer|/systemd/system/\S+\.d/\S+\.conf)\b")
+#: …and `systemctl show`, which prints the same values as `Environment=` unless its properties are chosen without it
+_UNIT_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b[^|;&\n]*")
 #: …filtered so the Environment lines never reach the output: dropped, counted, chosen lines that are not them, or nowhere
 _UNIT_FILTERED_RE = re.compile(r"\|\s*grep\s+-[A-Za-z]*v[A-Za-z]*\s+['\"]?\^?\s*Environment|\|\s*(?:grep\s+-[A-Za-z]*[cq]|wc)\b"
                                r"|>\s*/dev/null|\|\s*grep\s+(?:-[A-Za-z]+\s+)*(?P<pat>'[^']*'|\"[^\"]*\"|\S+)")
+
+
+def _shows_the_environment(call: str) -> bool:
+    """A `systemctl show` call prints `Environment=` when it chooses no property, or chooses that one."""
+    props = [p for ps in re.findall(r"(?:-p|--property)[\s=]+([\w,=-]+)", call) for p in ps.split(",")]
+    return not props or any(p.startswith("Environment") for p in props)
 
 
 def prints_a_units_environment(commands: list[str], verify: list[str]) -> list[dict]:
@@ -132,6 +140,14 @@ def prints_a_units_environment(commands: list[str], verify: list[str]) -> list[d
     out: list[dict] = []
     for c in list(commands or []) + list(verify or []):
         s = str(c)
+        show = next((m for m in _UNIT_SHOW_RE.finditer(s) if _shows_the_environment(m.group(0))), None)
+        if show:
+            out.append({"command": s[:200], "why": (
+                "this `systemctl show` PRINTS the unit's environment (`Environment=` -- every property when none is chosen, "
+                "or `-p Environment`), which is where a service keeps the keys it uses (live, T4's redraft read "
+                "control-panel.service's Environment this way). Choose the properties the step needs without it: "
+                "`systemctl show <unit> -p ExecStart -p WorkingDirectory -p User -p FragmentPath` (§17.1958).")})
+            continue
         for m in _UNIT_PRINT_RE.finditer(s):
             rest = re.split(r"\|\||&&|;", s[m.start():], maxsplit=1)[0]
             f = _UNIT_FILTERED_RE.search(rest)
