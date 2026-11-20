@@ -2655,6 +2655,12 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     an `ssh` into a machine, or a host-side `qm`/`pct` operation ON the guest,
     which is legitimately the host's work about it).
     """
+    # §17.1962b — a step whose TITLE places it on the Proxmox host is host work, whatever guest its body mentions (live,
+    # job 7cc2a7ac T17 "Proxmox host: use the control panel … controls": the body says to read App.jsx in CT 111, and the
+    # host's own curls were refused for "changing the HOST instead of guest 111")
+    from app.modules.develop import _HOST_PLACE_RE
+    if _HOST_PLACE_RE.match(str((node or {}).get("title") or "")):
+        return []
     from app.modules.machine_truth import without_excluded_guests
     text = without_excluded_guests(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))   # §17.1959
     ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
