@@ -2646,7 +2646,8 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     an `ssh` into a machine, or a host-side `qm`/`pct` operation ON the guest,
     which is legitimately the host's work about it).
     """
-    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    from app.modules.machine_truth import without_excluded_guests
+    text = without_excluded_guests(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))   # §17.1959
     ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
     # §17.1344 — an id no machine has is not a guest. Live, the step that hands the
     # shared media tree to the services says "in-container 999:996 is host

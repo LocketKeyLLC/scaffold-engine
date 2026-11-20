@@ -390,6 +390,25 @@ _PLACE_RE = re.compile(
     r"|\b(?:on|in|inside|into|within|to)\s+(?:the\s+)?(?:LXC|CT|VM|container|guest)\s*#?\s*(\d{3,5})\b", re.I)
 
 
+#: §17.1959 — a guest the step's words EXCLUDE: "(not on CT 111)", "never inside VM 106", "instead of container 120"
+_NEGATED_GUEST_RE = re.compile(
+    r"\b(?:not|never|nor|except|excluding|rather\s+than|instead\s+of|other\s+than|outside(?:\s+of)?)\s+"
+    r"(?:(?:on|in|inside|into|at|from|to|within)\s+)?(?:the\s+)?(?:VM|CT|LXC|container|guest)\s*#?\s*\d{3,5}\b", re.I)
+
+
+#: §17.1959b — "via Caddy", "through the caddy proxy": the route a request takes, named by its service
+_ROUTE_WORD_RE = re.compile(r"\b(?:via|through)\s+(?:the\s+)?[\w.-]+", re.I)
+
+
+def without_excluded_guests(text: str) -> str:
+    """§17.1959 — the step's words with every guest they EXCLUDE removed, so "on the lab runner (not on CT 111)" places
+    the work on no guest. Live (job 7cc2a7ac T7 "Install Playwright toolchain", 2026-11-20): `_PLACE_RE` read "on CT
+    111" inside "(not on CT 111)" as the place, the step was drafted INSIDE the panel's container through
+    `run_in_container` -- Node, Chromium and its system libraries into the very service under test -- and a redraft
+    whose note repeated "NOT on CT 111" was wrapped in the same template, because the note named CT 111 again."""
+    return _NEGATED_GUEST_RE.sub(" ", str(text or ""))
+
+
 def place_guest(node: Optional[dict]) -> Optional[str]:
     """§17.1581 — the ONE guest the step's own words place the work ON ("Edit the Radarr handler on
     container 111 …"), or None when the words name no place or more than one.
@@ -399,7 +418,7 @@ def place_guest(node: Optional[dict]) -> Optional[str]:
     CT 103 and the draft stopped Radarr and rewrote its config.xml there, while the panel on 111 — the
     place the step names — was never touched. Read from ALL the step's words: the planner wrote this
     one into `prompt_template`, which `title + description` readers never saw."""
-    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    text = without_excluded_guests(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))
     ids = list(dict.fromkeys((m.group(1) or m.group(2)) for m in _PLACE_RE.finditer(text)))
     # one place, and no OTHER guest in the words: "Configure VM 100 … (already passed to VM 110)" and "move the
     # media from container 101 to container 103" name two machines, and a place phrase on one of them decides nothing
@@ -412,7 +431,7 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
     against the inventory ("Install PalWorld server" → 106 palworld-server). Live,
     T23 had no id in its text, so no truth was read, no template applied, and the
     draft went over ssh with sudo into a VM whose agent answers."""
-    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description"))
+    text = without_excluded_guests(" ".join(str((node or {}).get(k) or "") for k in ("title", "description")))
     # §17.1340 — a guest the step's own commands ACT ON outranks one it merely
     # mentions. Live, ADD129 ("give Radarr, Sonarr and the download client the
     # shared media storage") carries a measured note that names `Jellyfin (CT 101)`
@@ -453,7 +472,11 @@ def subject_guest(node: Optional[dict], inventory: Optional[dict] = None) -> Opt
     if len(named) > 1:
         return None
     names = (inventory or {}).get("names") or {}
-    hits = [gid for gid, name in names.items() if name and _mentions_guest(text, gid, str(name))]
+    # §17.1959b — a service named as the ROUTE ("Curl API routes via Caddy", "through the proxy") is what the step's
+    # requests pass through, not where it works: live (job 7cc2a7ac T8), `caddy` matched CT 120 `caddy-proxy`, the step
+    # was wrapped in CT 120's in-guest template, and the drafter's host-side curls were dropped (the body became `true`)
+    by_name = _ROUTE_WORD_RE.sub(" ", text)
+    hits = [gid for gid, name in names.items() if name and _mentions_guest(by_name, gid, str(name))]
     return hits[0] if len(hits) == 1 else None
 
 

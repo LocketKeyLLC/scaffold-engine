@@ -874,7 +874,8 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     texts = [_resolve_ids(t) for t in [str(c) for c in commands or []]
              + [str((f or {}).get("content") or "") for f in files or []]]
     guests = guests_in(texts)
-    subject = str((node or {}).get("title") or "") + "\n" + str((node or {}).get("description") or "")
+    from app.modules.machine_truth import without_excluded_guests
+    subject = without_excluded_guests(str((node or {}).get("title") or "") + "\n" + str((node or {}).get("description") or ""))   # §17.1959
     subjects = list(dict.fromkeys(_SUBJECT_RE.findall(subject))) if node else []
     # §17.1316 — "Install PalWorld server" names VM 106 by its name; the pause measured it,
     # so the truth's guest is the step's subject for every rule below.
