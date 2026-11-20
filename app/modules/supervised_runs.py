@@ -5943,7 +5943,10 @@ def repair_lookups_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict],
 
 
 #: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
-_VAR_REF_RE = re.compile(r"\$\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)")
+#: §17.1955 — a `$` after one backslash is a literal dollar, not a read: `sed -n "/start/,\$p"` was refused
+#: "`$p` is read here and nothing sets it" (live, job 0fb4ea7f LM15). Two backslashes are an escaped backslash,
+#: and the `$` after them does expand.
+_VAR_REF_RE = re.compile(r"(?:(?<=\\\\)|(?<!\\))\$(?:\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))")
 #: `NAME=value`, `export NAME=value`, `NAME="$(…)"` — a value the block sets itself
 _VAR_SET_RE = re.compile(
     # the name may open the line, follow a separator, or sit just inside a quote
