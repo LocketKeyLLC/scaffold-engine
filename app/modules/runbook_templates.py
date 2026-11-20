@@ -1025,6 +1025,39 @@ def read_only_remote(remote_commands: str) -> str:
     return "\n".join(ln for ln in text.split("\n") if not _SHELL_OPTIONS_RE.match(ln.strip()))
 
 
+_BLOCK_OPEN_RE = re.compile(r"(?<![\w-])(?:if|for|while|until|case)(?![\w-])")
+_BLOCK_CLOSE_RE = re.compile(r"(?<![\w-])(?:fi|done|esac)(?![\w-])")
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+#: a line that ends here continues on the next without a `;` (`then`, `do`, `else`, `{`, a pipe or a `&&`/`||`)
+_CONTINUES_RE = re.compile(r"(?:(?<![\w-])(?:then|do|else)|\{|\|\||&&|\|)\s*$")
+
+
+def shell_statements(lines: list[str]) -> list[str]:
+    """§17.1957 — the body's lines joined into whole shell statements: a multi-line `if`/`for`/`while`/`case` becomes
+    the one-line compound the read judgment already understands (`for p in …; do if [ -e "$p" ]; then …; fi; done`).
+
+    Live (job 7cc2a7ac T2v2 "Verify the Caddy vhost on CT 120", 2026-11-20): a read-only inventory with three
+    multi-line blocks was judged line by line; `for p in …; do` and `if command -v caddy …; then` are heads with no
+    body, so no read table holds them, the block was not marked read-only (§17.1608), and the frame was refused "this
+    block has no check at all" (§17.1345) although §17.1680 exempts exactly a read-only template block."""
+    out: list[str] = []
+    cur: list[str] = []
+    depth = 0
+    for ln in lines:
+        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+        depth += len(_BLOCK_OPEN_RE.findall(code)) - len(_BLOCK_CLOSE_RE.findall(code))
+        cur.append(ln)
+        if depth <= 0:
+            joined = ""
+            for part in cur:
+                joined = part if not joined else (f"{joined} {part}" if _CONTINUES_RE.search(joined) else f"{joined}; {part}")
+            out.append(joined)
+            cur, depth = [], 0
+    if cur:                                                               # an unclosed block: judged as it stands
+        out.append("; ".join(cur))
+    return out
+
+
 def strict_line(remote_commands: str) -> str:
     """§17.1608 — `set -e` for in-guest work that CHANGES something; not for a block that only reads.
 
@@ -1035,6 +1068,7 @@ def strict_line(remote_commands: str) -> str:
     from app.modules.supervised_runs import _reads_only
     lines = [ln.strip() for ln in str(remote_commands or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
     lines = [ln for ln in lines if not _SHELL_OPTIONS_RE.match(ln)]       # §17.1634 — a shell option changes no machine
+    lines = shell_statements(lines)                                        # §17.1957 — a loop is judged whole
     if lines and all(_reads_only(ln) for ln in lines):
         # §17.1608b — and the block's exit is not its last read's: live (job 0fb4ea7f T15), a grep that found no OLLAMA_*
         # key (the compose default is used) exited 1 and the read-only step was recorded FAILED. The checks judge it.
