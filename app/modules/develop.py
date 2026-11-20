@@ -108,7 +108,11 @@ _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|
                              r"|\bpveum\b|\bpvesh\s+(?:create|set|delete)\b|\bpvesm\b|\bpvenode\b")
 
 
-_CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:validate|verify|check|test|audit|review|document)\b", re.I)
+#: §17.1961 — after an optional `<place>:` prefix ("CT 111: verify …", "Proxmox host: test …"), the convention that names
+#: a step's machine in its title. Live (job 7cc2a7ac T16, retitled "Proxmox host: test the control panel game-server
+#: controls through its API"): the prefix hid the leading verb, the test was taken for a build, and the develop flow
+#: proposed rewriting the panel's Palworld route files.
+_CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:validate|verify|check|test|audit|review|document)\b", re.I)
 
 
 def host_for(node: Optional[dict], services: Optional[list], brief: str = "") -> Optional[Host]:
