@@ -379,6 +379,9 @@ _ROUTE_TOOL = model_router.Tool(
     },
 )
 
+# §17.1954 — the router's output cap; scripts/model_ab.py imports it, so the A/B measures this call.
+_ROUTE_MAX_TOKENS = 512
+
 _ROUTE_SYSTEM = (
     "You are the top-level router for a self-hosted LLM orchestration engine. "
     "The operator typed a plain message (no slash command). Decide if it is a "
@@ -443,7 +446,7 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
             [_ROUTE_TOOL],
             role=role,
             temperature=0.0,
-            max_tokens=512,
+            max_tokens=_ROUTE_MAX_TOKENS,
             tool_choice="auto",
         )
     except Exception as exc:  # network / provider error — never block the turn
