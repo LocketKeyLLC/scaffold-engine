@@ -491,24 +491,59 @@ class Task:
     default_goldens: Path
     dispatch: Callable[..., Awaitable[Any]]
     score: Callable[[dict, Any], Awaitable[dict]]
+    # §17.1954 — the output cap production gives this call. A trial must run under the same cap, or it
+    # measures a call production never makes: routing ran at 8192 against the router's 512, and on CPU
+    # one qwen3:4b draw generated for over two hours.
+    prod_max_tokens: Callable[[], int]
+
+
+def _routing_cap() -> int:
+    from app.modules.command_guide import _ROUTE_MAX_TOKENS
+    return _ROUTE_MAX_TOKENS
+
+
+def _triage_cap() -> int:
+    from app.native_chat.triage import _TRIAGE_MAX_TOKENS
+    return _TRIAGE_MAX_TOKENS
+
+
+def _verifier_cap() -> int:
+    from app.config import settings
+    return settings.verifier_max_tokens
+
+
+def _extraction_cap() -> int:
+    from app.modules.gt_extractor import DISTILL_MAX_TOKENS
+    return DISTILL_MAX_TOKENS
+
+
+def _research_extract_cap() -> int:
+    from app.modules.research_agent import EXTRACT_MAX_TOKENS
+    return EXTRACT_MAX_TOKENS
+
+
+def _codegen_cap() -> int:
+    from app.config import settings
+    return settings.node_generation_max_tokens
 
 
 TASKS: dict[str, Task] = {
     "codegen": Task("codegen", _FIXTURES / "codegen_goldens.json",
-                    _dispatch_codegen, _score_codegen),
+                    _dispatch_codegen, _score_codegen, _codegen_cap),
     "extraction": Task("extraction", _FIXTURES / "extraction_goldens.json",
-                       _dispatch_extraction, _score_extraction),
+                       _dispatch_extraction, _score_extraction, _extraction_cap),
     "verifier": Task("verifier", _FIXTURES / "verifier_goldens.json",
-                     _dispatch_verifier, _score_verifier),
+                     _dispatch_verifier, _score_verifier, _verifier_cap),
     "routing": Task("routing", _FIXTURES / "routing_goldens.json",
-                    _dispatch_routing, _score_routing),
+                    _dispatch_routing, _score_routing, _routing_cap),
     # §17.993 — the prompt `model_research_extract` actually runs.
     "research_extract": Task("research_extract",
                              _FIXTURES / "research_extract_goldens.json",
-                             _dispatch_research_extract, _score_research_extract),
+                             _dispatch_research_extract, _score_research_extract,
+                             _research_extract_cap),
     # §17.997 — the prompts `model_triage` actually runs.
     "triage": Task("triage", _FIXTURES / "triage_goldens.json",
-                   _dispatch_triage, _score_triage),
+                   _dispatch_triage, _score_triage, _triage_cap),
 }
 
 
@@ -622,7 +657,7 @@ async def run_model_ab_task(
     *,
     repeat: int = 1,
     temperature: float = 0.2,
-    max_tokens: int = 8192,
+    max_tokens: int | None = None,
     limit: int = 0,
 ) -> dict:
     """§17.578 — library API for the model A/B harness (used by the scheduled
@@ -634,6 +669,7 @@ async def run_model_ab_task(
     if task_name not in TASKS:
         raise ValueError(f"unknown task: {task_name!r} (have {sorted(TASKS)})")
     task = TASKS[task_name]
+    max_tokens = max_tokens or task.prod_max_tokens()
     goldens = _load_goldens(task.default_goldens)
     if limit > 0:
         goldens = goldens[:limit]
@@ -671,7 +707,8 @@ async def main() -> int:
     ap.add_argument("--limit", type=int, default=0,
                     help="Run only the first N goldens (0 = all) — for quick probes.")
     ap.add_argument("--temperature", type=float, default=0.2)
-    ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--max-tokens", type=int, default=None,
+                    help="Output cap per trial (default: the cap production gives this call).")
     ap.add_argument("--outfile", type=Path,
                     default=Path("/tmp/model_ab_results.jsonl"))
     ap.add_argument("--dry-run", action="store_true",
@@ -684,8 +721,9 @@ async def main() -> int:
     if args.limit > 0:
         goldens = goldens[:args.limit]
 
+    max_tokens = args.max_tokens or task.prod_max_tokens()
     n = len(models) * len(goldens) * args.repeat
-    print(f"Task:    {task.name}")
+    print(f"Task:    {task.name}  (max_tokens {max_tokens})")
     print(f"Models:  {models}")
     print(f"Goldens: {len(goldens)} ({', '.join(g['id'] for g in goldens)})")
     print(f"Repeat:  {args.repeat}  →  {n} trials total")
@@ -703,26 +741,34 @@ async def main() -> int:
         if not available[model]:
             print(f"  ⚠ {model}: not pulled — skipping (run: ollama pull {model})")
 
+    # §17.1954 — each trial is appended as it lands, so a crash or a reboot loses only the trial in flight
     rows: list[dict] = []
+    out = args.outfile.open("w")
+
+    def keep(row: dict) -> None:
+        rows.append(row)
+        out.write(json.dumps(row) + "\n")
+        out.flush()
+
     for model in models:
         if not available[model]:
-            rows.append({"task": task.name, "model": model, "golden": "(preflight)",
-                         "ok": False, "passed": False,
-                         "error": "not pulled — ollama pull required"})
+            keep({"task": task.name, "model": model, "golden": "(preflight)",
+                  "ok": False, "passed": False,
+                  "error": "not pulled — ollama pull required"})
             continue
         for golden in goldens:
             for i in range(args.repeat):
                 r = await _run_one(task, model, golden, temperature=args.temperature,
-                                   max_tokens=args.max_tokens)
+                                   max_tokens=max_tokens)
                 r["repeat"] = i
-                rows.append(r)
+                keep(r)
                 tag = "ok" if r.get("ok") else f"ERR:{r.get('error','')[:60]}"
                 mark = "✓" if r.get("passed") else "✗"
                 metric = f"{r.get('metric','')}={r.get('metric_value','-')}" if r.get("ok") else ""
                 print(f"  {model:<30} {golden['id']:<22} {mark} "
-                      f"({tag}, {r.get('wall_s','?')}s, {metric})")
+                      f"({tag}, {r.get('wall_s','?')}s, {metric})", flush=True)
 
-    args.outfile.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    out.close()
     summary = _summarize(rows)
     _print_table(summary, task.name)
     print(f"Per-trial JSONL → {args.outfile}")

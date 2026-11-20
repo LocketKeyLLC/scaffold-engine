@@ -452,6 +452,9 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
   ]
 }"""
 
+# §17.1954 — the extract call's output cap; scripts/model_ab.py imports it, so the A/B measures this call.
+EXTRACT_MAX_TOKENS = 4096
+
 EXTRACT_SYSTEM_V1 = """You are a knowledge extraction engine. Given search results about a topic,
 extract atomic, self-contained factual entries and record them by calling the
 `record_entries` tool.
@@ -1116,7 +1119,7 @@ async def _extract_entries(
                 {"role": "user", "content": EXTRACT_PROMPT_V1.format(topic=topic, results=results_text)},
             ],
             tools=[RECORD_ENTRIES_TOOL],
-            role=role, overrides=overrides, temperature=0.1, max_tokens=4096,
+            role=role, overrides=overrides, temperature=0.1, max_tokens=EXTRACT_MAX_TOKENS,
             session_id=session_id,
         )
 
@@ -2513,7 +2516,7 @@ async def _run_research_url_mode(
             role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=EXTRACT_MAX_TOKENS,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(
@@ -2697,7 +2700,7 @@ async def _run_research_pdf_mode(
             role="model_research_extract",
             overrides=overrides,
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=EXTRACT_MAX_TOKENS,
             session_id=session_id,
         ))
         async for hb in _await_with_heartbeat(

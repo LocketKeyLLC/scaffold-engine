@@ -57,6 +57,9 @@ TOPIC_KEYWORDS = {
 # Prompts
 # ---------------------------------------------------------------------------
 
+# §17.1954 — the distill call's output cap; scripts/model_ab.py imports it, so the A/B measures this call.
+DISTILL_MAX_TOKENS = 4096
+
 DISTILL_SYSTEM = """You are a knowledge distillation engine. Given raw search results about a topic, extract discrete factual knowledge entries.
 
 Rules:
@@ -592,7 +595,7 @@ async def distill_entries(
         ],
         tools=[RECORD_DISTILLED_ENTRIES_TOOL],
         temperature=0.2,
-        max_tokens=4096,
+        max_tokens=DISTILL_MAX_TOKENS,
         # §17.986 — distilling N search results into ZERO entries is a failed
         # draw, not an answer, so redraw on it. §17.583's redraw only fires when
         # there are no tool args at all; `{"entries": []}` reads as a good draw
@@ -747,7 +750,7 @@ async def extract_ground_truths(
         ],
         tools=[RECORD_DISTILLED_ENTRIES_TOOL],
         temperature=0.2,
-        max_tokens=4096,
+        max_tokens=DISTILL_MAX_TOKENS,
         **route_kwargs,
     )
 
