@@ -115,6 +115,10 @@ _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|
 _CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:validate|verify|check|test|audit|review|document)\b", re.I)
 
 
+#: §17.1961b — "Proxmox host: …", "On the Proxmox host: …", "pve: …", "Host: …"
+_HOST_PLACE_RE = re.compile(r"\s*(?:on\s+)?(?:the\s+)?(?:proxmox\s+host|pve(?:\s+host)?|host)\s*:", re.I)
+
+
 def host_for(node: Optional[dict], services: Optional[list], brief: str = "") -> Optional[Host]:
     """The step builds software, and a measured service with a directory hosts it -- or None.
 
@@ -134,6 +138,12 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
     # entire build", 2026-10-10): its text names the control-panel backend it checks, so it was developed,
     # refused for having no feature check of its own, and parked with nothing to run.
     if _CHECKS_OR_WRITES_UP_RE.match(str((node or {}).get("title") or "")):
+        return None
+    # §17.1961b — a step whose title places it on the Proxmox HOST builds no service's software: the develop flow
+    # delivers files into one service's guest. Live (job 7cc2a7ac ADD2 "Proxmox host: read the game-server route
+    # handlers…", ADD3 "Proxmox host: baseline the game-server routes through the Caddy front door"): both were developed
+    # as new panel routes -- ADD3 a `caddy_baseline_route.js` plus a server.js edit and a restart -- for a test step.
+    if _HOST_PLACE_RE.match(str((node or {}).get("title") or "")):
         return None
     # §17.1431 — a step whose own text names a HOST-level change is not developed: the delivery carries
     # files into one service, never `pct set` / a reboot. Live, ADD128 ("CT 120: fix its DNS
