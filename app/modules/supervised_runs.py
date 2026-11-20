@@ -244,7 +244,11 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "reads the address itself and asks the operator for it",   # §17.1288l
                    "is this host's own address",                   # §17.1288l
                    "asks the operator for a password the runner holds",   # §17.1288m
-                   "is not waiting for the guest")                 # §17.1288m
+                   "is not waiting for the guest",                 # §17.1288m
+                   "changes the machine it reports on",            # §17.1956
+                   "PRINTS a whole systemd unit",                  # §17.1958
+                   "PRINTS the unit's environment",                # §17.1958
+                   "written BEFORE its commands run")              # §17.1960
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -303,6 +307,11 @@ async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) 
 #: what stops this recurring in a fifth costume
 #: ([[feedback_failsafes_are_a_registry]]).
 _WHOSE_GAP: dict[str, str] = {
+    # §17.1956/1958/1960 — the draft's own shape: a check that installs, a whole unit printed, a file in a folder not made yet
+    "changes the machine it reports on": "drafter",
+    "PRINTS a whole systemd unit": "drafter",
+    "PRINTS the unit's environment": "drafter",
+    "written BEFORE its commands run": "drafter",
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -4657,6 +4666,41 @@ def unterminated_heredoc(body: str) -> Optional[str]:
     return None
 
 
+_MKDIR_RE = re.compile(r"\b(?:mkdir|install\s+-d)\s+(?:-\S+(?:\s+\d{3,4})?\s+)*(?P<dirs>(?:[\"']?/[^\s;&|\"']+[\"']?\s*)+)")
+#: folders every machine has: a file there lands whatever the step creates beneath it
+_STANDING_DIRS = frozenset({"", "/tmp", "/root", "/opt", "/etc", "/usr", "/usr/local", "/var", "/var/tmp", "/home", "/srv"})
+
+
+def a_file_in_a_folder_the_step_makes(commands: list[str], files: list[dict]) -> list[dict]:
+    """§17.1960 — a written file whose folder this very step creates cannot land: the runner writes a step's files BEFORE
+    any of its commands run, and its write_file creates no directory (§17.1413c).
+
+    Live (job 7cc2a7ac T15 "Browser-test page sections", 2026-11-20): the block wrote
+    /opt/playwright-toolchain/panel-verify/sections.mjs and its first command was `mkdir -p
+    /opt/playwright-toolchain/panel-verify` -- the write was refused ("is not a directory on this machine") and the step
+    failed before anything ran. The first draft had the same shape under /tmp/panel-verify/."""
+    made: set[str] = set()
+    for c in commands or []:
+        for m in _MKDIR_RE.finditer(str(c)):
+            made.update(d.strip("\"'").rstrip("/") for d in m.group("dirs").split())
+    out: list[dict] = []
+    for f in files or []:
+        path = str((f or {}).get("path") or "")
+        parent = path.rsplit("/", 1)[0]
+        # `mkdir -p A/B/C` makes C and any of its missing ancestors: the parent is made when it IS a made folder or an
+        # ancestor of one -- unless it is a folder every machine already has
+        hit = None if parent in _STANDING_DIRS else next(
+            (d for d in sorted(made, key=len) if d and (d == parent or d.startswith(parent + "/"))), None)
+        if hit:
+            out.append({"command": f"the file {path}", "why": (
+                f"{path} is written into {parent}, which this step itself creates (`mkdir … {hit}`) -- but a step's files are "
+                "written BEFORE its commands run, and the runner's write creates no directory, so the write is refused "
+                "and the step fails before anything runs (§17.1960). Write the file flat into a directory that already "
+                f"exists (`/tmp/{path.rsplit('/', 1)[1]}`), then put it in place in a command: `install -D -m 0644 "
+                f"/tmp/{path.rsplit('/', 1)[1]} {path}`.")})
+    return out
+
+
 def file_writes_will_not_work(files: list[dict]) -> list[dict]:
     """§17.1271 — refuse a written file the machine would reject or the
     interpreter could not run, before the operator is asked to approve it.
@@ -7185,6 +7229,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                                        f"own, pre-gated; the model wrote only the commands that run inside the guest"}]
     # §17.1271 — and judge the written files the same way the commands are judged.
     refused = refused + file_writes_will_not_work(shape_files) + _secret_files
+    refused = refused + a_file_in_a_folder_the_step_makes(cmds, shape_files)   # §17.1960
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
     # §17.1257 — compile what the block hands to another interpreter. Supersedes
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
