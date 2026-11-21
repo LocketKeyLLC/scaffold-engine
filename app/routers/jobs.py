@@ -297,6 +297,13 @@ async def decide_endpoint(
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
     await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
+    # §17.1989 — an answer to a question the engine withdrew (its step was rewritten, settled or deleted) is refused
+    # with why, before anything reads it as an answer to whatever is parked now
+    _gone = await decision_pause.withdrawn_frame(db, str(parsed_id), body.node_key, body.frame_id)
+    if _gone:
+        raise HTTPException(status_code=409, detail={
+            "error": f"this question was withdrawn ({_gone['why']}): the step changed after it was asked -- "
+                     "read the job again", "node_key": body.node_key, "withdrawn": _gone})
     # §17.1681 — an approval binds to the frame the operator read, not to whatever is parked when it arrives
     if body.frame_id:
         _current = await decision_pause.parked_frame_id(db, str(parsed_id))

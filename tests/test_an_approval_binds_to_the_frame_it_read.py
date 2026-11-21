@@ -33,6 +33,7 @@ def _call(given, current):
     resolved = AsyncMock(return_value={"outcome": "ran", "node_status": "done"})
     with patch.object(jr, "assert_visible", AsyncMock()), \
          patch.object(jr.decision_pause, "parked_frame_id", AsyncMock(return_value=current)), \
+         patch.object(jr.decision_pause, "withdrawn_frame", AsyncMock(return_value=None)), \
          patch.object(jr.decision_pause, "resolve_decision", resolved):
         body = DecideInput(node_key="T2", choice="run", frame_id=given)
         try:
