@@ -88,6 +88,40 @@ def parse_numbered(blob: str, ambiguities: list) -> list[dict]:
     "stick to 2 TB" beside the question it answered. A number maps to the ambiguity in that position; a number with
     no such ambiguity, or a blob with no numbered lines, yields nothing."""
     amb = [str(a) for a in ambiguities or []]
+    pairs = (_numbered_lines(blob or "", amb)
+             or _numbered_lines(_inline_numbers_to_lines(blob or "", len(amb)), amb))   # §17.1984
+    # §17.1984 — a numbering that is the operator's own, not the brief's: fewer answers than questions AND one of
+    # them plainly restates a DIFFERENT question (live, job 6c401b85: seven answers to eight questions, "(4) the
+    # operator approves each order individually" answering the brief's 6th). Pairing by number would put that
+    # answer beside "which instruments"; pair those answers by what they say instead.
+    if pairs and len(pairs) != len(amb) and any(_restates_another(p, amb) for p in pairs):
+        return parse_restated("\n".join(p["answer"] for p in pairs), amb)
+    return pairs
+
+
+#: §17.1984 — "(1) … (2) …" written on one line; never inside a word or a parenthesis ("f(2)", "((2))")
+_INLINE_NUMBER_RE = re.compile(r"(?<![\w(])\((\d{1,2})\)(?=\s)")
+
+
+def _inline_numbers_to_lines(blob: str, n: int) -> str:
+    """§17.1984 — each "(k)" marker, k rising and within the brief's question count, starts its own line as "k)".
+
+    Live (job 69fe61c4, 2026-11-21): "Operator answers: (1) Access: the lab's existing API key … (2) Chart span:
+    buttons … (5) Proposals: a one-line summary …" — all five answered on one line, and only a number at the START of
+    a line was read, so all five came back as "Decide with the operator" steps. Rising only: an aside "(2)" after
+    "(4)" is prose, not an answer. Skipped numbers stay skipped ("(1) … (3) …" answers two, the rest stay open)."""
+    out, last, prev = [], 0, 0
+    for m in _INLINE_NUMBER_RE.finditer(blob):
+        k = int(m.group(1))
+        if not prev < k <= n:
+            continue
+        out += [blob[last:m.start()], f"\n{k}) "]
+        last, prev = m.end(), k
+    return "".join(out + [blob[last:]]) if prev else ""
+
+
+def _numbered_lines(blob: str, amb: list[str]) -> list[dict]:
+    """The §17.1605 line reader: a number at the start of a line answers the ambiguity in that position."""
     out: dict[int, list[str]] = {}
     cur: Optional[int] = None
     for raw in (blob or "").splitlines():
@@ -104,9 +138,67 @@ def parse_numbered(blob: str, ambiguities: list) -> list[dict]:
 
 
 def answers(brief: dict) -> list[dict]:
-    """§17.1605 — every answer the operator gave to the brief, in either shape: `Q:`/`A:` pairs, else numbered."""
+    """§17.1605 — every answer the operator gave to the brief: `Q:`/`A:` pairs, else numbered, else (§17.1984) restated."""
     blob = str((brief or {}).get("user_feedback") or "")
-    return parse_feedback(blob) or parse_numbered(blob, (brief or {}).get("ambiguities") or [])
+    amb = (brief or {}).get("ambiguities") or []
+    return parse_feedback(blob) or parse_numbered(blob, amb) or parse_restated(blob, amb)
+
+
+#: §17.1984 — words that say nothing about WHICH question a sentence answers
+_RESTATE_STOP = frozenset({
+    "should", "would", "could", "there", "their", "them", "they", "only", "also", "just", "more", "most",
+    "less", "each", "much", "some", "none", "every", "than", "then", "page", "show", "want", "need", "like",
+    "keep", "make", "use", "using", "used", "will", "operator", "answer", "answers", "question",
+})
+
+
+def _subject_words(text: str) -> set[str]:
+    """`_keywords` with a plural folded ("routes" ~ "route", "updates" ~ "update"), so a restatement meets its question."""
+    out = set()
+    for w in _keywords(text):
+        w = re.sub(r"ies$", "y", w)
+        w = re.sub(r"(?<!s)s$", "", w)
+        if w not in _RESTATE_STOP:
+            out.add(w)
+    return out
+
+
+def _best_match(text: str, words: list[set[str]]) -> tuple[int, int, int]:
+    """(best score, its index, runner-up score) of ``text`` against each ambiguity's subject words."""
+    mine = _subject_words(text)
+    scores = sorted(((len(mine & w), i) for i, w in enumerate(words)), reverse=True)
+    return scores[0][0], scores[0][1], (scores[1][0] if len(scores) > 1 else 0)
+
+
+def _restates_another(pair: dict, amb: list[str]) -> bool:
+    """§17.1984 — this numbered answer clearly restates a question other than the one its number names."""
+    words = [_subject_words(a) for a in amb]
+    best, idx, _ = _best_match(pair["answer"], words)
+    own = len(_subject_words(pair["answer"]) & words[amb.index(pair["question"])])
+    return amb[idx] != pair["question"] and best >= 3 and best - own >= 2
+
+
+def parse_restated(blob: str, ambiguities: list) -> list[dict]:
+    """§17.1984 — unnumbered answers that restate the question or quote the option they choose.
+
+    Each sentence of the feedback is scored against every ambiguity (question AND its options) by shared subject
+    words; it answers the one it shares at least three with, and only when no other ambiguity comes within two —
+    a sentence that could belong to two questions answers neither, and feedback about something else answers
+    nothing (re-asking is cheaper than building on a guessed pairing). Deterministic; no model call."""
+    amb = [str(a) for a in ambiguities or []]
+    if not amb:
+        return []
+    words = [_subject_words(a) for a in amb]
+    got: dict[int, list[str]] = {}
+    for seg in re.split(r"(?<=[.!?])\s+|\n+", blob or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        best, idx, runner = _best_match(seg, words)
+        if best >= 3 and best - runner >= 2:
+            got.setdefault(idx, []).append(seg)
+    return [{"question": amb[i], "answer": " ".join(parts), "answered": not is_non_answer(" ".join(parts))}
+            for i, parts in sorted(got.items())]
 
 
 def parse_feedback(blob: str) -> list[dict]:
