@@ -289,6 +289,7 @@ class OpenAIProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         timeout: int = 600,
+        stop_info: dict | None = None,
         **opts: Any,
     ) -> AsyncIterator[str]:
         """Stream content deltas from /chat/completions (stream=True).
@@ -359,6 +360,8 @@ class OpenAIProvider(LLMProvider):
                     if usage:
                         logger.debug("openai_stream_usage: %s", usage)
                     continue
+                if stop_info is not None and choices[0].get("finish_reason"):   # §17.1986b
+                    stop_info["done_reason"] = choices[0]["finish_reason"]
                 delta = choices[0].get("delta") or {}
                 content = delta.get("content")
                 if content:

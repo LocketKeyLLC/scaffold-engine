@@ -77,6 +77,7 @@ from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
 from app.modules.cost_budget import enforce_job_budget  # §17.777
 from app.utils.llm_retry import chat_until_nonempty  # §17.465
+from app.utils import cut_reply as _cut_reply  # §17.1986
 
 logger = logging.getLogger(__name__)
 
@@ -1639,7 +1640,7 @@ async def _draw_required_tests(output: str, *, tool: str, node_snapshot: dict, b
                  + f"Write only that file now: one ```python block whose first line is `# {_need}` -- pytest "
                  "tests of the module above (its rules, its edge cases, its failure paths), using only names "
                  "the module and this job's modules define.")}],
-            {"role": exec_role, "overrides": exec_overrides},
+            {"role": exec_role, "overrides": exec_overrides, "whole": True},   # §17.1986 — a cut test file is no answer
             temperature=0.4, max_tokens=gen_budget, draws=settings.node_generation_max_draws,
             label=f"node-tests {node_key}", think_off_rescue=True),
             timeout=settings.node_timeout_seconds)
@@ -2531,6 +2532,7 @@ async def execute_next_node(
     # and an output that stops AT the budget was cut off, which the gate below says instead of judging half a file
     _gen_budget = settings.node_generation_max_tokens
     _cut_off: dict = {"at": 0}
+    _whole = tool_lower in ("codegen", "shell")   # §17.1986 — code / commands, not prose
     try:
         from app.modules import engine_source as _es_b
         if tool_lower == "codegen" and _es_b.targets_the_engine(brief if isinstance(brief, dict) else {}):
@@ -2559,17 +2561,23 @@ async def execute_next_node(
             resp = await chat_until_nonempty(
                 model_router.chat,
                 messages,
-                {"role": exec_role, "overrides": exec_overrides},
+                # §17.1986 — code and a runbook's commands are only usable whole: a cut draw is redrawn at a larger
+                # budget, and one still cut comes back refused (cut_at) instead of as a success
+                {"role": exec_role, "overrides": exec_overrides, **({"whole": True} if _whole else {})},
                 temperature=0.7,
                 max_tokens=_gen_budget,
                 draws=settings.node_generation_max_draws,
                 label=f"node-exec {node_key}",
                     think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
             )
+            # §17.1986 — this read `resp.completion_tokens`, a field ModelResponse does not have (it is
+            # `tokens_completion`), so §17.1792's cut-off gate never fired outside its mock
+            _at = _cut_reply.cut_at(resp) or (_gen_budget if _cut_reply.reply_was_cut(resp, _gen_budget) else 0)
+            if _at and tool_lower == "codegen":
+                _cut_off["at"] = _at
+                return (resp.text or "").strip()
             if not resp.success:
                 raise RuntimeError(resp.error or "Model returned failure")
-            if (getattr(resp, "completion_tokens", 0) or 0) >= _gen_budget:
-                _cut_off["at"] = _gen_budget
             return resp.text.strip()
 
         async def _run_inference_streaming():
@@ -2589,6 +2597,7 @@ async def execute_next_node(
                 {"role": "user", "content": exec_prompt},
             ]
             chunks: list[str] = []
+            _stop: dict = {}   # §17.1986b — the stream's final stop reason
             try:
                 async for delta in model_router.stream_chat(
                     messages,
@@ -2596,6 +2605,7 @@ async def execute_next_node(
                     overrides=exec_overrides,
                     temperature=0.7,
                     max_tokens=_gen_budget,
+                    stop_info=_stop,
                 ):
                     if delta:
                         chunks.append(delta)
@@ -2610,17 +2620,28 @@ async def execute_next_node(
                     node_key, exc,
                 )
             text_out = "".join(chunks).strip()
-            if not text_out:
+            # §17.1986b — code / commands streamed to the limit are cut: the operator saw the stream, but what is
+            # kept is the non-streamed whole=True draw (redrawn larger, refused if still cut), as for _run_inference
+            _cut_stream = bool(text_out) and _whole and _cut_reply.stream_was_cut(_stop, _gen_budget)
+            if _cut_stream:
+                logger.warning("node_token_stream_cut: node=%s budget=%d chars=%d — redrawn whole (§17.1986b)",
+                               node_key, _gen_budget, len(text_out))
+            if not text_out or _cut_stream:
                 resp = await chat_until_nonempty(
                     model_router.chat,
                     messages,
-                    {"role": exec_role, "overrides": exec_overrides},
+                    {"role": exec_role, "overrides": exec_overrides, **({"whole": True} if _whole else {})},
                     temperature=0.7,
                     max_tokens=_gen_budget,
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-stream-fallback {node_key}",
                     think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
                 )
+                _at = _cut_reply.cut_at(resp) or (
+                    _gen_budget if _whole and _cut_reply.reply_was_cut(resp, _gen_budget) else 0)
+                if _at and tool_lower == "codegen":
+                    _cut_off["at"] = _at          # §17.1792 — refused as cut, not judged as a whole
+                    return (resp.text or "").strip()
                 if not resp.success:
                     raise RuntimeError(resp.error or "Model returned failure")
                 text_out = resp.text.strip()
@@ -2721,7 +2742,7 @@ async def execute_next_node(
             _resp = await asyncio.wait_for(
                 chat_until_nonempty(
                     model_router.chat, _messages,
-                    {"role": exec_role, "overrides": exec_overrides},
+                    {"role": exec_role, "overrides": exec_overrides, **({"whole": True} if _whole else {})},  # §17.1986
                     temperature=0.7, max_tokens=_gen_budget,           # §17.1792
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-regen {node_key}",
@@ -2892,7 +2913,7 @@ async def execute_next_node(
                                      "replaced by a plain `def` or a `MagicMock`, never an `async def`; the file must "
                                      "compile. Mock only what reaches outside the "
                                      "engine -- the broker, the network, model calls, the clock.")}],
-                                {"role": exec_role, "overrides": exec_overrides},
+                                {"role": exec_role, "overrides": exec_overrides, "whole": True},   # §17.1986
                                 temperature=0.4, max_tokens=_gen_budget, draws=settings.node_generation_max_draws,
                                 label=f"node-tests-redraw {node_key}", think_off_rescue=True),
                                 timeout=settings.node_timeout_seconds)

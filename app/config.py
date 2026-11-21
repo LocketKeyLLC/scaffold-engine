@@ -523,6 +523,10 @@ class Settings(BaseSettings):
     # alone → empty output → entries=0. Floor it so the JSON survives. Only
     # applied to tool_call_coax_models; other coaxed calls keep the caller value.
     tool_call_coax_min_tokens: int = Field(default=4096, ge=512, le=32768)
+    # §17.1986 — the ceiling for the ONE redraw of a reply cut at its token budget that must be whole (a structured
+    # reply via tool_call / generate_json, or a generate/chat called with whole=True — JSON, code, a script): the
+    # redraw gets twice the cut draw's budget, never more than this.
+    cut_reply_redraw_max_tokens: int = Field(default=16384, ge=1024, le=65536)
 
     # Per-role provider routing (Sprint E). Each role names which backend
     # serves it; default "ollama" preserves pre-Sprint-E behavior. Override

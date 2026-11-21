@@ -369,6 +369,7 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         timeout: int = 600,
+        stop_info: dict | None = None,
         **opts: Any,
     ) -> AsyncIterator[str]:
         """Stream message-content deltas from /api/chat.
@@ -427,6 +428,9 @@ class OllamaProvider(LLMProvider):
                         if content:
                             yield content
                         if chunk.get("done"):
+                            if stop_info is not None:   # §17.1986b
+                                stop_info.update(done_reason=chunk.get("done_reason"),
+                                                 eval_count=chunk.get("eval_count"))
                             return
                 return
             except Exception as exc:
