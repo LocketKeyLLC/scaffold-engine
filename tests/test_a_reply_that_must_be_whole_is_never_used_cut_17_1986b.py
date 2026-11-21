@@ -161,3 +161,63 @@ def test_every_text_json_caller_asks_for_a_whole_reply():
 def test_the_response_has_no_completion_tokens_field():
     # §17.1792's gate read this name; the real one is tokens_completion, so the gate never fired live
     assert not hasattr(ModelResponse(), "completion_tokens") and hasattr(ModelResponse(), "tokens_completion")
+
+
+# ── a streamed node draw (node_token_streaming_enabled; OFF live, covered anyway) ──
+
+async def test_ollama_stream_reports_its_final_stop_reason():
+    from unittest.mock import MagicMock
+    from app.providers.ollama import OllamaProvider
+    from app.utils.cut_reply import stream_was_cut
+    from tests.test_providers import _fake_ollama_stream
+    for last, expected in (('{"message":{"content":""},"done":true,"done_reason":"length","eval_count":8192}', True),
+                           ('{"message":{"content":""},"done":true,"done_reason":"stop","eval_count":40}', False)):
+        client = MagicMock()
+        client.stream = _fake_ollama_stream(lines=['{"message":{"content":"set -u\\ncurl -s"}}', last])
+        stop: dict = {}
+        with patch.object(model_router, "_get_client", return_value=client):
+            chunks = [c async for c in OllamaProvider().stream_chat("m", [{"role": "user", "content": "x"}],
+                                                                    max_tokens=8192, stop_info=stop)]
+        assert chunks == ["set -u\ncurl -s"]
+        assert stream_was_cut(stop, 8192) is expected, stop
+
+
+from tests.test_execution_agent_token_stream import _node_row as _llm_row   # noqa: E402 — bound before any patch
+
+
+def _shell_node():
+    row = _llm_row()
+    row.update(tool="Shell", title="Check the panel routes in CT 111", prompt_template="Check the panel routes.")
+    return row
+
+
+def _stream_ending(reason, used):
+    async def _stream(messages, stop_info=None, **kw):
+        yield "```bash\nset -u\ncurl -s -o /dev/null -w '%{http_code}' -m 3 -"
+        if stop_info is not None:
+            stop_info.update(done_reason=reason, eval_count=used)
+    return _stream
+
+
+async def _drive_shell(stream, chat_mock):
+    import asyncio
+    from tests import test_execution_agent_token_stream as ts
+    with patch.object(ts, "_node_row", _shell_node):
+        await ts._drive("4e3b8f01-145c-4c54-a0f6-5639101ee1ca", stream_mock=stream, chat_mock=chat_mock,
+                        token_q=asyncio.Queue())
+
+
+async def test_a_cut_streamed_script_is_redrawn_whole_not_kept(caplog):
+    from tests.test_execution_agent_token_stream import _ok
+    chat_mock = AsyncMock(return_value=_ok("```bash\nset -u\ncurl -s http://127.0.0.1:3001/api/health\n```"))
+    with caplog.at_level(logging.WARNING):
+        await _drive_shell(_stream_ending("length", 8192), chat_mock)
+    assert chat_mock.await_count >= 1 and chat_mock.await_args.kwargs.get("whole") is True
+    assert "node_token_stream_cut" in caplog.text
+
+
+async def test_a_streamed_script_that_ended_is_kept():
+    from tests.test_execution_agent_token_stream import _ok
+    chat_mock = AsyncMock(return_value=_ok("unused"))
+    await _drive_shell(_stream_ending("stop", 60), chat_mock)
+    assert chat_mock.await_count == 0

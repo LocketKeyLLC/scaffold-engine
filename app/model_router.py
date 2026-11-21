@@ -916,8 +916,12 @@ async def stream_chat(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    stop_info: dict | None = None,
 ):
     """Role-routed streaming chat — yields content-delta ``str`` chunks.
+
+    §17.1986b — ``stop_info``: filled by the provider with the stream's final stop reason (``done_reason``,
+    ``eval_count``); see ``LLMProvider.stream_chat``.
 
     Delegates to the resolved provider's ``stream_chat`` (the unified Sprint I.1
     contract: content-only, reasoning/thinking deltas filtered). First real
@@ -935,6 +939,7 @@ async def stream_chat(
         provider = get_provider(settings.model_general_provider)
     async for chunk in provider.stream_chat(
         resolved_model, messages, temperature=temperature, max_tokens=max_tokens,
+        **({"stop_info": stop_info} if stop_info is not None else {}),
     ):
         yield chunk
 

@@ -2596,6 +2596,7 @@ async def execute_next_node(
                 {"role": "user", "content": exec_prompt},
             ]
             chunks: list[str] = []
+            _stop: dict = {}   # §17.1986b — the stream's final stop reason
             try:
                 async for delta in model_router.stream_chat(
                     messages,
@@ -2603,6 +2604,7 @@ async def execute_next_node(
                     overrides=exec_overrides,
                     temperature=0.7,
                     max_tokens=_gen_budget,
+                    stop_info=_stop,
                 ):
                     if delta:
                         chunks.append(delta)
@@ -2617,17 +2619,28 @@ async def execute_next_node(
                     node_key, exc,
                 )
             text_out = "".join(chunks).strip()
-            if not text_out:
+            # §17.1986b — code / commands streamed to the limit are cut: the operator saw the stream, but what is
+            # kept is the non-streamed whole=True draw (redrawn larger, refused if still cut), as for _run_inference
+            _cut_stream = bool(text_out) and _whole and _cut_reply.stream_was_cut(_stop, _gen_budget)
+            if _cut_stream:
+                logger.warning("node_token_stream_cut: node=%s budget=%d chars=%d — redrawn whole (§17.1986b)",
+                               node_key, _gen_budget, len(text_out))
+            if not text_out or _cut_stream:
                 resp = await chat_until_nonempty(
                     model_router.chat,
                     messages,
-                    {"role": exec_role, "overrides": exec_overrides},
+                    {"role": exec_role, "overrides": exec_overrides, **({"whole": True} if _whole else {})},
                     temperature=0.7,
                     max_tokens=_gen_budget,
                     draws=settings.node_generation_max_draws,
                     label=f"node-exec-stream-fallback {node_key}",
                     think_off_rescue=True,   # §17.1483 — a partial answer cut off by reasoning is redrawn
                 )
+                _at = _cut_reply.cut_at(resp) or (
+                    _gen_budget if _whole and _cut_reply.reply_was_cut(resp, _gen_budget) else 0)
+                if _at and tool_lower == "codegen":
+                    _cut_off["at"] = _at          # §17.1792 — refused as cut, not judged as a whole
+                    return (resp.text or "").strip()
                 if not resp.success:
                     raise RuntimeError(resp.error or "Model returned failure")
                 text_out = resp.text.strip()

@@ -307,6 +307,7 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         timeout: int = 600,
+        stop_info: dict | None = None,
         **opts: Any,
     ) -> AsyncIterator[str]:
         """Stream text deltas from /messages (stream=true).
@@ -365,6 +366,10 @@ class AnthropicProvider(LLMProvider):
                     err = chunk.get("error") or {}
                     msg = err.get("message") or err.get("type") or "unknown error"
                     raise ProviderUnavailableError(f"anthropic stream error: {msg}")
+                if chunk.get("type") == "message_delta" and stop_info is not None:   # §17.1986b
+                    _sr = (chunk.get("delta") or {}).get("stop_reason")
+                    if _sr:
+                        stop_info["done_reason"] = "length" if _sr == "max_tokens" else _sr
                 if chunk.get("type") != "content_block_delta":
                     continue
                 delta = chunk.get("delta") or {}

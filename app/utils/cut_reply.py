@@ -81,3 +81,14 @@ def cut_at(resp: Any) -> int:
         return int(raw.get("cut_at") or 0) if isinstance(raw, dict) else 0
     except Exception:
         return 0
+
+
+def stream_was_cut(stop_info: dict, budget: int | None = None) -> bool:
+    """§17.1986b — ``reply_was_cut`` for a stream: ``stop_info`` is what the provider's final frame said
+    (``done_reason``, ``eval_count``; ``LLMProvider.stream_chat``). A stream that never said is judged by its count,
+    and one with neither is not called cut."""
+    from types import SimpleNamespace
+    stop_info = stop_info or {}
+    reason = stop_info.get("done_reason")
+    return reply_was_cut(SimpleNamespace(raw={"done_reason": reason} if reason else {},
+                                         tokens_completion=stop_info.get("eval_count")), budget)
