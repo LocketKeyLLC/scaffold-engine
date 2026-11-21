@@ -85,3 +85,45 @@ def test_a_named_allow_list_judges_the_shape_not_the_placeholder():
                          inventory={"cts": {"214": "running"}, "vms": {}, "names": {"214": "site"}})
     assert not [r for r in frame["refused"] if "redirect" in r["why"]], [r["why"][:80] for r in frame["refused"]]
     assert sum("makes itself" in r["why"] for r in frame["refused"]) == 1
+
+
+# §17.1968b — a value another command of the SAME block reads off the machine is not asked either
+READ_CMDS = [
+    "pct exec 214 -- systemctl show web-panel.service -p ExecStart -p WorkingDirectory --value",
+    "pct exec 214 -- tar -C <PANEL_DIR> -czf - . | tee /root/site-backup/site-dir.tar.gz | wc -c",
+]
+
+
+def test_the_live_t4_panel_dir_is_read_by_the_block():
+    hits = sr.reads_a_value_and_asks_for_it(READ_CMDS, [])
+    assert [h["name"] for h in hits] == ["PANEL_DIR"], hits
+    why = hits[0]["why"]
+    assert "reads this value itself and asks the operator for it" in why
+    # the remedy reads ONE property, in the command that uses it, in the guest it lives in
+    assert "pct exec 214 -- systemctl show web-panel.service -p WorkingDirectory --value" in why
+
+
+def test_the_frame_does_not_ask_for_a_read_value_and_the_redraft_is_told():
+    frame = _frame(LIVE_CMDS[:1] + READ_CMDS + LIVE_CMDS[1:], LIVE_VERIFY)
+    names = [i["name"] for i in frame["inputs"]]
+    assert "PANEL_DIR" not in names and "TIMESTAMP" not in names, names
+    hits = [r for r in frame["refused"] if "reads this value itself" in r["why"]]
+    assert len(hits) == 1 and sr.shape_retry_note({"kind": "run", "refused": hits})
+
+
+def test_a_read_of_another_unit_or_property_is_no_hit():
+    # another unit: `<PANEL_DIR>` is not what caddy's WorkingDirectory says
+    assert sr.reads_a_value_and_asks_for_it(
+        ["pct exec 220 -- systemctl show caddy.service -p WorkingDirectory --value", "tar -C <PANEL_DIR> -czf x ."],
+        []) == []
+    # another property: ExecStart prints no directory
+    assert sr.reads_a_value_and_asks_for_it(
+        ["systemctl show web-panel.service -p ExecStart --value", "tar -C <PANEL_DIR> -czf x ."], []) == []
+    # a config path is not a working directory
+    assert sr.reads_a_value_and_asks_for_it(
+        ["systemctl show caddy.service -p WorkingDirectory --value", "cat <CADDY_CONFIG_PATH>"], []) == []
+    # no read at all: a real input
+    assert sr.reads_a_value_and_asks_for_it(["tar -C <PANEL_DIR> -czf x ."], []) == []
+    # the read that already uses the placeholder itself reads nothing for it
+    assert sr.reads_a_value_and_asks_for_it(
+        ["systemctl show <PANEL_UNIT> -p WorkingDirectory --value"], []) == []

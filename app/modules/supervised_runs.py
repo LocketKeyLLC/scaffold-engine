@@ -249,7 +249,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "PRINTS a whole systemd unit",                  # §17.1958
                    "PRINTS the unit's environment",                # §17.1958
                    "written BEFORE its commands run",               # §17.1960
-                   "is a value this block makes itself")           # §17.1968
+                   "is a value this block makes itself",           # §17.1968
+                   "reads this value itself and asks the operator for it")   # §17.1968b
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -314,6 +315,7 @@ _WHOSE_GAP: dict[str, str] = {
     "PRINTS the unit's environment": "drafter",
     "written BEFORE its commands run": "drafter",
     "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
+    "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -6604,6 +6606,67 @@ def values_the_block_makes(commands: list[str], verify: list[str],
     return out
 
 
+#: §17.1968b — `systemctl show <unit> -p <Property>` prints ONE value per property; which placeholder kinds each fills
+_UNIT_PROPERTY_KINDS: dict[str, frozenset] = {
+    "workingdirectory": frozenset({"DIR", "DIRECTORY", "WORKDIR", "ROOT"}),
+    "fragmentpath": frozenset({"UNIT_PATH", "UNIT_FILE", "FILE"}),
+    "mainpid": frozenset({"PID"}),
+    "user": frozenset({"USER"}),
+    "execstart": frozenset({"CMD", "COMMAND", "EXEC", "EXECSTART", "BINARY", "BIN"}),
+}
+_SYSTEMCTL_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b([^|;&\n'\"]*)")
+
+
+def reads_a_value_and_asks_for_it(commands: list[str], verify: list[str],
+                                  files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1968b — a ``<NAME>`` whose value another command of the SAME block reads off the machine.
+
+    Live (job 7cc2a7ac T4, 2026-11-20): `pct exec 111 -- systemctl show control-panel.service -p ExecStart -p
+    WorkingDirectory --value` printed the panel's directory, and two commands later `tar -C <PANEL_DIR>` asked the
+    operator for it. §17.1288l's shape (an address read from `ip neigh`, then `<PALWORLD_IP>`) with a unit's property:
+    the block has the value at run time, the operator does not, and each command's shell forgets it. Refused, like
+    §17.1288l, with the capture to write -- not repaired: a read of two properties prints two lines, so splicing it
+    in as `$(…)` would hand `tar -C` both.
+
+    A hit needs the read to name a property whose kind is the placeholder's last word (`WorkingDirectory` ->
+    `_DIR`), and every other word of the placeholder to name that unit (`PANEL` in `control-panel.service`)."""
+    texts = [str(c or "") for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    reads: list[tuple[str, str, str, str]] = []                     # (command, unit, Property, guest prefix)
+    for t in texts:
+        for m in _SYSTEMCTL_SHOW_RE.finditer(t):
+            args = m.group(1).split()
+            unit = next((a for a in args if not a.startswith("-") and not re.fullmatch(r"[A-Z][A-Za-z,]*", a)), "")
+            props = re.findall(r"(?:-p\s*|--property[=\s]+)([A-Za-z,]+)", m.group(1))
+            guest = re.match(r"\s*(pct\s+exec\s+\d+\s+--\s+)", t)
+            for p in ",".join(props).split(","):
+                if p and unit:
+                    reads.append((t, unit, p, guest.group(1) if guest else ""))
+    out: list[dict] = []
+    for name in placeholders(texts):
+        words = name.split("_")
+        for cmd, unit, prop, guest in reads:
+            if f"<{name}>" in cmd:
+                continue
+            kinds = _UNIT_PROPERTY_KINDS.get(prop.lower(), frozenset())
+            kind = next((k for k in kinds if name == k or name.endswith("_" + k)), "")
+            if not kind:
+                continue
+            rest = [w.lower() for w in words[:len(words) - len(kind.split("_"))]]
+            if not all(w in unit.lower() for w in rest):      # every other word names the unit read
+                continue
+            out.append({"command": cmd.strip()[:200], "name": name, "why": (
+                f"this block reads this value itself and asks the operator for it: `<{name}>` is the `{prop}` "
+                f"that `systemctl show {unit} -p {prop}` prints in another command of this block (`{cmd.strip()[:90]}`). "
+                f"The operator cannot type what the block reads at run time, and each command runs in its own "
+                f"shell, so the printed value is gone before the next one. Read it where it is used, ONE property "
+                f"per read so `--value` prints one line: `{guest}systemctl show {unit} -p {prop} --value` inside a "
+                f"`$(…)` in the command that needs it -- e.g. `{guest}tar -C \"$({guest}systemctl show {unit} -p "
+                f"{prop} --value)\" -czf - .` -- or capture it once in a script under ## Write these files.")})
+            break
+    return out
+
+
 def is_develop_delivery(files: Optional[list[dict]]) -> bool:
     """§17.1589 — the block delivers files the develop flow staged (`/tmp/scaffold-dev-<step>--…`)."""
     return any(str((f or {}).get("path") or "").startswith("/tmp/scaffold-dev") for f in files or [])
@@ -7230,6 +7293,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1968 — a value the block makes itself is never asked for: it leaves the inputs and is refused, so the
     # redraft is told (live, 7cc2a7ac T4 asked for `<TIMESTAMP>` its own `$(date …)` folder name held)
     _made = values_the_block_makes(cmds, verify, files)
+    # §17.1968b — and one another command of the block READS off the machine (T4's `<PANEL_DIR>`)
+    _made = _made + [h for h in reads_a_value_and_asks_for_it(cmds, verify, files)
+                     if h["name"] not in {x["name"] for x in _made}]
     if _made:
         inputs = [i for i in inputs if i.get("name") not in {h["name"] for h in _made}]
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
