@@ -34,9 +34,22 @@ function sshArgs(host, argv) {
           `${host.user}@${host.address}`, argv.map(q).join(' ')];
 }
 
-function failure(host, argv, stderr, err) {
-  const why = (stderr && String(stderr).trim()) || (err && err.message) || 'failed';
-  return new Error(`remote ${argv.slice(0, 3).join(' ')} on ${host.user}@${host.address} failed: ${why}`);
+// §17.1965 — the remote STDOUT is kept on the error (`e.stdout`) and named when stderr is empty: `systemctl is-active`
+// says "inactive" on stdout with exit 3, and a handler that saw only "Command failed" could not tell a stopped unit
+// from a dead ssh (live, job 7cc2a7ac: the panel's Palworld status answered 500 for every poll while it was stopped).
+function failure(host, argv, stderr, err, stdout) {
+  const why = (stderr && String(stderr).trim()) || (stdout && String(stdout).trim()) || (err && err.message) || 'failed';
+  const e = new Error(`remote ${argv.slice(0, 3).join(' ')} on ${host.user}@${host.address} failed: ${why}`);
+  e.stdout = stdout === undefined ? '' : String(stdout);
+  return e;
+}
+
+// §17.1965 — `is-active` answers with its state; a non-zero exit with a state word is that answer, not a failure
+const UNIT_STATES = ['active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading', 'unknown'];
+
+function stateOf(err) {
+  const out = String((err && err.stdout) || '').trim();
+  return UNIT_STATES.includes(out) ? out : null;
 }
 
 // ── the blocking forms: kept for code already delivered ──
@@ -47,7 +60,7 @@ function run(host, argv, input, timeoutMs) {
     return execFileSync('ssh', args, { input: input === undefined ? '' : input, encoding: 'utf8',
                                        timeout: timeoutMs || 30000 });
   } catch (err) {
-    throw failure(host, argv, err.stderr, err);
+    throw failure(host, argv, err.stderr, err, err.stdout);
   }
 }
 
@@ -70,7 +83,12 @@ function checkVerb(verb) {
 
 function unit(host, verb, name) {
   checkVerb(verb);
-  return run(host, ['sudo', 'systemctl', verb, name]).trim();
+  try {
+    return run(host, ['sudo', 'systemctl', verb, name]).trim();
+  } catch (err) {
+    if (verb === 'is-active' && stateOf(err)) return stateOf(err);
+    throw err;
+  }
 }
 
 // ── §17.1598: the non-blocking forms, for anything a request handler calls ──
@@ -82,7 +100,7 @@ function runAsync(host, argv, opts) {
     try { args = sshArgs(host, argv); } catch (e) { reject(e); return; }
     const child = execFile('ssh', args, { encoding: 'utf8', timeout: o.timeoutMs || 30000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        if (err) reject(failure(host, argv, stderr, err));
+        if (err) reject(failure(host, argv, stderr, err, stdout));
         else resolve(stdout);
       });
     child.stdin.on('error', () => {});            // ssh may exit before reading its input
@@ -100,7 +118,12 @@ const promises = {
   },
   unit: async (host, verb, name) => {
     checkVerb(verb);
-    return (await runAsync(host, ['sudo', 'systemctl', verb, name])).trim();
+    try {
+      return (await runAsync(host, ['sudo', 'systemctl', verb, name])).trim();
+    } catch (err) {
+      if (verb === 'is-active' && stateOf(err)) return stateOf(err);
+      throw err;
+    }
   },
 };
 
