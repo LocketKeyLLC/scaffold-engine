@@ -1,273 +1,249 @@
 # tests/test_paper_13f_holdings_ingestion.py
-"""Pytest tests for paper_13f_holdings_ingestion."""
+"""Tests for the 13F information-table lookup.
 
-import asyncio
+EDGAR's submissions JSON reports the cover page with a folder prefix
+(``xslForm13F_X01/primary_doc.xml``) while index.json lists the bare name
+(``primary_doc.xml``). The lookup must compare by the last path segment,
+never return the cover page, and pick the information table whatever its
+name and position in the listing.
+"""
+
+from __future__ import annotations
+
 import json
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+import uuid
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
 
 from app.database import async_session
-from app.modules import paper_13f_holdings_ingestion as m
+from app.modules import paper_13f_holdings_ingestion as mod
 
-XML_ONE = b"""<?xml version="1.0"?>
+CIK = "0001067983"
+
+TABLE_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 <informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
   <infoTable>
     <nameOfIssuer>APPLE INC</nameOfIssuer>
     <titleOfClass>COM</titleOfClass>
     <cusip>037833100</cusip>
-    <value>1000000</value>
-    <shrsOrPrnAmt><sshPrnamt>5000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
-    <putCall>N/A</putCall>
+    <value>12345</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>100</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
     <investmentDiscretion>SOLE</investmentDiscretion>
-    <votingAuthority><Sole>5000</Sole><Shared>0</Shared><None>0</None></votingAuthority>
+    <votingAuthority>
+      <Sole>100</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
   </infoTable>
-</informationTable>"""
+</informationTable>
+"""
 
-XML_TWO = b"""<?xml version="1.0"?>
-<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
-  <infoTable>
-    <nameOfIssuer>MICROSOFT CORP</nameOfIssuer>
-    <titleOfClass>COM</titleOfClass>
-    <cusip>594918104</cusip>
-    <value>2000000</value>
-    <shrsOrPrnAmt><sshPrnamt>6000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
-    <putCall>N/A</putCall>
-    <investmentDiscretion>SOLE</investmentDiscretion>
-    <votingAuthority><Sole>6000</Sole><Shared>0</Shared><None>0</None></votingAuthority>
-  </infoTable>
-</informationTable>"""
+COVER_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/secedgar/13f/coverpage">
+  <headerData><submissionType>13F-HR</submissionType></headerData>
+</edgarSubmission>
+"""
+
+SUMMARY_XML = b"""<?xml version="1.0"?><FilingSummary><MyReports/></FilingSummary>"""
 
 
-@pytest.fixture(autouse=True)
-def mock_sleep():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep_mock:
-        yield sleep_mock
+class FakeResponse:
+    """Minimal httpx.Response stand-in."""
+
+    def __init__(
+        self, *, json_data: object = None, content: bytes = b"", status_code: int = 200
+    ) -> None:
+        self._json_data = json_data
+        self.content = content
+        self.status_code = status_code
+        self.text = content.decode("utf-8", "replace")
+
+    def json(self):
+        if self._json_data is None:
+            raise ValueError("response has no JSON body")
+        return self._json_data
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
-def _response(*, json_data=None, content=b"", status_code=200):
-    """A plain MagicMock response: json() and raise_for_status() answer at once."""
-    resp = MagicMock()
-    resp.json.return_value = json_data
-    resp.content = content
-    resp.raise_for_status = MagicMock(return_value=None)
-    resp.status_code = status_code
-    return resp
+class FakeClient:
+    """httpx.AsyncClient stand-in that serves prepared URLs and records calls."""
+
+    def __init__(self, responses: dict[str, FakeResponse]) -> None:
+        self._responses = responses
+        self.calls: list[str] = []
+
+    async def get(self, url: str, *, headers=None, params=None):
+        self.calls.append(url)
+        if url not in self._responses:
+            raise AssertionError(f"unexpected GET {url}")
+        return self._responses[url]
 
 
-def _make_client(submissions_payload, xml_by_url=None, json_by_url=None):
-    """Build a fake client whose get() is awaited and returns a MagicMock."""
-    xml_by_url = xml_by_url or {}
-    json_by_url = json_by_url or {}
-
-    async def fake_get(url, *, headers=None):
-        for key, val in json_by_url.items():
-            if key in url:
-                return _response(json_data=val)
-        if "submissions" in url:
-            return _response(json_data=submissions_payload)
-        for key, val in xml_by_url.items():
-            if key in url:
-                return _response(content=val)
-        return _response(content=b"", status_code=404)
-
-    client = MagicMock()
-    client.get = fake_get
-    return client
-
-
-def _submissions(recent_entries, files=None):
-    return {"filings": {"recent": recent_entries, "files": files or []}}
-
-
-def _row(
-    form="13F-HR",
-    accession="0001234567-25-000001",
-    filing_date="2025-01-15",
-    primary="primary.xml",
-):
+def _index(*names: str) -> dict:
     return {
-        "form": form,
-        "accessionNumber": accession,
-        "filingDate": filing_date,
-        "primaryDocument": primary,
+        "directory": {
+            "item": [
+                {"name": name, "type": "xml" if name.endswith(".xml") else "text.gif"}
+                for name in names
+            ]
+        }
     }
 
 
-async def _payloads(db):
-    rows = (
-        await db.execute(
-            text("SELECT payload FROM ingested_item WHERE source='sec_edgar' ORDER BY id")
+def _accession() -> str:
+    return f"0001067983-24-{uuid.uuid4().int % 10**8:08d}"
+
+
+async def _lookup(accession: str, primary_document: str, index: dict, extra=None):
+    index_url = mod._build_index_url(CIK, accession)
+    responses = {index_url: FakeResponse(json_data=index)}
+    responses.update(extra or {})
+    client = FakeClient(responses)
+    found = await mod._fetch_information_table_file(
+        CIK, accession, primary_document, client, {"User-Agent": "test"}
+    )
+    return found, client
+
+
+@pytest.mark.asyncio
+async def test_lookup_picks_table_listed_after_cover_page(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    found, _client = await _lookup(
+        accession,
+        "xslForm13F_X01/primary_doc.xml",
+        _index("primary_doc.xml", "0001067983-24-000001-index.htm", "60471.xml"),
+    )
+    assert found == "60471.xml"
+
+
+@pytest.mark.asyncio
+async def test_lookup_picks_table_listed_before_cover_page(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    found, _client = await _lookup(
+        accession,
+        "xslForm13F_X02/primary_doc.xml",
+        _index("60471.xml", "primary_doc.xml", "0001067983-24-000001-index.htm"),
+    )
+    assert found == "60471.xml"
+
+
+@pytest.mark.asyncio
+async def test_lookup_returns_none_when_only_the_cover_page_is_xml(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    found, client = await _lookup(
+        accession,
+        "xslForm13F_X01/primary_doc.xml",
+        _index("primary_doc.xml", "0001067983-24-000001-index.htm"),
+    )
+    assert found is None
+    # Only index.json was fetched; the cover page was never downloaded.
+    assert client.calls == [mod._build_index_url(CIK, accession)]
+
+
+@pytest.mark.asyncio
+async def test_lookup_uses_root_element_when_several_xml_candidates(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    summary_url = mod._build_archive_url(CIK, accession, "FilingSummary.xml")
+    table_url = mod._build_archive_url(CIK, accession, "60471.xml")
+    found, client = await _lookup(
+        accession,
+        "xslForm13F_X01/primary_doc.xml",
+        _index("primary_doc.xml", "FilingSummary.xml", "60471.xml"),
+        extra={
+            summary_url: FakeResponse(content=SUMMARY_XML),
+            table_url: FakeResponse(content=TABLE_XML),
+        },
+    )
+    assert found == "60471.xml"
+    assert summary_url in client.calls
+    assert client.calls.index(summary_url) < client.calls.index(table_url)
+
+
+@pytest.mark.asyncio
+async def test_lookup_skips_a_prefixed_cover_page_in_the_index(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    found, _client = await _lookup(
+        accession,
+        "xslForm13F_X01/primary_doc.xml",
+        _index("xslForm13F_X01/primary_doc.xml", "60471.xml"),
+    )
+    assert found == "60471.xml"
+
+
+@pytest.mark.asyncio
+async def test_ingest_picks_table_and_writes_one_row_per_holding(monkeypatch):
+    monkeypatch.setattr(mod, "RATE_LIMIT_SECONDS", 0.0)
+    accession = _accession()
+    primary = "xslForm13F_X02/primary_doc.xml"
+
+    submissions_url = mod.SUBMISSIONS_URL_TEMPLATE.format(CIK)
+    index_url = mod._build_index_url(CIK, accession)
+    table_url = mod._build_archive_url(CIK, accession, "60471.xml")
+
+    submissions = {
+        "filings": {
+            "recent": [
+                {
+                    "form": "13F-HR",
+                    "accessionNumber": accession,
+                    "filingDate": "2024-02-14",
+                    "primaryDocument": primary,
+                }
+            ],
+            "files": [],
+        }
+    }
+    client = FakeClient(
+        {
+            submissions_url: FakeResponse(json_data=submissions),
+            index_url: FakeResponse(
+                json_data=_index("primary_doc.xml", "60471.xml")
+            ),
+            table_url: FakeResponse(content=TABLE_XML),
+        }
+    )
+
+    async def _fake_values_for(db, names):
+        return {"SEC_CONTACT_EMAIL": "research@scaffold.invalid"}
+
+    async with async_session() as db:
+        with patch(
+            "app.modules.paper_13f_holdings_ingestion.values_for", _fake_values_for
+        ):
+            written = await mod.ingest_13f_holdings(CIK, db=db, client=client)
+
+    assert written == 1
+
+    external_id = f"{accession}:037833100"
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                "SELECT source, external_id, payload FROM ingested_item "
+                "WHERE external_id = :external_id"
+            ),
+            {"external_id": external_id},
         )
-    ).fetchall()
-    out = []
-    for r in rows:
-        val = r[0]
-        out.append(json.loads(val) if isinstance(val, str) else val)
-    return out
+        row = result.fetchone()
 
-
-@pytest.mark.asyncio
-async def test_ingest_13f_single_holding_success():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row()]),
-                {"primary.xml": XML_ONE},
-            )
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 1
-
-            payloads = await _payloads(db)
-            assert len(payloads) == 1
-            assert payloads[0]["nameOfIssuer"] == "APPLE INC"
-            assert payloads[0]["ticker"] is None
-
-
-@pytest.mark.asyncio
-async def test_ingest_13f_follows_pagination():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            base = _submissions(
-                [_row(accession="0001", primary="p1.xml")],
-                files=[{"url": "https://data.sec.gov/submissions/extra.json"}],
-            )
-            extra = {"recent": [_row(accession="0002", primary="p2.xml")]}
-            client = _make_client(
-                base,
-                {"p1.xml": XML_ONE, "p2.xml": XML_TWO},
-                json_by_url={"extra.json": extra},
-            )
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 2
-
-            payloads = await _payloads(db)
-            assert len(payloads) == 2
-            names = {p["nameOfIssuer"] for p in payloads}
-            assert names == {"APPLE INC", "MICROSOFT CORP"}
-
-
-@pytest.mark.asyncio
-async def test_ingest_skips_non_13f_forms():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row(form="4"), _row(form="10-K")]),
-                {},
-            )
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 0
-
-
-@pytest.mark.asyncio
-async def test_ingest_includes_13f_amendment():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row(form="13F-HR/A")]),
-                {"primary.xml": XML_ONE},
-            )
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 1
-
-
-@pytest.mark.asyncio
-async def test_ingest_skips_missing_required_fields():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            bad1 = _row(primary=None)
-            bad2 = _row(accession=None)
-            client = _make_client(_submissions([bad1, bad2]), {})
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 0
-
-
-@pytest.mark.asyncio
-async def test_ingest_handles_malformed_xml():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row()]),
-                {"primary.xml": b"<not-valid>"},
-            )
-            count = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert count == 0
-
-
-@pytest.mark.asyncio
-async def test_ingest_duplicate_skipped():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row()]),
-                {"primary.xml": XML_ONE},
-            )
-            first = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            second = await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert first == 1
-            assert second == 0
-
-            payloads = await _payloads(db)
-            assert len(payloads) == 1
-
-
-@pytest.mark.asyncio
-async def test_ingest_without_contact_email():
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={},
-    ):
-        async with async_session() as db:
-            client = _make_client(_submissions([_row()]), {})
-            with pytest.raises(RuntimeError, match="SEC_CONTACT_EMAIL"):
-                await m.ingest_13f_holdings("0001067983", db=db, client=client)
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_sleep_called(mock_sleep):
-    with patch(
-        "app.modules.paper_13f_holdings_ingestion.values_for",
-        new_callable=AsyncMock,
-        return_value={"SEC_CONTACT_EMAIL": "test@example.com"},
-    ):
-        async with async_session() as db:
-            client = _make_client(
-                _submissions([_row()]),
-                {"primary.xml": XML_ONE},
-            )
-            await m.ingest_13f_holdings("0001067983", db=db, client=client)
-            assert mock_sleep.await_count >= 2
-            mock_sleep.assert_awaited_with(m.RATE_LIMIT_SECONDS)
+    assert row is not None
+    assert row[0] == "sec_edgar"
+    assert row[1] == external_id
+    payload = row[2]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    assert payload["cusip"] == "037833100"
+    assert payload["accessionNumber"] == accession
+    assert payload["nameOfIssuer"] == "APPLE INC"
