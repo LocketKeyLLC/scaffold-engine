@@ -322,8 +322,118 @@ def where_a_column_is(col: str, table: str, tables: Tables, fks: dict | None) ->
     return f"; `{col}` is on {', '.join('`' + o + '`' for o in owners[:4])}"
 
 
+#: §17.1990 — module users: leaf -> {"writes": tables, "reads": tables, "funcs": public function names}
+Users = dict[str, dict]
+
+
+def tables_used(code: str) -> tuple[set[str], set[str]]:
+    """§17.1990 — the tables a module's SQL writes (INSERT/UPDATE/DELETE) and reads (FROM/JOIN), by name."""
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return set(), set()
+    writes: set[str] = set()
+    reads: set[str] = set()
+    for sql in _strings(tree):
+        if not _SQL_START.match(sql) or _CREATE.search(sql):
+            continue
+        ctes = {m.group(1).lower() for m in _CTE.finditer(sql)}
+        for rx in (_INSERT_TABLE, _DELETE):
+            writes |= {m.group(1).lower() for m in rx.finditer(sql)}
+        writes |= {m.group(1).lower() for m in re.finditer(r"\bUPDATE\s+" + _QUAL + _IDENT + r"\s", sql, re.I)}
+        for m in _FROM.finditer(sql):
+            if (m.group(2) and m.group(2).strip('".').lower() != "public") or _FN_FROM.search(sql[:m.start()]):
+                continue
+            reads.add(m.group(3).lower())
+        writes -= ctes
+        reads -= ctes | writes
+    return {t for t in writes if "{" not in t}, {t for t in reads if "{" not in t}
+
+
+def _norm_words(name: str) -> set[str]:
+    """`paper_spy_bars` -> {paper, spy, bar}: lower-case, singular, no digits."""
+    return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+            for w in re.split(r"[^a-z0-9]+", name.lower()) if len(w) >= 3 and not w.isdigit()}
+
+
+def modules_named_like(guess: str, users: Users) -> list[str]:
+    """§17.1990 — the modules whose name shares the guess's rarest words (a word in many module names -- `paper` --
+    names nothing): `paper_audit_trail` -> `paper_audit_trail_writer`; the best-scoring ones only."""
+    words = {m: _norm_words(m) for m in users}
+    df: dict[str, int] = {}
+    for ws in words.values():
+        for w in ws:
+            df[w] = df.get(w, 0) + 1
+    want = {w for w in _norm_words(guess) if 0 < df.get(w, 0) <= 3}
+    # a tie goes to the module whose name starts like the guess (`paper_spy_daily`: the `paper_` module over another)
+    lead = guess.lower().split("_")[0]
+    scored = {m: sum(1 / df[w] for w in want & ws) + 0.01 * (m.split("_")[0] == lead)
+              for m, ws in words.items() if want & ws}
+    if not scored:
+        return []
+    top = max(scored.values())
+    return sorted(m for m, s in scored.items() if s >= top - 1e-9)[:3]
+
+
+def _uses(mod: str, u: dict, tables: Tables) -> str:
+    w = sorted(t for t in u.get("writes") or () if t in tables)
+    r = sorted(t for t in u.get("reads") or () if t in tables and t not in w)
+    bits = ([f"writes {', '.join('`' + t + '`' for t in w)}"] if w else []) + \
+           ([f"reads {', '.join('`' + t + '`' for t in r)}"] if r else [])
+    return f"`{mod}` " + " and ".join(bits) if bits else ""
+
+
+def where_a_table_is(guess: str, tables: Tables, users: Users | None = None,
+                     using: set[str] | frozenset[str] = frozenset()) -> str:
+    """§17.1990 — the real tables a guessed one was reaching for. Live (job 69fe61c4 T8, the lab dashboard, six
+    attempts): `paper_audit_trail`, `paper_spy_bars`, `paper_spy_daily` were each refused "there is no table" and
+    each redraft guessed again -- the lab's audit trail is the seven tables `paper_audit_trail_writer` writes, and
+    SPY bars are stored nowhere (`paper_spy_benchmark_tracker` fetches them; `pnl.spy_benchmark_return` keeps the
+    return). Named: tables sharing a word with the guess, columns sharing a rare word, the module named like the
+    guess and what it writes (or that it keeps no table), and the tables the modules this code uses read and write."""
+    users = users or {}
+    g = _norm_words(guess)
+    out: list[str] = []
+    tdf: dict[str, int] = {}
+    for t in tables:
+        for w in _norm_words(t):
+            tdf[w] = tdf.get(w, 0) + 1
+    # a word in at most 3 table names (`log` is in four -- `paper_audit_log` is not `error_logs`)
+    named = sorted(t for t in tables if any(tdf[w] <= 3 for w in (_norm_words(t) & g) - {"paper"}))
+    if named:
+        out.append(f"tables named like it: {', '.join('`' + t + '`' for t in named[:6])}")
+    # a column word in at most 3 tables (`spy` in `pnl.spy_benchmark_return`; never `id`, `ts`, `status`)
+    cdf: dict[str, int] = {}
+    for cols in tables.values():
+        for w in {w for c in cols or () for w in _norm_words(c)}:
+            cdf[w] = cdf.get(w, 0) + 1
+    # ... and not a word several tables are named with (`log`: a kind of table, never a column's subject)
+    rare = {w for w in g if 0 < cdf.get(w, 0) <= 3 and tdf.get(w, 0) < 2} - {"paper"}
+    cols = sorted(f"`{t}.{c}`" for t, cs in tables.items() if t not in named for c in cs or () if _norm_words(c) & rare)
+    if cols:
+        out.append(f"columns named like it: {', '.join(cols[:4])}")
+    like = modules_named_like(guess, users)
+    stored = bool(named) or any(_uses(m, users[m], tables) for m in like)
+    for m in like:
+        u = users[m]
+        line = _uses(m, u, tables)
+        if line:
+            out.append(line)
+            continue
+        fns = ", ".join([f for f in u.get("funcs") or () if not f.startswith("_")][:4])
+        # nothing like it is stored anywhere: say so, and what computes it (SPY bars: fetched, never kept)
+        out.append((f"the engine stores no such data -- `{m}` computes it when called" if not stored
+                    else f"`{m}` keeps no table -- it computes when called") + (f" ({fns})" if fns else ""))
+    seen = set(like)
+    use = [ln for m in sorted(using) if m in users and m not in seen and (ln := _uses(m, users[m], tables))]
+    if use:
+        out.append("the modules this code uses: " + "; ".join(use[:4]))
+    return ("; " + "; ".join(out)) if out else ""
+
+
 def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | frozenset[str] = frozenset(),
-                        fks: dict | None = None) -> list[str]:
+                        fks: dict | None = None, users: Users | None = None,
+                        using: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Every table or column the output's SQL names that neither the engine's database nor this job's migrations
     have. ``tables`` is the union of both; the output's own migrations are added here."""
     known: dict = dict(tables)
@@ -356,7 +466,8 @@ def unknown_schema_refs(output: str, tables: Tables, job_tables: set[str] | froz
                     have = sorted(job_tables) if job_tables else []
                     note(f"`{where}`: there is no table `{t}` -- not in the engine's database, and no step of this "
                          "job creates it (a new table is an Alembic revision a step of this job writes)"
-                         + (f"; this job's tables are {', '.join('`' + h + '`' for h in have)}" if have else ""))
+                         + (f"; this job's tables are {', '.join('`' + h + '`' for h in have)}" if have else "")
+                         + where_a_table_is(t, known, users, using))                          # §17.1990
                     return False
                 return known[t.lower()] is not None
 

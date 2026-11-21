@@ -262,6 +262,104 @@ async def parked_frame_id(db: AsyncSession, job_id: str) -> str:
     return str(row[0] or "") if row else ""
 
 
+# ── §17.1989 a parked frame follows its step ────────────────────────────
+
+#: where a withdrawn frame is written down (newest last; the last WITHDRAWN_KEEP are kept)
+WITHDRAWN_KEY = "decisions_withdrawn"
+WITHDRAWN_KEEP = 20
+
+
+def frame_withdrawn_because(frame: Optional[dict], node: Optional[dict]) -> str:
+    """§17.1989 — why the parked frame no longer asks about its step, or "" while it still does.
+
+    A frame is a draft of ONE version of a step. Live (job 69fe61c4 T4, 2026-11-21): T4 was parked as a Shell frame
+    (`pct exec <ENGINE_GUEST_ID> …` on pve-runner); complete-plan (§17.1985) then made T4 a CodeGen step with new text,
+    T4 ran and was `done` -- and the job still carried the Shell frame, a question about a step that no longer existed
+    in that form and had already finished. The step's own row is the fact: gone, settled (done / skipped), or its tool,
+    text or dependencies are not the ones the frame was drafted from. A `running` step is not stale: an approved run
+    (`resolve_run`) holds it there with the frame up until the answer is recorded."""
+    f = frame or {}
+    if not f.get("node_key"):
+        return ""
+    if not node:
+        return "deleted"
+    st = str(node.get("status") or "")
+    if st in ("done", "skipped"):
+        return f"step_{st}"
+    if st == "running":
+        return ""
+    if f.get("tool") and str(f["tool"]).lower() != str(node.get("tool") or "").lower():
+        return "tool_changed"
+    if "prompt_template" in f and str(f.get("prompt_template") or "") != str(node.get("prompt_template") or ""):
+        return "text_changed"
+    if "depends_on" in f and sorted(f.get("depends_on") or []) != sorted(node.get("depends_on") or []):
+        return "deps_changed"
+    return ""
+
+
+async def withdraw_stale_frame(db: AsyncSession, job_id: str, *, node_keys: Optional[list[str]] = None,
+                               why: str = "") -> Optional[dict]:
+    """§17.1989 — clear the parked frame when its step moved on, write down that it was withdrawn, re-derive the job.
+
+    With `why` the caller already knows (a delete, a reset, a satisfied mark, an edit: §17.1639) and only `node_keys` is
+    checked; without it the step's row decides (`frame_withdrawn_because`), so every writer of a step -- a plan
+    re-apply, a node PATCH, the run finishing it -- is covered by reading the fact, not by each writer remembering. A job
+    waiting on the frame goes to `blocked` (nothing is asked; Run picks the plan up -- §17.1211), or to `executing` while
+    another step is running; a job already running keeps its status. The record (`metadata.decisions_withdrawn`) is
+    what a late `decide` on that frame is refused with. Returns the record, or None when nothing was withdrawn. The
+    caller commits."""
+    row = (await db.execute(
+        text("SELECT status, metadata -> 'awaiting_decision' AS asked, metadata -> :key AS gone "
+             "FROM jobs WHERE id = :j FOR UPDATE"), {"j": job_id, "key": WITHDRAWN_KEY})).mappings().first()
+    asked = _as_dict(row.get("asked")) if row else {}
+    nk = str(asked.get("node_key") or "")
+    if not nk or (node_keys is not None and nk not in set(node_keys)):
+        return None
+    if not why:
+        node = (await db.execute(text(
+            "SELECT status, tool, prompt_template, depends_on FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
+            {"j": job_id, "k": nk})).mappings().first()
+        why = frame_withdrawn_because(asked, dict(node) if node else None)
+        if not why:
+            return None
+    rec = {"node_key": nk, "frame_id": str(asked.get("frame_id") or ""), "title": str(asked.get("title") or ""),
+           "asked_at": asked.get("asked_at"), "why": why, "at": datetime.now(timezone.utc).isoformat()}
+    gone = row.get("gone")
+    gone = json.loads(gone) if isinstance(gone, str) else gone
+    kept = [r for r in (gone if isinstance(gone, list) else []) if isinstance(r, dict)][-(WITHDRAWN_KEEP - 1):]
+    await db.execute(
+        text("UPDATE jobs SET metadata = (COALESCE(metadata, '{}'::jsonb) - 'awaiting_decision') "
+             "|| CAST(:patch AS jsonb), updated_at = now() WHERE id = :j"),
+        {"j": job_id, "patch": json.dumps({WITHDRAWN_KEY: [*kept, rec]})})
+    if str(row["status"]) == STATUS:
+        busy = (await db.execute(text("SELECT 1 FROM dag_nodes WHERE job_id = :j AND status = 'running' LIMIT 1"),
+                                 {"j": job_id})).first()
+        await transition(db, job_id, to=("executing" if busy else "blocked"), expected_from=(STATUS,),
+                         reason=f"decision_withdrawn:{why}:{nk}")
+    logger.warning("decision_withdrawn job=%s node=%s frame=%s why=%s", job_id, nk, rec["frame_id"] or "-", why)
+    return rec
+
+
+def withdrawn_record(metadata: Any, node_key: str, frame_id: Optional[str] = None) -> Optional[dict]:
+    """§17.1989 — the newest withdrawal of `frame_id` (when given) or of `node_key`'s frame, or None."""
+    recs = [r for r in (_as_dict(metadata).get(WITHDRAWN_KEY) or []) if isinstance(r, dict)]
+    for r in reversed(recs):
+        if (frame_id and r.get("frame_id") == frame_id) or (not frame_id and r.get("node_key") == node_key):
+            return r
+    return None
+
+
+async def withdrawn_frame(db: AsyncSession, job_id: str, node_key: str, frame_id: Optional[str] = None) -> Optional[dict]:
+    """§17.1989 — the withdrawal a `decide` for (`node_key`, `frame_id`) is answering, or None when that question is
+    the one parked now (or was never withdrawn)."""
+    row = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :j"), {"j": job_id})).first()
+    md = _as_dict(row[0]) if row else {}
+    asked = _as_dict(md.get("awaiting_decision"))
+    if asked.get("node_key") == node_key and (not frame_id or str(asked.get("frame_id") or "") in ("", frame_id)):
+        return None
+    return withdrawn_record(md, node_key, frame_id)
+
+
 async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, frame: dict) -> Optional[dict]:
     """Write the question on the job, move it to ``awaiting_decision`` and
     return the SSE payload. The node stays ``pending`` — nothing was claimed."""
@@ -276,6 +374,7 @@ async def park_awaiting_decision(db: AsyncSession, job_id: str, node: dict, fram
         "depends_on": list(node.get("depends_on") or []),
         "asked_at": datetime.now(timezone.utc).isoformat(), **frame,
         "frame_id": frame_id_of(frame),          # §17.1681 — what an approval of THIS frame would run
+        "tool": node.get("tool") or "",          # §17.1989 — the step's tool the frame was drafted for
     }
     await db.execute(
         text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb) WHERE id = :jid"),

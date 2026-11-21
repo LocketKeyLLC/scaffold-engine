@@ -18,7 +18,10 @@ from app.modules import node_editor as ne
 def _db(status: str = "awaiting_decision", parked: str | None = "LT2"):
     db = AsyncMock()
     result = MagicMock()
-    result.mappings.return_value.first.return_value = {"status": status, "parked": parked}
+    # §17.1989 — the shared withdrawal reads the whole frame and the withdrawals already written down
+    result.mappings.return_value.first.return_value = {"status": status, "asked": {"node_key": parked} if parked else None,
+                                                       "gone": None}
+    result.first.return_value = None                     # no other step running
     result.mappings.return_value.all.return_value = []
     db.execute = AsyncMock(return_value=result)
     db.commit = AsyncMock()
@@ -32,7 +35,7 @@ def _sql(db) -> list[str]:
 @pytest.mark.asyncio
 async def test_the_parked_step_loses_its_frame_and_the_job_waits_for_run():
     db = _db()
-    with patch("app.modules.job_state.transition", AsyncMock(return_value="blocked")) as tr:
+    with patch("app.modules.decision_pause.transition", AsyncMock(return_value="blocked")) as tr:
         assert await ne._drop_parked_frame(db, "j", ["LT2"], "deleted") is True
     assert any("- 'awaiting_decision'" in s for s in _sql(db)), _sql(db)
     tr.assert_awaited_once()
@@ -42,7 +45,7 @@ async def test_the_parked_step_loses_its_frame_and_the_job_waits_for_run():
 @pytest.mark.asyncio
 async def test_another_steps_frame_is_left_alone():
     db = _db(parked="MC1")
-    with patch("app.modules.job_state.transition", AsyncMock()) as tr:
+    with patch("app.modules.decision_pause.transition", AsyncMock()) as tr:
         assert await ne._drop_parked_frame(db, "j", ["LT2"], "deleted") is False
     assert not any("- 'awaiting_decision'" in s for s in _sql(db))
     tr.assert_not_awaited()
@@ -51,7 +54,7 @@ async def test_another_steps_frame_is_left_alone():
 @pytest.mark.asyncio
 async def test_a_stale_frame_on_a_job_not_waiting_is_dropped_without_moving_the_job():
     db = _db(status="completed")
-    with patch("app.modules.job_state.transition", AsyncMock()) as tr:
+    with patch("app.modules.decision_pause.transition", AsyncMock()) as tr:
         assert await ne._drop_parked_frame(db, "j", ["LT2"], "deleted") is True
     assert any("- 'awaiting_decision'" in s for s in _sql(db))
     tr.assert_not_awaited()

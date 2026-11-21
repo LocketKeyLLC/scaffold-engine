@@ -807,6 +807,21 @@ async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
     return res.fetchone() is not None
 
 
+async def _withdraw_stale_frame(db: AsyncSession, job_id: str) -> None:
+    """§17.1989 — whenever the run settles a step, the parked frame is read against its step's row
+    (`decision_pause.withdraw_stale_frame`): a step finished, skipped, deleted or rewritten under its question takes
+    the question with it, whichever of the many status writers moved it. (A Run reaching a parked step whose text
+    changed re-drafts and re-parks it, so a Run's start needs no read of its own.) The step's own status is already
+    committed: a failure here is logged loudly and does not undo it."""
+    from app.modules import decision_pause
+    try:
+        if await decision_pause.withdraw_stale_frame(db, job_id):
+            await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("decision_withdraw_failed job=%s", job_id)
+
+
 async def _flip_job_blocked(db: AsyncSession, job_id: str) -> bool:
     """Flip a job to 'blocked', returning True iff THIS call won the flip.
 
@@ -2336,7 +2351,8 @@ async def execute_next_node(
                         # §17.1786 — and the job's tables, as its finished migration makes them
                         _done = [r for r in await _es.code_rows(_esdb, job_id)      # §17.1811
                                  if r.get("status") == "done" and r.get("node_key") != node_key]
-                    from app.modules import engine_schema as _esch
+                        from app.modules import engine_schema as _esch
+                        _live = await _esch.live_tables(_esdb)                       # §17.1990
                     from app.modules.engine_contracts import step_targets as _step_targets
                     _grounding_blocks.append(_es.block_for(
                         node_snapshot, _own_mods,
@@ -2350,7 +2366,8 @@ async def execute_next_node(
                             set(node_snapshot.get("prior_imports") or []),
                             tested=_es.tested_modules(_done)),                  # §17.1862
                         fks=_esch.foreign_keys_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1789
-                        rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1794
+                        rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1794
+                        live=_live, brief=json.dumps(brief, default=str) if isinstance(brief, dict) else str(brief or "")))
             except Exception as exc:
                 logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         # §17.1812 — a step of a follow-up job, reading or fixing, is shown the code its earlier job finished
@@ -3219,6 +3236,7 @@ async def execute_next_node(
                 "node_key": node_key,
                 "message": "node no longer running — stale executor result discarded",
             }
+        await _withdraw_stale_frame(db, job_id)              # §17.1989 — a step settled; is the parked one still asked?
         await _log_execution(
             db, job_id, node_id, "info" if verified else "warning",
             f"Node '{title}' -> {final_status}",

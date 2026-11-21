@@ -329,6 +329,8 @@ async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str], edited_by:
         ),
         {"j": job_id, "keys": keys},
     )
+    # §17.1989 — a reset step's draft is gone with it, whoever reset it (a plan re-apply, §17.1928/§17.1908, too)
+    await _drop_parked_frame(db, job_id, keys, "reset")
     if rows:
         logger.warning("node_reset_preimage job=%s nodes=%d keys=%s",
                        job_id, len(rows), sorted(r["node_key"] for r in rows))
@@ -367,21 +369,12 @@ async def _drop_parked_frame(db: AsyncSession, job_id: str, node_keys: list[str]
     for a step that no longer exists or is no longer that draft. Live (job 0fb4ea7f, 2026-10-18): LT2, a stop step held
     ready during a load test, was deleted while parked; the job kept the frame, and after the next run reached
     `completed` it still carried it. The job goes to `blocked` -- nothing is running, and Run picks the plan up again
-    (§17.1211: not `executing`, which would claim a run in flight). Returns True when a frame was dropped."""
-    row = (await db.execute(
-        text("SELECT status, metadata -> 'awaiting_decision' ->> 'node_key' AS parked "
-             "FROM jobs WHERE id = :j FOR UPDATE"), {"j": job_id})).mappings().first()
-    if not row or not row["parked"] or row["parked"] not in set(node_keys):
-        return False
-    await db.execute(
-        text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) - 'awaiting_decision', updated_at = now() "
-             "WHERE id = :j"), {"j": job_id})
-    if str(row["status"]) == "awaiting_decision":
-        from app.modules.job_state import transition
-        await transition(db, job_id, to="blocked", expected_from=("awaiting_decision",),
-                         reason=f"parked_step_{why}:{row['parked']}")
-    logger.warning("node_edit_dropped_parked_frame job=%s node=%s why=%s", job_id, row["parked"], why)
-    return True
+    (§17.1211: not `executing`, which would claim a run in flight). Returns True when a frame was dropped.
+
+    §17.1989 — one withdrawal for every path (`decision_pause.withdraw_stale_frame`): it is written down, so a late
+    `decide` on the frame is refused with why, and a job with another step running re-derives to `executing`."""
+    from app.modules import decision_pause
+    return await decision_pause.withdraw_stale_frame(db, job_id, node_keys=list(node_keys), why=why) is not None
 
 
 def _version_conflict(node: dict, expected_version: int | None) -> dict | None:
@@ -519,6 +512,10 @@ async def edit_node(
         reset_keys = sorted({node_key} | downstream)
         await _reset_keys(db, job_id, reset_keys, edited_by)
         await _reopen_job(db, job_id)
+    # §17.1989 — a step whose text, tool or dependencies changed is not the step its parked frame drafted: live
+    # (69fe61c4 T4), complete-plan made a parked Shell step CodeGen and the Shell frame stayed up after T4 was done
+    if INVALIDATING_FIELDS & {k for k in updates if before.get(k) != updates[k]}:
+        await _drop_parked_frame(db, job_id, [node_key], "edited")
 
     after = {k: updates[k] for k in updates}
     await _audit(db, job_id, node_key, "edit", before, after, edited_by)

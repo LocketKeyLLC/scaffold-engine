@@ -1245,6 +1245,9 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
                                      {"status": "skipped"}, edited_by)
             status[t["id"]] = "skipped"
             edited.append(t["id"])
+            # §17.1989 — a step settled here takes its parked question with it (`edit_node` and `_reset_keys` do so
+            # for the steps this pass rewrote or reset)
+            await node_editor._drop_parked_frame(db, job_id, [t["id"]], "skipped")
     if _gaps_reset or any(status.get(t["id"]) == "skipped" for t in tasks if t["id"] in edited):
         await db.commit()
     refreshed = [] if only_reviews else await refresh_stale_research(db, job_id, tasks, edited_by=edited_by)

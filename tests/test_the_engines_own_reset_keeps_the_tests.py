@@ -17,6 +17,9 @@ async def test_the_reset_row_names_who_asked_and_the_window_skips_the_engines():
         def mappings(self):
             return self
 
+        def first(self):                       # §17.1989 — no question parked on the job
+            return None
+
         def all(self):
             return [{"node_key": "T5", "status": "failed", "output_text": "x", "started_at": None,
                      "completed_at": None, "last_verification_reason": None, "retry_count": 2}]

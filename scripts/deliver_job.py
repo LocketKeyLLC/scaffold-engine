@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """§17.1905 — write a job's code into this checkout, for the pull request that delivers it into the engine.
 
-    python3 scripts/deliver_job.py <job_id> [--lab <wiring_module>] [--base-url http://localhost:8000]
+    python3 scripts/deliver_job.py <job_id> [--lab <wiring_module>] [--full] [--base-url http://localhost:8000]
 
 Reads ``GET /jobs/{id}/code?content=true`` (the engine's own export: each file as its last finished step left it),
 writes every file at its path, and lists the job's wiring module in ``app/labs.py`` so the engine starts the lab
 (``install(app)``) when it starts. §17.1932 — its tests go under ``tests/labs/<lab>/`` with a ``conftest.py`` that
 empties the job's tables before each test, as the engine's sandbox ran them (§17.1819). It writes files and nothing else -- branch, commit and pull request are the
-operator's (or their agent's), and the review is theirs. The API key is read from ``SCAFFOLD_API_KEY`` or ``.env``."""
+operator's (or their agent's), and the review is theirs. §17.1988 — a job delivered before writes only what its steps
+changed since that delivery (merged onto the reviewed copy here); every other file is kept as the review left it,
+unless ``--full``. The API key is read from ``SCAFFOLD_API_KEY`` or ``.env``."""
 from __future__ import annotations
 
 import argparse
@@ -118,26 +120,119 @@ def place(path: str, where: str) -> str:
     return f"tests/labs/{where}/{path[len('tests/'):]}" if path.startswith("tests/test_") else path
 
 
+def merge3(base: str, ours: str, theirs: str) -> tuple[str, bool]:
+    """§17.1988 — a line three-way merge: the reviewed copy (`ours`) with what the job's steps changed since the
+    delivery (`base` -> `theirs`) carried onto it. Returns (text, clean); changes that touch the same lines of the
+    delivered file are left between `<<<<<<< reviewed` / `>>>>>>> job` markers for the review."""
+    import difflib
+    b, sides = base.splitlines(keepends=True), (ours.splitlines(keepends=True), theirs.splitlines(keepends=True))
+    changes = sorted((i1, i2, side, s[j1:j2]) for side, s in enumerate(sides)
+                     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, b, s, autojunk=False).get_opcodes()
+                     if tag != "equal")
+    out: list[str] = []
+    pos, clean, k = 0, True, 0
+    while k < len(changes):
+        lo, hi, group = changes[k][0], changes[k][1], [changes[k]]
+        k += 1
+        while k < len(changes) and changes[k][0] <= hi:        # touching the same delivered lines: one region
+            hi = max(hi, changes[k][1])
+            group.append(changes[k])
+            k += 1
+        made = []
+        for side in (0, 1):
+            at, text = lo, []
+            for i1, i2, s, lines in group:
+                if s == side:
+                    text += b[at:i1] + lines
+                    at = i2
+            made.append(text + b[at:hi] if any(g[2] == side for g in group) else None)
+        out += b[pos:lo]
+        if made[0] is None or made[1] is None or made[0] == made[1]:
+            out += made[0] if made[1] is None else made[1]
+        else:
+            clean = False
+            out += ["<<<<<<< reviewed\n", *made[0], "=======\n", *made[1], ">>>>>>> job\n"]
+        pos = hi
+    return "".join(out + b[pos:]), clean
+
+
+def decide(f: dict, current: str | None, full: bool = False) -> tuple[str, str | None]:
+    """§17.1988 — what a delivery does with one exported file, given the file in this checkout (None: absent):
+    ("write" | "readded" | "merged" | "conflict", text) or ("kept" | "kept-deleted" | "same", None).
+
+    A job delivered before (the export says what each file did since): a file no step changed since is the reviewed
+    copy here, kept whatever the job holds -- live (5b4880c0, 2026-11-21) re-delivering for F13F1/F13F2 reverted
+    two edits made by hand in the review of #1161 (a dead `forward_days` back, the `ZERO` start of two Decimal sums
+    dropped). A file a step changed since is written, onto the reviewed copy by a three-way merge from the file as
+    delivered. A first delivery, or `full`, writes every file as the job holds it.
+
+    §17.1988b — a file the review deleted (delivered, absent here) and no step changed since stays deleted; one a step
+    changed since is written back, said so, for the review to decide again."""
+    new = f["content"]
+    if current == new:
+        return "same", None
+    since = f.get("since_delivery")
+    if full or since is None or since == "new":
+        return "write", new
+    if since == "unchanged":
+        return ("kept-deleted" if current is None else "kept"), None
+    if current is None:
+        return "readded", new
+    base = f.get("delivered_content")
+    if base is None or current == base:              # no reviewed edit to carry (or no base to carry it from)
+        return "write", new
+    text, clean = merge3(base, current, new)
+    return ("merged" if clean else "conflict"), text
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("job_id")
     ap.add_argument("--lab", help="the wiring module to list in app/labs.py (default: the one the export names)")
     ap.add_argument("--base-url", default=os.environ.get("SCAFFOLD_URL", "http://localhost:8000"))
+    ap.add_argument("--full", action="store_true",
+                    help="write every file as the job holds it, over the reviewed copies (§17.1988)")
     a = ap.parse_args()
     req = urllib.request.Request(f"{a.base_url}/jobs/{a.job_id}/code?content=true", headers={"X-API-Key": _key()})
     with urllib.request.urlopen(req, timeout=120) as r:
         out = json.load(r)
-    lab = a.lab or (out["wiring"][0] if len(out["wiring"]) == 1 else None)
+    return deliver(out, a.lab, a.full)
+
+
+def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
+    """Write the export `out` into this checkout (`ROOT`); 1 when a merge left a conflict for the review."""
+    lab = lab_arg or (out["wiring"][0] if len(out["wiring"]) == 1 else None)
     where = lab_dir([Path(f["path"]).stem for f in out["files"] if f["path"].startswith("app/modules/")], lab)
+    if out.get("delivered_at") and not full:
+        print(f"last delivered {out['delivered_at']}: writing what the job's steps changed since; the rest is kept "
+              "(--full writes every file as the job holds it)")
+    conflicts = []
     for f in out["files"]:
         if not _SAFE.match(f["path"]):
             sys.exit(f"refusing to write {f['path']!r}: not a job module, test or revision")
         dest = ROOT / place(f["path"], where)
+        act, body = decide(f, dest.read_text() if dest.exists() else None, full)
+        if act == "kept":
+            print(f"kept {place(f['path'], where)}: changed in the engine since delivery (reviewed edit), "
+                  "not rewritten")
+            continue
+        if act == "kept-deleted":
+            print(f"kept deleted {place(f['path'], where)}: deleted in the engine since delivery (reviewed), "
+                  "not re-written")
+            continue
+        if act == "same":
+            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(f["content"])
-        print(f"wrote {place(f['path'], where)}  ({f['lines']} lines, step {f['step']})")
+        dest.write_text(body)
+        if act == "conflict":
+            conflicts.append(place(f["path"], where))
+        print({"write": "wrote", "readded": "re-added", "merged": "merged", "conflict": "CONFLICT in"}[act]
+              + f" {place(f['path'], where)}  ({f['lines']} lines, step {f['step']})"
+              + {"write": "", "readded": " -- deleted in review, but a step changed it since; review it again",
+                 "merged": " -- the step's change carried onto the reviewed copy",
+                 "conflict": " -- the step's change and the reviewed edit overlap; resolve the markers"}[act])
         try:
-            fetches = vendored(f["path"], f["content"])
+            fetches = vendored(f["path"], body)
         except ValueError as exc:
             sys.exit(f"refusing the vendor manifest: {exc}")
         for to, url in fetches:                           # §17.1985 — fetched once, here, for the review to read
@@ -160,7 +255,9 @@ def main() -> int:
         print(f"no single wiring module (install(app)): {out['wiring'] or 'none'} -- app/labs.py left as it is; "
               "pass --lab once the job has one", file=sys.stderr)
     print(f"tables: {', '.join(out['tables']) or '-'}; secrets read: {', '.join(out['secrets']) or '-'}")
-    return 0
+    if conflicts:
+        print(f"{len(conflicts)} file(s) left with merge markers: {', '.join(conflicts)}", file=sys.stderr)
+    return 1 if conflicts else 0
 
 
 if __name__ == "__main__":

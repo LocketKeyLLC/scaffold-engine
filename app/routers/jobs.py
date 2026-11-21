@@ -220,8 +220,12 @@ async def job_code_endpoint(
               if p.startswith("app/modules/") and re.search(r"^def install\(", code, re.M)]
     # §17.1985 — and the static files beside the code (a page template, the lab's assets, its vendor manifest)
     static = engine_source.job_static_files(rows)
-    return {"job_id": str(job_id),
-            "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {})}
+    # §17.1988 — and what each file did since the job's last delivery, so a re-delivery keeps the reviewed copy
+    at, since = engine_source.since_delivery(rows)
+    return {"job_id": str(job_id), "delivered_at": at.isoformat() if at is not None else None,
+            "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {}),
+                       **({"since_delivery": since[p][0]} if p in since else {}),
+                       **({"delivered_content": since[p][1]} if content and p in since and since[p][1] else {})}
                       for p, (code, k) in {**files, **static}.items()],
             "tables": engine_plan.job_tables(files), "secrets": engine_plan.secrets_the_code_reads(files),
             "wiring": wiring}
@@ -297,6 +301,13 @@ async def decide_endpoint(
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
     await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
+    # §17.1989 — an answer to a question the engine withdrew (its step was rewritten, settled or deleted) is refused
+    # with why, before anything reads it as an answer to whatever is parked now
+    _gone = await decision_pause.withdrawn_frame(db, str(parsed_id), body.node_key, body.frame_id)
+    if _gone:
+        raise HTTPException(status_code=409, detail={
+            "error": f"this question was withdrawn ({_gone['why']}): the step changed after it was asked -- "
+                     "read the job again", "node_key": body.node_key, "withdrawn": _gone})
     # §17.1681 — an approval binds to the frame the operator read, not to whatever is parked when it arrives
     if body.frame_id:
         _current = await decision_pause.parked_frame_id(db, str(parsed_id))

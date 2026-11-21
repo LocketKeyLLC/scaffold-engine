@@ -50,8 +50,13 @@ async def _drop(jid: str) -> None:
 
 
 @pytest.mark.integration
-async def test_a_repeated_refusal_switches_the_model_once_with_fresh_attempts():
+async def test_a_repeated_refusal_switches_the_model_once_with_fresh_attempts(monkeypatch):
+    from app.config import settings
     from app.database import async_session
+    # §17.1987b — the switch needs two different models; a deployment whose .env gives both roles one model (the
+    # laptop) failed here before any code ran. The test sets its own.
+    monkeypatch.setattr(settings, "model_general", "test-general:1b")
+    monkeypatch.setattr(settings, "model_coder", "test-coder:1b")
     general, coder = get_model("model_general", None), get_model("model_coder", None)
     assert general != coder
     async with async_session() as db:
