@@ -6357,6 +6357,10 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
             # `process.env.PANEL_PASSWORD` passed
             if _ENV_LOOKUP_BEFORE_RE.search(t[max(0, m.start() - 40):m.start()]):
                 continue
+            # §17.1969 — the name as what a search LOOKS FOR is a reading of the word, not a value. Live (7cc2a7ac T22):
+            # `pct exec 111 -- grep -c 'PANEL_PASSWORD' /etc/systemd/system/control-panel.service` was refused
+            if _SEARCH_OPERAND_BEFORE_RE.search(t[t.rfind("\n", 0, m.start()) + 1:m.start()]):
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -6367,6 +6371,97 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
                 f"with the string `{name}`. Reference it so the runner resolves it — `$"
                 f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
                 f"machine with `$( … )`; never the bare word.")})
+    return out + _held_refs_in_python_strings(commands, files, verify, held, seen)
+
+
+#: §17.1969 — the start of the simple command a name is the operand of, when that command SEARCHES for it
+_SEARCH_OPERAND_BEFORE_RE = re.compile(r"(?:^|[|;&(`\s])(?:[ezf]?grep|zgrep|rg|ag|ack|git\s+grep)\s[^|;&\n]*$")
+#: §17.1969 — a Python program that hands a string to a SHELL (which does expand `$NAME`): not judged
+_PY_SHELL_SINK_RE = re.compile(
+    r"shell\s*=\s*True|\bos\.(?:system|popen|exec\w*)\(|expandvars|\bTemplate\(|getoutput|pexpect"
+    r"|['\"](?:ba|da|z)?sh['\"]\s*,\s*['\"]-c['\"]")
+#: §17.1969 — `python3 -c '…'`: single quotes, so the shell hands the program over unexpanded
+_PY_C_SINGLE_RE = re.compile(r"\bpython3?\s+(?:-[A-Za-z]+\s+)*?-c\s+'(?P<body>[^']*)'")
+#: a call whose string argument is a MESSAGE to a person, not a value a program uses
+_PY_MESSAGE_CALL_RE = re.compile(r"^(?:print|exit|SystemExit|warn|warning|error|info|debug|critical|exception|fail|"
+                                 r"\w*(?:Error|Exception))$")
+
+
+def _python_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
+                                             verify: Optional[list[str]]) -> list[str]:
+    """§17.1969 — every Python program whose text no shell expands before Python reads it: a quoted-tag
+    `python3 - <<'PY'`, a single-quoted `python3 -c '…'`, a quoted heredoc into a `.py` file, a written `.py` file."""
+    texts = [str(c) for c in list(commands or []) + list(verify or [])]
+    file_texts = [str((f or {}).get("content") or "") for f in files or []]
+    out = [body for _w, body, _where in _quoted_heredoc_programs(texts, files)]
+    for t in texts + file_texts:
+        out += [m.group("body") for m in _PY_C_SINGLE_RE.finditer(t)]
+        lines = t.split("\n")
+        for i, ln in enumerate(lines):
+            m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
+            tgt = m and (_HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():]))
+            path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
+            if not path.endswith(".py"):
+                continue
+            tag = m.group("q1") or m.group("q2") or m.group("q3")
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == tag), len(lines))
+            out.append("\n".join(lines[i + 1:end]))
+    run_text = "\n".join(texts)
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if body.strip() and (path.endswith(".py") or (path and re.search(rf"python3?\s+{re.escape(path)}(?![\w/])", run_text))):
+            out.append(body)
+    return out
+
+
+def _held_refs_in_python_strings(commands: list[str], files: Optional[list[dict]], verify: Optional[list[str]],
+                                 held: list[str], seen: set[str]) -> list[dict]:
+    """§17.1969 — `$NAME` inside a Python string literal is six characters, never the value.
+
+    Live (7cc2a7ac ADD5's draft, 2026-11-21): `/tmp/pal_stop.py` held `CFG = 'user = "panel:$PANEL_PASSWORD"\\n'`
+    and fed it to `curl --config /dev/stdin` -- the runner passes a held value in the ENVIRONMENT, never by rewriting
+    text, so every call would have sent the literal `$PANEL_PASSWORD` and answered 401; §17.1581 saw the `$` and passed
+    it. A program that hands strings to a shell (`shell=True`, `os.system`, `["sh", "-c", …]`, `expandvars`) is not
+    judged; a docstring, a message (`print`, `raise`, `sys.exit`) or a comparison is not a value."""
+    if not held:
+        return []
+    ref = re.compile(r"\$\{?(" + "|".join(re.escape(h) for h in held) + r")\}?(?![A-Za-z0-9_])")
+    out: list[dict] = []
+    for src in _python_programs_the_shell_never_expands(commands, files, verify):
+        if not ref.search(src) or _PY_SHELL_SINK_RE.search(src):
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        parents = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+                continue
+            m = ref.search(node.value if isinstance(node.value, str) else node.value.decode("latin-1"))   # `b"…"` too
+            if not m or m.group(1) in seen:
+                continue
+            p, skip = parents.get(id(node)), False
+            if isinstance(p, ast.Expr):                      # a docstring or a bare string: nothing uses it
+                skip = True
+            while p is not None and not skip:
+                if isinstance(p, (ast.Raise, ast.Assert, ast.Compare)):
+                    skip = True
+                elif isinstance(p, ast.Call):
+                    fn = p.func.attr if isinstance(p.func, ast.Attribute) else getattr(p.func, "id", "")
+                    skip = bool(_PY_MESSAGE_CALL_RE.match(fn or ""))
+                p = parents.get(id(p))
+            if skip:
+                continue
+            name = m.group(1)
+            seen.add(name)
+            line = next((ln for ln in src.splitlines() if m.group(0) in ln), m.group(0))
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: `{m.group(0)}` sits inside a Python string, "
+                f"which no shell expands -- the runner hands `{name}` to the program in its ENVIRONMENT, so the program "
+                f"would use the literal text `{m.group(0)}` (a login with it answers 401). Read it with "
+                f"`os.environ[\"{name}\"]` and run the program with `{name}=\"${name}\" python3 …` so the runner "
+                f"supplies it.")})
     return out
 
 
