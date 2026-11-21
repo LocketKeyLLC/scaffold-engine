@@ -6436,7 +6436,8 @@ def secrets_sudo_would_log(commands: list[str], policy: dict) -> list[dict]:
 
 
 #: §17.1963 — the text right before a name that is an environment lookup's key
-_ENV_LOOKUP_BEFORE_RE = re.compile(r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{)\s*['\"]$")
+_ENV_LOOKUP_BEFORE_RE = re.compile(
+    r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{|\bprocess\.env\s*\[)\s*['\"`]$")   # §17.1978 JS
 
 
 def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
@@ -6480,7 +6481,8 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
                 f"with the string `{name}`. Reference it so the runner resolves it — `$"
                 f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
                 f"machine with `$( … )`; never the bare word.")})
-    return out + _held_refs_in_python_strings(commands, files, verify, held, seen)
+    out += _held_refs_in_python_strings(commands, files, verify, held, seen)
+    return out + _held_refs_in_js_strings(commands, files, verify, held, seen)   # §17.1978
 
 
 #: §17.1969 — the start of the simple command a name is the operand of, when that command SEARCHES for it
@@ -6496,6 +6498,23 @@ _PY_MESSAGE_CALL_RE = re.compile(r"^(?:print|exit|SystemExit|warn|warning|error|
                                  r"\w*(?:Error|Exception))$")
 
 
+def _quoted_heredoc_bodies(text: str) -> list[tuple[str, str, str]]:
+    """``[(the line before `<<`, the file it writes or "", body)]`` for every quoted-tag heredoc in ``text`` -- a body no
+    shell expands. The closing tag may end the `sh -c '…'` word it sits in (`EOF'`)."""
+    out: list[tuple[str, str, str]] = []
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
+        if not m:
+            continue
+        tgt = _HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():])
+        path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
+        tag = m.group("q1") or m.group("q2") or m.group("q3")
+        end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() in (tag, tag + "'", tag + '"')), len(lines))
+        out.append((ln[:m.start()], path, "\n".join(lines[i + 1:end])))
+    return out
+
+
 def _python_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
                                              verify: Optional[list[str]]) -> list[str]:
     """§17.1969 — every Python program whose text no shell expands before Python reads it: a quoted-tag
@@ -6505,16 +6524,7 @@ def _python_programs_the_shell_never_expands(commands: list[str], files: Optiona
     out = [body for _w, body, _where in _quoted_heredoc_programs(texts, files)]
     for t in texts + file_texts:
         out += [m.group("body") for m in _PY_C_SINGLE_RE.finditer(t)]
-        lines = t.split("\n")
-        for i, ln in enumerate(lines):
-            m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
-            tgt = m and (_HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():]))
-            path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
-            if not path.endswith(".py"):
-                continue
-            tag = m.group("q1") or m.group("q2") or m.group("q3")
-            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == tag), len(lines))
-            out.append("\n".join(lines[i + 1:end]))
+        out += [body for _before, path, body in _quoted_heredoc_bodies(t) if path.endswith(".py")]
     run_text = "\n".join(texts)
     for f in files or []:
         path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
@@ -6571,6 +6581,216 @@ def _held_refs_in_python_strings(commands: list[str], files: Optional[list[dict]
                 f"would use the literal text `{m.group(0)}` (a login with it answers 401). Read it with "
                 f"`os.environ[\"{name}\"]` and run the program with `{name}=\"${name}\" python3 …` so the runner "
                 f"supplies it.")})
+    return out
+
+
+#: §17.1978 — a JavaScript program: what node runs, whether written as a file or fed on stdin
+_JS_SUFFIXES = (".js", ".mjs", ".cjs")
+#: §17.1978 — `node -e '…'`/`-p '…'`: single quotes, so the shell hands the program over unexpanded
+_JS_E_SINGLE_RE = re.compile(r"\bnode(?:js)?\s+(?:--?[\w-]+(?:=\S+)?\s+)*?(?:-e|-p|-pe|--eval|--print)\s+'(?P<body>[^']*)'")
+#: §17.1978 — the command before a heredoc that node reads AS its program: `node - <<'JS'`, `node --input-type=module <<'JS'`
+_JS_STDIN_BEFORE_RE = re.compile(r"\bnode(?:js)?(?:\s+--?[\w-]+(?:=\S+)?)*(?:\s+-)?\s*$")
+#: §17.1978 — a JS program that hands a string to a SHELL (which does expand `$NAME`): not judged. `exec(`/`execSync(`
+#: count only beside `child_process` (a RegExp has `.exec(` too)
+_JS_SHELL_SINK_RE = re.compile(
+    r"shell\s*:\s*(?:true|['\"`])|\bshelljs\b|\bzx/|\bexeca\b|['\"`](?:/bin/|/usr/bin/)?(?:ba|da|z)?sh['\"`]|\.sh['\"`]")
+_JS_EXEC_RE = re.compile(r"\bexec(?:Sync)?\s*\(")
+#: §17.1978 — a call whose string argument is a MESSAGE to a person, not a value a program uses
+_JS_MESSAGE_CALL_RE = re.compile(
+    r"^(?:console\.\w+|process\.std(?:out|err)\.write|assert(?:\.\w+)?|(?:\w+\.)*(?:log|warn|warning|error|info|debug|"
+    r"trace|fatal|fail|setFailed|exit)|(?:\w+\.)*\w*(?:Error|Exception))$")
+#: §17.1978 — a call that LOOKS FOR the text (`.replace('$NAME', process.env.NAME)` fills a placeholder itself)
+_JS_SEARCH_CALLS = frozenset({"replace", "replaceAll", "includes", "indexOf", "lastIndexOf", "startsWith", "endsWith",
+                              "split", "match", "matchAll", "search", "test"})
+#: a keyword after which `/` opens a regex literal, not a division
+_JS_KEYWORDS_BEFORE_REGEX = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+                                       "case", "do", "else", "yield", "await"})
+_JS_PUNCT_RE = re.compile(r"===|!==|==|!=|=>|\?\.|\.\.\.|\S")
+
+
+def _js_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
+                                         verify: Optional[list[str]]) -> list[str]:
+    """§17.1978 — every JavaScript program whose text no shell expands before node reads it: a single-quoted
+    `node -e '…'`, a quoted-tag heredoc into `node -` or into a `.js`/`.mjs`/`.cjs` file, a written `.js` file (or one
+    that `node <path>` runs)."""
+    texts = [str(c) for c in list(commands or []) + list(verify or [])]
+    file_texts = [str((f or {}).get("content") or "") for f in files or []]
+    out: list[str] = []
+    for t in texts + file_texts:
+        out += [m.group("body") for m in _JS_E_SINGLE_RE.finditer(t)]
+        out += [body.replace("'\\''", "'") for before, path, body in _quoted_heredoc_bodies(t)   # `sh -c '…'`: one quote
+                if path.endswith(_JS_SUFFIXES) or _JS_STDIN_BEFORE_RE.search(before)]
+    run_text = "\n".join(texts)
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if body.strip() and (path.endswith(_JS_SUFFIXES) or (path and re.search(
+                rf"\bnode(?:js)?\s+(?:--?[\w-]+(?:=\S+)?\s+)*{re.escape(path)}(?![\w/.])", run_text))):
+            out.append(body)
+    return out
+
+
+def _js_tokens(src: str) -> list[tuple[str, str, tuple, bool]]:
+    """§17.1978 — JavaScript source as ``[(kind, text, calls, thrown)]``: kind "str" (a '…'/"…" literal's text), "tpl"
+    (a template literal's text between `${…}`s), "id" or "p" (code). Comments and regex literals are dropped. ``calls``
+    are the callees (`console.error`, `x.replace`) whose argument list encloses the token; ``thrown`` is whether a
+    `throw` statement does. A careful scanner, not a parser: it knows only where strings, templates, comments and
+    regex literals begin and end."""
+    if src.startswith("#!"):
+        src = src[src.find("\n") + 1:] if "\n" in src else ""
+    toks: list[tuple[str, str, tuple, bool]] = []
+    stack: list[list] = []            # ["(", callee] | ["[", ""] | ["{", ""] | ["${", ""] | ["`", ""]
+    throw_at: Optional[int] = None    # the depth a `throw` statement was opened at
+    prev: tuple[str, str] = ("p", ";")
+    i, n = 0, len(src)
+
+    def calls() -> tuple:
+        return tuple(f[1] for f in stack if f[0] == "(" and f[1])
+
+    def callee() -> str:
+        parts, k = [], len(toks) - 1
+        while k >= 0 and toks[k][0] == "id":
+            parts.insert(0, toks[k][1])
+            if k >= 1 and toks[k - 1][0] == "p" and toks[k - 1][1] in (".", "?."):
+                k -= 2
+                continue
+            break
+        return ".".join(parts)
+
+    while i < n:
+        if stack and stack[-1][0] == "`":                       # template text, up to `${` or the closing backtick
+            j, buf = i, []
+            while j < n and src[j] != "`" and not src.startswith("${", j):
+                buf.append(src[j:j + 2] if src[j] == "\\" else src[j])
+                j += 2 if src[j] == "\\" else 1
+            toks.append(("tpl", "".join(buf), calls(), throw_at is not None))
+            if j >= n:
+                break
+            if src[j] == "`":
+                stack.pop()
+                prev, i = ("str", "`"), j + 1
+            else:
+                stack.append(["${", ""])
+                toks.append(("p", "${", calls(), throw_at is not None))
+                prev, i = ("p", "${"), j + 2
+            continue
+        c = src[i]
+        if c in " \t\r":
+            i += 1
+        elif c == "\n":
+            if throw_at is not None and len(stack) <= throw_at:
+                throw_at = None
+            i += 1
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c in "'\"":
+            j, buf = i + 1, []
+            while j < n and src[j] not in (c, "\n"):
+                buf.append(src[j:j + 2] if src[j] == "\\" else src[j])
+                j += 2 if src[j] == "\\" else 1
+            toks.append(("str", "".join(buf), calls(), throw_at is not None))
+            prev, i = ("str", c), j + 1
+        elif c == "`":
+            stack.append(["`", ""])
+            i += 1
+        elif c == "/" and (prev[0] == "p" and prev[1] not in (")", "]", "}")
+                           or prev[0] == "id" and prev[1] in _JS_KEYWORDS_BEFORE_REGEX):
+            j, in_class = i + 1, False                         # a regex literal: skipped whole
+            while j < n and src[j] != "\n" and (in_class or src[j] != "/"):
+                in_class = (in_class or src[j] == "[") and src[j] != "]"
+                j += 2 if src[j] == "\\" else 1
+            j += 1
+            while j < n and src[j].isalpha():
+                j += 1
+            prev, i = ("str", "/"), j
+        elif c.isalpha() or c in "_$":
+            j = i + 1
+            while j < n and (src[j].isalnum() or src[j] in "_$"):
+                j += 1
+            word = src[i:j]
+            if word == "throw":
+                throw_at = len(stack)
+            toks.append(("id", word, calls(), throw_at is not None))
+            prev, i = ("id", word), j
+        elif c.isdigit():
+            j = i + 1
+            while j < n and (src[j].isalnum() or src[j] in "._"):
+                j += 1
+            prev, i = ("num", src[i:j]), j
+        else:
+            p = _JS_PUNCT_RE.match(src, i).group(0)
+            if p == "(":
+                stack.append(["(", callee()])
+            elif p in "[{":
+                stack.append([p, ""])
+            elif p in ")]}" and stack:
+                closes_expr = p == "}" and stack[-1][0] == "${"
+                stack.pop()
+                if throw_at is not None and len(stack) < throw_at:
+                    throw_at = None
+                if closes_expr:                                 # back to the template's text
+                    toks.append(("p", "}", calls(), throw_at is not None))
+                    prev, i = ("p", "}"), i + 1
+                    continue
+            elif p == ";" and throw_at is not None and len(stack) <= throw_at:
+                throw_at = None
+            toks.append(("p", p, calls(), throw_at is not None))
+            prev, i = ("p", p), i + len(p)
+    return toks
+
+
+def _held_refs_in_js_strings(commands: list[str], files: Optional[list[dict]], verify: Optional[list[str]],
+                             held: list[str], seen: set[str]) -> list[dict]:
+    """§17.1978 — §17.1969 for JavaScript: a held `$NAME` inside a JS string node reads is the name, never the value.
+
+    In a '…'/"…" string `$NAME` and `${NAME}` are literal text; in a template literal `$NAME` is literal text and
+    `${NAME}` is a JS VARIABLE named NAME -- undeclared, so a ReferenceError (or a wrong value), never the secret. The
+    runner passes a held value in the ENVIRONMENT; node reads it as `process.env.NAME`. A program that hands strings to
+    a shell (`child_process` `exec`/`execSync`, `shell: true`, `spawn('sh', …)`) is not judged; a comment, a message
+    (`console.*`, `throw`, `new Error(…)`), a comparison or a `.replace('$NAME', …)` the program fills itself is not a
+    value. A `${NAME}` the program declares itself (`const NAME = …`, a parameter, `{ NAME } = process.env`) passes."""
+    if not held:
+        return []
+    ref = re.compile(r"\$\{?(" + "|".join(re.escape(h) for h in held) + r")\}?(?![A-Za-z0-9_])")
+    out: list[dict] = []
+    for src in _js_programs_the_shell_never_expands(commands, files, verify):
+        if not ref.search(src) or _JS_SHELL_SINK_RE.search(src) or ("child_process" in src and _JS_EXEC_RE.search(src)):
+            continue
+        toks = _js_tokens(src)
+
+        def tpl_expr(k: int) -> bool:   # toks[k] is the whole of a `${…}`
+            return 0 < k < len(toks) - 1 and toks[k - 1][:2] == ("p", "${") and toks[k + 1][:2] == ("p", "}")
+        bound = {t[1] for k, t in enumerate(toks) if t[0] == "id" and not tpl_expr(k)
+                 and not (k and toks[k - 1][0] == "p" and toks[k - 1][1] in (".", "?."))}
+        filled = {m.group(1) for t in toks if t[0] == "str" and t[2] and t[2][-1].rsplit(".", 1)[-1] in _JS_SEARCH_CALLS
+                  for m in ref.finditer(t[1])}
+        for k, t in enumerate(toks):
+            m = ref.search(t[1]) if t[0] in ("str", "tpl") else None
+            if m:
+                name, lit, as_var = m.group(1), m.group(0), False
+            elif t[0] == "id" and t[1] in held and tpl_expr(k) and t[1] not in bound:
+                name, lit, as_var = t[1], "${" + t[1] + "}", True
+            else:
+                continue
+            if name in seen or name in filled or t[3] or any(_JS_MESSAGE_CALL_RE.match(c) for c in t[2]):
+                continue
+            if t[0] == "str" and any(0 <= j < len(toks) and toks[j][:2] in (("p", "==="), ("p", "!=="), ("p", "=="),
+                                                                             ("p", "!=")) for j in (k - 1, k + 1)):
+                continue
+            seen.add(name)
+            line = next((ln for ln in src.splitlines() if lit in ln), lit)
+            what = (f"`{lit}` inside a JavaScript template literal is a JS VARIABLE named `{name}` that the program never "
+                    f"declares -- node throws a ReferenceError there, it never reads the secret"
+                    if as_var else
+                    f"`{lit}` sits inside a JavaScript string, which no shell expands -- the runner hands `{name}` to the "
+                    f"program in its ENVIRONMENT, so the program would use the literal text `{lit}` (a login with it "
+                    f"answers 401)")
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: {what}. Read it with `process.env.{name}` and "
+                f"run the program with `{name}=\"${name}\" node …` so the runner supplies it.")})
     return out
 
 
