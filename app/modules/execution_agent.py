@@ -1550,6 +1550,12 @@ def failed_draft(output: str) -> str:
     return f"{out[:head]}\n… [§17.1974: {len(out) - head - tail} chars cut] …\n{out[-tail:]}"
 
 
+def draft_of_a_failure(status: str, output: str) -> dict:
+    """§17.1974 — `{"draft": …}` for a failed attempt's log, else nothing. A helper, not an inline conditional:
+    `execute_next_node` sits at pyright's complexity limit ("Code is too complex to analyze", #1178)."""
+    return {"draft": failed_draft(output)} if status == "failed" and output else {}
+
+
 async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
                                    exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
                                    node_key: str) -> str:
@@ -3200,7 +3206,7 @@ async def execute_next_node(
              # §17.1891 — and the source of the ones that passed: the next attempt gets them back as they are
              **({"passed_tests": _passed_tests} if _passed_tests else {}),
              # §17.1974 — and the draft itself, as it was judged: the node row and the trace do not keep it
-             **({"draft": failed_draft(output)} if final_status == "failed" and output else {})},
+             **draft_of_a_failure(final_status, output)},
         )
         if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes

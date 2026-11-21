@@ -44,8 +44,10 @@ def test_a_draft_is_kept_whole_and_a_longer_one_keeps_its_head_and_its_tests():
 def test_the_failed_log_carries_the_draft_and_a_passing_one_does_not():
     src = inspect.getsource(ea.execute_next_node)
     at = src.index("f\"Node '{title}' -> {final_status}\"")
-    write = src[at:src.index(")", src.index('"draft"', at)) + 200]
-    assert '**({"draft": failed_draft(output)} if final_status == "failed" and output else {})' in write
+    write = src[at:src.index("draft_of_a_failure", at) + 200]
+    assert "**draft_of_a_failure(final_status, output)" in write
+    assert ea.draft_of_a_failure("failed", DRAFT) == {"draft": DRAFT}
+    assert ea.draft_of_a_failure("done", DRAFT) == {} and ea.draft_of_a_failure("failed", "") == {}
     # the reason it failed sits beside it, in the same row
     assert '"reason": reason' in write
 
