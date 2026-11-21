@@ -6039,6 +6039,111 @@ def repair_lookups_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict],
     return out, repairs
 
 
+
+_SET_E_LINE_RE = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*|-o\s+errexit)\b")
+_SET_E_OFF_RE = re.compile(r"^\s*set\s+(?:\+[a-zA-Z]*e[a-zA-Z]*|\+o\s+errexit)\b")
+#: §17.1972 — `a; b; true` / `a; :` -- a statement line whose last command is a no-op the author added to swallow failures
+_SEMI_NOOP_RE = re.compile(r"^(?P<indent>\s*)(?P<rest>\S.*?)\s*;\s*(?:true|:)\s*$")
+#: a line opening with a reserved word belongs to a compound around it: wrapping it would break the compound
+_RESERVED_HEAD_RE = re.compile(r"^(?:then|do|else|elif|fi|done|esac|in|\{|\}|\(|\))(?![\w-])")
+_HEREDOC_HEAD_RE = re.compile(r"(?<!<)<<(-?)\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+
+
+def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
+    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``;
+    returns ``(text, the lines repaired)``. A heredoc's body is a script of its own and is judged by ITS ``set -e``
+    (the in-guest templates carry the model's lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the
+    model writes with ``tee … <<'EOF'`` inside it is not run under that ``set -e`` and is left alone)."""
+    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _CONTINUES_RE, _QUOTED_RE
+    lines = body.split("\n")
+    out: list[str] = []
+    fixed: list[str] = []
+    errexit = False
+    prev = ""
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        hd = _HEREDOC_HEAD_RE.search(ln)
+        if hd:
+            strip_tabs, term = hd.group(1) == "-", hd.group(2)
+            j = next((k for k in range(i + 1, len(lines))
+                      if (lines[k].lstrip("\t") if strip_tabs else lines[k]).rstrip() == term), None)
+            if j is not None:                                # the head, the body judged on its own, the terminator
+                inner, inner_fixed = _ignore_failures_under_set_e("\n".join(lines[i + 1:j]))
+                out += [ln, *(inner.split("\n") if j > i + 1 else []), lines[j]]
+                fixed += inner_fixed
+                prev, i = ln, j + 1
+                continue
+        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+        if _SET_E_LINE_RE.match(ln):
+            errexit = True
+        elif _SET_E_OFF_RE.match(ln):
+            errexit = False
+        else:
+            m = _SEMI_NOOP_RE.match(ln)
+            rest = m.group("rest") if m else ""
+            rcode = _QUOTED_RE.sub("Q", rest)                     # a closed quote is one word; an open one is left
+            if (errexit and m and not ln.strip().startswith("#")
+                    and not _RESERVED_HEAD_RE.match(rest)
+                    and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))
+                    and "'" not in rcode and '"' not in rcode and "#" not in rcode       # no open quote, no comment
+                    and len(_BLOCK_OPEN_RE.findall(code)) == len(_BLOCK_CLOSE_RE.findall(code))
+                    and rcode.count("{") == rcode.count("}") and rcode.count("(") == rcode.count(")")
+                    and not rcode.rstrip().endswith(("&", "|", ";"))
+                    and not re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):   # one command, already `|| true`
+                new = f"{m.group('indent')}{{ {rest}; }} || true"
+                out.append(new)
+                fixed.append(ln.strip())
+                prev, i = new, i + 1
+                continue
+        out.append(ln)
+        prev, i = ln, i + 1
+    return "\n".join(out), fixed
+
+
+def repair_ignored_failures_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
+    """§17.1972 — ``(files, repairs)``: a line written ``a; b; true`` means "run these and ignore their failures",
+    but under ``set -e`` a failing ``a`` ends the script before the ``true`` is reached. Live (job 0fb4ea7f LM14,
+    2026-11-20): the step "restart the benchmark A/B" drafted ``systemctl stop lm-bench2 2>/dev/null; docker stop
+    vibrant_hugle 2>/dev/null; true`` into the ``reach_vm_ssh_and_run`` remote script, which opens with ``set -e``;
+    had either stop failed (the unit or the container already gone -- the very case the ``; true`` was written for),
+    the restart would have ended there with nothing started. It was caught by hand and redrafted with ``|| true``.
+
+    The repair is ``{ a; b; } || true``, not ``a || true; b || true``: bash does not apply ``set -e`` anywhere inside
+    the left side of ``||``, so every statement of the group runs in order whatever the others return, and the line
+    as a whole never fails -- exactly the line's meaning without ``set -e``. It needs no splitting of the line at its
+    ``;`` (which a quoted ``bash -c 'x; y'`` or an ``a && b`` would make wrong). Every repair is said on the frame
+    (§17.1270: never a silent repair), and a repair that would not compile is not made."""
+    out: list[dict] = []
+    repairs: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if not _SET_E_RE.search(body):
+            out.append(f)
+            continue
+        fixed, lines = _ignore_failures_under_set_e(body)
+        if not lines or (_bash_compiles(body) and not _bash_compiles(fixed)):
+            out.append(f)
+            continue
+        out.append({**f, "content": fixed})
+        for ln in lines:
+            repairs.append({"why": (
+                f"wrote `{ln[:120]}` in {path} as `{{ …; }} || true`: the script runs under `set -e`, where a failing "
+                f"first command ends it before the closing `true` is reached -- the `; true` says this line's failures "
+                f"are to be ignored, and `{{ …; }} || true` runs every command of the line and ignores them under "
+                f"`set -e` too.")})
+    return out, repairs
+
+
+def _bash_compiles(text: str) -> bool:
+    """§17.1972 — ``bash -n`` on a script; True when bash is not there to ask (the repair is then judged by shape)."""
+    import subprocess
+    try:
+        return subprocess.run(["bash", "-n"], input=text.encode(), capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 #: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
 #: §17.1955 — a `$` after one backslash is a literal dollar, not a read: `sed -n "/start/,\$p"` was refused
 #: "`$p` is read here and nothing sets it" (live, job 0fb4ea7f LM15). Two backslashes are an escaped backslash,
@@ -6947,6 +7052,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
+    files, _noop_repairs = repair_ignored_failures_under_set_e(files)   # §17.1972 — `a; b; true` under set -e
+    _lookup_repairs = list(_lookup_repairs) + _noop_repairs
     # §17.1657 — an *arr API call inside its own guest with no key gets one, FIRST, so every later step (the
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
     from app.modules.arr_api_key import present_the_arr_key as _present_arr_key
