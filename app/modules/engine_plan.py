@@ -621,6 +621,9 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                               "(the whole file, every existing public name, route and its auth kept)."
                               + (" " + str(t["notes"]).strip() if t.get("notes") else ""))
                 changes.append(f"engine_module_extended: {t.get('id')} edits `{mod}.py` in place (the brief names it)")
+            # §17.1985b — and is shown it whole when it runs, as a fix step is (`fixes_module`, `edited_module_block`)
+            if (t.get("tool_config") or {}).get("fixes_module") != mod:
+                t["tool_config"] = {**(t.get("tool_config") or {}), "fixes_module": mod}
             continue
         if mod and mod in engine_leaves:
             new = f"{pre}_{mod}"
