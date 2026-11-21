@@ -3,7 +3,7 @@
 // rebuilds this with nested shell quoting (every ADD122 round broke it a new way).
 //
 //   const remote = require('./scaffold-kit/remote');
-//   const host = { address: '10.0.0.6', user: 'operator' };
+//   const host = { address: HOST_ADDRESS, user: 'operator' };   // the machine's measured address, from config
 //   // in a request handler -- ALWAYS the promises form (§17.1598):
 //   const text = await remote.promises.readFile(host, '/path/on/that/machine');      // sudo cat
 //   await remote.promises.writeFile(host, '/path', text, { owner: 'steam:steam' });   // sudo tee, content on STDIN
