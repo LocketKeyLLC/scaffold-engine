@@ -2,8 +2,9 @@
 """SEC EDGAR 13F holdings ingestion for the scaffold engine.
 
 Fetches SEC submissions JSON for a CIK, finds 13F-HR and 13F-HR/A
-filings, downloads the primary XML document, parses each holding, and
-writes one ``ingested_item`` row per holding with ``source='sec_edgar'``.
+filings, reads the filing's index.json to locate the information-table
+XML document, downloads it, parses each holding, and writes one
+``ingested_item`` row per holding with ``source='sec_edgar'``.
 
 Polite rate limiting: SEC's fair-access guidance is 10 requests per
 second; we stay well under that with a 0.5s minimum inter-request delay.
@@ -27,11 +28,17 @@ logger = logging.getLogger("scaffold")
 # Fixed values that must never change at runtime (module constants).
 SUBMISSIONS_URL_TEMPLATE = "https://data.sec.gov/submissions/CIK{}.json"
 ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
+INDEX_URL_TEMPLATE = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
 RATE_LIMIT_SECONDS = 0.5  # well under SEC's 10 req/s limit
 SEC_USER_AGENT_SECRET = "SEC_CONTACT_EMAIL"
 SEC_USER_AGENT_TEMPLATE = "PaperTradingScaffold Research {email}"
 FORM_13F_TYPES = frozenset({"13F-HR", "13F-HR/A"})
 XML_NAMESPACE = "http://www.sec.gov/edgar/document/thirteenf/informationtable"
+
+# The 13F cover page is never the information table, whatever folder
+# prefix EDGAR's submissions JSON reports it under.
+COVER_PAGE_FILENAME = "primary_doc.xml"
+INFORMATION_TABLE_LOCAL_NAME = "informationTable"
 
 
 def _parse_edgar_date(value: str | None) -> datetime | None:
@@ -90,10 +97,68 @@ def _find_13f_hr_rows(payload: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _build_archive_url(cik: str, accession: str, primary_document: str) -> str:
-    """Build the per-filing archive URL."""
+def _build_archive_url(cik: str, accession: str, document: str) -> str:
+    """Build the per-filing archive URL for a document."""
     accession_no_dashes = accession.replace("-", "")
-    return f"{ARCHIVES_BASE}/{cik}/{accession_no_dashes}/{primary_document}"
+    return f"{ARCHIVES_BASE}/{cik}/{accession_no_dashes}/{document}"
+
+
+def _build_index_url(cik: str, accession: str) -> str:
+    """Build the URL of a filing's index.json."""
+    accession_no_dashes = accession.replace("-", "")
+    return INDEX_URL_TEMPLATE.format(cik=cik, accession=accession_no_dashes)
+
+
+def _document_basename(name: str) -> str:
+    """Return the last path segment of an EDGAR document name, lower-cased.
+
+    EDGAR's submissions JSON reports a 13F cover page with a folder prefix
+    (``xslForm13F_X01/primary_doc.xml``) while the same filing's index.json
+    lists the bare name (``primary_doc.xml``), so names are compared by
+    their last path segment only.
+    """
+    return name.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+
+
+def _local_name(tag: str) -> str:
+    """Return an element tag without its ``{namespace}`` prefix."""
+    if tag.startswith("{") and "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _is_information_table_xml(content: bytes | str) -> bool:
+    """True when ``content`` parses and its root element is an informationTable."""
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    if not content:
+        return False
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return False
+    return _local_name(root.tag) == INFORMATION_TABLE_LOCAL_NAME
+
+
+def _information_table_candidates(
+    items: list[Any], primary_document: str
+) -> list[str]:
+    """Return the index's ``.xml`` names that are neither the cover page nor the primary document."""
+    primary_basename = _document_basename(primary_document)
+    candidates: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not name.lower().endswith(".xml"):
+            continue
+        basename = _document_basename(name)
+        if basename == primary_basename or basename == COVER_PAGE_FILENAME:
+            continue
+        candidates.append(name)
+    return candidates
 
 
 async def _rate_limited_request(
@@ -247,10 +312,78 @@ async def _insert_holding(
     return row is not None
 
 
+async def _fetch_information_table_file(
+    cik: str,
+    accession: str,
+    primary_document: str,
+    client: Any,
+    headers: dict[str, str],
+) -> str | None:
+    """Fetch the filing's index.json and return the information-table XML file name.
+
+    The cover page is recognised by the *last path segment* of
+    ``primary_document`` (EDGAR reports ``xslForm13F_X01/primary_doc.xml``
+    while index.json lists ``primary_doc.xml``) and by the fixed cover-page
+    name itself, so it is never returned. When more than one other ``.xml``
+    remains, each is downloaded and the one whose root element is
+    ``informationTable`` wins — position and name in the listing do not
+    matter.
+
+    Returns ``None`` if the index is missing, malformed, or contains no
+    suitable ``.xml`` file.
+    """
+    index_url = _build_index_url(cik, accession)
+    response = await _rate_limited_request(client, index_url, headers=headers)
+    try:
+        index_data = response.json()
+    except ValueError:
+        logger.warning("Could not parse index.json for %s/%s", cik, accession)
+        return None
+    if not isinstance(index_data, dict):
+        logger.warning("Unexpected index payload for %s/%s", cik, accession)
+        return None
+
+    directory = index_data.get("directory", {})
+    items = directory.get("item", []) if isinstance(directory, dict) else []
+    if not isinstance(items, list):
+        return None
+
+    candidates = _information_table_candidates(items, primary_document)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    for name in candidates:
+        url = _build_archive_url(cik, accession, name)
+        try:
+            candidate_response = await _rate_limited_request(
+                client, url, headers=headers
+            )
+        except Exception as exc:  # one unreadable candidate must not abort the filing
+            logger.warning(
+                "Could not fetch candidate %s for %s/%s: %s", name, cik, accession, exc
+            )
+            continue
+        if _is_information_table_xml(getattr(candidate_response, "content", b"")):
+            return name
+
+    logger.warning(
+        "No informationTable XML among %d candidates for %s/%s (primary=%s)",
+        len(candidates),
+        cik,
+        accession,
+        primary_document,
+    )
+    return None
+
+
 async def ingest_13f_holdings(cik: str, *, db, client) -> int:
     """Fetch and record 13F holdings for one CIK.
 
-    Returns the number of new ``ingested_item`` rows written.
+    For each 13F filing, the function locates the information-table XML
+    document via the filing's index.json and parses it. Returns the number
+    of new ``ingested_item`` rows written.
     """
     secrets = await values_for(db, [SEC_USER_AGENT_SECRET])
     contact_email = secrets.get(SEC_USER_AGENT_SECRET)
@@ -266,8 +399,25 @@ async def ingest_13f_holdings(cik: str, *, db, client) -> int:
 
     written = 0
     for row in rows:
-        url = _build_archive_url(cik, row["accessionNumber"], row["primaryDocument"])
-        response = await _rate_limited_request(client, url, headers=headers)
+        info_table_file = await _fetch_information_table_file(
+            cik,
+            row["accessionNumber"],
+            row["primaryDocument"],
+            client,
+            headers,
+        )
+        if not info_table_file:
+            logger.warning(
+                "No information-table file found for accession %s (primary=%s)",
+                row["accessionNumber"],
+                row["primaryDocument"],
+            )
+            continue
+
+        info_table_url = _build_archive_url(
+            cik, row["accessionNumber"], info_table_file
+        )
+        response = await _rate_limited_request(client, info_table_url, headers=headers)
         content = response.content
         holdings = _parse_13f_xml(content)
         if not holdings:
