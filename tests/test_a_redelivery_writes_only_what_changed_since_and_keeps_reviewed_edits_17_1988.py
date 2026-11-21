@@ -114,7 +114,7 @@ def test_a_redelivery_keeps_the_reviewed_files_and_writes_the_13f_module(dj, tmp
     assert ("kept app/modules/lab_backtest.py: changed in the engine since delivery (reviewed edit), not rewritten"
             in out)
     assert "kept app/modules/lab_pnl.py" in out and "wrote app/modules/lab_13f.py" in out
-    assert "wrote app/modules/lab_wire.py" in out              # absent here: a file new to the tree is written
+    assert "kept deleted app/modules/lab_wire.py" in out       # §17.1988b: absent here, unchanged: the review deleted it
 
 
 def test_a_first_delivery_writes_everything(dj, tmp_path):

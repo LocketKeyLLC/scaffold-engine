@@ -158,21 +158,26 @@ def merge3(base: str, ours: str, theirs: str) -> tuple[str, bool]:
 
 def decide(f: dict, current: str | None, full: bool = False) -> tuple[str, str | None]:
     """§17.1988 — what a delivery does with one exported file, given the file in this checkout (None: absent):
-    ("write" | "merged" | "conflict", text) or ("kept" | "same", None).
+    ("write" | "readded" | "merged" | "conflict", text) or ("kept" | "kept-deleted" | "same", None).
 
     A job delivered before (the export says what each file did since): a file no step changed since is the reviewed
     copy here, kept whatever the job holds -- live (5b4880c0, 2026-11-21) re-delivering for F13F1/F13F2 reverted
     two edits made by hand in the review of #1161 (a dead `forward_days` back, the `ZERO` start of two Decimal sums
     dropped). A file a step changed since is written, onto the reviewed copy by a three-way merge from the file as
-    delivered. A first delivery, or `full`, writes every file as the job holds it."""
+    delivered. A first delivery, or `full`, writes every file as the job holds it.
+
+    §17.1988b — a file the review deleted (delivered, absent here) and no step changed since stays deleted; one a step
+    changed since is written back, said so, for the review to decide again."""
     new = f["content"]
     if current == new:
         return "same", None
     since = f.get("since_delivery")
-    if full or since is None or current is None or since == "new":
+    if full or since is None or since == "new":
         return "write", new
     if since == "unchanged":
-        return "kept", None
+        return ("kept-deleted" if current is None else "kept"), None
+    if current is None:
+        return "readded", new
     base = f.get("delivered_content")
     if base is None or current == base:              # no reviewed edit to carry (or no base to carry it from)
         return "write", new
@@ -211,15 +216,20 @@ def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
             print(f"kept {place(f['path'], where)}: changed in the engine since delivery (reviewed edit), "
                   "not rewritten")
             continue
+        if act == "kept-deleted":
+            print(f"kept deleted {place(f['path'], where)}: deleted in the engine since delivery (reviewed), "
+                  "not re-written")
+            continue
         if act == "same":
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(body)
         if act == "conflict":
             conflicts.append(place(f["path"], where))
-        print({"write": "wrote", "merged": "merged", "conflict": "CONFLICT in"}[act]
+        print({"write": "wrote", "readded": "re-added", "merged": "merged", "conflict": "CONFLICT in"}[act]
               + f" {place(f['path'], where)}  ({f['lines']} lines, step {f['step']})"
-              + {"write": "", "merged": " -- the step's change carried onto the reviewed copy",
+              + {"write": "", "readded": " -- deleted in review, but a step changed it since; review it again",
+                 "merged": " -- the step's change carried onto the reviewed copy",
                  "conflict": " -- the step's change and the reviewed edit overlap; resolve the markers"}[act])
         try:
             fetches = vendored(f["path"], body)

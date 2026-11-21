@@ -2078,6 +2078,15 @@ def replaces_an_engine_module(output: str, row: dict) -> list[str]:
             "under that name everywhere"]
 
 
+#: §17.1988b — when a delivery question was answered, kept through a reset: its own finish, the operator's answer
+#: (`jobs.metadata.decisions[key].at`, which no reset drops) and the finish a reset wrote down (`dag_node_edits`)
+_DELIVERED_MARK = (
+    "CASE WHEN d.title ~ '^Is this job''s code merged into the engine and running\\?$' THEN GREATEST(d.completed_at,"
+    " (SELECT (jj.metadata->'decisions'->d.node_key->>'at')::timestamptz FROM jobs jj WHERE jj.id = d.job_id),"
+    " (SELECT max((e.before->>'completed_at')::timestamptz) FROM dag_node_edits e"
+    "   WHERE e.job_id = d.job_id AND e.node_key = d.node_key AND e.op = 'reset')) END")
+
+
 async def code_rows(db, job_id: str) -> list[dict]:
     """§17.1811 — the steps whose code this job's code stands on: the finished steps of each job it `builds_on`
     (keyed `<job>:<key>` so they never meet this job's own keys), then this job's own steps, which win any file
@@ -2090,7 +2099,8 @@ async def code_rows(db, job_id: str) -> list[dict]:
     rows = (await db.execute(text(
         "SELECT * FROM ("
         " SELECT 0 AS src, d.execution_order AS ord, left(d.job_id::text, 8) || ':' || d.node_key AS node_key,"
-        "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id, d.completed_at"
+        "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id, d.completed_at,"
+        f"       {_DELIVERED_MARK} AS delivered_at"
         "   FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
         "        CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on'"
         "             ELSE '[]'::jsonb END) AS b(prior)"
@@ -2098,8 +2108,8 @@ async def code_rows(db, job_id: str) -> list[dict]:
         "  WHERE j.id = :j AND d.status = 'done' AND d.output_text IS NOT NULL"
         " UNION ALL"
         " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status, id,"
-        "        completed_at"
-        "   FROM dag_nodes WHERE job_id = :j"
+        f"       completed_at, {_DELIVERED_MARK}"
+        "   FROM dag_nodes d WHERE job_id = :j"
         ") r ORDER BY src, ord NULLS LAST, node_key"),
         {"j": job_id})).mappings().all()
     return [{k: v for k, v in dict(r).items() if k not in ("src", "ord")} for r in rows]
@@ -2227,13 +2237,18 @@ def job_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
     return dict(sorted(out.items()))
 
 
-def delivered_at(rows: list[dict]):
+def delivered_at(rows: list[dict], job: str = ""):
     """§17.1988 — when this job's code was last delivered: the latest answered delivery question of its own
-    ("Is this job's code merged into the engine and running?"), else None (never delivered)."""
+    ("Is this job's code merged into the engine and running?"), else None (never delivered). `job`: the 8-character
+    prefix of a job it builds on, for that job's delivery instead.
+
+    §17.1988b — a question reset since (asked again, its `completed_at` cleared) keeps the delivery: `code_rows` reads
+    its mark (`delivered_at`) from the operator's recorded answer and the reset's pre-image too."""
     from app.modules.engine_plan import _DELIVER_QUESTION_RE
-    done = [r["completed_at"] for r in rows if r.get("status") == "done" and r.get("completed_at") is not None
-            and ":" not in str(r.get("node_key") or "") and _DELIVER_QUESTION_RE.match(str(r.get("title") or ""))]
-    return max(done, default=None)
+    mine = (lambda k: ":" not in k) if not job else (lambda k: k.startswith(job + ":"))
+    done = [r.get("delivered_at") or (r.get("completed_at") if r.get("status") == "done" else None) for r in rows
+            if mine(str(r.get("node_key") or "")) and _DELIVER_QUESTION_RE.match(str(r.get("title") or ""))]
+    return max((t for t in done if t is not None), default=None)
 
 
 def as_delivered(rows: list[dict], at) -> list[dict]:
@@ -2413,6 +2428,24 @@ def tested_modules(rows: list[dict]) -> set[str]:
             for p in files_of(r) if is_test(p)}
 
 
+def reviewed_copy(rows: list[dict], module: str, cur: tuple[str, str, str]) -> tuple[str, str, str]:
+    """§17.1988b — a module delivered and not rewritten by any step since is the engine tree's file: the copy the
+    delivery's review left (it may differ from what the job's step wrote), which a step that edits it must start
+    from. Live (5b4880c0): the review of #1161 edited `paper_p_l_calculator` and `paper_entry_backtesting` by hand;
+    a fix step shown the job's own copy would have drafted on the pre-review code and undone the review."""
+    path, _code, key = cur
+    # delivered with its own job or with this one: this job's export carries the files of the jobs it builds on
+    # (live: `paper_entry_backtesting` is f00ea97f:T25E4's, never delivered by f00ea97f, delivered by 5b4880c0)
+    marks = [delivered_at(rows), delivered_at(rows, key.split(":", 1)[0]) if ":" in key else None]
+    at = max((t for t in marks if t is not None), default=None)
+    done = next((r.get("completed_at") for r in reversed(rows) if str(r.get("node_key") or "") == key), None)
+    own = ENGINE_PKG / "modules" / f"{module}.py"
+    if (at is None or done is None or done > at or path != f"app/modules/{module}.py"
+            or not re.fullmatch(r"[a-z_][a-z0-9_]*", module or "") or not own.is_file()):
+        return cur
+    return path, own.read_text(encoding="utf-8"), f"{key}, as delivered and reviewed into the engine"
+
+
 def edited_module_block(rows: list[dict], module: str) -> str:
     """§17.1832 — a step that edits a module in place is shown that module as it is now. Live (5b4880c0, 2026-10-26):
     T6U2-T6U4, each told "edit `paper_audit_trail_writer.py` in place, its public names kept", were shown only that
@@ -2427,6 +2460,8 @@ def edited_module_block(rows: list[dict], module: str) -> str:
         if not re.fullmatch(r"[a-z_][a-z0-9_]*", module or "") or not own.is_file():
             return ""
         cur = (f"app/modules/{module}.py", own.read_text(encoding="utf-8"), "the engine's own, as merged")
+    else:
+        cur = reviewed_copy(rows, module, cur)
     path, code, key = cur
     return (f"\n\n## The file this step edits: `{path}` as it is now (step {key})\n"
             "Edit THIS file: keep every public function, class and parameter it has (other modules call them), change "
