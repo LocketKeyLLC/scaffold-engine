@@ -7916,8 +7916,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         _missing = missing_prints(_expected, "\n".join([str(e.get("output") or "") for e in executed] + [verify_out]))
         if _missing:
             ok = False
-            refuted = list(refuted) + [{"verdict": "contradicted", "reason": f"nothing printed `{t}`, which its Done when names"}
-                                       for t in _missing]
+            refuted = list(refuted) + [{"verdict": "contradicted", "kind": "done_when_print",
+                                        "reason": f"nothing printed `{t}`, which its Done when names"} for t in _missing]
             logger.warning("supervised_run_expected_print_missing job=%s node=%s missing=%r",
                            job_id, node_key, [t[:60] for t in _missing])
     # §17.1680b — a read-only block with no separate check (§17.1680) is judged by its OWN output: the same judge, the
@@ -7968,19 +7968,34 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ok = False
         repeated_reason = _unverified
         logger.warning("supervised_run_unverified job=%s node=%s", job_id, node_key)
+    # §17.1967 — a TEST that ran and found faults did its job: done, with its findings recorded where the steps after it
+    # read them (`_result_of` keeps what follows `## Executed on`). Live (job 7cc2a7ac): T15's Playwright run printed
+    # "10 of 12 sections passed" and exited 1, T17's engine control answered HTTP 500, T9's sweep printed `000` for five
+    # routes -- each recorded failed, the job blocked, and the operator skipped all three by hand so F1–F4 could fix
+    # what they had found. A test whose own commands broke, or whose every probe failed, is still failed.
+    _findings, _findings_why = "", ""
+    if not ok and not confirmed_after_drop and not dropped and not repeated_reason:
+        from app.modules.found_faults import findings_of_a_run
+        _findings, _findings_why = findings_of_a_run(
+            waiting, executed, refuted,
+            not_run=runnable[max(0, len(executed) - len(_files)):] if _wrote_all else [])
+        if _findings:
+            output = f"{output}\n\n{mask_secrets(scrub_run_output(_findings, secret_env), values, need)}"
+            logger.warning("supervised_run_done_with_findings job=%s node=%s why=%s", job_id, node_key, _findings_why[:200])
     if confirmed_after_drop:
         output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
                    f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
                    "did not know whether it had run. The checks above were then read back off the "
                    "machine and they show the step's goal already met, so it is recorded as done "
                    "rather than retried — repeating a write that already happened is not a retry.")
-    if ok or confirmed_after_drop:
+    if ok or confirmed_after_drop or _findings:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
                  "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
             {"jid": job_id, "nk": node_key, "out": output,
              "why": (f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"
                      if ok else
+                     mask_secrets(scrub_run_output(_findings_why, secret_env), values, need) if _findings else
                      f"supervised run through {spec.name}: the response to "
                      f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
                      f"the machine confirm the step's goal is met")})
@@ -8963,11 +8978,11 @@ def blank_checks(pasted: str, ran: list[dict]) -> list[dict]:
     for r in done:
         cmd = str(r.get("command") or "").rstrip().rstrip("'\"").rstrip()
         if not outs[r["id"]] and _FILTER_TAIL_RE.search(cmd + " "):
-            out.append({"verdict": "contradicted", "id": r["id"], "reason": (
+            out.append({"verdict": "contradicted", "kind": "blank", "id": r["id"], "reason": (
                 f"`{str(r.get('command'))[:120]}` filters for what the step should have left, and printed NOTHING: "
                 f"what it looks for is not there (§17.1738)")})
     if done and not out and all(not outs[r["id"]] for r in done):
-        out.append({"verdict": "contradicted", "id": done[0]["id"], "reason": (
+        out.append({"verdict": "contradicted", "kind": "blank", "id": done[0]["id"], "reason": (
             f"all {len(done)} check(s) ran and printed nothing, so nothing confirmed the work (§17.1738)")})
     return out
 

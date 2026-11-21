@@ -43,6 +43,10 @@ def _settled_as(row: dict) -> str:
         m = re.search(r"verdict (passed|failed)", why)
         if m:
             return "done" if m.group(1) == "passed" else "failed"
+    # §17.1967 — a test recorded done WITH findings found failures: the fix conditional on it has something to fix
+    from app.modules.found_faults import FINDINGS_MARK
+    if st == "done" and why.startswith(FINDINGS_MARK):
+        return "failed"
     return st
 
 
