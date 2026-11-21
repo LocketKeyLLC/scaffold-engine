@@ -1534,6 +1534,22 @@ def _kept_after_check(output: str, res) -> dict:
     return kept_test_sources(output, list(res.passed))
 
 
+_DRAFT_KEEP = 64_000           # §17.1974 chars of a failed draft kept on its log; every CodeGen output measured fits
+
+
+def failed_draft(output: str) -> str:
+    """§17.1974 — a failed attempt's draft as the checks judged it, for its `-> failed` log (execution_logs, never
+    swept): the node row's output is the next attempt's once that runs, and the trace that held the draft goes at
+    `trace_retention_days` (14). Live (2026-11-19, §17.1951): three investigations found the draft swept. A longer
+    draft keeps its head and its tail (the tests sit last), the cut named."""
+    out = str(output or "")
+    if len(out) <= _DRAFT_KEEP:
+        return out
+    tail = _DRAFT_KEEP // 4
+    head = _DRAFT_KEEP - tail
+    return f"{out[:head]}\n… [§17.1974: {len(out) - head - tail} chars cut] …\n{out[-tail:]}"
+
+
 async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dict, brief: object, exec_prompt: str,
                                    exec_role: str, exec_overrides: dict, gen_budget: int, job_id: str,
                                    node_key: str) -> str:
@@ -3182,7 +3198,9 @@ async def execute_next_node(
              # §17.1864 — and the tests it wrote, by file: the next attempt keeps every one
              "tests": _ec_written_tests(str(output or "")),
              # §17.1891 — and the source of the ones that passed: the next attempt gets them back as they are
-             **({"passed_tests": _passed_tests} if _passed_tests else {})},
+             **({"passed_tests": _passed_tests} if _passed_tests else {}),
+             # §17.1974 — and the draft itself, as it was judged: the node row and the trace do not keep it
+             **({"draft": failed_draft(output)} if final_status == "failed" and output else {})},
         )
         if _evidence_summary.get("checked") or _evidence_summary.get("engine_test"):
             # §17.1039 — the evidence report is durable here; downstream nodes
