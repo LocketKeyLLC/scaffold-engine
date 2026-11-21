@@ -11815,6 +11815,91 @@ def the_run_is_the_read(waiting: Optional[dict], executed: Optional[list]) -> bo
     return bool(ex) and all(e.get("ok") is not False and str(e.get("output") or "").strip() for e in ex)
 
 
+#: §17.1976 — a read that says only that a machine or guest is THERE (up, reachable, answering), whatever runs on it
+_PLACE_READ_RE = re.compile(
+    r"^(?:qm\s+(?:status|list|guest\s+ping)\b|qm\s+agent\s+\d+\s+ping\b|pct\s+(?:status|list)\b"
+    r"|pvesh\s+get\s+\S*/(?:qemu|lxc)/\d+/status/current\b|f?ping\b|arping\b|nc\s+(?:-\w+\s+)*-\w*z"
+    r"|uptime\b|hostname\b|whoami\b|true\b|exit\b|echo\b|systemctl\s+is-system-running\b)")
+#: what may follow a place read in its pipeline without making it read anything else
+_PLACE_FILTER_RE = re.compile(r"^(?:grep|egrep|head|tail|awk|cut|tr|wc|sed\s+-n|sort|uniq)\b")
+#: §17.1976 — a block whose whole work is to bring a guest UP: its effect is the place (3cc24343 T4 "Start CT 109")
+_BRINGS_UP_RE = re.compile(r"^(?:(?:qm|pct)\s+(?:start|resume)\s+\d+|sleep\s+\d+)\s*$")
+
+
+def _unwrap_check(check: str) -> str:
+    """§17.1976 — the command a check runs where it lands: inside `pct exec N --`, `qm guest exec N --`, `sh -c '…'`,
+    the in-guest template's `bash /tmp/in_vm_N.sh check '…'`, `sudo`, `timeout N`, or `ssh [opts] host '…'`."""
+    c = str(check or "").strip()
+    for _ in range(6):
+        prev = c
+        m = re.match(r"^(?:\w+=\S*\s+)*bash\s+/tmp/in_(?:vm|ct)_\d+(?:_agent)?\.sh\s+check\s+(.*)$", c, re.S)
+        if m:
+            try:
+                c = " ".join(shlex.split(m.group(1)))
+            except ValueError:
+                c = m.group(1)
+        c = re.sub(r"^(?:pct\s+exec\s+\d+|qm\s+guest\s+exec\s+\d+)\s+--\s+", "", c)
+        c = re.sub(r"^(?:sudo(?:\s+-\w+)*|timeout\s+\d+[smh]?)\s+", "", c)
+        m = re.match(r"^(?:ba)?sh\s+-c\s+(['\"])(.*)\1\s*$", c, re.S)
+        if m:
+            c = m.group(2).replace("'\\''", "'")
+        m = re.match(r"^ssh(?:\s+-\w+(?:\s+[^\s'\"@-]\S*)?)*\s+(?:[\w.-]+@)?[\w.-]+(?:\s+(['\"])(.*)\1|\s+(.+))?\s*$", c, re.S)
+        if m:
+            c = (m.group(2) or m.group(3) or "true").strip()
+        c = c.strip()
+        if c == prev:
+            break
+    return c
+
+
+def _segments(cmd: str) -> list[str]:
+    return [p.strip() for p in re.split(r"\s*(?:;|&&|\|\||\n)\s*", str(cmd or "")) if p.strip()]
+
+
+def a_place_check(check: str) -> bool:
+    """§17.1976 — True when the check reads only that the step's machine or guest is up or reachable (`qm status 110`,
+    `pct status 109`, `ping`, `ssh host true`, `uptime` …): the PLACE, which holds before the step and after it alike."""
+    segs = _segments(_unwrap_check(check))
+    if not segs:
+        return False
+    for seg in segs:
+        head, *rest = [p.strip() for p in seg.split("|")]
+        if not _PLACE_READ_RE.match(_unwrap_check(head)) or not all(_PLACE_FILTER_RE.match(p) for p in rest):
+            return False
+    return True
+
+
+def checks_read_only_the_place(verify: list, commands: Optional[list] = None) -> str:
+    """§17.1976 — ``""``, or why the checks cannot show a step already met: every one reads only that the machine is
+    there. Live (job 0fb4ea7f LM26 "VM 110: start the benchmark A/B again as a transient unit", 2026-11-21): the
+    in-guest template's own verify, `qm status 110` → `status: running`, was the only check; the judge called the VM
+    being up "its effect is present", the step was recorded already met, and lm-ab3 never started. The one block it
+    can prove is a block that only brings the guest up (3cc24343 T4 "Start CT 109": `pct start 109`)."""
+    v = [str(c) for c in verify or [] if str(c).strip()]
+    if not v or not all(a_place_check(c) for c in v):
+        return ""
+    segs = [seg for c in commands or [] for seg in _segments(str(c))]
+    if segs and all(_BRINGS_UP_RE.match(seg) or a_place_check(seg) for seg in segs):
+        return ""
+    return (f"every check ({', '.join('`' + c[:60] + '`' for c in v[:3])}) reads only that the machine is up or "
+            "reachable -- that is where the step runs, not what it does")
+
+
+def own_checks_not_read(node: Optional[dict], verify: list) -> str:
+    """§17.1976 — ``""``, or the step's own named check (its "Check:" / "Done when" command) that the pre-read does not
+    run. The step's text says what proves it done; a pre-read that leaves it out answers another question."""
+    from app.modules.operator_steps import checks
+
+    def _flat(x: str) -> str:
+        return re.sub(r"[\s'\"\\]+", "", str(x or ""))
+
+    blob = "\n".join(_flat(_unwrap_check(c)) + "\n" + _flat(c) for c in verify or [])
+    for c in checks(node):
+        if _flat(c) not in blob and _flat(_unwrap_check(c)) not in blob:     # wrapped or bare, where it runs
+            return f"the step names its check `{c[:80]}` and the pre-read does not run it"
+    return ""
+
+
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
     """§17.1302 — read the step's OWN verify checks off the machine before the
     block is parked. When every check confirms the step's goal, the step is
@@ -11845,6 +11930,9 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         (frame or {}).get("files") or [])
     # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
     _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
+    # §17.1976 — the PLACE (the VM is up) is not the step's effect, and the step's own named checks are among the reads
+    _blind = (_blind or checks_read_only_the_place(verify_cmds, (frame or {}).get("commands") or [])
+              or own_checks_not_read(node, verify_cmds))
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)

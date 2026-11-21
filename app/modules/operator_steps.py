@@ -120,16 +120,26 @@ def done_when_clause(body: str) -> str:
     return re.split(r"\n\s*\n", rest, maxsplit=1)[0]
 
 
+#: §17.1976 — the step's own "Check: `a` and `b`." line, the commands its "Done when" is read from
+_CHECK_LINE_RE = re.compile(r"(?:^|(?<=[.!?:])\s)(?:Check|Verify)(?:\s+(?:with|by))?\s*:\s*([^\n]*`[^\n]*)", re.I | re.M)
+
+
 def checks(node: Optional[dict]) -> list[str]:
     """The step's own read-only checks: backticked commands after 'Done when'.
 
     §17.1625 — read from the description AND the prompt: `_text` takes the description when there is one, and a
-    short one ("From D9.", job 0fb4ea7f RD1) hid the prompt's whole "Done when" -- the checks never ran."""
+    short one ("From D9.", job 0fb4ea7f RD1) hid the prompt's whole "Done when" -- the checks never ran.
+    §17.1976 — and from a "Check: `cmd` and `cmd`." line beside it: live (job 0fb4ea7f LM26, 2026-11-21) the step said
+    "Check: `systemctl is-active lm-ab3` and `tail -n 3 /root/lm_bench.log`. Done when lm-ab3 is active …"; its Done when
+    named no command, so none was read, and the pre-read `qm status 110` alone recorded the step already met."""
     n = node or {}
     body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
                                      if str(n.get(k) or "").strip()))
     clause = done_when_clause(body)
-    if not clause:
+    if clause:
+        clause += "\n"
+    clause += "\n".join(m.group(1) for m in _CHECK_LINE_RE.finditer(body))
+    if not clause.strip():
         return []
     from app.modules.assist_state_check import read_only_command
     return [c.strip() for c in dict.fromkeys(_BACKTICK_RE.findall(clause))
