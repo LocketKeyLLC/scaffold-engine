@@ -250,7 +250,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "PRINTS the unit's environment",                # §17.1958
                    "written BEFORE its commands run",               # §17.1960
                    "is a value this block makes itself",           # §17.1968
-                   "reads this value itself and asks the operator for it")   # §17.1968b
+                   "reads this value itself and asks the operator for it",   # §17.1968b
+                   "uses bash-only syntax")                         # §17.1982
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -316,6 +317,7 @@ _WHOSE_GAP: dict[str, str] = {
     "written BEFORE its commands run": "drafter",
     "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
     "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
+    "uses bash-only syntax": "drafter",          # §17.1982 — where the engine cannot run it with bash: redraft as bash/POSIX
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -7858,7 +7860,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1973 — a shell builtin becomes the program on the FRAME, so the operator approves, the engine signs and the
     # runner runs one string (it used to be rewritten in transit, after signing, and the runner refused it).
     cmds, verify, _lk_notes = lookups_as_programs(cmds, verify)
-    _test_notes = list(_test_notes) + _lk_notes
+    # §17.1982 — a bash program handed to `sh` (dash in every Debian guest) runs with `bash`; where the engine cannot
+    # say bash is there (a container image, a quoted ssh command) it is refused below with the remedy
+    cmds, verify, files, _sh_notes, _sh_refused = bash_programs_handed_to_sh(cmds, verify, files)
+    _test_notes = list(_test_notes) + _lk_notes + _sh_notes
     _mv_notes = list(_comp_notes) + list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
@@ -7952,7 +7957,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _pre = list(preconditions or [])
     if _ns_notes:
         _pre = [p for p in _pre if "cannot resolve names" not in str((p or {}).get("why") or "")]
-    refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
+    refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars + _sh_refused   # §17.1213, §17.1332, §17.1346, §17.1982
     refused = refused + [{"command": h["command"], "why": h["why"]} for h in _made]   # §17.1968
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
@@ -10056,6 +10061,102 @@ def lookups_as_programs(commands: list[str], verify: list[str]) -> tuple[list[st
             "can run, so the lookup is `which` -- the form you approve is the one signed and sent "
             "(§17.1475, §17.1973).")})
     return out_cmds, out_verify, notes
+
+
+#: §17.1982 — the refusal's marker (registered in `_SHAPE_REFUSALS`, a drafter gap)
+_BASH_ONLY = "uses bash-only syntax"
+
+
+def _bash_for_sh(body: str, files: dict) -> tuple[str, list[str], list[dict]]:
+    """§17.1982 — one command line (or one written file's content): every program it hands to `sh`/`dash` that
+    uses bash-only syntax is run with `bash` instead where the engine can say bash is there, and refused otherwise.
+    Returns ``(the text, the constructs repaired, the refusals)``."""
+    from app.modules.shell_ast import bash_only_constructs, sh_programs
+    hits = [(p, bash_only_constructs(p.program)) for p in sh_programs(body, files)]
+    hits = [(p, found) for p, found in hits if found]
+    if not hits:
+        return body, [], []
+    raw, fixed, refused = body.encode("utf-8"), [], []
+    for p, found in sorted(hits, key=lambda h: -h[0].start):
+        what = ", ".join(found)
+        if p.start >= 0 and not p.in_image:
+            raw = raw[:p.start] + ("/bin/bash" if "/" in p.shell else "bash").encode() + raw[p.end:]
+            fixed.extend(f for f in found if f not in fixed)
+            continue
+        where = (" inside a container image, whose shell the engine does not know (an Alpine image has no bash at all)"
+                 if p.in_image else " inside a quoted remote command, which the engine does not rewrite")
+        refused.append({"command": body[:200], "why": (
+            f"this program {_BASH_ONLY} ({what}), and it is handed to `{p.shell}`{where}. On Debian and Ubuntu `sh` "
+            f"is dash, and dash parses the whole program first and stops at the first of these with a syntax error, so "
+            f"not a line of it runs. Run it with `bash -c '…'` where the machine has bash, or write it in plain POSIX "
+            f"sh: a temporary file or a pipe instead of `<(…)`, `[ … ]` instead of `[[ … ]]`, `>FILE 2>&1` instead "
+            f"of `&>`.")})
+    out = raw.decode("utf-8")
+    # the repair is believed only once the rule agrees: re-asked, a program it claimed still under `sh` keeps its refusal
+    if fixed and any(bash_only_constructs(p.program) and p.start >= 0 and not p.in_image
+                     for p in sh_programs(out, files)):
+        logger.warning("bash_for_sh_did_not_close_it body=%r", body[:120])
+        return body, [], refused + [{"command": body[:200], "why": (
+            f"this program {_BASH_ONLY} ({', '.join(fixed)}), and it is handed to `sh`, which on Debian and Ubuntu "
+            f"is dash and stops at it before running a line. Run it with `bash -c '…'`.")}]
+    return out, fixed, refused
+
+
+def bash_programs_handed_to_sh(commands: list[str], verify: list[str], files: list[dict]
+                               ) -> tuple[list[str], list[str], list[dict], list[dict], list[dict]]:
+    """§17.1982 — a program handed to a POSIX `sh` (`sh -c '…'`, `sh -s <<EOF`, `sh FILE`, on the host, through
+    `pct exec` / `qm guest exec` / `sudo`, or in a written file) that uses bash-only syntax runs with `bash`.
+
+    Live (job 0fb4ea7f CL3, 2026-11-21, frame 6de9e152c92bd675): `qm guest exec 106 --timeout 30 -- sh -c '… cmp -s
+    <(sed -e "\\$a\\\\" "$A") "$B" …'`. VM 106's `sh` is dash: `Syntax error: "(" unexpected`, the whole program dies
+    unparsed, and the guarded `rm` the step exists for could never run. Nothing refused it: every gate judged the
+    OUTER command, and the outer command is fine.
+
+    Why a repair and not a refusal: the program cannot run under dash at all, and bash runs it as written -- the
+    drafter wrote bash. Bash is there wherever the engine runs this: the Proxmox host is Debian, and the engine's own
+    in-guest templates already run `pct exec N -- bash -c` / `qm guest exec N -- bash -c` in every guest
+    (`runbook_templates`), so the repair assumes nothing the engine does not already depend on. A container IMAGE
+    (`docker exec`) is the exception -- busybox `sh`, often no bash -- and a `sh` inside a quoted ssh command is a word
+    the engine does not rewrite; both are refused with the remedy (a drafter gap).
+
+    Returns ``(commands, verify, files, notes, refusals)``; every repair is said on the frame (`engine_fixed`)."""
+    by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    fixed: list[str] = []
+    changed: list[str] = []
+    refused: list[dict] = []
+
+    def fix(seq: list[str]) -> list[str]:
+        out = []
+        for c in seq or []:
+            new, found, ref = _bash_for_sh(str(c), by_path)
+            refused.extend(ref)
+            if new != str(c):
+                changed.append(str(c))
+                fixed.extend(f for f in found if f not in fixed)
+            out.append(new if new != str(c) else c)
+        return out
+
+    out_cmds, out_verify = fix(commands), fix(verify)
+    out_files = []
+    for f in files or []:
+        body = str((f or {}).get("content") or "")
+        new, found, ref = _bash_for_sh(body, by_path)
+        refused.extend({**r, "command": f"{f.get('path')}: {r['command'][:160]}"} for r in ref)
+        if new != body:
+            changed.append(f"the file {f.get('path')}")
+            fixed.extend(x for x in found if x not in fixed)
+            f = {**f, "content": new}
+        out_files.append(f)
+    notes: list[dict] = []
+    if changed:
+        more = f" (and {len(changed) - 1} more)" if len(changed) > 1 else ""
+        notes.append({"why": (
+            f"`{changed[0][:80]}`{more}: a program handed to `sh` uses bash-only syntax ({', '.join(fixed)}). On "
+            "Debian and Ubuntu `sh` is dash, which stops at it with a syntax error before running a line, so the "
+            "engine runs that program with `bash` -- the shell its own templates use in every guest. Nothing else "
+            "was changed (§17.1982).")})
+        logger.warning("bash_for_sh_repaired count=%d first=%r", len(changed), changed[0][:120])
+    return out_cmds, out_verify, out_files, notes, refused
 
 
 def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
