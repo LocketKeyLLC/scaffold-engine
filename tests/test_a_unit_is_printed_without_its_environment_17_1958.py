@@ -39,7 +39,7 @@ def test_choosing_the_environment_lines_is_still_printing_them():
 def test_the_frame_gate_runs_it():
     import inspect
     from app.modules import supervised_runs
-    assert "_prints_a_units_environment(cmds, verify)" in inspect.getsource(supervised_runs)
+    assert "_prints_a_units_environment(cmds, verify, shape_files)" in inspect.getsource(supervised_runs)
 
 
 def test_systemctl_show_prints_the_environment_unless_properties_leave_it_out():
