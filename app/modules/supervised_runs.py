@@ -7336,6 +7336,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # configured" is `/{resource}/testall`, which needs no body. Repair it here, before
     # the §17.1378b refusal gate, so a connectivity-verify step runs instead of parking.
     cmds, verify, _test_notes = repair_empty_body_test_call(cmds, verify)
+    # §17.1973 — a shell builtin becomes the program on the FRAME, so the operator approves, the engine signs and the
+    # runner runs one string (it used to be rewritten in transit, after signing, and the runner refused it).
+    cmds, verify, _lk_notes = lookups_as_programs(cmds, verify)
+    _test_notes = list(_test_notes) + _lk_notes
     _mv_notes = list(_comp_notes) + list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
@@ -9481,6 +9485,38 @@ _TEST_ENDPOINT_RE = re.compile(r"(/api/v\d+/(\w+))/test\b")
 #: the `-d/--data…` flag together with its one quoted-or-bare argument, to delete.
 _DATA_FLAG_WITH_ARG_RE = re.compile(
     r"\s*(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])\s*(?:'[^']*'|\"[^\"]*\"|\S+)")
+
+
+def lookups_as_programs(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1973 — `command -v X` / `type X` / `hash X` → `which X` (§17.1475's rewrite), done where the frame is drawn.
+
+    The runner runs a line as `sudo -n <line>`, and a builtin is not a program sudo can find ("sudo: command: command
+    not found" with the tool installed, ADD155). §17.1475 rewrote it inside `mcp_client.call_tool` -- after
+    `run_block` had signed the original bytes, so every supervised command carrying a lookup was refused: live (job
+    0fb4ea7f LM5, 2026-11-19) `command -v ipmitool || echo 'ipmitool: not installed'` came back "approval signature
+    does not match this command" and the SEL was never read. Rewritten here, the frame shows the command that is
+    signed and sent, and the note says why."""
+    from app.modules.mcp_client import without_lookup_builtins
+    changed: list[str] = []
+
+    def fix(seq: list[str]) -> list[str]:
+        out = []
+        for c in seq or []:
+            new = without_lookup_builtins(str(c))
+            if new != str(c):
+                changed.append(str(c))
+            out.append(new if new != str(c) else c)
+        return out
+
+    out_cmds, out_verify = fix(commands), fix(verify)
+    notes: list[dict] = []
+    if changed:
+        more = f" (and {len(changed) - 1} more)" if len(changed) > 1 else ""
+        notes.append({"why": (
+            f"`{changed[0][:80]}`{more}: a shell builtin (`command -v`, `type`, `hash`) is not a program `sudo` "
+            "can run, so the lookup is `which` -- the form you approve is the one signed and sent "
+            "(§17.1475, §17.1973).")})
+    return out_cmds, out_verify, notes
 
 
 def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
