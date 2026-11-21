@@ -1,0 +1,7 @@
+#!/bin/sh
+# stub ssh for the §17.1965 kit test: the last argument is the remote command line
+case "$*" in
+  *"is-active"*stopped.service*) echo inactive; exit 3 ;;
+  *"is-active"*running.service*) echo active; exit 0 ;;
+  *) echo "ssh: connect to host 10.255.255.1 port 22: Connection refused" >&2; exit 255 ;;
+esac
