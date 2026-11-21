@@ -224,16 +224,10 @@ REFINE_MAX_TOKENS = 6144
 
 
 def draw_was_cut(resp, budget: int) -> bool:
-    """§17.1984 — the reply stopped at the token budget, not at its end. Ollama says so (``done_reason='length'``);
-    otherwise a completion count that reached the budget. Defensive on every field (mocks, other providers)."""
-    try:
-        raw = getattr(resp, "raw", None)
-        if isinstance(raw, dict) and raw.get("done_reason"):
-            return raw.get("done_reason") == "length"
-        used = getattr(resp, "tokens_completion", None)
-        return isinstance(used, int) and isinstance(budget, int) and budget > 0 and used >= budget
-    except Exception:
-        return False
+    """§17.1984 — the reply stopped at the token budget, not at its end: the shared reading (§17.1986
+    `cut_reply.reply_was_cut` -- every provider's stop reason, else a completion count that reached the budget)."""
+    from app.utils.cut_reply import reply_was_cut
+    return reply_was_cut(resp, budget)
 
 
 def drop_cut_tail(brief: dict, job_id) -> None:
