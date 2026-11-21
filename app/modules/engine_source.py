@@ -40,9 +40,16 @@ logger = logging.getLogger("scaffold")
 #: the package that is running -- read, never imported module by module
 ENGINE_PKG = Path(__file__).resolve().parent.parent
 
-#: "the scaffold engine itself", "this repository's code", "the engine's own codebase"
+#: "the scaffold engine itself", "this repository's code", "the engine's own codebase"; §17.1985 — and a job that
+#: ships its code INTO the engine: "Deliver the dashboard into the engine through the lab's existing delivery flow"
+#: (live 69fe61c4, 2026-11-21: read as a homelab job, its vendoring, static serving, read-only guard and delivery
+#: were Shell steps on the Proxmox host against a guessed `pct exec <ENGINE_GUEST_ID>`). "The scaffold engine itself
+#: on the Proxmox server" places the engine, it writes none of its code (0fb4ea7f, 171 Shell steps).
 _TARGETS_RE = re.compile(
-    r"\bscaffold[- ]engine(?:'s)?\s+(?:itself|own\s+(?:code|codebase|source|repo(?:sitory)?)|code(?:base)?|source|repo(?:sitory)?)\b"
+    r"\bscaffold[- ]engine(?:'s)?\s+(?:itself(?!\s+(?:on|onto)\b)|own\s+(?:code|codebase|source|repo(?:sitory)?)"
+    r"|code(?:base)?|source|repo(?:sitory)?)\b"
+    r"|\bdeliver(?:s|ed|ing)?\b[^.;:]{0,60}?\binto\s+the\s+(?:scaffold\s+)?engine\b"
+    r"|\b(?:the\s+lab's|the\s+engine's|the\s+existing\s+engine)\s+(?:existing\s+)?delivery\s+flow\b"
     r"|\b(?:to|in|into|of)\s+this\s+(?:repository|repo|codebase)\b"
     r"|\bthis\s+(?:repository|repo|codebase)'s\s+code\b"
     r"|\bthe\s+engine's\s+own\s+(?:code|codebase|source|repo(?:sitory)?)\b",
@@ -2219,6 +2226,149 @@ def job_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
     return dict(sorted(out.items()))
 
 
+#: §17.1985 — a static file a job for the engine carries: a page template or the lab's own asset, in its own folder
+STATIC_PATH_RE = re.compile(r"^app/(?:static|templates)/[a-z][a-z0-9_]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:html|css|js|json|svg)$")
+#: its block's first line names it: `<!-- app/templates/paper/dashboard.html -->`, `// app/static/paper/vendor.json`
+_STATIC_HEADER_RE = re.compile(r"^\s*(?:<!--|//|/\*|\{#|#)\s*(app/\S+?)\s*(?:-->|\*/|#\})?\s*$")
+
+
+def static_files_of(row: dict, keep_empty: bool = False) -> dict[str, str]:
+    """§17.1985 — the static files one step writes: each fenced block whose first line is a comment naming a path
+    under `app/static/<lab>/` or `app/templates/<lab>/` -- the file is the rest of the block. A Python block is never
+    one (`files_of` reads those)."""
+    from app.sandbox.engine_tests import after_reasoning
+    out: dict[str, str] = {}
+    for lang, code in extract_code_blocks(after_reasoning(str(row.get("output_text") or ""))):
+        if lang in PYTHON_LANGS or not code.strip():
+            continue
+        first, _, rest = code.lstrip().partition("\n")
+        m = _STATIC_HEADER_RE.match(first)
+        if m and STATIC_PATH_RE.match(m.group(1)) and (rest.strip() or keep_empty):
+            out[m.group(1)] = rest
+    return out
+
+
+def job_static_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
+    """§17.1985 — the static files a job delivers into the engine beside its code (`job_files`): path -> (content,
+    step), the last finished writer winning. Live (69fe61c4): the dashboard's template and its vendored chart library
+    had no place in the export, so the planner sent them to the Proxmox host as Shell steps."""
+    out: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        if r.get("status") != "done":
+            continue
+        for path, body in static_files_of(r).items():
+            out[path] = (body if body.endswith("\n") else body + "\n", str(r.get("node_key") or ""))
+    return dict(sorted(out.items()))
+
+
+#: §17.1985b — the static file a step was planned to write (`engine_plan._STATIC_LEAD`)
+_STATIC_ASKED_RE = re.compile(r"A static file this job carries: `(app/[^`]+)`")
+#: the vendor manifest's rules, as `scripts/deliver_job.py` applies them when it fetches (kept equal by a test)
+VENDOR_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:js|css|json|svg|woff2?|map)$")
+PINNED_RE = re.compile(r"[@/v-]\d+\.\d+\.\d+(?:[-+][\w.]+)?(?=[/.]|$)")
+#: a page that loads from another origin: the lab's pages are served under a strict `'self'` policy
+_REMOTE_LOAD_RE = re.compile(r"<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*[\"']?(?:https?:)?//", re.I)
+_CSS_REMOTE_RE = re.compile(r"@import\s+(?:url\()?\s*[\"']?(?:https?:)?//|url\(\s*[\"']?(?:https?:)?//", re.I)
+_JS_REMOTE_RE = re.compile(r"\bimport\b[^;\n]*?[\"'](?:https?:)?//|\bimport\(\s*[\"'](?:https?:)?//", re.I)
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
+              "param", "!doctype"}
+
+
+def _html_balance(body: str) -> str | None:
+    """The first element closed out of order or left open (the page with its Jinja tags blanked), else None."""
+    from html.parser import HTMLParser
+    stack: list[str] = []
+    bad: list[str] = []
+
+    class _P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag not in _VOID_TAGS:
+                stack.append(tag)
+
+        def handle_startendtag(self, tag, attrs):
+            pass
+
+        def handle_endtag(self, tag):
+            if tag in _VOID_TAGS:
+                return
+            if tag not in stack:
+                bad.append(f"`</{tag}>` closes nothing open")
+                return
+            while stack and stack[-1] != tag:
+                left = stack.pop()
+                if left not in ("p", "li", "td", "th", "tr", "option", "dt", "dd", "thead", "tbody"):   # closed implicitly
+                    bad.append(f"`<{left}>` is not closed before `</{tag}>`")
+            stack.pop()
+
+    _P(convert_charrefs=True).feed(re.sub(r"\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\}", " ", body, flags=re.S))
+    left = [t for t in stack if t not in ("p", "li", "td", "th", "tr", "option", "dt", "dd", "thead", "tbody",
+                                          "html", "body", "head")]
+    if left:
+        bad.append(f"`<{left[-1]}>` is never closed")
+    return bad[0] if bad else None
+
+
+def static_file_findings(output: str, row: dict) -> list[str]:
+    """§17.1985b — a static file a step for the engine writes is checked mechanically, as its modules are by the
+    sandbox: the file it was planned to write is there; a page parses as a Jinja template and its elements balance; a
+    JSON file parses, and a vendor manifest names each file by a safe name at an https URL of a pinned release; a page,
+    stylesheet or script loads nothing from another origin (the lab serves its own copy). Live (69fe61c4): T4 and T7
+    were planned as static files, which the sandbox skips ("no Python file to run") -- only the verifier read them."""
+    files = static_files_of({"output_text": output}, keep_empty=True)       # an empty file is a finding, not absent
+    found: list[str] = []
+    asked = _STATIC_ASKED_RE.search(" ".join(str(row.get(k) or "") for k in ("prompt_template", "description")))
+    if asked and asked.group(1) not in files:
+        found.append(f"`{asked.group(1)}`: the step writes this file and the output has no block whose first line is a "
+                     "comment naming it (e.g. `<!-- path -->`, `// path`, `/* path */`).")
+    for path, body in files.items():
+        ext = path.rsplit(".", 1)[-1]
+        if not body.strip():
+            found.append(f"`{path}`: the file is empty.")
+            continue
+        why = None
+        if ext == "html":
+            import jinja2
+            try:
+                jinja2.Environment(extensions=["jinja2.ext.do"]).parse(body)
+            except jinja2.TemplateSyntaxError as exc:
+                found.append(f"`{path}:{exc.lineno}`: not a template that parses: {str(exc.message).rstrip('.')}.")
+            else:
+                why = _html_balance(body)
+            if why:
+                found.append(f"`{path}`: {why}.")
+        if ext in ("html", "svg") and _REMOTE_LOAD_RE.search(body):
+            found.append(f"`{path}`: `{_REMOTE_LOAD_RE.search(body).group(0)[:80]}` loads from another origin; the "
+                         "lab's pages are served under a strict 'self' policy -- load the vendored copy it serves.")
+        if ext == "css" and _CSS_REMOTE_RE.search(body):
+            found.append(f"`{path}`: `{_CSS_REMOTE_RE.search(body).group(0)[:80]}` loads from another origin.")
+        if ext == "js" and _JS_REMOTE_RE.search(body):
+            found.append(f"`{path}`: `{_JS_REMOTE_RE.search(body).group(0)[:80]}` loads from another origin.")
+        if ext == "svg":
+            import xml.etree.ElementTree as ET
+            try:
+                ET.fromstring(body)
+            except ET.ParseError as exc:
+                found.append(f"`{path}`: not well-formed SVG: {exc}.")
+        if ext == "json":
+            import json as _json
+            try:
+                data = _json.loads(body)
+            except ValueError as exc:
+                found.append(f"`{path}`: not JSON that parses: {exc}.")
+                continue
+            if path.endswith("/vendor.json"):
+                if not isinstance(data, dict) or not data:
+                    found.append(f"`{path}`: a vendor manifest is an object of file name -> URL.")
+                    continue
+                for name, url in data.items():
+                    if not VENDOR_NAME_RE.match(str(name)):
+                        found.append(f"`{path}`: `{name}` is not a file name the delivery writes.")
+                    if not isinstance(url, str) or not url.startswith("https://") or not PINNED_RE.search(url):
+                        found.append(f"`{path}`: `{name}` -> `{url}` is not an https URL of a pinned release "
+                                     "(an exact version, never `@latest`).")
+    return found
+
+
 def tested_modules(rows: list[dict]) -> set[str]:
     """§17.1862 — the modules that have a test file among the finished rows (`tests/test_<module>.py`)."""
     from app.sandbox.engine_tests import files_of, is_test
@@ -2233,7 +2383,13 @@ def edited_module_block(rows: list[dict], module: str) -> str:
     writer taking one record object (`write_proposal(proposal)`), every caller broken."""
     cur = current_sources(rows).get(module)
     if not cur:
-        return ""
+        # §17.1985b — a module no step of the job (or of a job it builds on) wrote is the engine's own: a merged lab's
+        # router (69fe61c4 T8 extends `paper_wire_engine_entry_module`, delivered by 5b4880c0 and merged). It is shown
+        # whole from the engine's tree -- never edited from its signatures alone
+        own = ENGINE_PKG / "modules" / f"{module}.py"
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", module or "") or not own.is_file():
+            return ""
+        cur = (f"app/modules/{module}.py", own.read_text(encoding="utf-8"), "the engine's own, as merged")
     path, code, key = cur
     return (f"\n\n## The file this step edits: `{path}` as it is now (step {key})\n"
             "Edit THIS file: keep every public function, class and parameter it has (other modules call them), change "
@@ -2845,6 +3001,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
     found += misnamed_required_tests(output, " ".join(str(me.get(k) or "") for k in ("title", "prompt_template")))
+    found += static_file_findings(output, me)                                                 # §17.1985b
     # §17.1864 — a retry keeps every test its earlier attempts wrote
     from app.modules.engine_contracts import dropped_tests
     if me.get("node_id"):                       # the row's own id (`code_rows`); a fake row without one: no history
