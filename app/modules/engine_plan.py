@@ -914,7 +914,15 @@ _KNOWN_APIS = (
               # §17.1947 — a submissions document itself (one filer's): its own field names (`filings.recent.form`,
               # `accessionNumber`, `primaryDocument`, `filingDate`, `tickers`), which no guide page states (measured
               # 2026-11-19: loads, 3 kB of field outline)
-              "https://data.sec.gov/submissions/CIK0000320193.json"],
+              "https://data.sec.gov/submissions/CIK0000320193.json",
+              # §17.1975 — one 13F-HR filing as EDGAR keeps it (one filer's, its archive folder): the folder's file
+              # list, the cover page (`primary_doc.xml`) and the information table, a separate XML file whose
+              # outline states its namespace and fields (`infoTable[].nameOfIssuer`, `cusip`, `value`,
+              # `shrsOrPrnAmt.sshPrnamt`, `votingAuthority.Sole`) -- no guide page states them, and the spec PDFs
+              # 404/403 (measured 2026-11-21 through the engine's fetch: 0.6 kB, 5.5 kB, 45 kB, all 200)
+              "https://www.sec.gov/Archives/edgar/data/1067983/000119312526463399/index.json",
+              "https://www.sec.gov/Archives/edgar/data/1067983/000119312526463399/primary_doc.xml",
+              "https://www.sec.gov/Archives/edgar/data/1067983/000119312526463399/60471.xml"],
      "scope": "data.sec.gov submissions JSON, the Form 4 and 13F-HR filing documents, the fair-access User-Agent rule"},
     {"key": "ALPACA", "host": re.compile(r"\balpaca\.markets\b|\bAlpacaPaperClient\b"), "name": "Alpaca paper trading API", "re": re.compile(r"\balpaca\b", re.I),
      "docs": ["https://docs.alpaca.markets/docs/paper-trading", "https://docs.alpaca.markets/docs/authentication", "https://docs.alpaca.markets/docs/websocket-streaming",

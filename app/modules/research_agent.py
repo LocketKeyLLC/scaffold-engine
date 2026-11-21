@@ -217,6 +217,58 @@ def _json_outline(v, path: str = "", depth: int = 0, out: list[str] | None = Non
     return out
 
 
+def _xml_outline(el, path: str = "", depth: int = 0, out: list[str] | None = None,
+                 seen: set[str] | None = None, many: bool = False) -> list[str]:
+    """§17.1975 — an XML document as the elements it has, like `_json_outline`: `informationTable.infoTable[].cusip:
+    e.g. '02005N100'` -- one line per element path, namespaces dropped, a repeated element read by its first item, an
+    attribute as `@name`."""
+    out = [] if out is None else out
+    seen = set() if seen is None else seen
+    if len(out) >= 400 or depth > 8:
+        return out
+    name = str(el.tag).rsplit("}", 1)[-1]
+    here = (f"{path}.{name}" if path else name) + ("[]" if many else "")
+    for k, v in list(el.attrib.items())[:20]:
+        at = f"{here}@{str(k).rsplit('}', 1)[-1]}"
+        if at not in seen:
+            seen.add(at)
+            out.append(f"{at}: e.g. {str(v)[:80]!r}")
+    kids = list(el)
+    if not kids:
+        if here not in seen:
+            seen.add(here)
+            out.append(f"{here}: e.g. {(el.text or '').strip()[:80]!r}")
+        return out
+    tags = [str(k.tag) for k in kids]
+    done: set[str] = set()
+    for k in kids:
+        if str(k.tag) in done:
+            continue                                                   # a repeated element: its first item
+        done.add(str(k.tag))
+        _xml_outline(k, here, depth + 1, out, seen, many=tags.count(str(k.tag)) > 1)
+    return out
+
+
+def _xml_text(body: str) -> str | None:
+    """§17.1975 — an XML body that is not an HTML page, as its element outline; None for HTML or what does not parse.
+    Live (2026-11-21): a real 13F information table (`Archives/edgar/data/…/….xml`) loaded through the engine's fetch
+    and trafilatura kept the values and dropped every tag -- `ALLY FINL INC / COM / 02005N100`, no `nameOfIssuer`."""
+    if re.search(r"<!doctype\s+html|<html[\s>]", body[:2000], re.I):
+        return None
+    import defusedxml.ElementTree as _det                              # untrusted XML (XXE / entity expansion)
+    try:
+        root = _det.fromstring(body.lstrip().encode("utf-8"))
+    except Exception:
+        return None
+    lines = _xml_outline(root)
+    tags = [str(k.tag) for k in root]
+    reps = ", ".join(f"{t.rsplit('}', 1)[-1]} ×{tags.count(t)}" for t in dict.fromkeys(tags) if tags.count(t) > 1)
+    ns = str(root.tag)[1:].split("}", 1)[0] if str(root.tag).startswith("{") else ""
+    return (f"XML document `{str(root.tag).rsplit('}', 1)[-1]}`" + (f", namespace `{ns}`" if ns else "")
+            + (f" ({reps})" if reps else "")
+            + "; its elements (a repeated element read by its first item):\n" + "\n".join(lines))
+
+
 def _non_html_text(body: str) -> str | None:
     """§17.1947 — a body that is not HTML, as text the research can read: a JSON document as its field outline, plain
     text (a pipe-delimited file, a CSV) as its first lines. None for HTML. Live (5b4880c0, 2026-11-19): the SEC's own
@@ -224,7 +276,9 @@ def _non_html_text(body: str) -> str | None:
     FINRA's daily short-sale file (`Date|Symbol|ShortVolume|…`) both loaded and both came back empty -- trafilatura
     extracts HTML only."""
     head = body.lstrip()[:1]
-    if head == "<" or body.lstrip().startswith("%PDF"):
+    if head == "<":
+        return _xml_text(body)                                         # §17.1975 an XML document; HTML stays None
+    if body.lstrip().startswith("%PDF"):
         return None
     sample = body[:4000]
     if sample and sum(1 for ch in sample if not ch.isprintable() and ch not in "\r\n\t") > len(sample) // 20:
