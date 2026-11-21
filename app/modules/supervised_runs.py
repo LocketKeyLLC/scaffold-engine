@@ -248,7 +248,9 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "changes the machine it reports on",            # §17.1956
                    "PRINTS a whole systemd unit",                  # §17.1958
                    "PRINTS the unit's environment",                # §17.1958
-                   "written BEFORE its commands run")              # §17.1960
+                   "written BEFORE its commands run",               # §17.1960
+                   "is a value this block makes itself",           # §17.1968
+                   "reads this value itself and asks the operator for it")   # §17.1968b
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -312,6 +314,8 @@ _WHOSE_GAP: dict[str, str] = {
     "PRINTS a whole systemd unit": "drafter",
     "PRINTS the unit's environment": "drafter",
     "written BEFORE its commands run": "drafter",
+    "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
+    "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -6728,6 +6732,141 @@ def inputs_for(commands: list[str], verify: list[str], runbook: str,
     return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)} for n in placeholders(texts)]
 
 
+#: §17.1968 — the literal run just before a `<NAME>`: a path or a flag value, never across a space or a quote
+_MADE_PREFIX_RE = re.compile(r"[A-Za-z0-9_./:@+=%-]+$")
+
+
+def values_the_block_makes(commands: list[str], verify: list[str],
+                           files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1968 — a ``<NAME>`` whose value the block's OWN commands produce is not an input.
+
+    Live (job 7cc2a7ac T4 "Create restore point", 2026-11-20): the first command made
+    `/root/panel-backup-$(date -u +%Y%m%dT%H%M%SZ)` and the next thirteen wrote into
+    `/root/panel-backup-<TIMESTAMP>/…`; the frame asked "It needs 2 values from you first" -- a
+    time stamp only the run knows, typed before it runs. The operator had to redraft by hand.
+
+    Made by the block: the name is ASSIGNED or bound somewhere in it (`TIMESTAMP=$(date …)`,
+    `read TIMESTAMP`, `for TIMESTAMP in`), or the literal just before the placeholder is, elsewhere
+    in the block, followed by a value the shell makes (`$(…)`, a backtick, or a variable the block
+    assigns) -- the same position filled at run time. ``[{name, command, why}]``, one per name."""
+    texts = [str(c or "") for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    assigned: dict[str, str] = {}
+    for t in texts:
+        for m in _VAR_SET_RE.finditer(t):
+            n = m.group("name")
+            # `TITLE="<TITLE>" python3 …` hands the operator's value IN; it makes nothing
+            if re.match(r"[\"']?<" + re.escape(n) + r">", t[m.end():]) or _SELF_ASSIGN_RE.match(t[m.start("name"):]):
+                continue
+            assigned.setdefault(n, t)
+        for m in _VAR_BIND_RE.finditer(t):
+            for n in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")):
+                if n:
+                    assigned.setdefault(n, t)
+
+    def _made_at(prefix: str) -> tuple[str, str]:
+        """The command that fills `prefix` with a value the shell makes, and that value's head."""
+        for t in texts:
+            for o in re.finditer(re.escape(prefix) + r"(?=\$\(|`|\$\{?[A-Za-z_])", t):
+                tail = t[o.end():]
+                vm = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", tail)
+                if vm and vm.group(1) not in assigned:
+                    continue                         # a name the block does not make (a runner secret) is not made here
+                vh = re.match(r"\$\([^)]*\)|`[^`]*`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", tail)
+                return t, (prefix + (vh.group(0) if vh else tail.split()[0]))[:100]
+        return "", ""
+
+    out: list[dict] = []
+    for name in placeholders(texts):
+        made = assigned.get(name) or ""
+        how = f"the block sets `{name}` itself" if made else ""
+        for t in texts if not made else ():
+            for m in re.finditer(r"<" + re.escape(name) + r">", t):
+                pm = _MADE_PREFIX_RE.search(t[:m.start()])
+                prefix = pm.group(0) if pm else ""
+                # the last path segment must carry a name (`panel-backup-`), not just `/root/` or `http://`
+                if len(re.sub(r"[^A-Za-z0-9]", "", prefix.rsplit("/", 1)[-1])) < 3:
+                    continue
+                made, head = _made_at(prefix)
+                if made:
+                    how = f"`{head}` makes it at run time"
+                    break
+            if made:
+                break
+        if not made:
+            continue
+        out.append({"command": made.strip()[:200], "name": name, "why": (
+            f"`<{name}>` is a value this block makes itself -- {how} -- so it is not an input: nobody can "
+            f"type, before the run, a value only the run produces (live, §17.1968: a backup folder named by "
+            f"`$(date …)` in one command and written to as `<TIMESTAMP>` in the next). And each command runs "
+            f"as its own runner call, in its own shell, so a value made in one is gone in the next. Choose ONE "
+            f"fixed name the step can write in every command (a folder named after the job, not the clock), "
+            f"or make the value and use it inside the same command (`&&`), or read it back on the machine "
+            f"(`ls -d <folder>-* | tail -1`) in the command that needs it.")})
+    return out
+
+
+#: §17.1968b — `systemctl show <unit> -p <Property>` prints ONE value per property; which placeholder kinds each fills
+_UNIT_PROPERTY_KINDS: dict[str, frozenset] = {
+    "workingdirectory": frozenset({"DIR", "DIRECTORY", "WORKDIR", "ROOT"}),
+    "fragmentpath": frozenset({"UNIT_PATH", "UNIT_FILE", "FILE"}),
+    "mainpid": frozenset({"PID"}),
+    "user": frozenset({"USER"}),
+    "execstart": frozenset({"CMD", "COMMAND", "EXEC", "EXECSTART", "BINARY", "BIN"}),
+}
+_SYSTEMCTL_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b([^|;&\n'\"]*)")
+
+
+def reads_a_value_and_asks_for_it(commands: list[str], verify: list[str],
+                                  files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1968b — a ``<NAME>`` whose value another command of the SAME block reads off the machine.
+
+    Live (job 7cc2a7ac T4, 2026-11-20): `pct exec 111 -- systemctl show control-panel.service -p ExecStart -p
+    WorkingDirectory --value` printed the panel's directory, and two commands later `tar -C <PANEL_DIR>` asked the
+    operator for it. §17.1288l's shape (an address read from `ip neigh`, then `<PALWORLD_IP>`) with a unit's property:
+    the block has the value at run time, the operator does not, and each command's shell forgets it. Refused, like
+    §17.1288l, with the capture to write -- not repaired: a read of two properties prints two lines, so splicing it
+    in as `$(…)` would hand `tar -C` both.
+
+    A hit needs the read to name a property whose kind is the placeholder's last word (`WorkingDirectory` ->
+    `_DIR`), and every other word of the placeholder to name that unit (`PANEL` in `control-panel.service`)."""
+    texts = [str(c or "") for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    reads: list[tuple[str, str, str, str]] = []                     # (command, unit, Property, guest prefix)
+    for t in texts:
+        for m in _SYSTEMCTL_SHOW_RE.finditer(t):
+            args = m.group(1).split()
+            unit = next((a for a in args if not a.startswith("-") and not re.fullmatch(r"[A-Z][A-Za-z,]*", a)), "")
+            props = re.findall(r"(?:-p\s*|--property[=\s]+)([A-Za-z,]+)", m.group(1))
+            guest = re.match(r"\s*(pct\s+exec\s+\d+\s+--\s+)", t)
+            for p in ",".join(props).split(","):
+                if p and unit:
+                    reads.append((t, unit, p, guest.group(1) if guest else ""))
+    out: list[dict] = []
+    for name in placeholders(texts):
+        words = name.split("_")
+        for cmd, unit, prop, guest in reads:
+            if f"<{name}>" in cmd:
+                continue
+            kinds = _UNIT_PROPERTY_KINDS.get(prop.lower(), frozenset())
+            kind = next((k for k in kinds if name == k or name.endswith("_" + k)), "")
+            if not kind:
+                continue
+            rest = [w.lower() for w in words[:len(words) - len(kind.split("_"))]]
+            if not all(w in unit.lower() for w in rest):      # every other word names the unit read
+                continue
+            out.append({"command": cmd.strip()[:200], "name": name, "why": (
+                f"this block reads this value itself and asks the operator for it: `<{name}>` is the `{prop}` "
+                f"that `systemctl show {unit} -p {prop}` prints in another command of this block (`{cmd.strip()[:90]}`). "
+                f"The operator cannot type what the block reads at run time, and each command runs in its own "
+                f"shell, so the printed value is gone before the next one. Read it where it is used, ONE property "
+                f"per read so `--value` prints one line: `{guest}systemctl show {unit} -p {prop} --value` inside a "
+                f"`$(…)` in the command that needs it -- e.g. `{guest}tar -C \"$({guest}systemctl show {unit} -p "
+                f"{prop} --value)\" -czf - .` -- or capture it once in a script under ## Write these files.")})
+            break
+    return out
+
+
 def is_develop_delivery(files: Optional[list[dict]]) -> bool:
     """§17.1589 — the block delivers files the develop flow staged (`/tmp/scaffold-dev-<step>--…`)."""
     return any(str((f or {}).get("path") or "").startswith("/tmp/scaffold-dev") for f in files or [])
@@ -7357,6 +7496,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     cmds, verify, _ba_notes = _mv.present_a_held_login(cmds, verify, services, (policy or {}).get("held_logins") or [])
     _mv_notes = list(_mv_notes) + _ba_notes
     inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
+    # §17.1968 — a value the block makes itself is never asked for: it leaves the inputs and is refused, so the
+    # redraft is told (live, 7cc2a7ac T4 asked for `<TIMESTAMP>` its own `$(date …)` folder name held)
+    _made = values_the_block_makes(cmds, verify, files)
+    # §17.1968b — and one another command of the block READS off the machine (T4's `<PANEL_DIR>`)
+    _made = _made + [h for h in reads_a_value_and_asks_for_it(cmds, verify, files)
+                     if h["name"] not in {x["name"] for x in _made}]
+    if _made:
+        inputs = [i for i in inputs if i.get("name") not in {h["name"] for h in _made}]
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
     cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
@@ -7376,6 +7523,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # "redirect" per command.
     _dummies = {i["name"]: "x" for i in inputs}
     _dummies.update({n: "x" for n in secrets_missing})
+    _dummies.update({h["name"]: "x" for h in _made})          # §17.1968 — refused once below, not as a "redirect"
     shape = substitute(cmds, _dummies) if _dummies else cmds
     # §17.1280 — the gates judge the files as they will be WRITTEN (placeholders
     # filled with a dummy); the frame keeps them as drafted so resolve fills the
@@ -7415,6 +7563,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _ns_notes:
         _pre = [p for p in _pre if "cannot resolve names" not in str((p or {}).get("why") or "")]
     refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
+    refused = refused + [{"command": h["command"], "why": h["why"]} for h in _made]   # §17.1968
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
