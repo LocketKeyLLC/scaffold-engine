@@ -807,6 +807,21 @@ async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
     return res.fetchone() is not None
 
 
+async def _withdraw_stale_frame(db: AsyncSession, job_id: str) -> None:
+    """§17.1989 — whenever the run settles a step, the parked frame is read against its step's row
+    (`decision_pause.withdraw_stale_frame`): a step finished, skipped, deleted or rewritten under its question takes
+    the question with it, whichever of the many status writers moved it. (A Run reaching a parked step whose text
+    changed re-drafts and re-parks it, so a Run's start needs no read of its own.) The step's own status is already
+    committed: a failure here is logged loudly and does not undo it."""
+    from app.modules import decision_pause
+    try:
+        if await decision_pause.withdraw_stale_frame(db, job_id):
+            await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("decision_withdraw_failed job=%s", job_id)
+
+
 async def _flip_job_blocked(db: AsyncSession, job_id: str) -> bool:
     """Flip a job to 'blocked', returning True iff THIS call won the flip.
 
@@ -3219,6 +3234,7 @@ async def execute_next_node(
                 "node_key": node_key,
                 "message": "node no longer running — stale executor result discarded",
             }
+        await _withdraw_stale_frame(db, job_id)              # §17.1989 — a step settled; is the parked one still asked?
         await _log_execution(
             db, job_id, node_id, "info" if verified else "warning",
             f"Node '{title}' -> {final_status}",
