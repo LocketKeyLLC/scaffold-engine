@@ -193,17 +193,77 @@ _API_USED_RE = re.compile(
     r"|\b(?:ipv6|ipv4|ip|network|default|static|working|dead)\s+routes?\b|\bno\s+routes?\b|\broutes?\s+(?:to|table|add|del|via)\b", re.I)
 
 
-def builds_a_capability(text: str) -> bool:
+#: §17.1977 — after an optional `<place>:` prefix, a title that TESTS what was built (§17.1454's verbs, and "confirm",
+#: "exercise"): such a step builds nothing whatever nouns its text carries. Live (job 7cc2a7ac, the children of T16
+#: "Proxmox host: test the control panel game-server controls through its API"): each names the game-server ROUTES it
+#: tests, so each was told "Done when it WORKS: … call the route" — a build's rule — over checks like
+#: `cat /tmp/t16-caddy-baseline.txt` that were the step's whole point.
+_TESTS_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:validate|verify|check|test|audit|review|document|confirm|exercise)\b", re.I)
+#: §17.1977 — a title that READS or MEASURES (§17.1962c's verbs, and "baseline", "capture", "record", "recover"): it builds
+#: nothing when its text names no change (§17.1695) or declares it changes nothing (§17.1637). T15 "Read the host's
+#: guests through the Proxmox API", whose text says "Change the … handler", stays a build.
+_READS_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:read|inspect|list|show|print|inventory|measure|count|baseline|capture"
+                          r"|record|recover|collect|gather)\b", re.I)
+#: §17.1977 — a title that WRITES UP what was found (ADD8 "Proxmox host: write the game-server control test report");
+#: a report PAGE or route is a build.
+_WRITES_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:write|draft|compile|consolidate|produce)\s+(?:[\w'-]+\s+){0,6}?"
+                           r"(?:report|summary|findings|results)\b(?!\s+(?:page|route|endpoint|api|view|ui|screen|section|tab)\b)", re.I)
+
+
+def builds_nothing_by_title(title: str, text: str = "") -> bool:
+    """§17.1977 — does the step test, read or write up (and so build nothing)? ``text`` is the step's whole text."""
+    from app.modules.supervised_runs import _CHANGE_VERB_RE, declares_read_only
+    t = str(title or "")
+    if _TESTS_UP_RE.match(t) or _WRITES_UP_RE.match(t):
+        return True
+    if _READS_UP_RE.match(t):
+        work = re.split(r"\bDone when\b", str(text or ""), maxsplit=1)[0]
+        return declares_read_only({"title": t, "description": work}) or not _CHANGE_VERB_RE.search(work)
+    return False
+
+
+def builds_a_capability(text: str, *, title: str = "") -> bool:
     """A step that BUILDS something that does something — a route, an API, a page. §17.1560: an API the
-    step merely uses (calls, reads through, holds the key of) does not make it a build."""
+    step merely uses (calls, reads through, holds the key of) does not make it a build. §17.1977: nor does
+    a route it tests, reads or writes up — given its ``title``, such a step builds nothing."""
+    if title and builds_nothing_by_title(title, text):
+        return False
     t = _API_USED_RE.sub(" ", str(text or ""))
     return bool(_CAPABILITY_BUILD_RE.search(t))
 
 
+def standing_deps(plan: Optional[list[dict]], deps: list[str]) -> list[str]:
+    """§17.1966 — `deps` with each SKIPPED step replaced by what it stood on, until a step that is not skipped.
+
+    Live (job 7cc2a7ac, 2026-11-20): ADD1-ADD4 were skipped at 23:22, and the re-split of ADD5 at 23:35 chained its
+    first child ADD9 onto ADD4 -- a step that ran nothing. The order is kept (the skipped step's own dependencies are
+    the ones still standing); a row the plan does not carry, or carries without `depends_on`, is kept as it was."""
+    rows = {str(n.get("node_key")): n for n in plan or []}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def walk(d: str) -> None:
+        if d in seen:
+            return
+        seen.add(d)
+        row = rows.get(d)
+        if row is not None and str(row.get("status") or "") == "skipped" and row.get("depends_on") is not None:
+            for up in row.get("depends_on") or []:
+                walk(str(up))
+            return
+        out.append(d)
+    for d in deps or []:
+        walk(str(d))
+    return out
+
+
 def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str], keys: list[str],
-                  machine: str = "") -> list[dict]:
-    """The `insert_node` specs for a split: chained, stamped, each with its check."""
+                  machine: str = "", tool: str = "LLM", parent_title: str = "") -> list[dict]:
+    """The `insert_node` specs for a split: chained, stamped, each with its check and the parent's tool."""
+    from app.modules.develop import _HOST_PLACE_RE
     out: list[dict] = []
+    # §17.1977 — the parts of a TEST build nothing: T16 "test the … controls" split into reads, calls and a report.
+    parent_tests = bool(_TESTS_UP_RE.match(str(parent_title or "")))
     for i, (key, st) in enumerate(zip(keys, steps, strict=False)):
         title = " ".join(str(st.get("title") or "").split())[:200]
         body = " ".join(str(st.get("description") or "").split())
@@ -211,9 +271,11 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
         if not title or not body:
             continue
         descr = body
-        if machine and machine.lower() not in (title + " " + body).lower():
+        # §17.1966 — a child its own title places on the Proxmox host is host work (§17.1961b/1962): live, ADD1-ADD8
+        # ("Proxmox host: …") each carried "On container 111." from T16's guest, a place that contradicts the title
+        if machine and machine.lower() not in (title + " " + body).lower() and not _HOST_PLACE_RE.match(title):
             descr += f" On {machine}."
-        if check and presence_only(check) and builds_a_capability(title + " " + body):
+        if check and presence_only(check) and not parent_tests and builds_a_capability(title + " " + body, title=title):
             # §17.1408 — `grep -n palworld server.js` shows the code is THERE, not that
             # it works. Live, ADD122 was recorded done twice on that check while its GET
             # answered `{"settings":{}}` and its PUT could not write. The operator:
@@ -225,7 +287,7 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
         elif check:
             descr += f" Done when `{check}` shows it."
         descr += f"\n\n{SPLIT_MARK.format(key=parent_key)} — {i + 1} of {len(steps)}]"
-        out.append({"node_key": key, "title": title, "description": descr, "tool": "LLM",
+        out.append({"node_key": key, "title": title, "description": descr, "tool": tool or "LLM",
                     "depends_on": list(parent_deps) if i == 0 else [keys[i - 1]]})
     return out
 
@@ -437,8 +499,15 @@ async def split_step(job_id: str, node: dict, plan: Optional[list[dict]], brief,
     if not steps:
         return []
     keys = _next_keys(plan, len(steps))
-    specs = children_from(steps, parent_key=key, parent_deps=[str(d) for d in (node.get("depends_on") or [])],
-                          keys=keys, machine=machine)
+    # §17.1966 — the children are the parent's work in parts: they keep its tool (live, T16 was Shell and its eight
+    # children were LLM, so a control test became a text answer) and its place (a host-placed parent's guest is not
+    # theirs), and the first stands on what the parent stands on that still stands (never a skipped step)
+    from app.modules.develop import _HOST_PLACE_RE
+    if _HOST_PLACE_RE.match(str(node.get("title") or "")):
+        machine = ""
+    specs = children_from(steps, parent_key=key, keys=keys, machine=machine, tool=str(node.get("tool") or "LLM"),
+                          parent_title=str(node.get("title") or ""),
+                          parent_deps=standing_deps(plan, [str(d) for d in (node.get("depends_on") or [])]))
     if len(specs) < MIN_CHILDREN:
         return []
 

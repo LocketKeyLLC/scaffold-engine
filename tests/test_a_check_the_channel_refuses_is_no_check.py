@@ -147,7 +147,7 @@ def test_the_downgrade_is_applied_after_the_others():
     body = inspect.getsource(sr)
     i = body.index("_unverified = (")
     j = body.index("if _unverified and ok:")
-    k = body.index("if ok or confirmed_after_drop:")
+    k = body.index("if ok or confirmed_after_drop")          # §17.1967 — "… or _findings:"
     assert i < j < k
 
 

@@ -12,6 +12,35 @@ command's own output: not inside a `$( … )` substitution.
 from __future__ import annotations
 
 import re
+from typing import Optional
+
+#: §17.1970 — the in-guest body a template carries (`run_in_container`, `run_in_vm_via_agent`, `reach_vm_ssh_and_run`)
+_REMOTE_BODY_RE = re.compile(r"<<'REMOTE'\n(?P<body>.*?)\nREMOTE\n", re.S)
+IN_GUEST = "in-guest body: "
+
+
+def in_guest_lines(files: Optional[list[dict]]) -> list[str]:
+    """§17.1970 — the shell lines a template RUNS inside the guest, each judged like a command.
+
+    Live (job 7cc2a7ac T4, 2026-11-20): §17.1958's refusal of `pct exec 111 -- systemctl cat control-panel.service`
+    held only because the drafter wrote it as a host command; the same line in the `in_ct_111` template's body -- the
+    form most in-guest work takes -- was never read, nor were §17.1652's and §17.1673's: all three judged `cmds` and
+    `verify`, and a template's commands are only `bash /tmp/in_ct_N.sh start`. A heredoc inside the body (a config it
+    writes, a python program) is data or a program, not a line the shell prints from."""
+    from app.modules.runbook_preconditions import executed_lines
+    out: list[str] = []
+    for f in files or []:
+        for m in _REMOTE_BODY_RE.finditer(str((f or {}).get("content") or "")):
+            for ln in executed_lines(m.group("body").replace("\\\n", " "), max_depth=0):
+                ln = ln.strip()
+                if ln and not ln.startswith("#"):
+                    out.append(IN_GUEST + ln)
+    return out
+
+
+def _judged(commands: list[str], verify: list[str], files: Optional[list[dict]]) -> list[str]:
+    return [str(c) for c in list(commands or []) + list(verify or [])] + in_guest_lines(files)
+
 
 _CREDENTIAL_READ_RE = re.compile(
     r"<ApiKey>|\bSELECT\s+AccessToken\b|<Password>|\bapi_?key\s*=\s*[\"']?\$?\(?\s*cat\b", re.I)
@@ -52,10 +81,9 @@ def _prints_here(s: str, at: int) -> bool:
     return True
 
 
-def prints_a_credential(commands: list[str], verify: list[str]) -> list[dict]:
+def prints_a_credential(commands: list[str], verify: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     out: list[dict] = []
-    for c in list(commands or []) + list(verify or []):
-        s = str(c)
+    for s in _judged(commands, verify, files):                         # §17.1970 — and the template's in-guest body
         for m in _CREDENTIAL_READ_RE.finditer(s):
             if _substitution_depth(s, m.start()) == 0 and _prints_here(s, m.start()):
                 out.append({"command": s[:200], "why": (
@@ -74,7 +102,7 @@ _ARR_SETTINGS_RE = re.compile(r"\bcurl\b[^|;&\n]*?https?://(?:127\.0\.0\.1|local
                               r"(?:/\d+)?(?=[\"'\s?]|$)")
 
 
-def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
+def prints_arr_settings(commands: list[str], verify: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1673 — a read that PRINTS an *arr's settings list puts every credential in it into the record.
 
     Live (job 5db1b088 NB1 "Diagnose nekoBT indexer failure", 2026-10-19): the first command was `curl -s -H "X-Api-Key:
@@ -83,7 +111,7 @@ def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
     /dev/null`), only counted (`| grep -c`, `| wc`), or read by a program that prints chosen fields is fine; the
     failure reason lives in /api/v1/indexerstatus, which carries no credential."""
     out: list[dict] = []
-    for c in list(commands or []) + list(verify or []):
+    for c in _judged(commands, verify, files):                         # §17.1970 — and the template's in-guest body
         # a `$( … )` substitution (the engine's in-guest key read, with its own `|`) is one word to the shell
         s = re.sub(r"\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)", "SUBST", str(c))
         for m in _ARR_SETTINGS_RE.finditer(s):
@@ -113,7 +141,9 @@ def prints_arr_settings(commands: list[str], verify: list[str]) -> list[dict]:
 
 
 #: §17.1958 — a whole systemd unit printed: `systemctl cat <unit>`, or a reader of a unit file or drop-in
-_UNIT_PRINT_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*cat\b|\b(?:cat|head|tail|less|more)\s+(?:-\S+\s+)*[\"']?\S*"
+#: (§17.1970: `cat >/etc/systemd/system/x.service <<EOF` WRITES the unit -- a template body's usual line -- and a count
+#: flag takes its number: `head -n 5 x.service`)
+_UNIT_PRINT_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*cat\b|\b(?:cat|head|tail|less|more)\s+(?:-\S+\s+(?:\d+\s+)?)*[\"']?[^\s>]\S*"
                             r"(?:\.service|\.socket|\.timer|/systemd/system/\S+\.d/\S+\.conf)\b")
 #: …and `systemctl show`, which prints the same values as `Environment=` unless its properties are chosen without it
 _UNIT_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b[^|;&\n]*")
@@ -128,7 +158,8 @@ def _shows_the_environment(call: str) -> bool:
     return not props or any(p.startswith("Environment") for p in props)
 
 
-def prints_a_units_environment(commands: list[str], verify: list[str]) -> list[dict]:
+def prints_a_units_environment(commands: list[str], verify: list[str],
+                               files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1958 — a read that PRINTS a whole systemd unit prints its `Environment=` lines, and a unit is where a service's
     keys often live.
 
@@ -138,8 +169,7 @@ def prints_a_units_environment(commands: list[str], verify: list[str]) -> list[d
     them into the run's record and the job. A unit read whose output drops those lines, counts, chooses other lines, or
     goes nowhere is fine."""
     out: list[dict] = []
-    for c in list(commands or []) + list(verify or []):
-        s = str(c)
+    for s in _judged(commands, verify, files):                         # §17.1970 — and the template's in-guest body
         show = next((m for m in _UNIT_SHOW_RE.finditer(s) if _shows_the_environment(m.group(0))), None)
         if show:
             out.append({"command": s[:200], "why": (

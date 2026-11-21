@@ -66,7 +66,7 @@ def test_the_runs_exit_code_is_the_warnings_not_the_works():
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("async def resolve_run(")
     body = src[i:src.index("\nasync def ", i + 10)]
-    assert "script_was_cut(executed)" in body and body.index("script_was_cut(executed)") < body.index("if ok or confirmed_after_drop:")
+    assert "script_was_cut(executed)" in body and body.index("script_was_cut(executed)") < body.index("if ok or confirmed_after_drop")
 
 
 def test_negative_evidence_settles_a_health_check_without_a_model():

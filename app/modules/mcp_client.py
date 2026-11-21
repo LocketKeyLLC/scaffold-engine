@@ -245,7 +245,12 @@ async def call_tool(
     Raises ``McpError`` on transport failure and ``McpToolError`` when the
     server returns an error result (``isError=True``)."""
     args = arguments or {}
-    if tool_name in ("run_readonly", "run_supervised") and isinstance(args.get("command"), str):
+    # §17.1973 — only the UNSIGNED read is rewritten here. A `run_supervised` command carries an approval signed over
+    # its exact bytes; rewriting it after signing can only be refused. Live (job 0fb4ea7f LM5): the frame's
+    # `command -v ipmitool || echo …` was signed, sent as `which ipmitool || echo …`, and the runner answered
+    # "approval signature does not match this command" -- the SEL was never read. A supervised command is drafted in
+    # its sent form on the frame (`supervised_runs.lookups_as_programs`), where the operator approves it.
+    if tool_name == "run_readonly" and isinstance(args.get("command"), str):
         _cmd = without_lookup_builtins(args["command"])        # §17.1475
         if _cmd != args["command"]:
             args = {**args, "command": _cmd}

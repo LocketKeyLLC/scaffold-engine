@@ -248,7 +248,9 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "changes the machine it reports on",            # §17.1956
                    "PRINTS a whole systemd unit",                  # §17.1958
                    "PRINTS the unit's environment",                # §17.1958
-                   "written BEFORE its commands run")              # §17.1960
+                   "written BEFORE its commands run",               # §17.1960
+                   "is a value this block makes itself",           # §17.1968
+                   "reads this value itself and asks the operator for it")   # §17.1968b
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -312,6 +314,8 @@ _WHOSE_GAP: dict[str, str] = {
     "PRINTS a whole systemd unit": "drafter",
     "PRINTS the unit's environment": "drafter",
     "written BEFORE its commands run": "drafter",
+    "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
+    "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -6039,6 +6043,111 @@ def repair_lookups_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict],
     return out, repairs
 
 
+
+_SET_E_LINE_RE = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*|-o\s+errexit)\b")
+_SET_E_OFF_RE = re.compile(r"^\s*set\s+(?:\+[a-zA-Z]*e[a-zA-Z]*|\+o\s+errexit)\b")
+#: §17.1972 — `a; b; true` / `a; :` -- a statement line whose last command is a no-op the author added to swallow failures
+_SEMI_NOOP_RE = re.compile(r"^(?P<indent>\s*)(?P<rest>\S.*?)\s*;\s*(?:true|:)\s*$")
+#: a line opening with a reserved word belongs to a compound around it: wrapping it would break the compound
+_RESERVED_HEAD_RE = re.compile(r"^(?:then|do|else|elif|fi|done|esac|in|\{|\}|\(|\))(?![\w-])")
+_HEREDOC_HEAD_RE = re.compile(r"(?<!<)<<(-?)\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+
+
+def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
+    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``;
+    returns ``(text, the lines repaired)``. A heredoc's body is a script of its own and is judged by ITS ``set -e``
+    (the in-guest templates carry the model's lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the
+    model writes with ``tee … <<'EOF'`` inside it is not run under that ``set -e`` and is left alone)."""
+    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _CONTINUES_RE, _QUOTED_RE
+    lines = body.split("\n")
+    out: list[str] = []
+    fixed: list[str] = []
+    errexit = False
+    prev = ""
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        hd = _HEREDOC_HEAD_RE.search(ln)
+        if hd:
+            strip_tabs, term = hd.group(1) == "-", hd.group(2)
+            j = next((k for k in range(i + 1, len(lines))
+                      if (lines[k].lstrip("\t") if strip_tabs else lines[k]).rstrip() == term), None)
+            if j is not None:                                # the head, the body judged on its own, the terminator
+                inner, inner_fixed = _ignore_failures_under_set_e("\n".join(lines[i + 1:j]))
+                out += [ln, *(inner.split("\n") if j > i + 1 else []), lines[j]]
+                fixed += inner_fixed
+                prev, i = ln, j + 1
+                continue
+        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+        if _SET_E_LINE_RE.match(ln):
+            errexit = True
+        elif _SET_E_OFF_RE.match(ln):
+            errexit = False
+        else:
+            m = _SEMI_NOOP_RE.match(ln)
+            rest = m.group("rest") if m else ""
+            rcode = _QUOTED_RE.sub("Q", rest)                     # a closed quote is one word; an open one is left
+            if (errexit and m and not ln.strip().startswith("#")
+                    and not _RESERVED_HEAD_RE.match(rest)
+                    and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))
+                    and "'" not in rcode and '"' not in rcode and "#" not in rcode       # no open quote, no comment
+                    and len(_BLOCK_OPEN_RE.findall(code)) == len(_BLOCK_CLOSE_RE.findall(code))
+                    and rcode.count("{") == rcode.count("}") and rcode.count("(") == rcode.count(")")
+                    and not rcode.rstrip().endswith(("&", "|", ";"))
+                    and not re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):   # one command, already `|| true`
+                new = f"{m.group('indent')}{{ {rest}; }} || true"
+                out.append(new)
+                fixed.append(ln.strip())
+                prev, i = new, i + 1
+                continue
+        out.append(ln)
+        prev, i = ln, i + 1
+    return "\n".join(out), fixed
+
+
+def repair_ignored_failures_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
+    """§17.1972 — ``(files, repairs)``: a line written ``a; b; true`` means "run these and ignore their failures",
+    but under ``set -e`` a failing ``a`` ends the script before the ``true`` is reached. Live (job 0fb4ea7f LM14,
+    2026-11-20): the step "restart the benchmark A/B" drafted ``systemctl stop lm-bench2 2>/dev/null; docker stop
+    vibrant_hugle 2>/dev/null; true`` into the ``reach_vm_ssh_and_run`` remote script, which opens with ``set -e``;
+    had either stop failed (the unit or the container already gone -- the very case the ``; true`` was written for),
+    the restart would have ended there with nothing started. It was caught by hand and redrafted with ``|| true``.
+
+    The repair is ``{ a; b; } || true``, not ``a || true; b || true``: bash does not apply ``set -e`` anywhere inside
+    the left side of ``||``, so every statement of the group runs in order whatever the others return, and the line
+    as a whole never fails -- exactly the line's meaning without ``set -e``. It needs no splitting of the line at its
+    ``;`` (which a quoted ``bash -c 'x; y'`` or an ``a && b`` would make wrong). Every repair is said on the frame
+    (§17.1270: never a silent repair), and a repair that would not compile is not made."""
+    out: list[dict] = []
+    repairs: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if not _SET_E_RE.search(body):
+            out.append(f)
+            continue
+        fixed, lines = _ignore_failures_under_set_e(body)
+        if not lines or (_bash_compiles(body) and not _bash_compiles(fixed)):
+            out.append(f)
+            continue
+        out.append({**f, "content": fixed})
+        for ln in lines:
+            repairs.append({"why": (
+                f"wrote `{ln[:120]}` in {path} as `{{ …; }} || true`: the script runs under `set -e`, where a failing "
+                f"first command ends it before the closing `true` is reached -- the `; true` says this line's failures "
+                f"are to be ignored, and `{{ …; }} || true` runs every command of the line and ignores them under "
+                f"`set -e` too.")})
+    return out, repairs
+
+
+def _bash_compiles(text: str) -> bool:
+    """§17.1972 — ``bash -n`` on a script; True when bash is not there to ask (the repair is then judged by shape)."""
+    import subprocess
+    try:
+        return subprocess.run(["bash", "-n"], input=text.encode(), capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 #: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
 #: §17.1955 — a `$` after one backslash is a literal dollar, not a read: `sed -n "/start/,\$p"` was refused
 #: "`$p` is read here and nothing sets it" (live, job 0fb4ea7f LM15). Two backslashes are an escaped backslash,
@@ -6357,6 +6466,10 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
             # `process.env.PANEL_PASSWORD` passed
             if _ENV_LOOKUP_BEFORE_RE.search(t[max(0, m.start() - 40):m.start()]):
                 continue
+            # §17.1969 — the name as what a search LOOKS FOR is a reading of the word, not a value. Live (7cc2a7ac T22):
+            # `pct exec 111 -- grep -c 'PANEL_PASSWORD' /etc/systemd/system/control-panel.service` was refused
+            if _SEARCH_OPERAND_BEFORE_RE.search(t[t.rfind("\n", 0, m.start()) + 1:m.start()]):
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -6367,6 +6480,97 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
                 f"with the string `{name}`. Reference it so the runner resolves it — `$"
                 f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
                 f"machine with `$( … )`; never the bare word.")})
+    return out + _held_refs_in_python_strings(commands, files, verify, held, seen)
+
+
+#: §17.1969 — the start of the simple command a name is the operand of, when that command SEARCHES for it
+_SEARCH_OPERAND_BEFORE_RE = re.compile(r"(?:^|[|;&(`\s])(?:[ezf]?grep|zgrep|rg|ag|ack|git\s+grep)\s[^|;&\n]*$")
+#: §17.1969 — a Python program that hands a string to a SHELL (which does expand `$NAME`): not judged
+_PY_SHELL_SINK_RE = re.compile(
+    r"shell\s*=\s*True|\bos\.(?:system|popen|exec\w*)\(|expandvars|\bTemplate\(|getoutput|pexpect"
+    r"|['\"](?:ba|da|z)?sh['\"]\s*,\s*['\"]-c['\"]")
+#: §17.1969 — `python3 -c '…'`: single quotes, so the shell hands the program over unexpanded
+_PY_C_SINGLE_RE = re.compile(r"\bpython3?\s+(?:-[A-Za-z]+\s+)*?-c\s+'(?P<body>[^']*)'")
+#: a call whose string argument is a MESSAGE to a person, not a value a program uses
+_PY_MESSAGE_CALL_RE = re.compile(r"^(?:print|exit|SystemExit|warn|warning|error|info|debug|critical|exception|fail|"
+                                 r"\w*(?:Error|Exception))$")
+
+
+def _python_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
+                                             verify: Optional[list[str]]) -> list[str]:
+    """§17.1969 — every Python program whose text no shell expands before Python reads it: a quoted-tag
+    `python3 - <<'PY'`, a single-quoted `python3 -c '…'`, a quoted heredoc into a `.py` file, a written `.py` file."""
+    texts = [str(c) for c in list(commands or []) + list(verify or [])]
+    file_texts = [str((f or {}).get("content") or "") for f in files or []]
+    out = [body for _w, body, _where in _quoted_heredoc_programs(texts, files)]
+    for t in texts + file_texts:
+        out += [m.group("body") for m in _PY_C_SINGLE_RE.finditer(t)]
+        lines = t.split("\n")
+        for i, ln in enumerate(lines):
+            m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
+            tgt = m and (_HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():]))
+            path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
+            if not path.endswith(".py"):
+                continue
+            tag = m.group("q1") or m.group("q2") or m.group("q3")
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == tag), len(lines))
+            out.append("\n".join(lines[i + 1:end]))
+    run_text = "\n".join(texts)
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if body.strip() and (path.endswith(".py") or (path and re.search(rf"python3?\s+{re.escape(path)}(?![\w/])", run_text))):
+            out.append(body)
+    return out
+
+
+def _held_refs_in_python_strings(commands: list[str], files: Optional[list[dict]], verify: Optional[list[str]],
+                                 held: list[str], seen: set[str]) -> list[dict]:
+    """§17.1969 — `$NAME` inside a Python string literal is six characters, never the value.
+
+    Live (7cc2a7ac ADD5's draft, 2026-11-21): `/tmp/pal_stop.py` held `CFG = 'user = "panel:$PANEL_PASSWORD"\\n'`
+    and fed it to `curl --config /dev/stdin` -- the runner passes a held value in the ENVIRONMENT, never by rewriting
+    text, so every call would have sent the literal `$PANEL_PASSWORD` and answered 401; §17.1581 saw the `$` and passed
+    it. A program that hands strings to a shell (`shell=True`, `os.system`, `["sh", "-c", …]`, `expandvars`) is not
+    judged; a docstring, a message (`print`, `raise`, `sys.exit`) or a comparison is not a value."""
+    if not held:
+        return []
+    ref = re.compile(r"\$\{?(" + "|".join(re.escape(h) for h in held) + r")\}?(?![A-Za-z0-9_])")
+    out: list[dict] = []
+    for src in _python_programs_the_shell_never_expands(commands, files, verify):
+        if not ref.search(src) or _PY_SHELL_SINK_RE.search(src):
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        parents = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+                continue
+            m = ref.search(node.value if isinstance(node.value, str) else node.value.decode("latin-1"))   # `b"…"` too
+            if not m or m.group(1) in seen:
+                continue
+            p, skip = parents.get(id(node)), False
+            if isinstance(p, ast.Expr):                      # a docstring or a bare string: nothing uses it
+                skip = True
+            while p is not None and not skip:
+                if isinstance(p, (ast.Raise, ast.Assert, ast.Compare)):
+                    skip = True
+                elif isinstance(p, ast.Call):
+                    fn = p.func.attr if isinstance(p.func, ast.Attribute) else getattr(p.func, "id", "")
+                    skip = bool(_PY_MESSAGE_CALL_RE.match(fn or ""))
+                p = parents.get(id(p))
+            if skip:
+                continue
+            name = m.group(1)
+            seen.add(name)
+            line = next((ln for ln in src.splitlines() if m.group(0) in ln), m.group(0))
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: `{m.group(0)}` sits inside a Python string, "
+                f"which no shell expands -- the runner hands `{name}` to the program in its ENVIRONMENT, so the program "
+                f"would use the literal text `{m.group(0)}` (a login with it answers 401). Read it with "
+                f"`os.environ[\"{name}\"]` and run the program with `{name}=\"${name}\" python3 …` so the runner "
+                f"supplies it.")})
     return out
 
 
@@ -6526,6 +6730,141 @@ def inputs_for(commands: list[str], verify: list[str], runbook: str,
     from app.modules.runbook_inputs import secret_name       # §17.1275 — one definition
     texts = list(commands) + list(verify) + [str((f or {}).get("content") or "") for f in files or []]
     return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)} for n in placeholders(texts)]
+
+
+#: §17.1968 — the literal run just before a `<NAME>`: a path or a flag value, never across a space or a quote
+_MADE_PREFIX_RE = re.compile(r"[A-Za-z0-9_./:@+=%-]+$")
+
+
+def values_the_block_makes(commands: list[str], verify: list[str],
+                           files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1968 — a ``<NAME>`` whose value the block's OWN commands produce is not an input.
+
+    Live (job 7cc2a7ac T4 "Create restore point", 2026-11-20): the first command made
+    `/root/panel-backup-$(date -u +%Y%m%dT%H%M%SZ)` and the next thirteen wrote into
+    `/root/panel-backup-<TIMESTAMP>/…`; the frame asked "It needs 2 values from you first" -- a
+    time stamp only the run knows, typed before it runs. The operator had to redraft by hand.
+
+    Made by the block: the name is ASSIGNED or bound somewhere in it (`TIMESTAMP=$(date …)`,
+    `read TIMESTAMP`, `for TIMESTAMP in`), or the literal just before the placeholder is, elsewhere
+    in the block, followed by a value the shell makes (`$(…)`, a backtick, or a variable the block
+    assigns) -- the same position filled at run time. ``[{name, command, why}]``, one per name."""
+    texts = [str(c or "") for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    assigned: dict[str, str] = {}
+    for t in texts:
+        for m in _VAR_SET_RE.finditer(t):
+            n = m.group("name")
+            # `TITLE="<TITLE>" python3 …` hands the operator's value IN; it makes nothing
+            if re.match(r"[\"']?<" + re.escape(n) + r">", t[m.end():]) or _SELF_ASSIGN_RE.match(t[m.start("name"):]):
+                continue
+            assigned.setdefault(n, t)
+        for m in _VAR_BIND_RE.finditer(t):
+            for n in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")):
+                if n:
+                    assigned.setdefault(n, t)
+
+    def _made_at(prefix: str) -> tuple[str, str]:
+        """The command that fills `prefix` with a value the shell makes, and that value's head."""
+        for t in texts:
+            for o in re.finditer(re.escape(prefix) + r"(?=\$\(|`|\$\{?[A-Za-z_])", t):
+                tail = t[o.end():]
+                vm = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", tail)
+                if vm and vm.group(1) not in assigned:
+                    continue                         # a name the block does not make (a runner secret) is not made here
+                vh = re.match(r"\$\([^)]*\)|`[^`]*`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", tail)
+                return t, (prefix + (vh.group(0) if vh else tail.split()[0]))[:100]
+        return "", ""
+
+    out: list[dict] = []
+    for name in placeholders(texts):
+        made = assigned.get(name) or ""
+        how = f"the block sets `{name}` itself" if made else ""
+        for t in texts if not made else ():
+            for m in re.finditer(r"<" + re.escape(name) + r">", t):
+                pm = _MADE_PREFIX_RE.search(t[:m.start()])
+                prefix = pm.group(0) if pm else ""
+                # the last path segment must carry a name (`panel-backup-`), not just `/root/` or `http://`
+                if len(re.sub(r"[^A-Za-z0-9]", "", prefix.rsplit("/", 1)[-1])) < 3:
+                    continue
+                made, head = _made_at(prefix)
+                if made:
+                    how = f"`{head}` makes it at run time"
+                    break
+            if made:
+                break
+        if not made:
+            continue
+        out.append({"command": made.strip()[:200], "name": name, "why": (
+            f"`<{name}>` is a value this block makes itself -- {how} -- so it is not an input: nobody can "
+            f"type, before the run, a value only the run produces (live, §17.1968: a backup folder named by "
+            f"`$(date …)` in one command and written to as `<TIMESTAMP>` in the next). And each command runs "
+            f"as its own runner call, in its own shell, so a value made in one is gone in the next. Choose ONE "
+            f"fixed name the step can write in every command (a folder named after the job, not the clock), "
+            f"or make the value and use it inside the same command (`&&`), or read it back on the machine "
+            f"(`ls -d <folder>-* | tail -1`) in the command that needs it.")})
+    return out
+
+
+#: §17.1968b — `systemctl show <unit> -p <Property>` prints ONE value per property; which placeholder kinds each fills
+_UNIT_PROPERTY_KINDS: dict[str, frozenset] = {
+    "workingdirectory": frozenset({"DIR", "DIRECTORY", "WORKDIR", "ROOT"}),
+    "fragmentpath": frozenset({"UNIT_PATH", "UNIT_FILE", "FILE"}),
+    "mainpid": frozenset({"PID"}),
+    "user": frozenset({"USER"}),
+    "execstart": frozenset({"CMD", "COMMAND", "EXEC", "EXECSTART", "BINARY", "BIN"}),
+}
+_SYSTEMCTL_SHOW_RE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*show\b([^|;&\n'\"]*)")
+
+
+def reads_a_value_and_asks_for_it(commands: list[str], verify: list[str],
+                                  files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1968b — a ``<NAME>`` whose value another command of the SAME block reads off the machine.
+
+    Live (job 7cc2a7ac T4, 2026-11-20): `pct exec 111 -- systemctl show control-panel.service -p ExecStart -p
+    WorkingDirectory --value` printed the panel's directory, and two commands later `tar -C <PANEL_DIR>` asked the
+    operator for it. §17.1288l's shape (an address read from `ip neigh`, then `<PALWORLD_IP>`) with a unit's property:
+    the block has the value at run time, the operator does not, and each command's shell forgets it. Refused, like
+    §17.1288l, with the capture to write -- not repaired: a read of two properties prints two lines, so splicing it
+    in as `$(…)` would hand `tar -C` both.
+
+    A hit needs the read to name a property whose kind is the placeholder's last word (`WorkingDirectory` ->
+    `_DIR`), and every other word of the placeholder to name that unit (`PANEL` in `control-panel.service`)."""
+    texts = [str(c or "") for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    reads: list[tuple[str, str, str, str]] = []                     # (command, unit, Property, guest prefix)
+    for t in texts:
+        for m in _SYSTEMCTL_SHOW_RE.finditer(t):
+            args = m.group(1).split()
+            unit = next((a for a in args if not a.startswith("-") and not re.fullmatch(r"[A-Z][A-Za-z,]*", a)), "")
+            props = re.findall(r"(?:-p\s*|--property[=\s]+)([A-Za-z,]+)", m.group(1))
+            guest = re.match(r"\s*(pct\s+exec\s+\d+\s+--\s+)", t)
+            for p in ",".join(props).split(","):
+                if p and unit:
+                    reads.append((t, unit, p, guest.group(1) if guest else ""))
+    out: list[dict] = []
+    for name in placeholders(texts):
+        words = name.split("_")
+        for cmd, unit, prop, guest in reads:
+            if f"<{name}>" in cmd:
+                continue
+            kinds = _UNIT_PROPERTY_KINDS.get(prop.lower(), frozenset())
+            kind = next((k for k in kinds if name == k or name.endswith("_" + k)), "")
+            if not kind:
+                continue
+            rest = [w.lower() for w in words[:len(words) - len(kind.split("_"))]]
+            if not all(w in unit.lower() for w in rest):      # every other word names the unit read
+                continue
+            out.append({"command": cmd.strip()[:200], "name": name, "why": (
+                f"this block reads this value itself and asks the operator for it: `<{name}>` is the `{prop}` "
+                f"that `systemctl show {unit} -p {prop}` prints in another command of this block (`{cmd.strip()[:90]}`). "
+                f"The operator cannot type what the block reads at run time, and each command runs in its own "
+                f"shell, so the printed value is gone before the next one. Read it where it is used, ONE property "
+                f"per read so `--value` prints one line: `{guest}systemctl show {unit} -p {prop} --value` inside a "
+                f"`$(…)` in the command that needs it -- e.g. `{guest}tar -C \"$({guest}systemctl show {unit} -p "
+                f"{prop} --value)\" -czf - .` -- or capture it once in a script under ## Write these files.")})
+            break
+    return out
 
 
 def is_develop_delivery(files: Optional[list[dict]]) -> bool:
@@ -6852,6 +7191,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
+    files, _noop_repairs = repair_ignored_failures_under_set_e(files)   # §17.1972 — `a; b; true` under set -e
+    _lookup_repairs = list(_lookup_repairs) + _noop_repairs
     # §17.1657 — an *arr API call inside its own guest with no key gets one, FIRST, so every later step (the
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
     from app.modules.arr_api_key import present_the_arr_key as _present_arr_key
@@ -7134,6 +7475,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # configured" is `/{resource}/testall`, which needs no body. Repair it here, before
     # the §17.1378b refusal gate, so a connectivity-verify step runs instead of parking.
     cmds, verify, _test_notes = repair_empty_body_test_call(cmds, verify)
+    # §17.1973 — a shell builtin becomes the program on the FRAME, so the operator approves, the engine signs and the
+    # runner runs one string (it used to be rewritten in transit, after signing, and the runner refused it).
+    cmds, verify, _lk_notes = lookups_as_programs(cmds, verify)
+    _test_notes = list(_test_notes) + _lk_notes
     _mv_notes = list(_comp_notes) + list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
@@ -7151,12 +7496,22 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     cmds, verify, _ba_notes = _mv.present_a_held_login(cmds, verify, services, (policy or {}).get("held_logins") or [])
     _mv_notes = list(_mv_notes) + _ba_notes
     inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
+    # §17.1968 — a value the block makes itself is never asked for: it leaves the inputs and is refused, so the
+    # redraft is told (live, 7cc2a7ac T4 asked for `<TIMESTAMP>` its own `$(date …)` folder name held)
+    _made = values_the_block_makes(cmds, verify, files)
+    # §17.1968b — and one another command of the block READS off the machine (T4's `<PANEL_DIR>`)
+    _made = _made + [h for h in reads_a_value_and_asks_for_it(cmds, verify, files)
+                     if h["name"] not in {x["name"] for x in _made}]
+    if _made:
+        inputs = [i for i in inputs if i.get("name") not in {h["name"] for h in _made}]
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
     cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
-        inputs = suggest_inputs(inputs, env, text=step_text(node))   # §17.1275 — and what the step says
+        inputs = suggest_inputs(inputs, env, text=step_text(node),   # §17.1275 — and what the step says
+                                logins=(policy or {}).get("held_logins"),  # §17.1971 — and the logins it holds
+                                held=sorted(_stored_names))
     _mv_asked = (_mv.still_asked(inputs, inventory)          # §17.1332 — the other end of the fix
                  + _mv.engine_still_asked(inputs, engine_address))   # §17.1333
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
@@ -7168,6 +7523,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # "redirect" per command.
     _dummies = {i["name"]: "x" for i in inputs}
     _dummies.update({n: "x" for n in secrets_missing})
+    _dummies.update({h["name"]: "x" for h in _made})          # §17.1968 — refused once below, not as a "redirect"
     shape = substitute(cmds, _dummies) if _dummies else cmds
     # §17.1280 — the gates judge the files as they will be WRITTEN (placeholders
     # filled with a dummy); the frame keeps them as drafted so resolve fills the
@@ -7207,6 +7563,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     if _ns_notes:
         _pre = [p for p in _pre if "cannot resolve names" not in str((p or {}).get("why") or "")]
     refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
+    refused = refused + [{"command": h["command"], "why": h["why"]} for h in _made]   # §17.1968
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
     if str(runbook or "").lstrip().startswith("<!-- runbook-cut -->"):
@@ -7260,11 +7617,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # a written file that runs itself, and a check that reads only that file.
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
     from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
-    refused = refused + _prints_a_credential(cmds, verify)              # §17.1652 — a key is used, never printed
+    refused = refused + _prints_a_credential(cmds, verify, shape_files)  # §17.1652 — a key is used, never printed (§17.1970: in the body too)
     from app.modules.prints_a_secret import prints_arr_settings as _prints_arr_settings
-    refused = refused + _prints_arr_settings(cmds, verify)              # §17.1673 — an *arr settings list holds credentials
+    refused = refused + _prints_arr_settings(cmds, verify, shape_files)  # §17.1673 — an *arr settings list holds credentials
     from app.modules.prints_a_secret import prints_a_units_environment as _prints_a_units_environment
-    refused = refused + _prints_a_units_environment(cmds, verify)       # §17.1958 — a unit's Environment holds keys
+    refused = refused + _prints_a_units_environment(cmds, verify, shape_files)   # §17.1958 — a unit's Environment holds keys
     from app.modules.check_writes import a_check_that_writes as _a_check_that_writes
     refused = refused + _a_check_that_writes(cmds, node)                 # §17.1659 — a check does not change what it checks
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
@@ -7916,8 +8273,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         _missing = missing_prints(_expected, "\n".join([str(e.get("output") or "") for e in executed] + [verify_out]))
         if _missing:
             ok = False
-            refuted = list(refuted) + [{"verdict": "contradicted", "reason": f"nothing printed `{t}`, which its Done when names"}
-                                       for t in _missing]
+            refuted = list(refuted) + [{"verdict": "contradicted", "kind": "done_when_print",
+                                        "reason": f"nothing printed `{t}`, which its Done when names"} for t in _missing]
             logger.warning("supervised_run_expected_print_missing job=%s node=%s missing=%r",
                            job_id, node_key, [t[:60] for t in _missing])
     # §17.1680b — a read-only block with no separate check (§17.1680) is judged by its OWN output: the same judge, the
@@ -7968,19 +8325,34 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ok = False
         repeated_reason = _unverified
         logger.warning("supervised_run_unverified job=%s node=%s", job_id, node_key)
+    # §17.1967 — a TEST that ran and found faults did its job: done, with its findings recorded where the steps after it
+    # read them (`_result_of` keeps what follows `## Executed on`). Live (job 7cc2a7ac): T15's Playwright run printed
+    # "10 of 12 sections passed" and exited 1, T17's engine control answered HTTP 500, T9's sweep printed `000` for five
+    # routes -- each recorded failed, the job blocked, and the operator skipped all three by hand so F1–F4 could fix
+    # what they had found. A test whose own commands broke, or whose every probe failed, is still failed.
+    _findings, _findings_why = "", ""
+    if not ok and not confirmed_after_drop and not dropped and not repeated_reason:
+        from app.modules.found_faults import findings_of_a_run
+        _findings, _findings_why = findings_of_a_run(
+            waiting, executed, refuted,
+            not_run=runnable[max(0, len(executed) - len(_files)):] if _wrote_all else [])
+        if _findings:
+            output = f"{output}\n\n{mask_secrets(scrub_run_output(_findings, secret_env), values, need)}"
+            logger.warning("supervised_run_done_with_findings job=%s node=%s why=%s", job_id, node_key, _findings_why[:200])
     if confirmed_after_drop:
         output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
                    f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
                    "did not know whether it had run. The checks above were then read back off the "
                    "machine and they show the step's goal already met, so it is recorded as done "
                    "rather than retried — repeating a write that already happened is not a retry.")
-    if ok or confirmed_after_drop:
+    if ok or confirmed_after_drop or _findings:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
                  "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
             {"jid": job_id, "nk": node_key, "out": output,
              "why": (f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"
                      if ok else
+                     mask_secrets(scrub_run_output(_findings_why, secret_env), values, need) if _findings else
                      f"supervised run through {spec.name}: the response to "
                      f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
                      f"the machine confirm the step's goal is met")})
@@ -8963,11 +9335,11 @@ def blank_checks(pasted: str, ran: list[dict]) -> list[dict]:
     for r in done:
         cmd = str(r.get("command") or "").rstrip().rstrip("'\"").rstrip()
         if not outs[r["id"]] and _FILTER_TAIL_RE.search(cmd + " "):
-            out.append({"verdict": "contradicted", "id": r["id"], "reason": (
+            out.append({"verdict": "contradicted", "kind": "blank", "id": r["id"], "reason": (
                 f"`{str(r.get('command'))[:120]}` filters for what the step should have left, and printed NOTHING: "
                 f"what it looks for is not there (§17.1738)")})
     if done and not out and all(not outs[r["id"]] for r in done):
-        out.append({"verdict": "contradicted", "id": done[0]["id"], "reason": (
+        out.append({"verdict": "contradicted", "kind": "blank", "id": done[0]["id"], "reason": (
             f"all {len(done)} check(s) ran and printed nothing, so nothing confirmed the work (§17.1738)")})
     return out
 
@@ -9262,6 +9634,38 @@ _TEST_ENDPOINT_RE = re.compile(r"(/api/v\d+/(\w+))/test\b")
 #: the `-d/--data…` flag together with its one quoted-or-bare argument, to delete.
 _DATA_FLAG_WITH_ARG_RE = re.compile(
     r"\s*(?:-d|--data|--data-raw|--data-binary|--json)(?![\w-])\s*(?:'[^']*'|\"[^\"]*\"|\S+)")
+
+
+def lookups_as_programs(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
+    """§17.1973 — `command -v X` / `type X` / `hash X` → `which X` (§17.1475's rewrite), done where the frame is drawn.
+
+    The runner runs a line as `sudo -n <line>`, and a builtin is not a program sudo can find ("sudo: command: command
+    not found" with the tool installed, ADD155). §17.1475 rewrote it inside `mcp_client.call_tool` -- after
+    `run_block` had signed the original bytes, so every supervised command carrying a lookup was refused: live (job
+    0fb4ea7f LM5, 2026-11-19) `command -v ipmitool || echo 'ipmitool: not installed'` came back "approval signature
+    does not match this command" and the SEL was never read. Rewritten here, the frame shows the command that is
+    signed and sent, and the note says why."""
+    from app.modules.mcp_client import without_lookup_builtins
+    changed: list[str] = []
+
+    def fix(seq: list[str]) -> list[str]:
+        out = []
+        for c in seq or []:
+            new = without_lookup_builtins(str(c))
+            if new != str(c):
+                changed.append(str(c))
+            out.append(new if new != str(c) else c)
+        return out
+
+    out_cmds, out_verify = fix(commands), fix(verify)
+    notes: list[dict] = []
+    if changed:
+        more = f" (and {len(changed) - 1} more)" if len(changed) > 1 else ""
+        notes.append({"why": (
+            f"`{changed[0][:80]}`{more}: a shell builtin (`command -v`, `type`, `hash`) is not a program `sudo` "
+            "can run, so the lookup is `which` -- the form you approve is the one signed and sent "
+            "(§17.1475, §17.1973).")})
+    return out_cmds, out_verify, notes
 
 
 def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:
@@ -11815,6 +12219,91 @@ def the_run_is_the_read(waiting: Optional[dict], executed: Optional[list]) -> bo
     return bool(ex) and all(e.get("ok") is not False and str(e.get("output") or "").strip() for e in ex)
 
 
+#: §17.1976 — a read that says only that a machine or guest is THERE (up, reachable, answering), whatever runs on it
+_PLACE_READ_RE = re.compile(
+    r"^(?:qm\s+(?:status|list|guest\s+ping)\b|qm\s+agent\s+\d+\s+ping\b|pct\s+(?:status|list)\b"
+    r"|pvesh\s+get\s+\S*/(?:qemu|lxc)/\d+/status/current\b|f?ping\b|arping\b|nc\s+(?:-\w+\s+)*-\w*z"
+    r"|uptime\b|hostname\b|whoami\b|true\b|exit\b|echo\b|systemctl\s+is-system-running\b)")
+#: what may follow a place read in its pipeline without making it read anything else
+_PLACE_FILTER_RE = re.compile(r"^(?:grep|egrep|head|tail|awk|cut|tr|wc|sed\s+-n|sort|uniq)\b")
+#: §17.1976 — a block whose whole work is to bring a guest UP: its effect is the place (3cc24343 T4 "Start CT 109")
+_BRINGS_UP_RE = re.compile(r"^(?:(?:qm|pct)\s+(?:start|resume)\s+\d+|sleep\s+\d+)\s*$")
+
+
+def _unwrap_check(check: str) -> str:
+    """§17.1976 — the command a check runs where it lands: inside `pct exec N --`, `qm guest exec N --`, `sh -c '…'`,
+    the in-guest template's `bash /tmp/in_vm_N.sh check '…'`, `sudo`, `timeout N`, or `ssh [opts] host '…'`."""
+    c = str(check or "").strip()
+    for _ in range(6):
+        prev = c
+        m = re.match(r"^(?:\w+=\S*\s+)*bash\s+/tmp/in_(?:vm|ct)_\d+(?:_agent)?\.sh\s+check\s+(.*)$", c, re.S)
+        if m:
+            try:
+                c = " ".join(shlex.split(m.group(1)))
+            except ValueError:
+                c = m.group(1)
+        c = re.sub(r"^(?:pct\s+exec\s+\d+|qm\s+guest\s+exec\s+\d+)\s+--\s+", "", c)
+        c = re.sub(r"^(?:sudo(?:\s+-\w+)*|timeout\s+\d+[smh]?)\s+", "", c)
+        m = re.match(r"^(?:ba)?sh\s+-c\s+(['\"])(.*)\1\s*$", c, re.S)
+        if m:
+            c = m.group(2).replace("'\\''", "'")
+        m = re.match(r"^ssh(?:\s+-\w+(?:\s+[^\s'\"@-]\S*)?)*\s+(?:[\w.-]+@)?[\w.-]+(?:\s+(['\"])(.*)\1|\s+(.+))?\s*$", c, re.S)
+        if m:
+            c = (m.group(2) or m.group(3) or "true").strip()
+        c = c.strip()
+        if c == prev:
+            break
+    return c
+
+
+def _segments(cmd: str) -> list[str]:
+    return [p.strip() for p in re.split(r"\s*(?:;|&&|\|\||\n)\s*", str(cmd or "")) if p.strip()]
+
+
+def a_place_check(check: str) -> bool:
+    """§17.1976 — True when the check reads only that the step's machine or guest is up or reachable (`qm status 110`,
+    `pct status 109`, `ping`, `ssh host true`, `uptime` …): the PLACE, which holds before the step and after it alike."""
+    segs = _segments(_unwrap_check(check))
+    if not segs:
+        return False
+    for seg in segs:
+        head, *rest = [p.strip() for p in seg.split("|")]
+        if not _PLACE_READ_RE.match(_unwrap_check(head)) or not all(_PLACE_FILTER_RE.match(p) for p in rest):
+            return False
+    return True
+
+
+def checks_read_only_the_place(verify: list, commands: Optional[list] = None) -> str:
+    """§17.1976 — ``""``, or why the checks cannot show a step already met: every one reads only that the machine is
+    there. Live (job 0fb4ea7f LM26 "VM 110: start the benchmark A/B again as a transient unit", 2026-11-21): the
+    in-guest template's own verify, `qm status 110` → `status: running`, was the only check; the judge called the VM
+    being up "its effect is present", the step was recorded already met, and lm-ab3 never started. The one block it
+    can prove is a block that only brings the guest up (3cc24343 T4 "Start CT 109": `pct start 109`)."""
+    v = [str(c) for c in verify or [] if str(c).strip()]
+    if not v or not all(a_place_check(c) for c in v):
+        return ""
+    segs = [seg for c in commands or [] for seg in _segments(str(c))]
+    if segs and all(_BRINGS_UP_RE.match(seg) or a_place_check(seg) for seg in segs):
+        return ""
+    return (f"every check ({', '.join('`' + c[:60] + '`' for c in v[:3])}) reads only that the machine is up or "
+            "reachable -- that is where the step runs, not what it does")
+
+
+def own_checks_not_read(node: Optional[dict], verify: list) -> str:
+    """§17.1976 — ``""``, or the step's own named check (its "Check:" / "Done when" command) that the pre-read does not
+    run. The step's text says what proves it done; a pre-read that leaves it out answers another question."""
+    from app.modules.operator_steps import checks
+
+    def _flat(x: str) -> str:
+        return re.sub(r"[\s'\"\\]+", "", str(x or ""))
+
+    blob = "\n".join(_flat(_unwrap_check(c)) + "\n" + _flat(c) for c in verify or [])
+    for c in checks(node):
+        if _flat(c) not in blob and _flat(_unwrap_check(c)) not in blob:     # wrapped or bare, where it runs
+            return f"the step names its check `{c[:80]}` and the pre-read does not run it"
+    return ""
+
+
 async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
     """§17.1302 — read the step's OWN verify checks off the machine before the
     block is parked. When every check confirms the step's goal, the step is
@@ -11845,6 +12334,9 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         (frame or {}).get("files") or [])
     # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
     _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
+    # §17.1976 — the PLACE (the VM is up) is not the step's effect, and the step's own named checks are among the reads
+    _blind = (_blind or checks_read_only_the_place(verify_cmds, (frame or {}).get("commands") or [])
+              or own_checks_not_read(node, verify_cmds))
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)
