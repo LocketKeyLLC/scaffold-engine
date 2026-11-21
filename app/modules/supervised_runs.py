@@ -6053,12 +6053,14 @@ _RESERVED_HEAD_RE = re.compile(r"^(?:then|do|else|elif|fi|done|esac|in|\{|\}|\(|
 _HEREDOC_HEAD_RE = re.compile(r"(?<!<)<<(-?)\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 
 
-def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
-    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``;
-    returns ``(text, the lines repaired)``. A heredoc's body is a script of its own and is judged by ITS ``set -e``
-    (the in-guest templates carry the model's lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the
-    model writes with ``tee … <<'EOF'`` inside it is not run under that ``set -e`` and is left alone)."""
-    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _CONTINUES_RE, _QUOTED_RE
+def _repair_lines_under_set_e(body: str, repair_line) -> tuple[str, list[str]]:
+    """§17.1972/§17.1979 — one script's text with ``repair_line(line)`` applied to each statement line that runs under
+    ``set -e``; returns ``(text, the lines repaired)``. ``repair_line`` returns the new line, or None to leave it.
+    A heredoc's body is a script of its own and is judged by ITS ``set -e`` (the in-guest templates carry the model's
+    lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the model writes with ``tee … <<'EOF'`` inside
+    it is not run under that ``set -e`` and is left alone). A comment line and a line that continues the one before
+    it are never statements of their own."""
+    from app.modules.runbook_templates import _CONTINUES_RE
     lines = body.split("\n")
     out: list[str] = []
     fixed: list[str] = []
@@ -6073,29 +6075,19 @@ def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
             j = next((k for k in range(i + 1, len(lines))
                       if (lines[k].lstrip("\t") if strip_tabs else lines[k]).rstrip() == term), None)
             if j is not None:                                # the head, the body judged on its own, the terminator
-                inner, inner_fixed = _ignore_failures_under_set_e("\n".join(lines[i + 1:j]))
+                inner, inner_fixed = _repair_lines_under_set_e("\n".join(lines[i + 1:j]), repair_line)
                 out += [ln, *(inner.split("\n") if j > i + 1 else []), lines[j]]
                 fixed += inner_fixed
                 prev, i = ln, j + 1
                 continue
-        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
         if _SET_E_LINE_RE.match(ln):
             errexit = True
         elif _SET_E_OFF_RE.match(ln):
             errexit = False
-        else:
-            m = _SEMI_NOOP_RE.match(ln)
-            rest = m.group("rest") if m else ""
-            rcode = _QUOTED_RE.sub("Q", rest)                     # a closed quote is one word; an open one is left
-            if (errexit and m and not ln.strip().startswith("#")
-                    and not _RESERVED_HEAD_RE.match(rest)
-                    and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))
-                    and "'" not in rcode and '"' not in rcode and "#" not in rcode       # no open quote, no comment
-                    and len(_BLOCK_OPEN_RE.findall(code)) == len(_BLOCK_CLOSE_RE.findall(code))
-                    and rcode.count("{") == rcode.count("}") and rcode.count("(") == rcode.count(")")
-                    and not rcode.rstrip().endswith(("&", "|", ";"))
-                    and not re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):   # one command, already `|| true`
-                new = f"{m.group('indent')}{{ {rest}; }} || true"
+        elif (errexit and not ln.strip().startswith("#")
+              and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))):
+            new = repair_line(ln)
+            if new is not None and new != ln:
                 out.append(new)
                 fixed.append(ln.strip())
                 prev, i = new, i + 1
@@ -6103,6 +6095,30 @@ def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
         out.append(ln)
         prev, i = ln, i + 1
     return "\n".join(out), fixed
+
+
+def _semi_noop_line(ln: str) -> Optional[str]:
+    """§17.1972 — ``a; b; true`` written ``{ a; b; } || true``, or None when the line is not that shape."""
+    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _QUOTED_RE
+    code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+    m = _SEMI_NOOP_RE.match(ln)
+    if not m:
+        return None
+    rest = m.group("rest")
+    rcode = _QUOTED_RE.sub("Q", rest)                         # a closed quote is one word; an open one is left
+    if (_RESERVED_HEAD_RE.match(rest)
+            or "'" in rcode or '"' in rcode or "#" in rcode                              # an open quote, a comment
+            or len(_BLOCK_OPEN_RE.findall(code)) != len(_BLOCK_CLOSE_RE.findall(code))
+            or rcode.count("{") != rcode.count("}") or rcode.count("(") != rcode.count(")")
+            or rcode.rstrip().endswith(("&", "|", ";"))
+            or re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):           # one command, already `|| true`
+        return None
+    return f"{m.group('indent')}{{ {rest}; }} || true"
+
+
+def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
+    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``."""
+    return _repair_lines_under_set_e(body, _semi_noop_line)
 
 
 def repair_ignored_failures_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
@@ -6146,6 +6162,148 @@ def _bash_compiles(text: str) -> bool:
         return subprocess.run(["bash", "-n"], input=text.encode(), capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return True
+
+
+#: §17.1979 — a stop command whose "there was nothing to stop" exit is a code of its own, by the tool's documented exit
+#: status (measured on procps 4 / psmisc / systemd 255 / Docker 28): `pkill` 1 = no process matched (2 = a bad option,
+#: 3 = fatal), `killall` 1 = no process killed. `systemctl stop` is NOT one: its 5 ("not loaded") is also what a
+#: misspelled unit returns, and a stop-then-edit step (a service's DB) must not go on editing while the real unit
+#: runs -- a stop with nothing to stop fails loudly, and the drafter may write the guard itself. `systemctl disable` of
+#: a missing unit exits 1, the generic failure, so it is not one either. `docker stop|rm` of a missing container exits 1 just
+#: as a daemon that is down does, so for it the "No such container" is read back from `docker container inspect`;
+#: `docker rm -f` of a missing one already exits 0. `pgrep` and signal 0 are checks that the thing runs: never touched.
+_REDIRECTION_RE = re.compile(r"\s\d*(?:&>>?|>>?|<)(?:&[\d-]|\s*(?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|[^\s;'\"]+))")
+_WORD_RE = re.compile(r"(?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|[^\s'\"])+")
+_SIGNAL_ZERO_RE = re.compile(r"(?:^|\s)(?:-0|-s\s*0|--signal(?:=|\s+)0)(?=\s|$)")
+_DOCKER_FLAGS = {"-v", "--volumes", "-l", "--link"}
+_DOCKER_VALUED = {"-t", "--time", "-s", "--signal"}
+
+
+def _statements_of(line: str) -> Optional[tuple[list[str], str]]:
+    """§17.1979 — ``(statements, trailing comment)``: a line split at its unquoted ``;``; None on an open quote."""
+    segs: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and quote != "'":
+            cur.append(line[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == ";":
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+            segs.append("".join(cur))
+            return segs, line[i:]
+        cur.append(c)
+        i += 1
+    if quote:
+        return None
+    segs.append("".join(cur))
+    return segs, ""
+
+
+def _no_op_exit_guard(stmt: str) -> str:
+    """§17.1979 — the ``|| …`` that lets ``stmt`` exit with ONLY its documented "nothing to stop" status, or "" when
+    the statement is not a bare stop command of that kind (a list, a pipe, a compound, a guarded or negated one)."""
+    from app.modules.runbook_templates import _QUOTED_RE
+    bare = _REDIRECTION_RE.sub(" ", " " + stmt)              # `2>/dev/null`, `>&2`, `> file` belong to the command
+    if re.search(r"[|&(){}`<>;!\\]", _QUOTED_RE.sub("Q", bare)):
+        return ""
+    words = _WORD_RE.findall(bare)
+    sudo = ""
+    if words[:1] == ["sudo"]:
+        if len(words) < 2 or words[1].startswith("-"):
+            return ""
+        sudo, words = "sudo ", words[1:]
+    if not words:
+        return ""
+    head, args = words[0], words[1:]
+    if head in ("pkill", "killall"):
+        return "" if _SIGNAL_ZERO_RE.search(" ".join(args)) else "|| [ $? -eq 1 ]"
+    if head != "docker":
+        return ""
+    if args[:1] == ["container"]:
+        args = args[1:]
+    if not args or args[0] not in ("stop", "rm"):
+        return ""
+    names: list[str] = []
+    rest = args[1:]
+    while rest:
+        a = rest.pop(0)
+        if a in _DOCKER_VALUED:
+            if not rest:
+                return ""
+            rest.pop(0)
+        elif a in _DOCKER_FLAGS or ("=" in a and a.split("=", 1)[0] in _DOCKER_VALUED):
+            continue
+        elif a.startswith("-"):
+            return ""                                        # `-f` already tolerates a missing one; others unknown
+        else:
+            names.append(a)
+    if len(names) != 1:
+        return ""
+    return (f'|| case "$({sudo}docker container inspect {names[0]} 2>&1 >/dev/null)" in '
+            f'*"No such"*) ;; *) false ;; esac')
+
+
+def _no_op_stop_line(ln: str) -> Optional[str]:
+    """§17.1979 — ``ln`` with each bare stop statement given its no-op guard, or None when none is."""
+    if _RESERVED_HEAD_RE.match(ln.strip()) or re.match(r"\s*(?:if|while|until|for|case|select|function)(?![\w-])", ln):
+        return None                                          # a compound's head or condition, not a statement
+    split = _statements_of(ln)
+    if split is None:
+        return None
+    segs, comment = split
+    out: list[str] = []
+    for seg in segs:
+        guard = _no_op_exit_guard(seg) if seg.strip() else ""
+        if guard:
+            body = seg.rstrip()
+            tail = seg[len(body):]
+            seg = f"{body} {guard}{tail}"
+        out.append(seg)
+    return ";".join(out) + comment if out != segs else None
+
+
+def repair_no_op_stops_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
+    """§17.1979 — ``(files, repairs)``: under ``set -e`` a stop whose non-zero exit only means "there was nothing to
+    stop" ends the whole script. Live (job 0fb4ea7f LM14, 2026-11-20): the draft carried ``pkill -f 'llama-server
+    --model …'; sleep 5; docker exec ollama ollama ps`` into the in-guest remote script that opens with ``set -e``;
+    ``pkill`` exits 1 when nothing matches (the runner already gone), so the restart after it would never have run.
+
+    The repair tolerates ONLY that documented exit (``pkill -f X || [ $? -eq 1 ]``, ``killall X || [ $? -eq 1 ]``,
+    a ``docker stop`` whose container ``inspect`` says "No such"), never a blanket ``|| true``: a real error (``pkill``'s
+    2 for a bad option, a daemon that is down) still stops the script. Only a stop that stands as a statement of its
+    own is touched -- one already in a list, a pipe, a compound or a condition is left as written. Every repair is
+    said on the frame (§17.1270), and one that would not compile is not made."""
+    out: list[dict] = []
+    repairs: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if not _SET_E_RE.search(body):
+            out.append(f)
+            continue
+        fixed, lines = _repair_lines_under_set_e(body, _no_op_stop_line)
+        if not lines or (_bash_compiles(body) and not _bash_compiles(fixed)):
+            out.append(f)
+            continue
+        out.append({**f, "content": fixed})
+        for ln in lines:
+            repairs.append({"why": (
+                f"guarded `{ln[:120]}` in {path} so its \"nothing to stop\" exit does not end the script: it runs under "
+                f"`set -e`, and a stop whose target is already gone (`pkill` 1, `killall` 1, "
+                f"`docker stop|rm` \"No such container\") would end the step before the commands after it -- the guard "
+                f"tolerates that exit only, so a real error still stops the script.")})
+    return out, repairs
 
 
 #: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
@@ -7192,6 +7350,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
     files, _noop_repairs = repair_ignored_failures_under_set_e(files)   # §17.1972 — `a; b; true` under set -e
+    files, _stop_repairs = repair_no_op_stops_under_set_e(files)   # §17.1979 — a stop with nothing to stop
+    _noop_repairs = list(_noop_repairs) + _stop_repairs
     _lookup_repairs = list(_lookup_repairs) + _noop_repairs
     # §17.1657 — an *arr API call inside its own guest with no key gets one, FIRST, so every later step (the
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
