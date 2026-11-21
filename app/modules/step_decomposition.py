@@ -200,9 +200,35 @@ def builds_a_capability(text: str) -> bool:
     return bool(_CAPABILITY_BUILD_RE.search(t))
 
 
+def standing_deps(plan: Optional[list[dict]], deps: list[str]) -> list[str]:
+    """§17.1966 — `deps` with each SKIPPED step replaced by what it stood on, until a step that is not skipped.
+
+    Live (job 7cc2a7ac, 2026-11-20): ADD1-ADD4 were skipped at 23:22, and the re-split of ADD5 at 23:35 chained its
+    first child ADD9 onto ADD4 -- a step that ran nothing. The order is kept (the skipped step's own dependencies are
+    the ones still standing); a row the plan does not carry, or carries without `depends_on`, is kept as it was."""
+    rows = {str(n.get("node_key")): n for n in plan or []}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def walk(d: str) -> None:
+        if d in seen:
+            return
+        seen.add(d)
+        row = rows.get(d)
+        if row is not None and str(row.get("status") or "") == "skipped" and row.get("depends_on") is not None:
+            for up in row.get("depends_on") or []:
+                walk(str(up))
+            return
+        out.append(d)
+    for d in deps or []:
+        walk(str(d))
+    return out
+
+
 def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str], keys: list[str],
-                  machine: str = "") -> list[dict]:
-    """The `insert_node` specs for a split: chained, stamped, each with its check."""
+                  machine: str = "", tool: str = "LLM") -> list[dict]:
+    """The `insert_node` specs for a split: chained, stamped, each with its check and the parent's tool."""
+    from app.modules.develop import _HOST_PLACE_RE
     out: list[dict] = []
     for i, (key, st) in enumerate(zip(keys, steps, strict=False)):
         title = " ".join(str(st.get("title") or "").split())[:200]
@@ -211,7 +237,9 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
         if not title or not body:
             continue
         descr = body
-        if machine and machine.lower() not in (title + " " + body).lower():
+        # §17.1966 — a child its own title places on the Proxmox host is host work (§17.1961b/1962): live, ADD1-ADD8
+        # ("Proxmox host: …") each carried "On container 111." from T16's guest, a place that contradicts the title
+        if machine and machine.lower() not in (title + " " + body).lower() and not _HOST_PLACE_RE.match(title):
             descr += f" On {machine}."
         if check and presence_only(check) and builds_a_capability(title + " " + body):
             # §17.1408 — `grep -n palworld server.js` shows the code is THERE, not that
@@ -225,7 +253,7 @@ def children_from(steps: list[dict], *, parent_key: str, parent_deps: list[str],
         elif check:
             descr += f" Done when `{check}` shows it."
         descr += f"\n\n{SPLIT_MARK.format(key=parent_key)} — {i + 1} of {len(steps)}]"
-        out.append({"node_key": key, "title": title, "description": descr, "tool": "LLM",
+        out.append({"node_key": key, "title": title, "description": descr, "tool": tool or "LLM",
                     "depends_on": list(parent_deps) if i == 0 else [keys[i - 1]]})
     return out
 
@@ -437,8 +465,14 @@ async def split_step(job_id: str, node: dict, plan: Optional[list[dict]], brief,
     if not steps:
         return []
     keys = _next_keys(plan, len(steps))
-    specs = children_from(steps, parent_key=key, parent_deps=[str(d) for d in (node.get("depends_on") or [])],
-                          keys=keys, machine=machine)
+    # §17.1966 — the children are the parent's work in parts: they keep its tool (live, T16 was Shell and its eight
+    # children were LLM, so a control test became a text answer) and its place (a host-placed parent's guest is not
+    # theirs), and the first stands on what the parent stands on that still stands (never a skipped step)
+    from app.modules.develop import _HOST_PLACE_RE
+    if _HOST_PLACE_RE.match(str(node.get("title") or "")):
+        machine = ""
+    specs = children_from(steps, parent_key=key, keys=keys, machine=machine, tool=str(node.get("tool") or "LLM"),
+                          parent_deps=standing_deps(plan, [str(d) for d in (node.get("depends_on") or [])]))
     if len(specs) < MIN_CHILDREN:
         return []
 
