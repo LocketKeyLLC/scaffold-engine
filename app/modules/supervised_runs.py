@@ -7489,6 +7489,16 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                            f"never uses that value, so nobody has it to type; the remaining checks stand"}
                    for h in _vhits]
         _vhits = []
+    # §17.1981 — a check that walks a tree with no path (`du -sh`, `find -name x`, `grep -rn X`) walks the runner's cwd,
+    # `/`. Live (job 0fb4ea7f CL1): "Done when it prints the `du -sh` lines" reached the checks; it ran bare on the host
+    # and walked the whole root filesystem (`du: cannot access './proc/…'`).
+    from app.modules.operator_steps import walks_the_cwd
+    _walkers = [v for v in verify if walks_the_cwd(_unwrap_check(str(v)))]
+    if _walkers:
+        verify = [v for v in verify if v not in _walkers]
+        _vdrops = list(_vdrops) + [{"why": f"dropped the check `{w[:120]}` -- it names no path, so it would walk the "
+                                           f"runner's working directory `/`, the whole root filesystem"}
+                                   for w in _walkers]
     # §17.1548 — a check that curls a service the engine holds a login for presents it
     # as HTTP Basic auth, the password fed to the guest on stdin as the runner-resolved
     # placeholder. BEFORE inputs_for, so the `<SECRET>` it inserts is picked up as a
