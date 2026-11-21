@@ -2090,14 +2090,15 @@ async def code_rows(db, job_id: str) -> list[dict]:
     rows = (await db.execute(text(
         "SELECT * FROM ("
         " SELECT 0 AS src, d.execution_order AS ord, left(d.job_id::text, 8) || ':' || d.node_key AS node_key,"
-        "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id"
+        "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id, d.completed_at"
         "   FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
         "        CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on'"
         "             ELSE '[]'::jsonb END) AS b(prior)"
         "   JOIN dag_nodes d ON d.job_id::text = b.prior"
         "  WHERE j.id = :j AND d.status = 'done' AND d.output_text IS NOT NULL"
         " UNION ALL"
-        " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status, id"
+        " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status, id,"
+        "        completed_at"
         "   FROM dag_nodes WHERE job_id = :j"
         ") r ORDER BY src, ord NULLS LAST, node_key"),
         {"j": job_id})).mappings().all()
@@ -2224,6 +2225,42 @@ def job_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
             if _DELIVERABLE_RE.match(path):
                 out[path] = (code if code.endswith("\n") else code + "\n", str(r.get("node_key") or ""))
     return dict(sorted(out.items()))
+
+
+def delivered_at(rows: list[dict]):
+    """§17.1988 — when this job's code was last delivered: the latest answered delivery question of its own
+    ("Is this job's code merged into the engine and running?"), else None (never delivered)."""
+    from app.modules.engine_plan import _DELIVER_QUESTION_RE
+    done = [r["completed_at"] for r in rows if r.get("status") == "done" and r.get("completed_at") is not None
+            and ":" not in str(r.get("node_key") or "") and _DELIVER_QUESTION_RE.match(str(r.get("title") or ""))]
+    return max(done, default=None)
+
+
+def as_delivered(rows: list[dict], at) -> list[dict]:
+    """§17.1988 — the rows as they stood at the delivery: each step that had finished by then (a step finished
+    later, or reset since, is not part of what was delivered)."""
+    return [r for r in rows if r.get("completed_at") is not None and r["completed_at"] <= at]
+
+
+def since_delivery(rows: list[dict]) -> tuple:
+    """§17.1988 — (delivered_at, path -> (state, delivered)) for each file the job delivers now: "unchanged" (no
+    step rewrote it since the delivery: the engine's tree holds the reviewed copy, which a re-delivery keeps),
+    "changed" (with the file as delivered, the base a re-delivery merges the reviewed copy from) or "new". Empty
+    for a job never delivered. Live (5b4880c0, 2026-11-21): re-delivering to ship F13F1/F13F2 re-wrote
+    `paper_entry_backtesting` and `paper_p_l_calculator` as the job held them -- the review of #1161 had edited
+    both by hand, and the job's records never learn a review."""
+    at = delivered_at(rows)
+    if at is None:
+        return None, {}
+    was = as_delivered(rows, at)
+    then = {**job_files(was), **job_static_files(was)}
+    out: dict[str, tuple[str, str]] = {}
+    for p, (code, _k) in {**job_files(rows), **job_static_files(rows)}.items():
+        if p not in then:
+            out[p] = ("new", "")
+        else:
+            out[p] = ("unchanged", "") if then[p][0] == code else ("changed", then[p][0])
+    return at, out
 
 
 #: §17.1985 — a static file a job for the engine carries: a page template or the lab's own asset, in its own folder

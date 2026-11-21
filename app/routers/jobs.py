@@ -220,8 +220,12 @@ async def job_code_endpoint(
               if p.startswith("app/modules/") and re.search(r"^def install\(", code, re.M)]
     # §17.1985 — and the static files beside the code (a page template, the lab's assets, its vendor manifest)
     static = engine_source.job_static_files(rows)
-    return {"job_id": str(job_id),
-            "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {})}
+    # §17.1988 — and what each file did since the job's last delivery, so a re-delivery keeps the reviewed copy
+    at, since = engine_source.since_delivery(rows)
+    return {"job_id": str(job_id), "delivered_at": at.isoformat() if at is not None else None,
+            "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {}),
+                       **({"since_delivery": since[p][0]} if p in since else {}),
+                       **({"delivered_content": since[p][1]} if content and p in since and since[p][1] else {})}
                       for p, (code, k) in {**files, **static}.items()],
             "tables": engine_plan.job_tables(files), "secrets": engine_plan.secrets_the_code_reads(files),
             "wiring": wiring}
