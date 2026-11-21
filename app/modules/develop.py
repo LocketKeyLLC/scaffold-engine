@@ -113,6 +113,12 @@ _HOST_CHANGE_RE = re.compile(r"\b(?:pct|qm)\s+(?:set|reboot|start|stop|shutdown|
 #: controls through its API"): the prefix hid the leading verb, the test was taken for a build, and the develop flow
 #: proposed rewriting the panel's Palworld route files.
 _CHECKS_OR_WRITES_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:validate|verify|check|test|audit|review|document)\b", re.I)
+#: §17.1962c — and a READ verb, when the step's text names no change (§17.1695's test): a step that reads, inspects,
+#: lists or measures builds nothing. Live (job 7cc2a7ac ADD2 "Proxmox host: read the game-server route handlers…" and
+#: RB1 "CT 111: read the request bodies the panel page sends"): both were developed, and RB1 ran 8 rounds that "returned
+#: no files" for a two-grep read. The text test keeps c2792d4b T15 ("Read the host's guests through the Proxmox API",
+#: whose text says "Change the control panel's /api/network-ui handler") a build.
+_READS_UP_RE = re.compile(r"\s*(?:[^:]{1,60}:\s*)?(?:read|inspect|list|show|print|inventory|measure|confirm|count)\b", re.I)
 
 
 #: §17.1961b — "Proxmox host: …", "On the Proxmox host: …", "pve: …", "Host: …"
@@ -139,6 +145,10 @@ def host_for(node: Optional[dict], services: Optional[list], brief: str = "") ->
     # refused for having no feature check of its own, and parked with nothing to run.
     if _CHECKS_OR_WRITES_UP_RE.match(str((node or {}).get("title") or "")):
         return None
+    if _READS_UP_RE.match(str((node or {}).get("title") or "")):
+        from app.modules.supervised_runs import _CHANGE_VERB_RE, declares_read_only
+        if declares_read_only(node) or not _CHANGE_VERB_RE.search(re.split(r"\bDone when\b", text, maxsplit=1)[0]):
+            return None
     # §17.1961b — a step whose title places it on the Proxmox HOST builds no service's software: the develop flow
     # delivers files into one service's guest. Live (job 7cc2a7ac ADD2 "Proxmox host: read the game-server route
     # handlers…", ADD3 "Proxmox host: baseline the game-server routes through the Caddy front door"): both were developed
