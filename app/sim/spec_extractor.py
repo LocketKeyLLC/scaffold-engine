@@ -221,7 +221,7 @@ async def extract_spec(
     resp = await chat_until_nonempty(
         model_router.chat,
         messages,
-        {"role": role},
+        {"role": role, "whole": True},   # §17.1986 — the JSON is parsed from the text: a cut reply is never repaired
         temperature=0.0,
         max_tokens=settings.spec_extractor_max_tokens,
         draws=settings.spec_extractor_max_draws,

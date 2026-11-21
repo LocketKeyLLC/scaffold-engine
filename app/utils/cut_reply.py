@@ -9,7 +9,9 @@ the one the cap fell in.
 ``model_router.tool_call`` and ``model_router.generate_json`` (the two parse points every structured caller goes
 through) use this: a cut reply is redrawn once at a larger budget (``redraw_budget``); still cut, the incomplete
 trailing item is dropped when the cut fell inside a list (``drop_cut_tail``), and the reply is refused — loudly —
-when it fell in a scalar, where nothing whole is left to keep. §17.1984's ``idea_refinement`` guard is the same
+when it fell in a scalar, where nothing whole is left to keep. §17.1986b — ``model_router.generate`` / ``chat`` take
+``whole=True`` for a reply parsed or run as text (the ``generate``/``chat`` + ``parse_json_object`` callers, code, a
+script): cut, it is redrawn once larger and, still cut, refused (``success=False``, ``cut_at``). §17.1984's ``idea_refinement`` guard is the same
 rule held at one caller and can read ``reply_was_cut`` / ``drop_cut_tail`` from here.
 """
 from __future__ import annotations
@@ -70,3 +72,12 @@ def drop_cut_tail(obj: Any) -> tuple[Any, Any]:
             return None, None
         return {**obj, key: inner}, dropped
     return None, None
+
+
+def cut_at(resp: Any) -> int:
+    """The budget a ``whole=True`` reply was refused at (``model_router._whole_reply``), else 0."""
+    try:
+        raw = getattr(resp, "raw", None) or {}
+        return int(raw.get("cut_at") or 0) if isinstance(raw, dict) else 0
+    except Exception:
+        return 0

@@ -327,7 +327,7 @@ async def select_topologies(
     resp = await chat_until_nonempty(
         model_router.chat,
         messages,
-        {"role": role},
+        {"role": role, "whole": True},   # §17.1986 — the JSON is parsed from the text: a cut reply is never repaired
         temperature=0.0,
         max_tokens=settings.topology_select_max_tokens,
         draws=settings.topology_select_max_draws,

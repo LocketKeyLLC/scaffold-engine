@@ -340,7 +340,8 @@ async def _run(output: str, brief: dict, *, exec_check: bool = False, node_extra
         captured["max_tokens"] = kw.get("max_tokens")
         return SimpleNamespace(text=queue.pop(0) if queue else output, success=True, model="m", error=None,
                                tool_calls=None,
-                               fallback_used=False, prompt_tokens=1, completion_tokens=chat_tokens, retries=0)
+                               fallback_used=False, prompt_tokens=1, retries=0,
+                               tokens_completion=chat_tokens)   # §17.1986 — ModelResponse's real field name
     set_status = AsyncMock()
     verify = AsyncMock(return_value=("pass", "fine", 0.9))
     with patch.object(xa.settings, "execution_optimize_enabled", False), \

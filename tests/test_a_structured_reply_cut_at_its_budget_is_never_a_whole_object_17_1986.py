@@ -186,7 +186,7 @@ def test_the_redraw_is_bounded_by_the_cap():
 
 async def test_at_the_cap_it_settles_without_a_redraw():
     from app.config import settings
-    cap = settings.structured_cut_redraw_max_tokens
+    cap = settings.cut_reply_redraw_max_tokens
     p = _Provider([(CUT_BRIEF, "length")])
     resp = await _call(p, max_tokens=cap)
     assert p.budgets == [cap, cap] and len(resp.tool_calls[0].arguments["ambiguities"]) == 1

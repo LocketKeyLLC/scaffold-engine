@@ -531,7 +531,7 @@ async def _call_llm_propose(
     resp = await chat_until_nonempty(
         model_router.chat,
         messages,
-        {"role": role},
+        {"role": role, "whole": True},   # §17.1986 — the JSON is parsed from the text: a cut reply is never repaired
         temperature=0.0,
         max_tokens=settings.sim_stage_max_tokens,
         draws=settings.sim_stage_max_draws,

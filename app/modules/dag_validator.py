@@ -173,6 +173,7 @@ async def validate_tool_picks(
                 system=VALIDATOR_SYSTEM,
                 temperature=0.1,
                 max_tokens=max_tokens,
+                whole=True,   # §17.1986 — a cut verdict is refused, never repaired into a whole one
                 **route_kwargs,
             )
         except Exception as exc:
