@@ -11348,6 +11348,13 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     # control" became an inventory of /opt/palworld* on VM 106)
     text = re.split(r"\bDone when\b", _node_text(node), maxsplit=1)[0]
     title = str((node or {}).get("title") or "")
+    # §17.1963b — a step whose text SPELLS OUT its own commands (backticked shell lines) asked for those reads, not a generic
+    # inventory: live (job 7cc2a7ac D1 "CT 111: read the media-library handler, the engine address and the Palworld status
+    # code", four exact `pct exec 111 -- …` reads), "read … handler" matched and the four reads were replaced by the
+    # route inventory T5 had already printed
+    if any(re.match(r"\s*(?:pct|qm|ssh|curl|cat|grep|python3|sed|ls|systemctl|journalctl)\b", c)
+           for c in re.findall(r"`([^`\n]{6,})`", text)):
+        return list(commands or []), list(verify or []), []
     if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
         return list(commands or []), list(verify or []), []
     # §17.1682b — "read" alone (not inventory/enumerate/list/map/catalog/survey) claims only a service built from code the
