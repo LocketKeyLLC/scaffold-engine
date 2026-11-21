@@ -7156,7 +7156,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
-        inputs = suggest_inputs(inputs, env, text=step_text(node))   # §17.1275 — and what the step says
+        inputs = suggest_inputs(inputs, env, text=step_text(node),   # §17.1275 — and what the step says
+                                logins=(policy or {}).get("held_logins"),  # §17.1971 — and the logins it holds
+                                held=sorted(_stored_names))
     _mv_asked = (_mv.still_asked(inputs, inventory)          # §17.1332 — the other end of the fix
                  + _mv.engine_still_asked(inputs, engine_address))   # §17.1333
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in

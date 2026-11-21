@@ -251,24 +251,69 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
     return out
 
 
-def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "") -> list[dict]:
+def suggest_inputs(inputs: list[dict], env: Optional[dict], text: str = "",
+                   logins: Optional[list[dict]] = None, held: Optional[list] = None) -> list[dict]:
     """The frame's ``inputs`` with ``suggestions`` and a prefilled ``value``
     when the operator pinned that exact name — or (§17.1275) when the step's own
     text states exactly one candidate. Two candidates in the text are both
-    offered and neither prefilled, the §17.1212 two-disks rule."""
+    offered and neither prefilled, the §17.1212 two-disks rule.
+    §17.1971 — ``logins``/``held`` are the runner-held logins (`logins_from_held`) and secret NAMES: a
+    `<STEM>_USER` whose service the engine holds a login for is that login's user, never the homelab account."""
     out = []
     for i in inputs:
-        sugg = suggest_for(str(i.get("name") or ""), env or {}, text)
+        name = str(i.get("name") or "")
+        sugg = suggest_for(name, env or {}, text)
         pinned = next((s["value"] for s in sugg if s["confidence"] == "pinned"), "")
         stepped = [s["value"] for s in sugg if s["confidence"] == "step"]
-        value = pinned or (stepped[0] if len(stepped) == 1 else "")
-        if not value:
-            acct = homelab_account(str(i.get("name") or ""), env or {})
+        own = None if pinned else held_login_user(name, logins)
+        if own:
+            sugg = [{"value": own[0], "source": own[1], "confidence": "held"}] + [x for x in sugg if x.get("value") != own[0]]
+        value = pinned or (own[0] if own else "") or (stepped[0] if len(stepped) == 1 else "")
+        if not value and not service_login_name(name, logins, held):
+            acct = homelab_account(name, env or {})
             if acct:
                 value, src = acct
                 sugg = [{"value": value, "source": src, "confidence": "homelab"}] + [x for x in sugg if x.get("value") != value]
         out.append({**i, "suggestions": sugg, "value": value})
     return out
+
+
+def _user_stem(name: str) -> str:
+    """`PANEL_USER` → `panel`, normalised the way `machine_values._login_stem` normalises `PANEL_PASSWORD`."""
+    from app.modules.machine_values import _norm
+    return _norm(re.sub(r"_?(?:USER|USERNAME|LOGIN)$", "", str(name or ""), flags=re.I))
+
+
+def held_login_user(name: str, logins: Optional[list[dict]]) -> Optional[tuple[str, str]]:
+    """§17.1971 — ``(user, source)`` for a `<STEM>_USER` when the engine holds the login `<STEM>_PASSWORD` and its
+    hint records the user (`logins_from_held`), else None. That login is the service's own: the operator recorded
+    its user with the password. Live (job 7cc2a7ac T3v2/T15, 2026-11-20): the frame asked for `PANEL_USER` and
+    prefilled `aedefruscio`, while the runner held `PANEL_PASSWORD` with "user `panel`" — the panel's Basic-auth
+    user, which T3v2 had just used (`-u "panel:$PANEL_PASSWORD"`, http=200)."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*_(?:USER|USERNAME|LOGIN)", name or ""):
+        return None
+    from app.modules.machine_values import _login_stem
+    stem = _user_stem(name)
+    users = {str(L.get("user") or "") for L in logins or [] if stem and _login_stem(str(L.get("name") or "")) == stem}
+    users.discard("")
+    if len(users) != 1:
+        return None
+    u = users.pop()
+    held_as = next(str(L.get("name")) for L in logins or [] if str(L.get("user") or "") == u
+                   and _login_stem(str(L.get("name") or "")) == stem)
+    return u, f"the user of the login the engine holds for it ({held_as})"
+
+
+def service_login_name(name: str, logins: Optional[list[dict]] = None, held: Optional[list] = None) -> bool:
+    """§17.1971 — is `<STEM>_USER` the user of a login the engine holds a password for (`<STEM>_PASSWORD`
+    among the held secrets)? Then it is that SERVICE's own login, and the homelab account the guests' logins
+    share (§17.1606) is no candidate for it — a web app's Basic-auth user is not a Linux account."""
+    from app.modules.machine_values import _login_stem
+    stem = _user_stem(name)
+    if not stem or not re.search(r"_(?:USER|USERNAME|LOGIN)$", name or "", re.I):
+        return False
+    names = [str(L.get("name") or "") for L in logins or []] + [str(h or "") for h in held or []]
+    return any(re.search(r"(?:PASSWORD|PASSWD|PASS)$", n) and _login_stem(n) == stem for n in names)
 
 
 def homelab_account(name: str, env: dict) -> Optional[tuple[str, str]]:
