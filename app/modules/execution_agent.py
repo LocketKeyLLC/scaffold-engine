@@ -2788,6 +2788,9 @@ async def execute_next_node(
                 output, node_snapshot, _idb)
     except Exception as exc:
         logger.warning("instructions_not_work_check_failed node=%s err=%r", node_key, exc)
+    # §17.1987 — bound on every path: the `-> failed` log reads it, and the skip/instruction branches never reach the
+    # codegen block that sets it (UnboundLocalError in tests/integration/test_codegen_golden_live.py, 7 of 7)
+    _passed_tests: dict = {}
     if _self_blocked:
         logger.warning("node_declares_itself_blocked node=%s sentence=%r", node_key, _self_blocked)
         verify_status = "fail"
@@ -2937,7 +2940,7 @@ async def execute_next_node(
         # §17.1765 — and it is RUN: its tests, or an import of its module, in the engine-test sandbox with this job's
         # finished modules written in. A skip (sandbox off / unreachable / another engine) is logged, never a pass.
         engine_test_reason: str | None = None
-        _passed_tests: dict = {}                                 # §17.1891 what passed, kept for the next attempt
+        _passed_tests = {}                                       # §17.1891 what passed, kept for the next attempt
         if syntax_reason is None and engine_reason is None and (tool or "").lower() == "codegen":
             try:
                 from app.modules import engine_source as _es
