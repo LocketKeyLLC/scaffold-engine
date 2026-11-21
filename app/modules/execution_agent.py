@@ -2397,11 +2397,11 @@ async def execute_next_node(
                         _grounding_blocks.append(_cb)
                 # §17.1832 — a step that edits a module in place sees that module as it is now; §17.1983 -- an
                 # operator's "Fix <module>" as well as the engine's own fix steps (`tool_config.fixes_module`)
-                _others = [r for r in _code if r.get("node_key") != node_key]
+                _sibling_rows = [r for r in _code if r.get("node_key") != node_key]
                 _fm = _es.fixed_module({**node_snapshot, "tool_config": node.get("tool_config")},
-                                       {_es.step_module(r) for r in _others} - {""})
+                                       {_es.step_module(r) for r in _sibling_rows} - {""})
                 if _fm:
-                    _eb = _es.edited_module_block(_others, _fm)
+                    _eb = _es.edited_module_block(_sibling_rows, _fm)
                     if _eb:
                         _grounding_blocks.append(_eb)
             except Exception as exc:
