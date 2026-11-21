@@ -39,9 +39,16 @@ logger = logging.getLogger("scaffold")
 #: the package that is running -- read, never imported module by module
 ENGINE_PKG = Path(__file__).resolve().parent.parent
 
-#: "the scaffold engine itself", "this repository's code", "the engine's own codebase"
+#: "the scaffold engine itself", "this repository's code", "the engine's own codebase"; §17.1985 — and a job that
+#: ships its code INTO the engine: "Deliver the dashboard into the engine through the lab's existing delivery flow"
+#: (live 69fe61c4, 2026-11-21: read as a homelab job, its vendoring, static serving, read-only guard and delivery
+#: were Shell steps on the Proxmox host against a guessed `pct exec <ENGINE_GUEST_ID>`). "The scaffold engine itself
+#: on the Proxmox server" places the engine, it writes none of its code (0fb4ea7f, 171 Shell steps).
 _TARGETS_RE = re.compile(
-    r"\bscaffold[- ]engine(?:'s)?\s+(?:itself|own\s+(?:code|codebase|source|repo(?:sitory)?)|code(?:base)?|source|repo(?:sitory)?)\b"
+    r"\bscaffold[- ]engine(?:'s)?\s+(?:itself(?!\s+(?:on|onto)\b)|own\s+(?:code|codebase|source|repo(?:sitory)?)"
+    r"|code(?:base)?|source|repo(?:sitory)?)\b"
+    r"|\bdeliver(?:s|ed|ing)?\b[^.;:]{0,60}?\binto\s+the\s+(?:scaffold\s+)?engine\b"
+    r"|\b(?:the\s+lab's|the\s+engine's|the\s+existing\s+engine)\s+(?:existing\s+)?delivery\s+flow\b"
     r"|\b(?:to|in|into|of)\s+this\s+(?:repository|repo|codebase)\b"
     r"|\bthis\s+(?:repository|repo|codebase)'s\s+code\b"
     r"|\bthe\s+engine's\s+own\s+(?:code|codebase|source|repo(?:sitory)?)\b",
@@ -2181,6 +2188,41 @@ def job_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
         for path, code in files_of(r).items():
             if _DELIVERABLE_RE.match(path):
                 out[path] = (code if code.endswith("\n") else code + "\n", str(r.get("node_key") or ""))
+    return dict(sorted(out.items()))
+
+
+#: §17.1985 — a static file a job for the engine carries: a page template or the lab's own asset, in its own folder
+STATIC_PATH_RE = re.compile(r"^app/(?:static|templates)/[a-z][a-z0-9_]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:html|css|js|json|svg)$")
+#: its block's first line names it: `<!-- app/templates/paper/dashboard.html -->`, `// app/static/paper/vendor.json`
+_STATIC_HEADER_RE = re.compile(r"^\s*(?:<!--|//|/\*|\{#|#)\s*(app/\S+?)\s*(?:-->|\*/|#\})?\s*$")
+
+
+def static_files_of(row: dict) -> dict[str, str]:
+    """§17.1985 — the static files one step writes: each fenced block whose first line is a comment naming a path
+    under `app/static/<lab>/` or `app/templates/<lab>/` -- the file is the rest of the block. A Python block is never
+    one (`files_of` reads those)."""
+    from app.sandbox.engine_tests import after_reasoning
+    out: dict[str, str] = {}
+    for lang, code in extract_code_blocks(after_reasoning(str(row.get("output_text") or ""))):
+        if lang in PYTHON_LANGS or not code.strip():
+            continue
+        first, _, rest = code.lstrip().partition("\n")
+        m = _STATIC_HEADER_RE.match(first)
+        if m and STATIC_PATH_RE.match(m.group(1)) and rest.strip():
+            out[m.group(1)] = rest
+    return out
+
+
+def job_static_files(rows: list[dict]) -> dict[str, tuple[str, str]]:
+    """§17.1985 — the static files a job delivers into the engine beside its code (`job_files`): path -> (content,
+    step), the last finished writer winning. Live (69fe61c4): the dashboard's template and its vendored chart library
+    had no place in the export, so the planner sent them to the Proxmox host as Shell steps."""
+    out: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        if r.get("status") != "done":
+            continue
+        for path, body in static_files_of(r).items():
+            out[path] = (body if body.endswith("\n") else body + "\n", str(r.get("node_key") or ""))
     return dict(sorted(out.items()))
 
 

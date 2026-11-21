@@ -36,8 +36,8 @@ def _text(t: dict) -> str:
 
 def _module_of(t: dict) -> str | None:
     """The module a CodeGen task writes: the first non-test `x.py` its text names."""
-    if str(t.get("tool") or "").lower() != "codegen":
-        return None
+    if str(t.get("tool") or "").lower() != "codegen" or str(t.get("notes") or "").startswith(_STATIC_LEAD):
+        return None                                   # §17.1985 — a static file names no module of its own
     for m in _MODULE_RE.finditer(_text(t)):
         if not _TEST_RE.match(m.group(1)):
             return m.group(1)
@@ -80,6 +80,19 @@ def prefix_for(brief: dict | None) -> str:
         if w.lower() not in _STOP:
             return w.lower()
     return "job"
+
+
+#: §17.1985 — an engine file the brief names by its path ("routes in app/modules/paper_wire_engine_entry_module.py")
+_ENGINE_PATH_RE = re.compile(r"\bapp/modules/([a-z_][a-z0-9_]*)\.py\b")
+
+
+def extended_modules(brief: dict | None) -> set[str]:
+    """§17.1985 — the engine modules a brief names by path: what the job extends in place (the caller keeps those
+    that are the engine's own)."""
+    b = brief if isinstance(brief, dict) else {}
+    parts = [b.get("description"), *(b.get("goals") or []), *(b.get("inputs_available") or []),
+             *(b.get("constraints") or [])]
+    return {m.group(1) for p in parts if p for m in _ENGINE_PATH_RE.finditer(str(p))}
 
 
 #: §17.1799 — "entry points for A, B, C" in a step's text
@@ -493,6 +506,43 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         changes.append(f"live_run_made_its_own_step: {rid} -- the operator makes the run {q.get('id')} asked the "
                        "keys for, through the lab's own entry points")
 
+    # 0f'. §17.1985 — a job that ships into the engine ships through the engine's delivery, and what it adds is files
+    #      of its own. Live (69fe61c4, 2026-11-21): T12 [Shell] "Deliver dashboard via lab flow" and T4 [Shell]
+    #      "Vendor charting asset" -- framed as `pct exec <ENGINE_GUEST_ID> -- sh -c 'curl … -o <LAB_STATIC_DIR>/…'`
+    #      on the Proxmox host, both values unknown: the engine is not a guest this job reaches through a runner, its
+    #      code is the job's delivered files. The delivery is the delivery question; a vendored file is named in the
+    #      lab's vendor manifest (the delivery fetches it); a page or an asset is a static file the export carries.
+    for t in list(tasks):
+        tool, name = str(t.get("tool") or "").lower(), str(t.get("name") or "")
+        if (tool not in ("shell", "codegen") or _CHECK_STEP_RE.match(name) or _DELIVER_QUESTION_RE.match(name)
+                or str(t.get("notes") or "").startswith(_STATIC_LEAD)):         # given its file by an earlier pass
+            continue
+        if _DELIVERY_STEP_RE.search(f"{name} {t.get('notes') or ''}"):
+            if any(_DELIVER_QUESTION_RE.match(str(u.get("name") or "")) for u in tasks):
+                _drop(tasks, t)
+                changes.append(f"delivery_step_dropped: {t.get('id')} (the delivery question delivers the code)")
+                continue
+            t.update(name="Is this job's code merged into the engine and running?", type="decision", tool="LLM",
+                     notes=_DELIVER_NOTE)
+            changes.append(f"delivery_made_the_question: {t.get('id')} is the delivery question (it was a {tool} "
+                           "step shipping the code by hand)")
+        elif tool == "shell" and _VENDOR_STEP_RE.match(name):
+            path = f"app/static/{pre}/vendor.json"
+            t["tool"] = "CodeGen"
+            t["notes"] = _VENDOR_NOTE.format(path=path, pre=pre) + " " + str(t.get("notes") or "").strip()
+            changes.append(f"vendor_made_a_manifest: {t.get('id')} names its files in `{path}` (it was a Shell step)")
+        elif (_STATIC_STEP_RE.search(name) and not _MODULE_RE.search(_text(t)) and not _WIRING_RE.search(name)
+              and not str(t.get("notes") or "").startswith(_STATIC_LEAD)):
+            ext = ("css" if re.search(r"\b(?:css|stylesheet)\b", name, re.I) else
+                   "js" if re.search(r"\bjavascript\b", name, re.I) else "html")
+            stem = _slug(_STATIC_WORDS_RE.sub(" ", name))
+            path = f"app/templates/{pre}/{stem}.html" if ext == "html" else f"app/static/{pre}/{stem}.{ext}"
+            header = f"<!-- {path} -->" if ext == "html" else f"/* {path} */"
+            t["tool"] = "CodeGen"
+            t["notes"] = _STATIC_NOTE.format(path=path, header=header) + " " + str(t.get("notes") or "").strip()
+            changes.append(f"static_file_named: {t.get('id')} writes `{path}` (it was a {tool} step"
+                           + (" naming no file)" if tool == "codegen" else ")"))
+
     # 0f. §17.1770 — what is left as Shell in a plan for engine code is code the job must write. Live (918b6274's
     #     fourth plan): "Run daily proposal batch", "Execute approved orders", "Acquire point-in-time data", "Run
     #     backtest validation" and three "Verify …" checkpoints were Shell steps -- operating the lab on the Proxmox
@@ -541,6 +591,8 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     for t in tasks:
         if str(t.get("tool") or "").lower() != "codegen" or _module_of(t) or _MODULE_RE.search(_text(t)):
             continue
+        if str(t.get("notes") or "").startswith(_STATIC_LEAD):
+            continue                                       # §17.1985 — a static file, not a module
         if _MIGRATION_RE.search(_text(t)):
             continue                                       # a schema step writes an Alembic revision, not a module
         own = _carried_own(t, carried)
@@ -557,9 +609,19 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         t["notes"] = f"Python module `{name}.py`." + (" " + str(t["notes"]).strip() if t.get("notes") else "")
         changes.append(f"module_named: {t.get('id')} writes `{name}.py` (its text named no file)")
 
-    # 1. a module that would take an engine module's name is renamed, in every task that names it
+    # 1. a module that would take an engine module's name is renamed, in every task that names it -- §17.1985 unless
+    #    the brief names that engine file as what this job extends (69fe61c4 T8 "Thin route in
+    #    paper_wire_engine_entry_module.py", the lab's own router, delivered by 5b4880c0): that step edits it in place
+    extends = extended_modules(brief) & engine_leaves
     for t in tasks:
         mod = _module_of(t)
+        if mod and mod in extends:
+            if "edit it in place" not in str(t.get("notes") or ""):
+                t["notes"] = (f"Python module `{mod}.py` -- the engine's own, which this job extends: edit it in place "
+                              "(the whole file, every existing public name, route and its auth kept)."
+                              + (" " + str(t["notes"]).strip() if t.get("notes") else ""))
+                changes.append(f"engine_module_extended: {t.get('id')} edits `{mod}.py` in place (the brief names it)")
+            continue
         if mod and mod in engine_leaves:
             new = f"{pre}_{mod}"
             pat = re.compile(rf"\b{re.escape(mod)}\.py\b|\bapp\.modules\.{re.escape(mod)}\b")
@@ -806,8 +868,8 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
     #    end-to-end trade while every one of the job's 29 modules lived only in its output.
     live = [t for t in tasks if _KEYS_QUESTION_RE.match(str(t.get("name") or ""))
             or _RUN_QUESTION_RE.match(str(t.get("name") or ""))]
-    if live:
-        deliver = next((t for t in tasks if _DELIVER_QUESTION_RE.match(str(t.get("name") or ""))), None)
+    deliver = next((t for t in tasks if _DELIVER_QUESTION_RE.match(str(t.get("name") or ""))), None)
+    if live or deliver is not None:      # §17.1985 — a delivery the plan asks for (0f') waits on the code too
         before = [str(t["id"]) for t in tasks if (str(t.get("tool") or "").lower() == "codegen" or str(t["id"]) in audits)
                   and t is not deliver and t not in live]
         if deliver is None:
@@ -876,6 +938,26 @@ _DELIVER_NOTE = ("The engine exports this job's code -- every module, its tests 
                  "it and redeploys. Answer when the engine runs it: the engine checks that each of this job's modules "
                  "is the engine's own, its tables exist, and its wiring module was installed when the engine started, "
                  "and refuses the answer until they are.")
+#: §17.1985 — a step that ships this job's code into the engine ("Deliver dashboard via lab flow")
+_DELIVERY_STEP_RE = re.compile(r"\b(?:deliver|ship|merge|deploy)\w*\b[^.]{0,80}?\b(?:into\s+the\s+(?:scaffold\s+)?engine"
+                               r"|(?:lab|delivery)\s+flow|deliver_job)\b", re.I)
+#: §17.1985 — a step that puts a third-party file in place ("Vendor charting asset", "Download the Chart.js bundle")
+_VENDOR_STEP_RE = re.compile(r"^\s*(?:vendor\b|(?:download|fetch|pin)\b.{0,40}?(?:\b(?:assets?|librar(?:y|ies)|bundle)\b"
+                             r"|\.(?:js|css)\b))", re.I)
+#: §17.1985 — a step that writes a page or an asset, not a module ("Write dashboard HTML template")
+_STATIC_STEP_RE = re.compile(r"\b(?:html|template|css|stylesheet|javascript)\b", re.I)
+_STATIC_WORDS_RE = re.compile(r"\b(?:html|page|template|css|stylesheet|javascript|js|file)\b", re.I)
+#: what the notes of a step that writes a static file start with (pass 0 names no module for it); its notes name no
+#: `x.py`, or an unnamed block of its output would be read as that module (`step_module`)
+_STATIC_LEAD = "A static file this job carries"
+_VENDOR_NOTE = (_STATIC_LEAD + ": `{path}` -- a JSON object naming each third-party file by its file name and the "
+                "https URL of its pinned release (`{{\"chart.umd.min.js\": \"https://cdn.jsdelivr.net/npm/chart.js@4.5.1/"
+                "dist/chart.umd.min.js\"}}`), in one ```json block whose first line is `// {path}`. "
+                "The delivery (`scripts/deliver_job`) fetches each into `app/static/{pre}/vendor/` and "
+                "prints its sha256 for the review; the job's pages load it from there. No command runs on a machine.")
+_STATIC_NOTE = (_STATIC_LEAD + ": `{path}`, in one fenced block whose first line is the comment `{header}`; it is "
+                "delivered beside the job's modules (`GET /jobs/{{id}}/code`). It holds no Python; the module that "
+                "serves it reads it from that path.")
 #: §17.1909 — the step that wires the lab into the engine, by its title
 _WIRE_STEP_RE = re.compile(r"\bwire[sd]?\b|\bwiring\b", re.I)
 _INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def install(app) -> None`, which "
@@ -1846,7 +1928,8 @@ async def answer_unmet(db, job_id: str, title: str) -> dict | None:
     kind = answered_by_the_engine(title)
     if kind is None:
         return None
-    files = engine_source.job_files(await engine_source.code_rows(db, job_id))
+    rows = await engine_source.code_rows(db, job_id)
+    files = engine_source.job_files(rows)
     tables = job_tables(files)
     verdicts: list[str] = []
     if kind == "delivered":
@@ -1856,6 +1939,9 @@ async def answer_unmet(db, job_id: str, title: str) -> dict | None:
         have = {r[0] for r in (await db.execute(_text_sql(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"))).all()}
         verdicts += [f"table `{t}` does not exist (the job's revision has not run)" for t in tables if t not in have]
+        # §17.1985 — and each static file it carries is in the engine's tree
+        verdicts += [f"`{p}` is not in the running engine" for p in engine_source.job_static_files(rows)
+                     if not (engine_source.ENGINE_PKG.parent / p).is_file()]
         wiring = [m for m in mods if re.search(r"^def install\(", files[f"app/modules/{m}.py"][0], re.M)]
         if not wiring:
             verdicts.append("no module of this job exposes `install(app)` -- nothing would start the lab")
