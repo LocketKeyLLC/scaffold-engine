@@ -2394,12 +2394,13 @@ async def execute_next_node(
                         set(node_snapshot.get("prior_imports") or []))
                     if _cb:
                         _grounding_blocks.append(_cb)
-                # §17.1832 — a step that edits a module in place sees that module as it is now
-                _tcf = node.get("tool_config")
-                _tcf = json.loads(_tcf) if isinstance(_tcf, str) else (_tcf or {})
-                if isinstance(_tcf, dict) and _tcf.get("fixes_module"):
-                    _eb = _es.edited_module_block([r for r in _code if r.get("node_key") != node_key],
-                                                  str(_tcf["fixes_module"]))
+                # §17.1832 — a step that edits a module in place sees that module as it is now; §17.1983 -- an
+                # operator's "Fix <module>" as well as the engine's own fix steps (`tool_config.fixes_module`)
+                _others = [r for r in _code if r.get("node_key") != node_key]
+                _fm = _es.fixed_module({**node_snapshot, "tool_config": node.get("tool_config")},
+                                       {_es.step_module(r) for r in _others} - {""})
+                if _fm:
+                    _eb = _es.edited_module_block(_others, _fm)
                     if _eb:
                         _grounding_blocks.append(_eb)
             except Exception as exc:
