@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import logging
 import re
 import sys
@@ -1602,14 +1603,47 @@ def step_module_path(row: dict) -> str:
     return f"app.modules.{leaf}" if leaf else ""
 
 
-def step_module(row: dict) -> str:
-    """The module a step writes: its code's `# app/modules/x.py` header, else the first `x.py` its own text names."""
+def step_module(row: dict, known: set[str] | frozenset[str] = frozenset()) -> str:
+    """The module a step writes: its code's `# app/modules/x.py` header, else the module it fixes (§17.1983), else
+    the first `x.py` its own text names. `known`: the modules the job's other steps write."""
     for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
         m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
         if m and not re.match(r"(?:test_\w+|\w+_test|conftest)$", m.group(2)):     # a step's tests are not its module
             return m.group(2)
+    if fixed := fixed_module(row, known):
+        return fixed
     m = _SIBLING_FILE_RE.search(" ".join(str(row.get(k) or "") for k in ("prompt_template", "title", "description")))
     return m.group(1) if m else ""
+
+
+#: §17.1983 — a step that LEADS with "Fix <module>": its title or text names the one module it edits. A name written
+#: plain must look like a module (`paper_13f_holdings_ingestion`, not "the scheduler"); in backticks or as `x.py`, any.
+_FIX_LEAD_RE = re.compile(r"^\W*(?:fix|repair|correct|update|patch)\s+(?:the\s+)?(`?)([A-Za-z_]\w*)(\.py)?`?(?![\w.])",
+                          re.I)
+
+
+def fixed_module(row: dict, known: set[str] | frozenset[str] = frozenset()) -> str:
+    """§17.1983 — the module a step fixes in place: its `tool_config.fixes_module` (the engine's own fix steps), else
+    a module its title or text leads with -- "Fix paper_13f_holdings_ingestion (holdings are in …)" -- when that module
+    exists (`app/modules`, or `known`: written by another step of the job). Live (5b4880c0 F13F1, 2026-11-21): an
+    operator-added fix named no `x.py`, so it "named no module of its own"; each attempt that edited the module in
+    place was refused as writing step API_SEC_EDGAR_AUDITF1's file, and one that wrote a new file importing it was
+    refused for that import."""
+    cfg = row.get("tool_config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except ValueError:
+            cfg = None
+    if isinstance(cfg, dict) and cfg.get("fixes_module"):
+        return str(cfg["fixes_module"])
+    have = {k.rpartition(".")[2] for k in module_index() if k.startswith("app.modules.")} | set(known)
+    for k in ("title", "prompt_template", "description"):
+        m = _FIX_LEAD_RE.match(str(row.get(k) or ""))
+        if (m and m.group(2) in have and (m.group(1) or m.group(3) or "_" in m.group(2))
+                and not re.match(r"(?:test_\w+|\w+_test|conftest)$", m.group(2))):
+            return m.group(2)
+    return ""
 
 
 def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
@@ -1994,7 +2028,8 @@ def imports_an_unwritten_sibling(output: str, others: list[dict], written: dict[
 
 def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list[str]:
     """§17.1775 — an output whose code is headed with another step's module: it would overwrite that step's file."""
-    own = step_module({k: v for k, v in row.items() if k != "output_text"})
+    planned = {step_module(r) for r in others} - {""}
+    own = step_module({k: v for k, v in row.items() if k != "output_text"}, planned)          # §17.1983
     # §17.1812 — a module the earlier job finished is not a sibling's file when this step fixes it; §17.1822 — only
     # then: a step whose own text never names it (live: T6D, the batch's data step, rewrote the audit trail writer in
     # passing, and its copy replaced the finished one for every later step) is held to it like any sibling's
@@ -3381,7 +3416,7 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
     # §17.1775 — which file is THIS step's. Live (job f00ea97f): T6's second attempt wrote T4's
     # `paper_audit_trail_writer.py`, and T9's third imported its own `_extract_tickers` from T5's module -- the step
     # was shown its siblings' code and never told which module was its own.
-    own = step_module(node)
+    own = step_module(node, set(siblings))                                                  # §17.1983
     others = sorted(set(siblings) - {own})
     # §17.1787 — only a module that is WRITTEN can be imported; when the caller knows which are, say so
     ready = sorted(set(others) & set(written)) if written is not None else others

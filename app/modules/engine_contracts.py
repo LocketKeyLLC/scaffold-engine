@@ -992,11 +992,16 @@ def dropped_tests(output: str, prior: dict[str, list[str]] | None) -> list[str]:
                 compile(code, "<block>", "exec", dont_inherit=True)
             except SyntaxError:
                 broken.add(m.group(1))
+    # §17.1983 — a test kept by name in another test file of the output is kept, not dropped. Live (5b4880c0 F13F1,
+    # 2026-11-21): attempt 2, refused for editing its module in place, renamed it and its tests to `…_fix`; attempt 3
+    # kept all 11 tests in the first file and was refused for "dropping" them from the `_fix` one
+    kept = {n for ns in have.values() for n in ns}
     found: list[str] = []
     for path, names in sorted(prior.items()):
-        gone = [n for n in names if n not in set(have.get(path, []))]
+        gone = [n for n in names if n not in kept]
         if not gone or path in broken:
             continue
+        kept |= set(gone)                           # a name two earlier files held is reported once
         found.append(
             f"`{path}` dropped {len(gone)} of the {len(names)} tests your earlier attempts wrote: "
             + ", ".join(f"`{n}`" for n in gone)
