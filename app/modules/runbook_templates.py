@@ -880,6 +880,12 @@ def select_template(node: dict, truth, services: Optional[list] = None) -> Optio
     # host: no in-guest template. Live (c2792d4b T14), "pveum user token add" was wrapped to run inside CT 111.
     host_admin = bool(_HOST_ADMIN_RE.search(" ".join(str((node or {}).get(k) or "")
                                                       for k in ("title", "description", "prompt_template"))))
+    # §17.1962 — and a step whose TITLE places it on the Proxmox host runs there, whatever guest its body mentions. Live
+    # (job 7cc2a7ac ADD5/ADD9 "Proxmox host: …"): the engine's split wrote "On container 111" and `pct exec 111 -- curl
+    # …` into the body, `run_in_container` wrapped the host's curls inside CT 111, where the runner's PANEL_PASSWORD
+    # and Caddy's files are not, and every draft was refused.
+    from app.modules.develop import _HOST_PLACE_RE
+    host_admin = host_admin or bool(_HOST_PLACE_RE.match(str((node or {}).get("title") or "")))
     login = logs_in_with_a_stored_secret(node)       # §17.1495 — the login runs from the host, on stdin
     for t in TEMPLATES:
         try:

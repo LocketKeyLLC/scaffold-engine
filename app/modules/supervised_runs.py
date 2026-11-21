@@ -2655,6 +2655,12 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     an `ssh` into a machine, or a host-side `qm`/`pct` operation ON the guest,
     which is legitimately the host's work about it).
     """
+    # §17.1962b — a step whose TITLE places it on the Proxmox host is host work, whatever guest its body mentions (live,
+    # job 7cc2a7ac T17 "Proxmox host: use the control panel … controls": the body says to read App.jsx in CT 111, and the
+    # host's own curls were refused for "changing the HOST instead of guest 111")
+    from app.modules.develop import _HOST_PLACE_RE
+    if _HOST_PLACE_RE.match(str((node or {}).get("title") or "")):
+        return []
     from app.modules.machine_truth import without_excluded_guests
     text = without_excluded_guests(" ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template")))   # §17.1959
     ids = sorted({m.group(1) for m in _GUEST_SUBJECT_RE.finditer(text)})
@@ -6320,6 +6326,10 @@ def secrets_sudo_would_log(commands: list[str], policy: dict) -> list[dict]:
     return out
 
 
+#: §17.1963 — the text right before a name that is an environment lookup's key
+_ENV_LOOKUP_BEFORE_RE = re.compile(r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{)\s*['\"]$")
+
+
 def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
                                        verify: Optional[list[str]] = None) -> list[dict]:
     """§17.1581 — a held secret's NAME typed where its VALUE belongs.
@@ -6340,6 +6350,13 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
     for t in texts:
         for m in pat.finditer(t):
             name = m.group(1)
+            # §17.1963 — the name as the KEY of an environment lookup is how a program reads the value the runner passes
+            # (`os.environ["NAME"]`, `.get("NAME")`, `os.getenv("NAME")`, Ruby/Perl `ENV["NAME"]`). Live (job 7cc2a7ac
+            # ADD5 and T15's first draft): `pw = os.environ["PANEL_PASSWORD"]`, run as `PANEL_PASSWORD="$PANEL_PASSWORD"
+            # python3 …`, was refused as the name written where its value belongs -- while the JavaScript form
+            # `process.env.PANEL_PASSWORD` passed
+            if _ENV_LOOKUP_BEFORE_RE.search(t[max(0, m.start() - 40):m.start()]):
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -11331,6 +11348,13 @@ def rewrite_inventory_service_routes(node: Optional[dict], commands: list[str], 
     # control" became an inventory of /opt/palworld* on VM 106)
     text = re.split(r"\bDone when\b", _node_text(node), maxsplit=1)[0]
     title = str((node or {}).get("title") or "")
+    # §17.1963b — a step whose text SPELLS OUT its own commands (backticked shell lines) asked for those reads, not a generic
+    # inventory: live (job 7cc2a7ac D1 "CT 111: read the media-library handler, the engine address and the Palworld status
+    # code", four exact `pct exec 111 -- …` reads), "read … handler" matched and the four reads were replaced by the
+    # route inventory T5 had already printed
+    if any(re.match(r"\s*(?:pct|qm|ssh|curl|cat|grep|python3|sed|ls|systemctl|journalctl)\b", c)
+           for c in re.findall(r"`([^`\n]{6,})`", text)):
+        return list(commands or []), list(verify or []), []
     if title_changes_something(node) or not (_ROUTE_INVENTORY_RE.search(title) or _ROUTE_INVENTORY_RE.search(text)):
         return list(commands or []), list(verify or []), []
     # §17.1682b — "read" alone (not inventory/enumerate/list/map/catalog/survey) claims only a service built from code the
