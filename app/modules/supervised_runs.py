@@ -6326,6 +6326,10 @@ def secrets_sudo_would_log(commands: list[str], policy: dict) -> list[dict]:
     return out
 
 
+#: §17.1963 — the text right before a name that is an environment lookup's key
+_ENV_LOOKUP_BEFORE_RE = re.compile(r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{)\s*['\"]$")
+
+
 def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
                                        verify: Optional[list[str]] = None) -> list[dict]:
     """§17.1581 — a held secret's NAME typed where its VALUE belongs.
@@ -6346,6 +6350,13 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
     for t in texts:
         for m in pat.finditer(t):
             name = m.group(1)
+            # §17.1963 — the name as the KEY of an environment lookup is how a program reads the value the runner passes
+            # (`os.environ["NAME"]`, `.get("NAME")`, `os.getenv("NAME")`, Ruby/Perl `ENV["NAME"]`). Live (job 7cc2a7ac
+            # ADD5 and T15's first draft): `pw = os.environ["PANEL_PASSWORD"]`, run as `PANEL_PASSWORD="$PANEL_PASSWORD"
+            # python3 …`, was refused as the name written where its value belongs -- while the JavaScript form
+            # `process.env.PANEL_PASSWORD` passed
+            if _ENV_LOOKUP_BEFORE_RE.search(t[max(0, m.start() - 40):m.start()]):
+                continue
             if name in seen:
                 continue
             seen.add(name)
