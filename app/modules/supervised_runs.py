@@ -250,7 +250,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "PRINTS the unit's environment",                # §17.1958
                    "written BEFORE its commands run",               # §17.1960
                    "is a value this block makes itself",           # §17.1968
-                   "reads this value itself and asks the operator for it")   # §17.1968b
+                   "reads this value itself and asks the operator for it",   # §17.1968b
+                   "uses bash-only syntax")                         # §17.1982
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -316,6 +317,7 @@ _WHOSE_GAP: dict[str, str] = {
     "written BEFORE its commands run": "drafter",
     "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
     "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
+    "uses bash-only syntax": "drafter",          # §17.1982 — where the engine cannot run it with bash: redraft as bash/POSIX
     # §17.1578 — the runner at hand demands a block's own `$UPPER` names: the drafter names them in lowercase
     "reads every `$UPPER` reference as a secret": "drafter",
     "writes the secret's NAME where its VALUE belongs": "drafter",     # §17.1581
@@ -6053,12 +6055,14 @@ _RESERVED_HEAD_RE = re.compile(r"^(?:then|do|else|elif|fi|done|esac|in|\{|\}|\(|
 _HEREDOC_HEAD_RE = re.compile(r"(?<!<)<<(-?)\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 
 
-def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
-    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``;
-    returns ``(text, the lines repaired)``. A heredoc's body is a script of its own and is judged by ITS ``set -e``
-    (the in-guest templates carry the model's lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the
-    model writes with ``tee … <<'EOF'`` inside it is not run under that ``set -e`` and is left alone)."""
-    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _CONTINUES_RE, _QUOTED_RE
+def _repair_lines_under_set_e(body: str, repair_line) -> tuple[str, list[str]]:
+    """§17.1972/§17.1979 — one script's text with ``repair_line(line)`` applied to each statement line that runs under
+    ``set -e``; returns ``(text, the lines repaired)``. ``repair_line`` returns the new line, or None to leave it.
+    A heredoc's body is a script of its own and is judged by ITS ``set -e`` (the in-guest templates carry the model's
+    lines in a ``<<'REMOTE'`` body that opens with ``set -e``; a file the model writes with ``tee … <<'EOF'`` inside
+    it is not run under that ``set -e`` and is left alone). A comment line and a line that continues the one before
+    it are never statements of their own."""
+    from app.modules.runbook_templates import _CONTINUES_RE
     lines = body.split("\n")
     out: list[str] = []
     fixed: list[str] = []
@@ -6073,29 +6077,19 @@ def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
             j = next((k for k in range(i + 1, len(lines))
                       if (lines[k].lstrip("\t") if strip_tabs else lines[k]).rstrip() == term), None)
             if j is not None:                                # the head, the body judged on its own, the terminator
-                inner, inner_fixed = _ignore_failures_under_set_e("\n".join(lines[i + 1:j]))
+                inner, inner_fixed = _repair_lines_under_set_e("\n".join(lines[i + 1:j]), repair_line)
                 out += [ln, *(inner.split("\n") if j > i + 1 else []), lines[j]]
                 fixed += inner_fixed
                 prev, i = ln, j + 1
                 continue
-        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
         if _SET_E_LINE_RE.match(ln):
             errexit = True
         elif _SET_E_OFF_RE.match(ln):
             errexit = False
-        else:
-            m = _SEMI_NOOP_RE.match(ln)
-            rest = m.group("rest") if m else ""
-            rcode = _QUOTED_RE.sub("Q", rest)                     # a closed quote is one word; an open one is left
-            if (errexit and m and not ln.strip().startswith("#")
-                    and not _RESERVED_HEAD_RE.match(rest)
-                    and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))
-                    and "'" not in rcode and '"' not in rcode and "#" not in rcode       # no open quote, no comment
-                    and len(_BLOCK_OPEN_RE.findall(code)) == len(_BLOCK_CLOSE_RE.findall(code))
-                    and rcode.count("{") == rcode.count("}") and rcode.count("(") == rcode.count(")")
-                    and not rcode.rstrip().endswith(("&", "|", ";"))
-                    and not re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):   # one command, already `|| true`
-                new = f"{m.group('indent')}{{ {rest}; }} || true"
+        elif (errexit and not ln.strip().startswith("#")
+              and not (prev.rstrip().endswith("\\") or _CONTINUES_RE.search(prev.split(" #", 1)[0]))):
+            new = repair_line(ln)
+            if new is not None and new != ln:
                 out.append(new)
                 fixed.append(ln.strip())
                 prev, i = new, i + 1
@@ -6103,6 +6097,30 @@ def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
         out.append(ln)
         prev, i = ln, i + 1
     return "\n".join(out), fixed
+
+
+def _semi_noop_line(ln: str) -> Optional[str]:
+    """§17.1972 — ``a; b; true`` written ``{ a; b; } || true``, or None when the line is not that shape."""
+    from app.modules.runbook_templates import _BLOCK_CLOSE_RE, _BLOCK_OPEN_RE, _QUOTED_RE
+    code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+    m = _SEMI_NOOP_RE.match(ln)
+    if not m:
+        return None
+    rest = m.group("rest")
+    rcode = _QUOTED_RE.sub("Q", rest)                         # a closed quote is one word; an open one is left
+    if (_RESERVED_HEAD_RE.match(rest)
+            or "'" in rcode or '"' in rcode or "#" in rcode                              # an open quote, a comment
+            or len(_BLOCK_OPEN_RE.findall(code)) != len(_BLOCK_CLOSE_RE.findall(code))
+            or rcode.count("{") != rcode.count("}") or rcode.count("(") != rcode.count(")")
+            or rcode.rstrip().endswith(("&", "|", ";"))
+            or re.fullmatch(r"[^;&|]*\|\|\s*(?:true|:)", rcode.strip())):           # one command, already `|| true`
+        return None
+    return f"{m.group('indent')}{{ {rest}; }} || true"
+
+
+def _ignore_failures_under_set_e(body: str) -> tuple[str, list[str]]:
+    """§17.1972 — one script's text with each ``a; b; true`` line under ``set -e`` written ``{ a; b; } || true``."""
+    return _repair_lines_under_set_e(body, _semi_noop_line)
 
 
 def repair_ignored_failures_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
@@ -6146,6 +6164,148 @@ def _bash_compiles(text: str) -> bool:
         return subprocess.run(["bash", "-n"], input=text.encode(), capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return True
+
+
+#: §17.1979 — a stop command whose "there was nothing to stop" exit is a code of its own, by the tool's documented exit
+#: status (measured on procps 4 / psmisc / systemd 255 / Docker 28): `pkill` 1 = no process matched (2 = a bad option,
+#: 3 = fatal), `killall` 1 = no process killed. `systemctl stop` is NOT one: its 5 ("not loaded") is also what a
+#: misspelled unit returns, and a stop-then-edit step (a service's DB) must not go on editing while the real unit
+#: runs -- a stop with nothing to stop fails loudly, and the drafter may write the guard itself. `systemctl disable` of
+#: a missing unit exits 1, the generic failure, so it is not one either. `docker stop|rm` of a missing container exits 1 just
+#: as a daemon that is down does, so for it the "No such container" is read back from `docker container inspect`;
+#: `docker rm -f` of a missing one already exits 0. `pgrep` and signal 0 are checks that the thing runs: never touched.
+_REDIRECTION_RE = re.compile(r"\s\d*(?:&>>?|>>?|<)(?:&[\d-]|\s*(?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|[^\s;'\"]+))")
+_WORD_RE = re.compile(r"(?:'[^']*'|\"(?:[^\"\\]|\\.)*\"|[^\s'\"])+")
+_SIGNAL_ZERO_RE = re.compile(r"(?:^|\s)(?:-0|-s\s*0|--signal(?:=|\s+)0)(?=\s|$)")
+_DOCKER_FLAGS = {"-v", "--volumes", "-l", "--link"}
+_DOCKER_VALUED = {"-t", "--time", "-s", "--signal"}
+
+
+def _statements_of(line: str) -> Optional[tuple[list[str], str]]:
+    """§17.1979 — ``(statements, trailing comment)``: a line split at its unquoted ``;``; None on an open quote."""
+    segs: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and quote != "'":
+            cur.append(line[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == ";":
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+            segs.append("".join(cur))
+            return segs, line[i:]
+        cur.append(c)
+        i += 1
+    if quote:
+        return None
+    segs.append("".join(cur))
+    return segs, ""
+
+
+def _no_op_exit_guard(stmt: str) -> str:
+    """§17.1979 — the ``|| …`` that lets ``stmt`` exit with ONLY its documented "nothing to stop" status, or "" when
+    the statement is not a bare stop command of that kind (a list, a pipe, a compound, a guarded or negated one)."""
+    from app.modules.runbook_templates import _QUOTED_RE
+    bare = _REDIRECTION_RE.sub(" ", " " + stmt)              # `2>/dev/null`, `>&2`, `> file` belong to the command
+    if re.search(r"[|&(){}`<>;!\\]", _QUOTED_RE.sub("Q", bare)):
+        return ""
+    words = _WORD_RE.findall(bare)
+    sudo = ""
+    if words[:1] == ["sudo"]:
+        if len(words) < 2 or words[1].startswith("-"):
+            return ""
+        sudo, words = "sudo ", words[1:]
+    if not words:
+        return ""
+    head, args = words[0], words[1:]
+    if head in ("pkill", "killall"):
+        return "" if _SIGNAL_ZERO_RE.search(" ".join(args)) else "|| [ $? -eq 1 ]"
+    if head != "docker":
+        return ""
+    if args[:1] == ["container"]:
+        args = args[1:]
+    if not args or args[0] not in ("stop", "rm"):
+        return ""
+    names: list[str] = []
+    rest = args[1:]
+    while rest:
+        a = rest.pop(0)
+        if a in _DOCKER_VALUED:
+            if not rest:
+                return ""
+            rest.pop(0)
+        elif a in _DOCKER_FLAGS or ("=" in a and a.split("=", 1)[0] in _DOCKER_VALUED):
+            continue
+        elif a.startswith("-"):
+            return ""                                        # `-f` already tolerates a missing one; others unknown
+        else:
+            names.append(a)
+    if len(names) != 1:
+        return ""
+    return (f'|| case "$({sudo}docker container inspect {names[0]} 2>&1 >/dev/null)" in '
+            f'*"No such"*) ;; *) false ;; esac')
+
+
+def _no_op_stop_line(ln: str) -> Optional[str]:
+    """§17.1979 — ``ln`` with each bare stop statement given its no-op guard, or None when none is."""
+    if _RESERVED_HEAD_RE.match(ln.strip()) or re.match(r"\s*(?:if|while|until|for|case|select|function)(?![\w-])", ln):
+        return None                                          # a compound's head or condition, not a statement
+    split = _statements_of(ln)
+    if split is None:
+        return None
+    segs, comment = split
+    out: list[str] = []
+    for seg in segs:
+        guard = _no_op_exit_guard(seg) if seg.strip() else ""
+        if guard:
+            body = seg.rstrip()
+            tail = seg[len(body):]
+            seg = f"{body} {guard}{tail}"
+        out.append(seg)
+    return ";".join(out) + comment if out != segs else None
+
+
+def repair_no_op_stops_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
+    """§17.1979 — ``(files, repairs)``: under ``set -e`` a stop whose non-zero exit only means "there was nothing to
+    stop" ends the whole script. Live (job 0fb4ea7f LM14, 2026-11-20): the draft carried ``pkill -f 'llama-server
+    --model …'; sleep 5; docker exec ollama ollama ps`` into the in-guest remote script that opens with ``set -e``;
+    ``pkill`` exits 1 when nothing matches (the runner already gone), so the restart after it would never have run.
+
+    The repair tolerates ONLY that documented exit (``pkill -f X || [ $? -eq 1 ]``, ``killall X || [ $? -eq 1 ]``,
+    a ``docker stop`` whose container ``inspect`` says "No such"), never a blanket ``|| true``: a real error (``pkill``'s
+    2 for a bad option, a daemon that is down) still stops the script. Only a stop that stands as a statement of its
+    own is touched -- one already in a list, a pipe, a compound or a condition is left as written. Every repair is
+    said on the frame (§17.1270), and one that would not compile is not made."""
+    out: list[dict] = []
+    repairs: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if not _SET_E_RE.search(body):
+            out.append(f)
+            continue
+        fixed, lines = _repair_lines_under_set_e(body, _no_op_stop_line)
+        if not lines or (_bash_compiles(body) and not _bash_compiles(fixed)):
+            out.append(f)
+            continue
+        out.append({**f, "content": fixed})
+        for ln in lines:
+            repairs.append({"why": (
+                f"guarded `{ln[:120]}` in {path} so its \"nothing to stop\" exit does not end the script: it runs under "
+                f"`set -e`, and a stop whose target is already gone (`pkill` 1, `killall` 1, "
+                f"`docker stop|rm` \"No such container\") would end the step before the commands after it -- the guard "
+                f"tolerates that exit only, so a real error still stops the script.")})
+    return out, repairs
 
 
 #: §17.1348 — `$NAME`, `${NAME}`: a value the command expects the environment to hold
@@ -6436,7 +6596,8 @@ def secrets_sudo_would_log(commands: list[str], policy: dict) -> list[dict]:
 
 
 #: §17.1963 — the text right before a name that is an environment lookup's key
-_ENV_LOOKUP_BEFORE_RE = re.compile(r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{)\s*['\"]$")
+_ENV_LOOKUP_BEFORE_RE = re.compile(
+    r"(?:\benviron\s*(?:\[|\.get\(|\.setdefault\()|\bgetenv\(|\bENV\[|\$ENV\{|\bprocess\.env\s*\[)\s*['\"`]$")   # §17.1978 JS
 
 
 def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list[dict]], policy: dict,
@@ -6480,7 +6641,8 @@ def a_secret_name_written_as_its_value(commands: list[str], files: Optional[list
                 f"with the string `{name}`. Reference it so the runner resolves it — `$"
                 f"{name}` in a command the runner runs, or the engine's `<{name}>` placeholder — or read it off the "
                 f"machine with `$( … )`; never the bare word.")})
-    return out + _held_refs_in_python_strings(commands, files, verify, held, seen)
+    out += _held_refs_in_python_strings(commands, files, verify, held, seen)
+    return out + _held_refs_in_js_strings(commands, files, verify, held, seen)   # §17.1978
 
 
 #: §17.1969 — the start of the simple command a name is the operand of, when that command SEARCHES for it
@@ -6496,6 +6658,23 @@ _PY_MESSAGE_CALL_RE = re.compile(r"^(?:print|exit|SystemExit|warn|warning|error|
                                  r"\w*(?:Error|Exception))$")
 
 
+def _quoted_heredoc_bodies(text: str) -> list[tuple[str, str, str]]:
+    """``[(the line before `<<`, the file it writes or "", body)]`` for every quoted-tag heredoc in ``text`` -- a body no
+    shell expands. The closing tag may end the `sh -c '…'` word it sits in (`EOF'`)."""
+    out: list[tuple[str, str, str]] = []
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
+        if not m:
+            continue
+        tgt = _HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():])
+        path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
+        tag = m.group("q1") or m.group("q2") or m.group("q3")
+        end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() in (tag, tag + "'", tag + '"')), len(lines))
+        out.append((ln[:m.start()], path, "\n".join(lines[i + 1:end])))
+    return out
+
+
 def _python_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
                                              verify: Optional[list[str]]) -> list[str]:
     """§17.1969 — every Python program whose text no shell expands before Python reads it: a quoted-tag
@@ -6505,16 +6684,7 @@ def _python_programs_the_shell_never_expands(commands: list[str], files: Optiona
     out = [body for _w, body, _where in _quoted_heredoc_programs(texts, files)]
     for t in texts + file_texts:
         out += [m.group("body") for m in _PY_C_SINGLE_RE.finditer(t)]
-        lines = t.split("\n")
-        for i, ln in enumerate(lines):
-            m = _QUOTED_HEREDOC_OPEN_RE.search(ln)
-            tgt = m and (_HEREDOC_TARGET_RE.search(ln[:m.start()]) or _HEREDOC_TARGET_RE.search(ln[m.end():]))
-            path = ((tgt.group("path") or tgt.group("tee")) if tgt else "") or ""
-            if not path.endswith(".py"):
-                continue
-            tag = m.group("q1") or m.group("q2") or m.group("q3")
-            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == tag), len(lines))
-            out.append("\n".join(lines[i + 1:end]))
+        out += [body for _before, path, body in _quoted_heredoc_bodies(t) if path.endswith(".py")]
     run_text = "\n".join(texts)
     for f in files or []:
         path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
@@ -6571,6 +6741,216 @@ def _held_refs_in_python_strings(commands: list[str], files: Optional[list[dict]
                 f"would use the literal text `{m.group(0)}` (a login with it answers 401). Read it with "
                 f"`os.environ[\"{name}\"]` and run the program with `{name}=\"${name}\" python3 …` so the runner "
                 f"supplies it.")})
+    return out
+
+
+#: §17.1978 — a JavaScript program: what node runs, whether written as a file or fed on stdin
+_JS_SUFFIXES = (".js", ".mjs", ".cjs")
+#: §17.1978 — `node -e '…'`/`-p '…'`: single quotes, so the shell hands the program over unexpanded
+_JS_E_SINGLE_RE = re.compile(r"\bnode(?:js)?\s+(?:--?[\w-]+(?:=\S+)?\s+)*?(?:-e|-p|-pe|--eval|--print)\s+'(?P<body>[^']*)'")
+#: §17.1978 — the command before a heredoc that node reads AS its program: `node - <<'JS'`, `node --input-type=module <<'JS'`
+_JS_STDIN_BEFORE_RE = re.compile(r"\bnode(?:js)?(?:\s+--?[\w-]+(?:=\S+)?)*(?:\s+-)?\s*$")
+#: §17.1978 — a JS program that hands a string to a SHELL (which does expand `$NAME`): not judged. `exec(`/`execSync(`
+#: count only beside `child_process` (a RegExp has `.exec(` too)
+_JS_SHELL_SINK_RE = re.compile(
+    r"shell\s*:\s*(?:true|['\"`])|\bshelljs\b|\bzx/|\bexeca\b|['\"`](?:/bin/|/usr/bin/)?(?:ba|da|z)?sh['\"`]|\.sh['\"`]")
+_JS_EXEC_RE = re.compile(r"\bexec(?:Sync)?\s*\(")
+#: §17.1978 — a call whose string argument is a MESSAGE to a person, not a value a program uses
+_JS_MESSAGE_CALL_RE = re.compile(
+    r"^(?:console\.\w+|process\.std(?:out|err)\.write|assert(?:\.\w+)?|(?:\w+\.)*(?:log|warn|warning|error|info|debug|"
+    r"trace|fatal|fail|setFailed|exit)|(?:\w+\.)*\w*(?:Error|Exception))$")
+#: §17.1978 — a call that LOOKS FOR the text (`.replace('$NAME', process.env.NAME)` fills a placeholder itself)
+_JS_SEARCH_CALLS = frozenset({"replace", "replaceAll", "includes", "indexOf", "lastIndexOf", "startsWith", "endsWith",
+                              "split", "match", "matchAll", "search", "test"})
+#: a keyword after which `/` opens a regex literal, not a division
+_JS_KEYWORDS_BEFORE_REGEX = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+                                       "case", "do", "else", "yield", "await"})
+_JS_PUNCT_RE = re.compile(r"===|!==|==|!=|=>|\?\.|\.\.\.|\S")
+
+
+def _js_programs_the_shell_never_expands(commands: list[str], files: Optional[list[dict]],
+                                         verify: Optional[list[str]]) -> list[str]:
+    """§17.1978 — every JavaScript program whose text no shell expands before node reads it: a single-quoted
+    `node -e '…'`, a quoted-tag heredoc into `node -` or into a `.js`/`.mjs`/`.cjs` file, a written `.js` file (or one
+    that `node <path>` runs)."""
+    texts = [str(c) for c in list(commands or []) + list(verify or [])]
+    file_texts = [str((f or {}).get("content") or "") for f in files or []]
+    out: list[str] = []
+    for t in texts + file_texts:
+        out += [m.group("body") for m in _JS_E_SINGLE_RE.finditer(t)]
+        out += [body.replace("'\\''", "'") for before, path, body in _quoted_heredoc_bodies(t)   # `sh -c '…'`: one quote
+                if path.endswith(_JS_SUFFIXES) or _JS_STDIN_BEFORE_RE.search(before)]
+    run_text = "\n".join(texts)
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if body.strip() and (path.endswith(_JS_SUFFIXES) or (path and re.search(
+                rf"\bnode(?:js)?\s+(?:--?[\w-]+(?:=\S+)?\s+)*{re.escape(path)}(?![\w/.])", run_text))):
+            out.append(body)
+    return out
+
+
+def _js_tokens(src: str) -> list[tuple[str, str, tuple, bool]]:
+    """§17.1978 — JavaScript source as ``[(kind, text, calls, thrown)]``: kind "str" (a '…'/"…" literal's text), "tpl"
+    (a template literal's text between `${…}`s), "id" or "p" (code). Comments and regex literals are dropped. ``calls``
+    are the callees (`console.error`, `x.replace`) whose argument list encloses the token; ``thrown`` is whether a
+    `throw` statement does. A careful scanner, not a parser: it knows only where strings, templates, comments and
+    regex literals begin and end."""
+    if src.startswith("#!"):
+        src = src[src.find("\n") + 1:] if "\n" in src else ""
+    toks: list[tuple[str, str, tuple, bool]] = []
+    stack: list[list] = []            # ["(", callee] | ["[", ""] | ["{", ""] | ["${", ""] | ["`", ""]
+    throw_at: Optional[int] = None    # the depth a `throw` statement was opened at
+    prev: tuple[str, str] = ("p", ";")
+    i, n = 0, len(src)
+
+    def calls() -> tuple:
+        return tuple(f[1] for f in stack if f[0] == "(" and f[1])
+
+    def callee() -> str:
+        parts, k = [], len(toks) - 1
+        while k >= 0 and toks[k][0] == "id":
+            parts.insert(0, toks[k][1])
+            if k >= 1 and toks[k - 1][0] == "p" and toks[k - 1][1] in (".", "?."):
+                k -= 2
+                continue
+            break
+        return ".".join(parts)
+
+    while i < n:
+        if stack and stack[-1][0] == "`":                       # template text, up to `${` or the closing backtick
+            j, buf = i, []
+            while j < n and src[j] != "`" and not src.startswith("${", j):
+                buf.append(src[j:j + 2] if src[j] == "\\" else src[j])
+                j += 2 if src[j] == "\\" else 1
+            toks.append(("tpl", "".join(buf), calls(), throw_at is not None))
+            if j >= n:
+                break
+            if src[j] == "`":
+                stack.pop()
+                prev, i = ("str", "`"), j + 1
+            else:
+                stack.append(["${", ""])
+                toks.append(("p", "${", calls(), throw_at is not None))
+                prev, i = ("p", "${"), j + 2
+            continue
+        c = src[i]
+        if c in " \t\r":
+            i += 1
+        elif c == "\n":
+            if throw_at is not None and len(stack) <= throw_at:
+                throw_at = None
+            i += 1
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c in "'\"":
+            j, buf = i + 1, []
+            while j < n and src[j] not in (c, "\n"):
+                buf.append(src[j:j + 2] if src[j] == "\\" else src[j])
+                j += 2 if src[j] == "\\" else 1
+            toks.append(("str", "".join(buf), calls(), throw_at is not None))
+            prev, i = ("str", c), j + 1
+        elif c == "`":
+            stack.append(["`", ""])
+            i += 1
+        elif c == "/" and (prev[0] == "p" and prev[1] not in (")", "]", "}")
+                           or prev[0] == "id" and prev[1] in _JS_KEYWORDS_BEFORE_REGEX):
+            j, in_class = i + 1, False                         # a regex literal: skipped whole
+            while j < n and src[j] != "\n" and (in_class or src[j] != "/"):
+                in_class = (in_class or src[j] == "[") and src[j] != "]"
+                j += 2 if src[j] == "\\" else 1
+            j += 1
+            while j < n and src[j].isalpha():
+                j += 1
+            prev, i = ("str", "/"), j
+        elif c.isalpha() or c in "_$":
+            j = i + 1
+            while j < n and (src[j].isalnum() or src[j] in "_$"):
+                j += 1
+            word = src[i:j]
+            if word == "throw":
+                throw_at = len(stack)
+            toks.append(("id", word, calls(), throw_at is not None))
+            prev, i = ("id", word), j
+        elif c.isdigit():
+            j = i + 1
+            while j < n and (src[j].isalnum() or src[j] in "._"):
+                j += 1
+            prev, i = ("num", src[i:j]), j
+        else:
+            p = _JS_PUNCT_RE.match(src, i).group(0)
+            if p == "(":
+                stack.append(["(", callee()])
+            elif p in "[{":
+                stack.append([p, ""])
+            elif p in ")]}" and stack:
+                closes_expr = p == "}" and stack[-1][0] == "${"
+                stack.pop()
+                if throw_at is not None and len(stack) < throw_at:
+                    throw_at = None
+                if closes_expr:                                 # back to the template's text
+                    toks.append(("p", "}", calls(), throw_at is not None))
+                    prev, i = ("p", "}"), i + 1
+                    continue
+            elif p == ";" and throw_at is not None and len(stack) <= throw_at:
+                throw_at = None
+            toks.append(("p", p, calls(), throw_at is not None))
+            prev, i = ("p", p), i + len(p)
+    return toks
+
+
+def _held_refs_in_js_strings(commands: list[str], files: Optional[list[dict]], verify: Optional[list[str]],
+                             held: list[str], seen: set[str]) -> list[dict]:
+    """§17.1978 — §17.1969 for JavaScript: a held `$NAME` inside a JS string node reads is the name, never the value.
+
+    In a '…'/"…" string `$NAME` and `${NAME}` are literal text; in a template literal `$NAME` is literal text and
+    `${NAME}` is a JS VARIABLE named NAME -- undeclared, so a ReferenceError (or a wrong value), never the secret. The
+    runner passes a held value in the ENVIRONMENT; node reads it as `process.env.NAME`. A program that hands strings to
+    a shell (`child_process` `exec`/`execSync`, `shell: true`, `spawn('sh', …)`) is not judged; a comment, a message
+    (`console.*`, `throw`, `new Error(…)`), a comparison or a `.replace('$NAME', …)` the program fills itself is not a
+    value. A `${NAME}` the program declares itself (`const NAME = …`, a parameter, `{ NAME } = process.env`) passes."""
+    if not held:
+        return []
+    ref = re.compile(r"\$\{?(" + "|".join(re.escape(h) for h in held) + r")\}?(?![A-Za-z0-9_])")
+    out: list[dict] = []
+    for src in _js_programs_the_shell_never_expands(commands, files, verify):
+        if not ref.search(src) or _JS_SHELL_SINK_RE.search(src) or ("child_process" in src and _JS_EXEC_RE.search(src)):
+            continue
+        toks = _js_tokens(src)
+
+        def tpl_expr(k: int) -> bool:   # toks[k] is the whole of a `${…}`
+            return 0 < k < len(toks) - 1 and toks[k - 1][:2] == ("p", "${") and toks[k + 1][:2] == ("p", "}")
+        bound = {t[1] for k, t in enumerate(toks) if t[0] == "id" and not tpl_expr(k)
+                 and not (k and toks[k - 1][0] == "p" and toks[k - 1][1] in (".", "?."))}
+        filled = {m.group(1) for t in toks if t[0] == "str" and t[2] and t[2][-1].rsplit(".", 1)[-1] in _JS_SEARCH_CALLS
+                  for m in ref.finditer(t[1])}
+        for k, t in enumerate(toks):
+            m = ref.search(t[1]) if t[0] in ("str", "tpl") else None
+            if m:
+                name, lit, as_var = m.group(1), m.group(0), False
+            elif t[0] == "id" and t[1] in held and tpl_expr(k) and t[1] not in bound:
+                name, lit, as_var = t[1], "${" + t[1] + "}", True
+            else:
+                continue
+            if name in seen or name in filled or t[3] or any(_JS_MESSAGE_CALL_RE.match(c) for c in t[2]):
+                continue
+            if t[0] == "str" and any(0 <= j < len(toks) and toks[j][:2] in (("p", "==="), ("p", "!=="), ("p", "=="),
+                                                                             ("p", "!=")) for j in (k - 1, k + 1)):
+                continue
+            seen.add(name)
+            line = next((ln for ln in src.splitlines() if lit in ln), lit)
+            what = (f"`{lit}` inside a JavaScript template literal is a JS VARIABLE named `{name}` that the program never "
+                    f"declares -- node throws a ReferenceError there, it never reads the secret"
+                    if as_var else
+                    f"`{lit}` sits inside a JavaScript string, which no shell expands -- the runner hands `{name}` to the "
+                    f"program in its ENVIRONMENT, so the program would use the literal text `{lit}` (a login with it "
+                    f"answers 401)")
+            out.append({"command": line.strip()[:200], "why": (
+                f"this writes the secret's NAME where its VALUE belongs: {what}. Read it with `process.env.{name}` and "
+                f"run the program with `{name}=\"${name}\" node …` so the runner supplies it.")})
     return out
 
 
@@ -7192,6 +7572,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
     files, _noop_repairs = repair_ignored_failures_under_set_e(files)   # §17.1972 — `a; b; true` under set -e
+    files, _stop_repairs = repair_no_op_stops_under_set_e(files)   # §17.1979 — a stop with nothing to stop
+    _noop_repairs = list(_noop_repairs) + _stop_repairs
     _lookup_repairs = list(_lookup_repairs) + _noop_repairs
     # §17.1657 — an *arr API call inside its own guest with no key gets one, FIRST, so every later step (the
     # wrapper repairs, §17.1332's in-guest read of the placeholder) sees it as if the draft had written it
@@ -7478,7 +7860,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1973 — a shell builtin becomes the program on the FRAME, so the operator approves, the engine signs and the
     # runner runs one string (it used to be rewritten in transit, after signing, and the runner refused it).
     cmds, verify, _lk_notes = lookups_as_programs(cmds, verify)
-    _test_notes = list(_test_notes) + _lk_notes
+    # §17.1982 — a bash program handed to `sh` (dash in every Debian guest) runs with `bash`; where the engine cannot
+    # say bash is there (a container image, a quoted ssh command) it is refused below with the remedy
+    cmds, verify, files, _sh_notes, _sh_refused = bash_programs_handed_to_sh(cmds, verify, files)
+    _test_notes = list(_test_notes) + _lk_notes + _sh_notes
     _mv_notes = list(_comp_notes) + list(_loop_notes) + list(_mv_notes) + _test_notes
     _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
     _vdrops: list[dict] = []
@@ -7489,6 +7874,16 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                            f"never uses that value, so nobody has it to type; the remaining checks stand"}
                    for h in _vhits]
         _vhits = []
+    # §17.1981 — a check that walks a tree with no path (`du -sh`, `find -name x`, `grep -rn X`) walks the runner's cwd,
+    # `/`. Live (job 0fb4ea7f CL1): "Done when it prints the `du -sh` lines" reached the checks; it ran bare on the host
+    # and walked the whole root filesystem (`du: cannot access './proc/…'`).
+    from app.modules.operator_steps import walks_the_cwd
+    _walkers = [v for v in verify if walks_the_cwd(_unwrap_check(str(v)))]
+    if _walkers:
+        verify = [v for v in verify if v not in _walkers]
+        _vdrops = list(_vdrops) + [{"why": f"dropped the check `{w[:120]}` -- it names no path, so it would walk the "
+                                           f"runner's working directory `/`, the whole root filesystem"}
+                                   for w in _walkers]
     # §17.1548 — a check that curls a service the engine holds a login for presents it
     # as HTTP Basic auth, the password fed to the guest on stdin as the runner-resolved
     # placeholder. BEFORE inputs_for, so the `<SECRET>` it inserts is picked up as a
@@ -7562,7 +7957,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _pre = list(preconditions or [])
     if _ns_notes:
         _pre = [p for p in _pre if "cannot resolve names" not in str((p or {}).get("why") or "")]
-    refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars   # §17.1213, §17.1332, §17.1346
+    refused = list(refused) + _pre + _mv_asked + _svc_refused + _empty_vars + _sh_refused   # §17.1213, §17.1332, §17.1346, §17.1982
     refused = refused + [{"command": h["command"], "why": h["why"]} for h in _made]   # §17.1968
     # §17.1312 — the drafter said the template's content was cut twice; the frame says it
     # too, as a refusal, so Run is withheld and the redraft chain carries the reason.
@@ -9666,6 +10061,102 @@ def lookups_as_programs(commands: list[str], verify: list[str]) -> tuple[list[st
             "can run, so the lookup is `which` -- the form you approve is the one signed and sent "
             "(§17.1475, §17.1973).")})
     return out_cmds, out_verify, notes
+
+
+#: §17.1982 — the refusal's marker (registered in `_SHAPE_REFUSALS`, a drafter gap)
+_BASH_ONLY = "uses bash-only syntax"
+
+
+def _bash_for_sh(body: str, files: dict) -> tuple[str, list[str], list[dict]]:
+    """§17.1982 — one command line (or one written file's content): every program it hands to `sh`/`dash` that
+    uses bash-only syntax is run with `bash` instead where the engine can say bash is there, and refused otherwise.
+    Returns ``(the text, the constructs repaired, the refusals)``."""
+    from app.modules.shell_ast import bash_only_constructs, sh_programs
+    hits = [(p, bash_only_constructs(p.program)) for p in sh_programs(body, files)]
+    hits = [(p, found) for p, found in hits if found]
+    if not hits:
+        return body, [], []
+    raw, fixed, refused = body.encode("utf-8"), [], []
+    for p, found in sorted(hits, key=lambda h: -h[0].start):
+        what = ", ".join(found)
+        if p.start >= 0 and not p.in_image:
+            raw = raw[:p.start] + ("/bin/bash" if "/" in p.shell else "bash").encode() + raw[p.end:]
+            fixed.extend(f for f in found if f not in fixed)
+            continue
+        where = (" inside a container image, whose shell the engine does not know (an Alpine image has no bash at all)"
+                 if p.in_image else " inside a quoted remote command, which the engine does not rewrite")
+        refused.append({"command": body[:200], "why": (
+            f"this program {_BASH_ONLY} ({what}), and it is handed to `{p.shell}`{where}. On Debian and Ubuntu `sh` "
+            f"is dash, and dash parses the whole program first and stops at the first of these with a syntax error, so "
+            f"not a line of it runs. Run it with `bash -c '…'` where the machine has bash, or write it in plain POSIX "
+            f"sh: a temporary file or a pipe instead of `<(…)`, `[ … ]` instead of `[[ … ]]`, `>FILE 2>&1` instead "
+            f"of `&>`.")})
+    out = raw.decode("utf-8")
+    # the repair is believed only once the rule agrees: re-asked, a program it claimed still under `sh` keeps its refusal
+    if fixed and any(bash_only_constructs(p.program) and p.start >= 0 and not p.in_image
+                     for p in sh_programs(out, files)):
+        logger.warning("bash_for_sh_did_not_close_it body=%r", body[:120])
+        return body, [], refused + [{"command": body[:200], "why": (
+            f"this program {_BASH_ONLY} ({', '.join(fixed)}), and it is handed to `sh`, which on Debian and Ubuntu "
+            f"is dash and stops at it before running a line. Run it with `bash -c '…'`.")}]
+    return out, fixed, refused
+
+
+def bash_programs_handed_to_sh(commands: list[str], verify: list[str], files: list[dict]
+                               ) -> tuple[list[str], list[str], list[dict], list[dict], list[dict]]:
+    """§17.1982 — a program handed to a POSIX `sh` (`sh -c '…'`, `sh -s <<EOF`, `sh FILE`, on the host, through
+    `pct exec` / `qm guest exec` / `sudo`, or in a written file) that uses bash-only syntax runs with `bash`.
+
+    Live (job 0fb4ea7f CL3, 2026-11-21, frame 6de9e152c92bd675): `qm guest exec 106 --timeout 30 -- sh -c '… cmp -s
+    <(sed -e "\\$a\\\\" "$A") "$B" …'`. VM 106's `sh` is dash: `Syntax error: "(" unexpected`, the whole program dies
+    unparsed, and the guarded `rm` the step exists for could never run. Nothing refused it: every gate judged the
+    OUTER command, and the outer command is fine.
+
+    Why a repair and not a refusal: the program cannot run under dash at all, and bash runs it as written -- the
+    drafter wrote bash. Bash is there wherever the engine runs this: the Proxmox host is Debian, and the engine's own
+    in-guest templates already run `pct exec N -- bash -c` / `qm guest exec N -- bash -c` in every guest
+    (`runbook_templates`), so the repair assumes nothing the engine does not already depend on. A container IMAGE
+    (`docker exec`) is the exception -- busybox `sh`, often no bash -- and a `sh` inside a quoted ssh command is a word
+    the engine does not rewrite; both are refused with the remedy (a drafter gap).
+
+    Returns ``(commands, verify, files, notes, refusals)``; every repair is said on the frame (`engine_fixed`)."""
+    by_path = {str((f or {}).get("path") or ""): str((f or {}).get("content") or "") for f in files or []}
+    fixed: list[str] = []
+    changed: list[str] = []
+    refused: list[dict] = []
+
+    def fix(seq: list[str]) -> list[str]:
+        out = []
+        for c in seq or []:
+            new, found, ref = _bash_for_sh(str(c), by_path)
+            refused.extend(ref)
+            if new != str(c):
+                changed.append(str(c))
+                fixed.extend(f for f in found if f not in fixed)
+            out.append(new if new != str(c) else c)
+        return out
+
+    out_cmds, out_verify = fix(commands), fix(verify)
+    out_files = []
+    for f in files or []:
+        body = str((f or {}).get("content") or "")
+        new, found, ref = _bash_for_sh(body, by_path)
+        refused.extend({**r, "command": f"{f.get('path')}: {r['command'][:160]}"} for r in ref)
+        if new != body:
+            changed.append(f"the file {f.get('path')}")
+            fixed.extend(x for x in found if x not in fixed)
+            f = {**f, "content": new}
+        out_files.append(f)
+    notes: list[dict] = []
+    if changed:
+        more = f" (and {len(changed) - 1} more)" if len(changed) > 1 else ""
+        notes.append({"why": (
+            f"`{changed[0][:80]}`{more}: a program handed to `sh` uses bash-only syntax ({', '.join(fixed)}). On "
+            "Debian and Ubuntu `sh` is dash, which stops at it with a syntax error before running a line, so the "
+            "engine runs that program with `bash` -- the shell its own templates use in every guest. Nothing else "
+            "was changed (§17.1982).")})
+        logger.warning("bash_for_sh_repaired count=%d first=%r", len(changed), changed[0][:120])
+    return out_cmds, out_verify, out_files, notes, refused
 
 
 def repair_empty_body_test_call(commands: list[str], verify: list[str]) -> tuple[list[str], list[str], list[dict]]:

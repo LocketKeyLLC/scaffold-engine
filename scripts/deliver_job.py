@@ -11,6 +11,7 @@ operator's (or their agent's), and the review is theirs. The API key is read fro
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,14 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_SAFE = re.compile(r"^(?:app/modules/[a-z_][a-z0-9_]*\.py|tests/test_[a-z0-9_]+\.py|alembic/versions/\w+\.py)$")
+_SAFE = re.compile(r"^(?:app/modules/[a-z_][a-z0-9_]*\.py|tests/test_[a-z0-9_]+\.py|alembic/versions/\w+\.py"
+                   # §17.1985 — a static file beside the code: a page template, the lab's own asset, its vendor manifest
+                   r"|app/(?:static|templates)/[a-z][a-z0-9_]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:html|css|js|json|svg))$")
+#: §17.1985 — `app/static/<lab>/vendor.json`: {"chart.umd.min.js": "https://…/chart.js@4.5.1/dist/chart.umd.min.js"}
+_VENDOR_MANIFEST = re.compile(r"^app/static/([a-z][a-z0-9_]*)/vendor\.json$")
+_VENDOR_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:js|css|json|svg|woff2?|map)$")
+#: a pinned release: `@4.5.1`, `/4.5.1/`, `-4.5.1.`, `v4.5.1` -- a floating `@latest` would change under the review
+_PINNED = re.compile(r"[@/v-]\d+\.\d+\.\d+(?:[-+][\w.]+)?(?=[/.]|$)")
 
 
 def _key() -> str:
@@ -85,6 +93,26 @@ def lab_dir(modules: list[str], lab: str | None) -> str:
     return re.sub(r"[^a-z0-9_]", "_", (lab or "lab").lower())
 
 
+def vendored(manifest_path: str, content: str) -> list[tuple[str, str]]:
+    """§17.1985 — what a lab's vendor manifest asks for: (destination, url) per third-party file, each at a pinned
+    https release, written under `app/static/<lab>/vendor/`. The job's step cannot write a minified library; it names
+    the file, and the delivery fetches it for the review. Raises ValueError on a name, URL or version it refuses."""
+    m = _VENDOR_MANIFEST.match(manifest_path)
+    if not m:
+        return []
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError(f"{manifest_path}: not an object of file name -> URL")
+    out: list[tuple[str, str]] = []
+    for name, url in data.items():
+        if not _VENDOR_NAME.match(str(name)):
+            raise ValueError(f"{manifest_path}: refusing file name {name!r}")
+        if not isinstance(url, str) or not url.startswith("https://") or not _PINNED.search(url):
+            raise ValueError(f"{manifest_path}: {name}: {url!r} is not an https URL of a pinned release")
+        out.append((f"app/static/{m.group(1)}/vendor/{name}", url))
+    return out
+
+
 def place(path: str, where: str) -> str:
     """Where a delivered file goes: a test under `tests/labs/<lab>/`, anything else at its own path."""
     return f"tests/labs/{where}/{path[len('tests/'):]}" if path.startswith("tests/test_") else path
@@ -108,6 +136,16 @@ def main() -> int:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f["content"])
         print(f"wrote {place(f['path'], where)}  ({f['lines']} lines, step {f['step']})")
+        try:
+            fetches = vendored(f["path"], f["content"])
+        except ValueError as exc:
+            sys.exit(f"refusing the vendor manifest: {exc}")
+        for to, url in fetches:                           # §17.1985 — fetched once, here, for the review to read
+            with urllib.request.urlopen(url, timeout=120) as v:
+                body = v.read()
+            (ROOT / to).parent.mkdir(parents=True, exist_ok=True)
+            (ROOT / to).write_bytes(body)
+            print(f"vendored {to}  ({len(body)} bytes, sha256 {hashlib.sha256(body).hexdigest()}) from {url}")
     if any(f["path"].startswith("tests/test_") for f in out["files"]):
         for pkg in (ROOT / "tests" / "labs", ROOT / "tests" / "labs" / where):
             (pkg / "__init__.py").touch()

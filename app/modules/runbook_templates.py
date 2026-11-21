@@ -1483,6 +1483,7 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
     from app import model_router                    # §17.1290b — live: importing it from app.modules was an ImportError
     from app.config import settings
     from app.utils.llm_retry import generate_until_nonempty
+    from app.utils.cut_reply import reply_was_cut
     # §17.1306 — the model path's prompt carries the upstream outputs and the
     # facts; the template draw carried neither, so ADD88's "Caddyfile with the
     # 17-line content … five handle_path blocks" came back as a stub with
@@ -1528,7 +1529,9 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                 draws=2, label=f"template {template.name} {node.get('node_key')} {p.name}",
             )
             text = (getattr(resp, "text", "") or "").strip()
-            if not content_is_cut(text):
+            # §17.1986 — the provider's own stop reason too: a script that stopped at its limit is cut whether or
+            # not its fence happens to balance
+            if not content_is_cut(text) and not reply_was_cut(resp, cap):
                 break
             logger.warning("template_param_cut template=%s node=%s param=%s cap=%d chars=%d", template.name,
                            node.get("node_key"), p.name, cap, len(text))
@@ -1552,7 +1555,8 @@ async def fill_free_params(template: Template, node: dict, brief_text: str, upst
                     {"role": "model_general", "think": False}, system=FREE_PARAM_SYSTEM_VERIFY, temperature=0.1,
                     max_tokens=base_cap, draws=2, label=f"template {template.name} {node.get('node_key')} {p.name} redraw")
                 check2 = strip_guest_wrappers(model_fence((getattr(resp2, "text", "") or "").strip())).split("\n", 1)[0].strip()
-                if check2 and not check_looks_where_the_work_went(out.get("REMOTE_COMMANDS", ""), check2):
+                if check2 and not reply_was_cut(resp2, base_cap) and not check_looks_where_the_work_went(  # §17.1986
+                        out.get("REMOTE_COMMANDS", ""), check2):
                     check = check2
             # §17.1496 — the slot is `bash -c "…"` on the HOST, and the model's check went in RAW:
             # `grep -q "ListenPort = 51820" wg0.conf` word-split into `bash -c "grep -q ListenPort"

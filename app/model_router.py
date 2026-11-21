@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from app.config import settings
+from app.utils import cut_reply as _cut_reply
 from app.utils import think_policy as _think_policy
 from app.providers.base import ModelResponse, Tool, ToolCall
 
@@ -656,6 +657,7 @@ async def generate(
     fallback: str | None = None,
     think: bool | None = None,
     response_schema: dict | str | None = None,
+    whole: bool = False,
 ) -> ModelResponse:
     """Generate text. ``role=`` routes via the provider abstraction.
 
@@ -675,7 +677,20 @@ async def generate(
     enforces it (OpenAI/Anthropic; Ollama via ``structured_outputs_ollama_enabled``)
     — otherwise dropped, byte-identical to the legacy path. See
     ``_effective_response_schema``.
+
+    §17.1986 — ``whole=True``: the reply is only usable whole (JSON parsed from text, code, a script). One that
+    stopped at its token limit is redrawn once at a larger budget and, still cut, refused (``success=False``) —
+    see ``_whole_reply``.
     """
+    if whole:
+        return await _whole_reply(
+            lambda budget: generate(
+                prompt, model=model, role=role, overrides=overrides, system=system,
+                temperature=temperature, max_tokens=budget, fallback=fallback, think=think,
+                response_schema=response_schema,
+            ),
+            max_tokens, where="generate", who=role or model or settings.model_general,
+        )
     _reject_role_model_collision(role, model)
     _begin_trace(
         "generate", prompt=prompt, system=system,
@@ -720,6 +735,32 @@ async def generate(
     return await _record_call(resp)
 
 
+async def _whole_reply(draw, budget: int, *, where: str, who: str) -> ModelResponse:
+    """§17.1986 — one draw of a reply that is only usable whole. Cut at its limit (``cut_reply.reply_was_cut``),
+    it is redrawn once at ``cut_reply.redraw_budget``; still cut, it is refused: ``success=False``, an error that
+    says so, and ``raw["cut_at"]`` the budget it stopped at (``cut_reply.cut_at``). The text stays for a caller
+    that reports what was cut; it is never handed on as a success."""
+    resp = await draw(budget)
+    if not resp.success or not _cut_reply.reply_was_cut(resp, budget):
+        return resp
+    bigger = _cut_reply.redraw_budget(budget, getattr(resp, "tokens_completion", None),
+                                      settings.cut_reply_redraw_max_tokens)
+    if bigger > budget:
+        logger.warning("whole_reply_cut_redraw: where=%s model/role=%s budget=%d->%d chars=%d (§17.1986)",
+                       where, who, budget, bigger, len(resp.text or ""))
+        resp, budget = await draw(bigger), bigger
+        if not resp.success or not _cut_reply.reply_was_cut(resp, budget):
+            return resp
+    logger.error("whole_reply_cut_refused: where=%s model/role=%s stopped at its %d-token limit, chars=%d — "
+                 "refused, never used cut (§17.1986)", where, who, budget, len(resp.text or ""))
+    resp.success = False
+    resp.error = (f"the reply stopped at its {budget}-token limit and is incomplete — refused rather than used "
+                  f"cut (§17.1986)")
+    if isinstance(resp.raw, dict):
+        resp.raw["cut_at"] = budget
+    return resp
+
+
 async def generate_json(
     prompt: str,
     schema: dict,
@@ -747,17 +788,48 @@ async def generate_json(
     ``as_array=True``) or ``None`` on empty/unparseable output; ``resp`` is the
     full :class:`ModelResponse` so callers keep telemetry, error text, and the
     redraw-on-empty signal they had with the two-call pattern.
+
+    §17.1986 — a reply that stopped at its token limit is redrawn once at a larger budget; still cut, its
+    incomplete trailing list item is dropped, or ``parsed`` is ``None`` (logged) when the cut fell in a scalar —
+    never the object json_repair closes around a stump. See ``app.utils.cut_reply``.
     """
-    resp = await generate(
-        prompt, model=model, role=role, overrides=overrides,
-        system=system, temperature=temperature, max_tokens=max_tokens,
-        fallback=fallback, think=think, response_schema=schema,
+    async def _draw(budget: int):
+        r = await generate(
+            prompt, model=model, role=role, overrides=overrides,
+            system=system, temperature=temperature, max_tokens=budget,
+            fallback=fallback, think=think, response_schema=schema,
+        )
+        if not r.success:
+            return None, r
+        text = r.text or ""
+        return (parse_json_array(text) if as_array else parse_json_object(text)), r
+
+    parsed, resp = await _draw(max_tokens)
+    if parsed is None or not _cut_reply.reply_was_cut(resp, max_tokens):
+        return parsed, resp
+    who = role or model or settings.model_general
+    bigger = _cut_reply.redraw_budget(max_tokens, getattr(resp, "tokens_completion", None),
+                                      settings.cut_reply_redraw_max_tokens)
+    if bigger > max_tokens:
+        logger.warning(
+            "structured_reply_cut_redraw: where=generate_json model/role=%s budget=%d->%d (§17.1986)",
+            who, max_tokens, bigger,
+        )
+        parsed, resp = await _draw(bigger)
+        if parsed is None or not _cut_reply.reply_was_cut(resp, bigger):
+            return parsed, resp
+    settled, dropped = _cut_reply.drop_cut_tail(parsed)
+    if settled is not None:
+        logger.warning(
+            "structured_reply_cut_tail_dropped: where=generate_json model/role=%s dropped=%r (§17.1986)",
+            who, str(dropped)[:160],
+        )
+        return settled, resp
+    logger.error(
+        "structured_reply_cut_refused: where=generate_json model/role=%s — the reply stopped at its token limit "
+        "inside a value, nothing whole to keep (§17.1986)", who,
     )
-    if not resp.success:
-        return None, resp
-    text = resp.text or ""
-    parsed = parse_json_array(text) if as_array else parse_json_object(text)
-    return parsed, resp
+    return None, resp
 
 
 async def chat(
@@ -771,6 +843,7 @@ async def chat(
     fallback: str | None = None,
     think: bool | None = None,
     response_schema: dict | str | None = None,
+    whole: bool = False,
 ) -> ModelResponse:
     """Chat completion. ``role=`` routes via the provider abstraction.
 
@@ -782,7 +855,17 @@ async def chat(
     §17.773 — ``response_schema`` requests grammar-constrained decoding; see
     ``generate`` for semantics. Provider-aware gate: applied only when the master
     valve is on AND the resolved provider enforces schemas.
+
+    §17.1986 — ``whole=True``: see ``generate``.
     """
+    if whole:
+        return await _whole_reply(
+            lambda budget: chat(
+                messages, model=model, role=role, overrides=overrides, temperature=temperature,
+                max_tokens=budget, fallback=fallback, think=think, response_schema=response_schema,
+            ),
+            max_tokens, where="chat", who=role or model or settings.model_general,
+        )
     _reject_role_model_collision(role, model)
     _begin_trace(
         "chat", messages=messages,
@@ -833,8 +916,12 @@ async def stream_chat(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    stop_info: dict | None = None,
 ):
     """Role-routed streaming chat — yields content-delta ``str`` chunks.
+
+    §17.1986b — ``stop_info``: filled by the provider with the stream's final stop reason (``done_reason``,
+    ``eval_count``); see ``LLMProvider.stream_chat``.
 
     Delegates to the resolved provider's ``stream_chat`` (the unified Sprint I.1
     contract: content-only, reasoning/thinking deltas filtered). First real
@@ -852,6 +939,7 @@ async def stream_chat(
         provider = get_provider(settings.model_general_provider)
     async for chunk in provider.stream_chat(
         resolved_model, messages, temperature=temperature, max_tokens=max_tokens,
+        **({"stop_info": stop_info} if stop_info is not None else {}),
     ):
         yield chunk
 
@@ -955,7 +1043,83 @@ async def tool_call(
     (``success=False``) and the empty-``tools`` no-op path return immediately;
     pass ``draws=1`` to opt out (e.g. a router-style call where "no tool" is a
     valid answer).
+
+    §17.1986 — a draw whose arguments were read out of reply TEXT and whose reply stopped at its token limit is
+    redrawn once at a larger budget (``cut_reply_redraw_max_tokens`` caps it); still cut, the cap's
+    incomplete trailing list item is dropped, or the reply is refused (``success=False``) when the cut fell in a
+    scalar. See ``app.utils.cut_reply``.
     """
+    route = dict(model=model, role=role, overrides=overrides, temperature=temperature,
+                 tool_choice=tool_choice, fallback=fallback, draws=draws,
+                 require_nonempty=require_nonempty, think=think)
+    resp = await _tool_call_draws(messages, tools, max_tokens=max_tokens, **route)
+    if not _cut_structured(resp, max_tokens):
+        return resp
+    who = role or model or settings.model_general
+    bigger = _cut_reply.redraw_budget(max_tokens, getattr(resp, "tokens_completion", None),
+                                      settings.cut_reply_redraw_max_tokens)
+    if bigger > max_tokens:
+        logger.warning(
+            "structured_reply_cut_redraw: where=tool_call tool=%s model/role=%s budget=%d->%d (§17.1986) %s",
+            resp.tool_calls[0].name, who, max_tokens, bigger, _empty_draw_diag(resp),
+        )
+        resp = await _tool_call_draws(messages, tools, max_tokens=bigger, **route)
+        if not _cut_structured(resp, bigger):
+            return resp
+    return _settle_cut_tool_call(resp, who=who)
+
+
+def _cut_structured(resp, budget: int) -> bool:
+    """§17.1986 — a successful draw whose tool arguments were read from reply text that stopped at its limit."""
+    calls = getattr(resp, "tool_calls", None) or []
+    return bool(
+        getattr(resp, "success", False) and calls
+        and getattr(calls[0], "id", None) in _cut_reply.TEXT_READ_CALL_IDS
+        and isinstance(getattr(calls[0], "arguments", None), dict)
+        and _cut_reply.reply_was_cut(resp, budget)
+    )
+
+
+def _settle_cut_tool_call(resp, *, who: str) -> ModelResponse:
+    """§17.1986 — a reply still cut after its redraw: keep what was written whole, never the stump."""
+    call = resp.tool_calls[0]
+    settled, dropped = _cut_reply.drop_cut_tail(call.arguments)
+    if settled is not None:
+        logger.warning(
+            "structured_reply_cut_tail_dropped: where=tool_call tool=%s model/role=%s dropped=%r (§17.1986)",
+            call.name, who, str(dropped)[:160],
+        )
+        resp.tool_calls = [ToolCall(id=call.id, name=call.name, arguments=settled)] + list(resp.tool_calls[1:])
+        return resp
+    logger.error(
+        "structured_reply_cut_refused: where=tool_call tool=%s model/role=%s — the reply stopped at its token "
+        "limit inside a value, nothing whole to keep (§17.1986) %s", call.name, who, _empty_draw_diag(resp),
+    )
+    resp.success = False
+    resp.tool_calls = []
+    resp.error = (
+        f"structured reply for {call.name!r} was cut at its token limit (done_reason=length) and redrawn, "
+        f"still cut — refused rather than repaired into a stump (§17.1986)"
+    )
+    return resp
+
+
+async def _tool_call_draws(
+    messages: list[dict[str, str]],
+    tools: list[Tool],
+    model: str | None = None,
+    *,
+    role: str | None,
+    overrides: dict | None,
+    temperature: float,
+    max_tokens: int,
+    tool_choice: str,
+    fallback: str | None,
+    draws: int,
+    require_nonempty: str | None,
+    think: bool | None,
+) -> ModelResponse:
+    """The §17.583 draw loop of ``tool_call`` at one budget (see its docstring)."""
     resp = None
     attempts = max(1, draws)
     # §17.1056 — a caller may switch reasoning off from the FIRST draw (a

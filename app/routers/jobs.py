@@ -206,16 +206,23 @@ async def job_code_endpoint(
     ``scripts/deliver_job.py`` writes these onto a branch. 409 for a job that does not write code for the engine."""
     from app.modules import engine_plan, engine_source
     await assert_visible(db, principal, str(job_id), detail=f"Job {job_id} not found")
-    brief = (await db.execute(text("SELECT refined_brief FROM jobs WHERE id = :j"), {"j": str(job_id)})).scalar()
+    job = (await db.execute(text("SELECT refined_brief, input_text FROM jobs WHERE id = :j"),
+                            {"j": str(job_id)})).mappings().first() or {}
+    brief = job.get("refined_brief")
     brief = json.loads(brief) if isinstance(brief, str) else brief
-    if not engine_source.targets_the_engine(brief if isinstance(brief, dict) else {}):
+    # §17.1985 — read as the planner and the executor read it: the operator's words decide an unstamped brief
+    brief = engine_source.brief_for_the_engine(brief if isinstance(brief, dict) else {}, job.get("input_text"))
+    if not engine_source.targets_the_engine(brief):
         raise HTTPException(status_code=409, detail="this job does not write code for the engine")
-    files = engine_source.job_files(await engine_source.code_rows(db, str(job_id)))
+    rows = await engine_source.code_rows(db, str(job_id))
+    files = engine_source.job_files(rows)
     wiring = [p.rsplit("/", 1)[1][:-3] for p, (code, _k) in files.items()
               if p.startswith("app/modules/") and re.search(r"^def install\(", code, re.M)]
+    # §17.1985 — and the static files beside the code (a page template, the lab's assets, its vendor manifest)
+    static = engine_source.job_static_files(rows)
     return {"job_id": str(job_id),
             "files": [{"path": p, "step": k, "lines": code.count("\n"), **({"content": code} if content else {})}
-                      for p, (code, k) in files.items()],
+                      for p, (code, k) in {**files, **static}.items()],
             "tables": engine_plan.job_tables(files), "secrets": engine_plan.secrets_the_code_reads(files),
             "wiring": wiring}
 

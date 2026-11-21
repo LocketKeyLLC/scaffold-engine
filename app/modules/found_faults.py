@@ -24,9 +24,17 @@ Narrow on purpose, so no real failure passes as a finding:
 - nothing in the run may show the test's own tooling breaking (command not found, a syntax error, a missing module,
   permission denied, a refused credential), and a run the engine already distrusts (a dropped response, a refusal, a cut
   script, a repeated failure, checks that printed nothing, a missing "Done when" print) is never rescued here.
+
+§17.1980 — a probe that ran in a VM through `qm guest exec` is judged like any other. The host exits 0 and answers JSON,
+and the guest's exit and output are inside it. Live (same job, ADD6 "exercise the Palworld settings control"): GET, PUT
+and GET answered 200, then `qm guest exec 106 -- cmp <settings> <its copy>` answered `"exitcode" : 1`, `cmp: EOF on …
+after byte 3636`. The panel's save had dropped the file's last newline, and nothing read that as a fault, so the step
+stayed failed. A comparison (`cmp`/`diff`) exiting 1 is a difference found, and 0 is a match. One that differs right
+after the step's OWN copy of the same file is the test's tooling failing, and it never counts as a finding.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
@@ -65,7 +73,8 @@ _BROKE_RE = re.compile(
     r"Executable doesn't exist|browserType\.launch|Traceback \(most recent call last\)|"
     r"\b[Pp]ermission denied\b|Operation not permitted|Could not resolve host|"
     r"returned error: 40[137]\b|\bUsage: |\b(?:TypeError|ReferenceError|SyntaxError|Uncaught)\b|"
-    r"^\s+at .+:\d+:\d+\)?$", re.I | re.M)
+    r"^\s+at .+:\d+:\d+\)?$|"
+    r"QEMU guest agent is not running|guest-exec\b[^\n]{0,80}\bfailed|\bAgent error\b|\bVM \d+ (?:is )?not running", re.I | re.M)
 _FAIL_LINE_RE = re.compile(r"^\s*(?:FAIL(?:ED)?|✗|❌)\b.*$", re.M)
 _PASS_LINE_RE = re.compile(r"^\s*(?:PASS(?:ED)?|OK|✓|✅)\b", re.M)
 #: "=== 10 of 12 sections passed ===", "3/5 passed"
@@ -81,6 +90,51 @@ _FAILS_ON_HTTP_RE = re.compile(r"--fail(?:-with-body)?\b|\s-[a-zA-Z]*f[a-zA-Z]*\
 _REPORTING_EXITS = {1, 22, 28}
 
 
+#: §17.1980 — `qm guest exec <vmid> -- <cmd>` exits 0 on the host and answers JSON; the guest's own exit and output are
+#: inside it (`"exitcode" : 1`, `"out-data"`, `"err-data"`)
+_GUEST_EXEC_RE = re.compile(r"(?<![\w./-])qm\s+guest\s+exec\s+\d+\s+(?:--\s+)?")
+#: a comparison: exit 1 says the two differ (a finding), 0 says they match; anything else is the tool's own trouble
+_COMPARE_RE = re.compile(r"^\s*(?:sudo\s+)?(?:cmp|diff)\b")
+
+
+def _in_the_guest(e: dict) -> dict:
+    """§17.1980 — the guest's own command, exit and output when ``e`` is a `qm guest exec` that ran to the end, so the
+    probe inside is judged like any other; anything else (not that envelope, the agent down, still running) is
+    returned as it is."""
+    cmd = str(e.get("command") or "")
+    m = _GUEST_EXEC_RE.search(cmd)
+    if not m:
+        return e
+    try:
+        d = json.loads(str(e.get("output") or ""))
+    except (ValueError, TypeError):
+        return e
+    if not isinstance(d, dict) or not isinstance(d.get("exitcode"), int) or d.get("exited") in (0, False):
+        return e
+    out = str(d.get("out-data") or "")
+    err = str(d.get("err-data") or "")
+    inner = cmd[m.end():].strip().rstrip("'\"")
+    return {**e, "command": inner, "exit": d["exitcode"],
+            "output": (out.rstrip("\n") + "\n" + err) if out and err else (out or err)}
+
+
+_COPY_RE = re.compile(r"^\s*(?:sudo\s+)?(?:cp|install|rsync|mv|dd|tee)\b")
+_PATH_RE = re.compile(r"(?<![\w:])/[\w./@+-]+")
+
+
+def _checks_its_own_copy(executed: list[dict]) -> bool:
+    """§17.1980 — a comparison that differs right after the step's OWN copy of the same file checks the step's own
+    work: that difference is the test's tooling failing (a copy that did not land), never a finding about the thing
+    under test."""
+    inner = [_in_the_guest(e) for e in executed]
+    for prev, cur in zip(inner, inner[1:], strict=False):
+        c = str(cur.get("command") or "")
+        if _COMPARE_RE.match(c) and cur.get("exit") == 1 and _COPY_RE.match(str(prev.get("command") or "")):
+            if set(_PATH_RE.findall(c)) & set(_PATH_RE.findall(str(prev.get("command") or ""))):
+                return True
+    return False
+
+
 def _judge_code(code: str) -> Optional[bool]:
     """True = the probe passed, False = it found a fault, None = says nothing (401/403 are the test's own access)."""
     c = int(code)
@@ -93,8 +147,14 @@ def _judge_code(code: str) -> Optional[bool]:
 
 def _probe(e: dict) -> tuple[list[str], list[str]]:
     """What one command shows: ``(passes, faults)``, each a short line."""
+    e = _in_the_guest(e)
     cmd, out = str(e.get("command") or ""), str(e.get("output") or "")
     passes, faults = [], []
+    if _COMPARE_RE.match(cmd) and e.get("exit") in (0, 1):
+        if e["exit"] == 1:
+            faults.append(f"`{cmd[:100]}` found a difference: {out.strip()[-160:]}")
+        else:
+            passes.append(f"`{cmd[:100]}` matched")
     for m in _FAIL_LINE_RE.finditer(out):
         faults.append(m.group(0).strip()[:200])
     passes += [m.group(0).strip() for m in _PASS_LINE_RE.finditer(out)]
@@ -140,7 +200,10 @@ def findings_of_a_run(node: Optional[dict], executed: list[dict], refuted: Optio
         return "", ""
     if any(e.get("refused") or e.get("unreachable") for e in executed):
         return "", ""
-    if any(_BROKE_RE.search(str(e.get("output") or "")) for e in executed):
+    if any(_BROKE_RE.search(str(e.get("output") or "")) or _BROKE_RE.search(str(_in_the_guest(e).get("output") or ""))
+           for e in executed):
+        return "", ""
+    if _checks_its_own_copy(executed):
         return "", ""
     # a check that printed nothing (§17.1738) or a "Done when" print that never came (§17.1630) is not a finding:
     # nothing was read, so nothing was found

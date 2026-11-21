@@ -309,7 +309,7 @@ async def test_extract_spec_uses_default_role_from_settings(monkeypatch):
     from app.config import settings as live_settings
     captured_role: dict[str, str] = {}
 
-    async def fake_chat(messages, *, role, temperature, max_tokens):
+    async def fake_chat(messages, *, role, temperature, max_tokens, whole=False):  # §17.1986b
         captured_role["role"] = role
         return _llm_response(json.dumps({"spec": _VALID_SPEC}))
 
@@ -325,7 +325,7 @@ async def test_extract_spec_uses_default_role_from_settings(monkeypatch):
 async def test_extract_spec_explicit_role_overrides_settings(monkeypatch):
     captured_role: dict[str, str] = {}
 
-    async def fake_chat(messages, *, role, temperature, max_tokens):
+    async def fake_chat(messages, *, role, temperature, max_tokens, whole=False):  # §17.1986b
         captured_role["role"] = role
         return _llm_response(json.dumps({"spec": _VALID_SPEC}))
 

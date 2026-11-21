@@ -227,9 +227,14 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         timeout: int = 600,
+        stop_info: dict | None = None,
         **opts: Any,
     ) -> AsyncIterator[str]:
         """Yield chunks of generated text as they arrive.
+
+        §17.1986b — ``stop_info``: a dict the provider fills, when the stream ends, with the stop reason its
+        final frame carries (``done_reason`` and ``eval_count``, under Ollama's own names), so a caller can tell a
+        stream that stopped at its token limit from one that ended. The yielded chunks stay content-only.
 
         Default implementation raises ``ProviderCapabilityError`` —
         providers that support streaming override this.

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -142,8 +143,97 @@ def checks(node: Optional[dict]) -> list[str]:
     if not clause.strip():
         return []
     from app.modules.assist_state_check import read_only_command
+    own = [c.strip() for c in _BACKTICK_RE.findall(body) if _looks_like_command(c)]
     return [c.strip() for c in dict.fromkeys(_BACKTICK_RE.findall(clause))
-            if _looks_like_command(c) and read_only_command(c.strip())]
+            if _looks_like_command(c) and read_only_command(c.strip())
+            and not names_an_own_commands_output(c.strip(), own) and not walks_the_cwd(c.strip())]   # §17.1981
+
+
+#: §17.1981 — the programs that walk a tree, and so read the WHOLE cwd (`/` on the runner) when given no path
+_WALKER_RE = re.compile(r"^(?:du|find|tree|ls|grep|egrep|fgrep|rg)$")
+
+
+def _words(seg: str) -> list[str]:
+    try:
+        return shlex.split(str(seg or ""))
+    except ValueError:
+        return str(seg or "").split()
+
+
+def _own_segments(cmd: str) -> list[str]:
+    """The simple commands of a line, split at `;` `&&` `||` `|` and newlines OUTSIDE quotes (a grep's `'a|b'` is one)."""
+    out, cur, quote, s, i = [], [], "", str(cmd or ""), 0
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "\\" and i + 1 < len(s):
+            cur.append(s[i:i + 2])
+            i += 2
+            continue
+        elif ch in ";|\n" or s.startswith("&&", i):
+            out.append("".join(cur))
+            cur = []
+            i += 2 if s.startswith(("&&", "||"), i) else 1
+            continue
+        cur.append(ch)
+        i += 1
+    out.append("".join(cur))
+    return [p.strip() for p in out if p.strip()]
+
+
+def _operands(words: list[str]) -> list[str]:
+    """The words after the program that are not options (`2>&1`, `>/dev/null` redirections are not operands)."""
+    return [w for w in words[1:] if not w.startswith("-") and not re.match(r"^\d*[<>]", w)]
+
+
+def names_an_own_commands_output(check: str, own: list[str]) -> bool:
+    """§17.1981 — True when a backticked Done-when text only NAMES one of the step's own commands: a strict prefix of it
+    (`du -sh` of `du -sh /opt/x/* 2>&1`), or its program with no operand where the step's command has operands. It
+    says whose output proves the step; it is not a command of its own.
+
+    Live (job 0fb4ea7f CL1 "Proxmox host: read the Playwright browsers", 2026-11-21): "Done when it prints the `du -sh`
+    lines." became a check; it ran bare on the host with cwd / and walked the whole root filesystem."""
+    cw = _words(check)
+    if not cw or len(_own_segments(check)) != 1:
+        return False
+    for cmd in own:
+        if cmd.strip() == check.strip():
+            continue
+        for seg in _own_segments(cmd):
+            sw = _words(seg)
+            if len(cw) < len(sw) and sw[:len(cw)] == cw:
+                return True
+            if sw and sw[0] == cw[0] and not _operands(cw) and _operands(sw):
+                return True
+    return False
+
+
+def walks_the_cwd(check: str) -> bool:
+    """§17.1981 — True when the check is a tree-walker (`du`, `find`, `ls -R`, `grep -r` …) given no path: run by the
+    runner, whose cwd is `/`, it reads the whole root filesystem (`du: cannot access './proc/…'`)."""
+    segs = _own_segments(check)
+    if any(re.match(r"^(?:cd|pushd)\s", seg) for seg in segs):       # it says where it walks
+        return False
+    for seg in segs:
+        w = _words(seg)
+        if not w or not _WALKER_RE.match(w[0]):
+            continue
+        ops, flags = _operands(w), " ".join(x for x in w[1:] if x.startswith("-"))
+        if w[0] in ("du", "tree") and not ops:
+            return True
+        if w[0] == "find" and (len(w) == 1 or w[1].startswith(("-", "(", "!"))):
+            return True
+        if w[0] == "ls" and re.search(r"(?:^|\s)-\w*R|--recursive", flags) and not ops:
+            return True
+        if w[0] in ("grep", "egrep", "fgrep") and re.search(r"(?:^|\s)-\w*[rR]|--recursive|--dereference-recursive", flags) \
+                and len(ops) <= max(1, sum(x in ("-e", "--regexp") for x in w)):     # the patterns, no path
+            return True
+        if w[0] == "rg" and len(ops) <= 1:
+            return True
+    return False
 
 
 # §17.1630 — "Done when it prints `A` and `B`": the backticked texts a verb of output names.

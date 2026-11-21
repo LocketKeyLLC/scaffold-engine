@@ -500,6 +500,7 @@ async def _generate_dag_json(
             # thinking off the model emits the JSON directly — the structure is
             # fully specified by DAG_SYSTEM.
             think=False,
+            whole=True,   # §17.1986 — a DAG cut at its limit is refused, never repaired into a shorter one
             **route_kwargs,
         )
         total_ms += getattr(resp, "total_duration_ms", 0) or 0
@@ -2959,6 +2960,7 @@ async def regenerate_subgraph(
             # budget; on a large subgraph it starves this structured regen
             # output. Disable thinking so the whole budget goes to the answer.
             think=False,
+            whole=True,   # §17.1986
             **route_kwargs,
         )
     except Exception as exc:

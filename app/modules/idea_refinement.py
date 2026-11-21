@@ -216,6 +216,35 @@ REFINE_BRIEF_TOOL = Tool(
 # ---------------------------------------------------------------------------
 
 
+#: §17.1984 — the brief's token budget. It was 2048: live (job 69fe61c4, 2026-11-21) the refiner spent all 2048
+#: (completion_tokens = 2048 in llm_traces), the reply stopped inside the fifth ambiguity ("(b) a summary you can
+#: click to"), the JSON repair closed the string, and the operator was handed a question with its options missing.
+#: A brief whose every ambiguity carries 2-4 options with trade-offs (§17.1219) outgrew that budget.
+REFINE_MAX_TOKENS = 6144
+
+
+def draw_was_cut(resp, budget: int) -> bool:
+    """§17.1984 — the reply stopped at the token budget, not at its end: the shared reading (§17.1986
+    `cut_reply.reply_was_cut` -- every provider's stop reason, else a completion count that reached the budget)."""
+    from app.utils.cut_reply import reply_was_cut
+    return reply_was_cut(resp, budget)
+
+
+def drop_cut_tail(brief: dict, job_id) -> None:
+    """§17.1984 — still cut after the redraw: the LAST field the model wrote stops mid-item. Arguments keep the
+    order they were written in, so that item is the last element of the last list field; it is dropped (a question
+    cut before its options cannot be answered, and asking it as written is how the operator got "(b) a summary you
+    can click to"). A cut string field is left: it is still the brief's own words."""
+    try:
+        last = next(reversed(brief)) if brief else None
+        val = brief.get(last) if last else None
+        if isinstance(val, list) and val:
+            gone = val.pop()
+            logger.warning("refine_brief_cut_tail_dropped: job=%s field=%s item=%r", job_id, last, str(gone)[:120])
+    except Exception as exc:                          # noqa: BLE001 — the brief stands without it
+        logger.warning("refine_brief_cut_tail_failed: job=%s err=%r", job_id, exc)
+
+
 def _truncate_title(text_in: str, max_chars: int = 80) -> str:
     """Trim a title to ``max_chars`` at a word boundary, appending an ellipsis.
 
@@ -315,17 +344,27 @@ async def refine_idea(
         {"model": model} if model
         else {"role": "model_general", "overrides": model_overrides}
     )
+    messages = [
+        {"role": "system", "content": REFINE_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
+    budget = REFINE_MAX_TOKENS
     try:
         resp = await model_router.tool_call(
-            messages=[
-                {"role": "system", "content": REFINE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            tools=[REFINE_BRIEF_TOOL],
-            temperature=0.3,
-            max_tokens=2048,
-            **route_kwargs,
+            messages=messages, tools=[REFINE_BRIEF_TOOL], temperature=0.3,
+            max_tokens=budget, **route_kwargs,
         )
+        if draw_was_cut(resp, budget):
+            # §17.1984 — a brief cut at the budget still parses (the reply is repaired into JSON) and loses its
+            # tail without a word; draw once more with room for the whole brief.
+            logger.warning("refine_brief_cut: job=%s budget=%d — redrawing at %d", job_id,
+                           REFINE_MAX_TOKENS, 2 * REFINE_MAX_TOKENS)
+            again = await model_router.tool_call(
+                messages=messages, tools=[REFINE_BRIEF_TOOL], temperature=0.3,
+                max_tokens=2 * REFINE_MAX_TOKENS, **route_kwargs,
+            )
+            if read_tool_args(again) is not None:
+                resp, budget = again, 2 * REFINE_MAX_TOKENS
     except Exception as e:
         await _fail_job(db, job_id, f"LLM refinement exception: {e}")
         raise
@@ -351,6 +390,9 @@ async def refine_idea(
             "error": "LLM did not produce a valid refined brief",
             "raw_output": (resp.text or "")[:500],
         }
+
+    if draw_was_cut(resp, budget):
+        drop_cut_tail(brief, job_id)
 
     # 3b. Override domain if user supplied one
     if domain:
