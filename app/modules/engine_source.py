@@ -1530,6 +1530,55 @@ def module_index() -> dict[str, dict]:
     return out
 
 
+def engine_table_users() -> dict[str, dict]:
+    """§17.1990 — every `app/modules` module by leaf: the tables its SQL writes and reads, and its functions. Over
+    the modules `module_index` has (the engine's tests see it without its delivered labs, §17.1935)."""
+    return dict(_table_users_of(tuple(sorted(m.rsplit(".", 1)[1] for m in module_index()
+                                             if m.startswith("app.modules.") and m.count(".") == 2))))
+
+
+@lru_cache(maxsize=4)
+def _table_users_of(leaves: tuple[str, ...]) -> dict[str, dict]:
+    from app.modules.engine_schema import tables_used
+    out: dict[str, dict] = {}
+    for leaf in leaves:
+        try:
+            code = (ENGINE_PKG / "modules" / f"{leaf}.py").read_text(encoding="utf-8")
+            body = ast.parse(code).body
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        w, r = tables_used(code)
+        out[leaf] = {"writes": w, "reads": r,
+                     "funcs": sorted(n.name for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))}
+    return out
+
+
+def table_users(rows: list[dict] = ()) -> dict[str, dict]:
+    """§17.1990 — `engine_table_users`, with the job's finished modules (`code_rows` rows) as they are now."""
+    from app.modules.engine_schema import tables_used
+    out = dict(engine_table_users())
+    for mod, (_p, code, _k) in current_sources(list(rows)).items():
+        try:
+            body = ast.parse(code).body
+        except SyntaxError:
+            continue
+        w, r = tables_used(code)
+        out[mod] = {"writes": w, "reads": r,
+                    "funcs": sorted(n.name for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))}
+    return out
+
+
+def output_uses(output: str) -> set[str]:
+    """§17.1990 — the `app.modules` leaves an output imports or writes."""
+    out = set(_written_modules(output))
+    for lang, code in extract_code_blocks(output or ""):
+        if lang in PYTHON_LANGS:
+            out |= set(re.findall(r"\bapp\.modules\.(\w+)", code))
+            out |= {a for grp in re.findall(r"from\s+app\.modules\s+import\s+\(?([\w\s,]+)\)?", code)
+                    for a in re.findall(r"\b(\w+)\b(?:\s+as\s+\w+)?", grp) if a != "as"}
+    return out
+
+
 @lru_cache(maxsize=1)
 def settings_fields() -> dict[str, str]:
     """Every field of the engine's `Settings`, with its default -- blank for anything secret-shaped."""
@@ -2570,11 +2619,58 @@ _EXECUTOR_ONLY = frozenset({("app.modules.decision_pause", n)
                             for n in ("park_awaiting_decision", "resolve_decision", "pending_decision")})
 
 
+def rewritten_engine_modules(output: str) -> dict[str, tuple[set[str], list[str]]]:
+    """§17.1990 — each engine module the output rewrites (a block headed `# app/…/x.py` for a module the engine has):
+    dotted name -> (every name the rewrite binds, the ones it defines itself -- functions first)."""
+    index = module_index()
+    out: dict[str, tuple[set[str], list[str]]] = {}
+    for lang, code in extract_code_blocks(output or ""):
+        m = re.match(r"^\s*#\s*(app/(?:[\w]+/)*\w+)\.py\b", code.lstrip().splitlines()[0]) \
+            if lang in PYTHON_LANGS and code.strip() else None
+        if not m or m.group(1).replace("/", ".") not in index:
+            continue
+        names = _module_names(code)
+        if names is None:
+            continue
+        body = ast.parse(code).body
+        fns = [n.name for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        vals = [t.id for n in body if isinstance(n, (ast.Assign, ast.AnnAssign))
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)]
+        out[m.group(1).replace("/", ".")] = (names, fns + [v for v in vals if v not in fns and v != "logger"])
+    return out
+
+
+def module_has(mod: str, name: str) -> str:
+    """§17.1990 — " (it has …)" for a name an engine module lacks: its functions (public first; private ones too
+    when the name asked for is private), then its constants -- and where the name, or the thing it names, is.
+    Live (69fe61c4 T8): `paper_wire_engine_entry_module` was described "(it has install)" -- it also has
+    `_make_router`, `_start_stream_consumer` and five constants -- and `load_audit_trail` was never pointed at
+    `paper_audit_trail_writer`."""
+    index = module_index()
+    info = index.get(mod) or {}
+    fns = sorted(info.get("funcs") or {}, key=lambda f: (f.startswith("_"), f))
+    fns = [f for f in fns if not f.startswith("_") or name.startswith("_")]
+    classes = [p.split()[-1] for p in info.get("public") or [] if p.startswith("class ")]
+    have = fns + classes + list(info.get("values") or [])
+    out = f" (it has {', '.join(have[:16])})" if have else ""
+    owners = sorted(m for m, i in index.items() if m != mod and name in (i.get("funcs") or {}))
+    if owners:
+        return out + f"; `{name}` is in {', '.join('`' + o + '`' for o in owners[:3])}"
+    from app.modules.engine_schema import modules_named_like
+    users = engine_table_users()
+    near = [m for m in modules_named_like(name, users) if f"app.modules.{m}" != mod]
+    if near:
+        out += "; " + "; ".join(f"`app.modules.{m}` has {', '.join([f for f in users[m]['funcs'] if not f.startswith('_')][:8])}"
+                                for m in near[:2])
+    return out
+
+
 def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names: set[str] = frozenset()) -> list[str]:
     """Every engine module, name, settings field or package the output reaches for that does not exist."""
     index = module_index()
     fields = settings_fields()
     found: list[str] = []
+    rewrites = rewritten_engine_modules(output)            # §17.1990
 
     def note(msg: str) -> None:
         if msg not in found:
@@ -2613,11 +2709,19 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                     for al in n.names:
                         if al.name == "*":
                             continue
-                        if (al.name not in index[mod]["names"] and f"{mod}.{al.name}" not in index
+                        if mod in rewrites:
+                            # §17.1990 — the module this output rewrites has what the rewrite defines, not what the
+                            # merged file had. Live (69fe61c4 T8): its tests' `from …paper_wire_engine_entry_module
+                            # import _collect_dashboard_data, load_audit_trail` -- both defined by the rewrite -- were
+                            # refused "has no … (it has install)" against the file being replaced, three attempts
+                            names, defined = rewrites[mod]
+                            if al.name not in names and f"{mod}.{al.name}" not in index and al.name not in sibling_names:
+                                note(f"`from {mod} import {al.name}`: this output's `{mod.replace('.', '/')}.py` defines "
+                                     f"no `{al.name}` (it defines {', '.join(defined[:24])})")
+                        elif (al.name not in index[mod]["names"] and f"{mod}.{al.name}" not in index
                                 and al.name not in sibling_names and al.name not in siblings):
-                            real = ", ".join(p.split("(")[0].split()[-1] for p in index[mod]["public"][:12])
                             note(f"`from {mod} import {al.name}`: `{mod}` has no `{al.name}`"
-                                 + (f" (it has {real})" if real else ""))
+                                 + module_has(mod, al.name))
                         if (mod, al.name) in _EXECUTOR_ONLY:
                             note(f"`from {mod} import {al.name}`: the executor's own half of the decision pause -- "
                                  "code asks the operator with `app.modules.operator_ask` (open_decision_job, "
@@ -2632,7 +2736,7 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
         engine_funcs: dict[str, tuple[str, str]] = {}
         engine_mods: dict[str, str] = {}
         for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module in index:
+            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module in index and n.module not in rewrites:
                 for al in n.names:
                     if al.name in index[n.module].get("funcs", {}):
                         engine_funcs[al.asname or al.name] = (n.module, al.name)
@@ -2640,7 +2744,7 @@ def unresolved_refs(output: str, siblings: set[str] = frozenset(), sibling_names
                         engine_mods[al.asname or al.name] = f"{n.module}.{al.name}"
             elif isinstance(n, ast.Import):
                 for al in n.names:
-                    if al.asname and al.name in index:
+                    if al.asname and al.name in index and al.name not in rewrites:
                         engine_mods[al.asname] = al.name
         if engine_funcs or engine_mods:
             misused = _coroutines_used_as_values(tree, engine_funcs, engine_mods, index)
@@ -3068,7 +3172,8 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     for k, v in jobs_own.items():
         have = tables.get(k)
         tables[k] = v if have is None or v is None else have | v
-    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own), _fks)
+    found += engine_schema.unknown_schema_refs(output, tables, set(jobs_own), _fks,
+                                               users=table_users(_others), using=output_uses(output))   # §17.1990
     found += migration_refs(output, revisions_in_code(others))
     found += placeholder_refs(output)
     found += answers_read_where_asked(output)
@@ -3423,6 +3528,53 @@ def matching_settings(want: set[str], rare: int = 3) -> list[str]:
     return [f for f in fields if any(len(w) >= 6 and df[w] <= rare and w in want for w in f.split("_"))][:20]
 
 
+def subject_modules(text: str, users: dict[str, dict]) -> list[str]:
+    """§17.1990 — the engine modules a step's text names: by name (`paper_operator_view`), or by two of its words in
+    a row ("the audit trail" -> `paper_audit_trail_writer`, "the SPY benchmark" -> `paper_spy_benchmark_tracker`)."""
+    low = (text or "").lower()
+    seq = re.findall(r"[a-z0-9]+", low)
+    pairs = {f"{a} {b}" for a, b in zip(seq, seq[1:], strict=False)}
+    out = []
+    for m in sorted(users):
+        toks = [t for t in m.split("_") if t and t != "paper" and not t.isdigit()]
+        if re.search(rf"(?<![a-z0-9_]){re.escape(m)}(?![a-z0-9_])", low) or \
+                any(f"{a} {b}" in pairs for a, b in zip(toks, toks[1:], strict=False)):
+            out.append(m)
+    return out
+
+
+def _render_engine_tables(node: dict, live: dict, own: str, job_tables: set[str], brief: str = "",
+                          budget: int = 3500) -> str:
+    """§17.1990 — the engine tables the step's subject reads and writes, with their live columns. Live (job 69fe61c4
+    T8, the lab dashboard): the brief named "the full audit trail" and "the SPY benchmark"; the block showed the
+    job's own tables (none -- the job adds no migration) and no engine table, and six drafts invented
+    `paper_audit_trail`, `paper_spy_bars`, `paper_spy_daily`. The lab's tables live in the engine's database, made
+    by the job that built the lab; the modules that write and read them say which they are."""
+    users = engine_table_users()
+    text = " ".join(str(node.get(k) or "") for k in ("title", "description", "prompt_template")) + " " + (brief or "")
+    mods = ([own] if own in users else []) + [m for m in subject_modules(text, users) if m != own]
+    lines, used = [], []
+    for m in mods:
+        u = users[m]
+        w = sorted(t for t in u["writes"] if t in live and t not in job_tables)
+        r = sorted(t for t in u["reads"] if t in live and t not in job_tables and t not in w)
+        if w or r:
+            lines.append(f"    `{m}`" + (f" writes {', '.join(w)}" if w else "") + (" and" if w and r else "")
+                         + (f" reads {', '.join(r)}" if r else ""))
+            used += [t for t in w + r if t not in used]
+        elif m != own and (m.split("_")[0] == own.split("_")[0] or re.search(rf"\b{re.escape(m)}\b", text)):
+            # a table-less module only of the step's own family, or named outright ("API key" is not `arr_api_key`)
+            fns = [f for f in u["funcs"] if not f.startswith("_")][:4]
+            lines.append(f"    `{m}` keeps no table -- what it gives is computed when called"
+                         + (f" ({', '.join(fns)})" if fns else ""))
+    if not used and not lines:
+        return ""
+    cols = "".join(f"    {t}: {', '.join(sorted(live[t] or ()))}\n" for t in used)
+    out = ("### The engine's tables this step's subject uses (live database -- exact names; read these, never a "
+           "table of your own naming)\n" + "\n".join(lines) + "\n" + cols)
+    return out if len(out) <= budget else out[:budget].rsplit("\n", 1)[0] + "\n    …\n"
+
+
 def _render_job_tables(tables: dict, fks: dict | None = None, rules: dict | None = None) -> str:
     """§17.1786 — the job's own tables, exactly as its migration makes them. Live (job f00ea97f T13, T20): the plan's
     text said "filter on publication_time" while the migration made `published_ts`; each attempt followed the text and
@@ -3632,7 +3784,8 @@ def misnamed_required_tests(output: str, step_text: str) -> list[str]:
 
 def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000, tables: dict | None = None,
               written: set[str] | None = None, fks: dict | None = None, rules: dict | None = None,
-              modules: dict[str, dict] | None = None, first: set[str] | None = None) -> str:
+              modules: dict[str, dict] | None = None, first: set[str] | None = None, live: dict | None = None,
+              brief: str = "") -> str:
     """What a CodeGen step that extends the engine is shown of the engine (attached after the optimizer, §17.1042).
     `first`: the job modules the step runs through (§17.1851) -- they lead the job-modules list."""
     index = module_index()
@@ -3649,7 +3802,10 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
     others = sorted(set(siblings) - {own})
     # §17.1787 — only a module that is WRITTEN can be imported; when the caller knows which are, say so
     ready = sorted(set(others) & set(written)) if written is not None else others
-    later = sorted(set(others) - set(written)) if written is not None else []
+    # §17.1990 — a module the engine already has is importable whatever the job's steps say: live (69fe61c4 T8) the
+    # dashboard route was told `paper_operator_view.py` -- the lab's view, merged -- was "NOT importable here"
+    _engine_has = {m.rsplit(".", 1)[1] for m in index if m.count(".") >= 1}
+    later = sorted(set(others) - set(written) - _engine_has) if written is not None else []
     mine = ""
     if own:
         mine = (f"\n**This step writes `app/modules/{own}.py`** (its first line `# app/modules/{own}.py`), and its "
@@ -3671,6 +3827,10 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
         jm = _render_job_modules(modules, own, first=first)
         if jm:
             parts.insert(1, jm)
+    if live:
+        et = _render_engine_tables(node, live, own, set(tables or ()), brief)                # §17.1990
+        if et:
+            parts.insert(1, et)
     if tables:
         jt = _render_job_tables(tables, fks, rules)
         if jt:

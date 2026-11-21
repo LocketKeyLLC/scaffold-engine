@@ -2351,7 +2351,8 @@ async def execute_next_node(
                         # §17.1786 — and the job's tables, as its finished migration makes them
                         _done = [r for r in await _es.code_rows(_esdb, job_id)      # §17.1811
                                  if r.get("status") == "done" and r.get("node_key") != node_key]
-                    from app.modules import engine_schema as _esch
+                        from app.modules import engine_schema as _esch
+                        _live = await _esch.live_tables(_esdb)                       # §17.1990
                     from app.modules.engine_contracts import step_targets as _step_targets
                     _grounding_blocks.append(_es.block_for(
                         node_snapshot, _own_mods,
@@ -2365,7 +2366,8 @@ async def execute_next_node(
                             set(node_snapshot.get("prior_imports") or []),
                             tested=_es.tested_modules(_done)),                  # §17.1862
                         fks=_esch.foreign_keys_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1789
-                        rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done])))  # §17.1794
+                        rules=_esch.column_rules_in_code([str(r.get("output_text") or "") for r in _done]),  # §17.1794
+                        live=_live, brief=json.dumps(brief, default=str) if isinstance(brief, dict) else str(brief or "")))
             except Exception as exc:
                 logger.warning("engine_source_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         # §17.1812 — a step of a follow-up job, reading or fixing, is shown the code its earlier job finished
