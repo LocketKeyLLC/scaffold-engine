@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from sqlalchemy import text
@@ -192,7 +193,8 @@ _TEST_FIX_NOTE = ("They run before the step passes, with no network or secrets; 
                   "they test are finished.")
 
 
-async def _insert_fix_step(job_id: str, deliver_key: str, taken: set[str], title: str, prompt: str) -> str | None:
+async def _insert_fix_step(job_id: str, deliver_key: str, taken: set[str], title: str, prompt: str,
+                           tool_config: dict | None = None) -> str | None:
     """A CodeGen fix step the delivery waits on (§17.1936's shape, shared since §17.1942). None when it is not added."""
     from sqlalchemy import text as _t
 
@@ -203,7 +205,8 @@ async def _insert_fix_step(job_id: str, deliver_key: str, taken: set[str], title
     key = f"{deliver_key}L{n}"
     async with async_session() as db:
         out = await node_editor.insert_node(job_id, {"node_key": key, "title": title, "tool": "CodeGen",
-                                                     "node_type": "task", "depends_on": [], "prompt_template": prompt},
+                                                     "node_type": "task", "depends_on": [], "prompt_template": prompt,
+                                                     **({"tool_config": tool_config} if tool_config else {})},
                                             edited_by="engine §17.1936", db=db)
         if out.get("error"):
             logger.warning("lab_fix_step_not_added job=%s title=%r err=%s", job_id, title, out["error"])
@@ -240,7 +243,10 @@ async def failing_test_fix_steps(job_id: str, deliver_key: str, files: list[tupl
                   + "Each passes alone or did when its step ran: look for what one test leaves behind for the next "
                     "(rows, a patched name, an open transaction, a module-level cache) or assumes about order. "
                   + _TEST_FIX_NOTE)
-        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt)
+        # §17.2001 — the step fixes this test file, and keeps every test it holds (`engine_source.module_tests`)
+        mod = re.fullmatch(r"test_(\w+)", Path(path).stem)
+        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt,
+                                     tool_config={"fixes_tests_of": mod.group(1)} if mod else None)
         if key:
             added.append(key)
             logger.warning("lab_test_fix_added job=%s step=%s file=%s failed=%d", job_id, key, path, len(names))
