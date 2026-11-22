@@ -2567,7 +2567,8 @@ _RETIRES_RE = re.compile(r"\b(?:remov|delet|drop|replac|rewrit|retir|supersed)\w
 
 def _engine_test_file(module: str) -> Path | None:
     """§17.1992 — the engine tree's test file for `module`: where a delivery puts it (`tests/labs/<lab>/`, §17.1932),
-    else the engine's own (`tests/`); None when the tree has none (the runtime image carries no tests)."""
+    else the engine's own (`tests/`); None when the tree has none. §17.1998 — the runtime image carries the labs'
+    tests (`tests/labs/`, and no other): a follow-up job's fix step, whose job never wrote the file, reads them here."""
     if not re.fullmatch(r"[a-z_][a-z0-9_]*", module or ""):
         return None
     root = ENGINE_PKG.parent / "tests"
