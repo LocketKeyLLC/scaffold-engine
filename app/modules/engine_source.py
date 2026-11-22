@@ -3280,6 +3280,26 @@ def _module_names(code: str) -> set[str] | None:
     return out
 
 
+def entry_leaves_out(files: dict[str, str], row: dict) -> list[str]:
+    """§17.2000 — a step that edits the lab's entry to use what nothing else reaches (`tool_config.reaches`, planned
+    by `engine_plan.reach_the_entry`) imports each of those modules from it, transitively through the files it writes.
+    Its tests pass just as well with the module re-implemented inline -- and the module stays dead (69fe61c4 T9/T10)."""
+    cfg = row.get("tool_config") or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except ValueError:
+            return []
+    want, entry = list(cfg.get("reaches") or []), cfg.get("fixes_module")
+    if not want or not entry or f"app/modules/{entry}.py" not in files:
+        return []
+    from app.modules.module_reach import reached
+    got = reached({Path(p).stem: c for p, c in files.items() if p.startswith("app/modules/")}, {entry})
+    return [f"`app/modules/{entry}.py` does not import `app.modules.{m}` -- this step exists to make the lab's entry "
+            f"use it (nothing else imports it, so none of it runs): import it by its real name and call what it "
+            f"defines where its step says it belongs, never a copy of it here" for m in want if m not in got]
+
+
 def importers_left_without(files: dict[str, str], current: dict) -> list[str]:
     """§17.1931 — a module this step rewrites keeps every name another finished module of the job imports from it.
     ``current``: `current_sources` (module -> (path, code, step)). Live (follow-up 5b4880c0, 2026-11-05):
@@ -3399,6 +3419,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str, inherited
     found += uncommitted_parents(files_of({**me, "output_text": output}), _cur, _fks)
     found += wrong_fakes(files_of({**me, "output_text": output}), _cur, _own)
     found += importers_left_without(files_of({**me, "output_text": output}), current_sources(_others))   # §17.1931
+    found += entry_leaves_out(files_of({**me, "output_text": output}), me)                           # §17.2000
     found += await lint_findings(files_of({**me, "output_text": output}))                            # §17.1936
     found += await tool_audit_findings(files_of({**me, "output_text": output}))                    # §17.1939
     found += unknown_result_attributes(files_of({**me, "output_text": output}), _cur)        # §17.1870

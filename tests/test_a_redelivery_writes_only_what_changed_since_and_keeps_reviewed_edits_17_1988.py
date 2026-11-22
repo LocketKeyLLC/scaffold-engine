@@ -77,6 +77,8 @@ def dj(tmp_path, monkeypatch):
     spec.loader.exec_module(mod)
     (tmp_path / "app" / "modules").mkdir(parents=True)
     (tmp_path / "app" / "labs.py").write_text("LABS: tuple[str, ...] = ()\n")
+    (tmp_path / "app" / "main.py").write_text(                             # §17.2000: the lab's modules are reached
+        "from app.modules import lab_backtest, lab_pnl, lab_13f, lab_x\n")
     monkeypatch.setattr(mod, "ROOT", tmp_path)
     return mod
 
