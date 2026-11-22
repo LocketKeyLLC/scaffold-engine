@@ -1035,8 +1035,10 @@ def dropped_module_tests(output: str, mt: dict | None, skip: set[str] | frozense
     if not gone:
         return []
     # no step key before the colon: `_DROPPED_RE` reads the names after the first one (a carried key holds a colon)
+    what = ("the file this step fixes in place" if mt.get("tests_only")                          # §17.2001
+            else "the module this step edits in place")
     return [f"`{path}` dropped {len(gone)} of the {len(mt['tests'])} tests it already held for `{mt['module']}`, "
-            "the module this step edits in place: " + ", ".join(f"`{n}`" for n in gone)
+            f"{what}: " + ", ".join(f"`{n}`" for n in gone)
             + f" -- keep every existing test by name (step {mt.get('key') or '?'} wrote them); fix one only where "
             "this step's change makes it wrong, and add this step's own tests beside them"]
 

@@ -1213,8 +1213,13 @@ _system_for_tool = system_for_tool
 #: `extend_converging_step` (converging_rounds, converging_from) and §17.1848 `switch_code_model` (model_switched_from,
 #: switched_for). They record a NEW ROUND of the same step, not a change of the step.
 ROUND_BOOKKEEPING_KEYS = ("converging_rounds", "converging_from", "model_switched_from", "switched_for")
+#: §17.2001 — a step with no tool_config (NULL, or JSON null) has the empty one: a round's first edit -- null to
+#: `{converging_rounds, converging_from}` -- compared JSON null with `{}` and closed the window. Live (69fe61c4 T12L1,
+#: 2026-11-22 21:08:39 UTC): the round's first attempt was shown none of the 16 tests the step had written, and the
+#: round passed with 6 of them.
 _TC_WITHOUT_ROUNDS = ("CASE WHEN jsonb_typeof(e.{side}->'tool_config') = 'object' THEN (e.{side}->'tool_config') - "
                       "array[" + ", ".join(f"'{k}'" for k in ROUND_BOOKKEEPING_KEYS) + "] "
+                      "WHEN COALESCE(jsonb_typeof(e.{side}->'tool_config'), 'null') = 'null' THEN '{{}}'::jsonb "
                       "ELSE e.{side}->'tool_config' END")
 #: §17.1815 — the run-log window since the step itself last changed (shared by prior_refusals and prior_imports)
 #: §17.1997 — a tool_config edit closes it only when it changed more than the round bookkeeping: live (69fe61c4 T8,

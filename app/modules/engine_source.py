@@ -1717,6 +1717,25 @@ def fixed_module(row: dict, known: set[str] | frozenset[str] = frozenset()) -> s
     return ""
 
 
+def fixed_tests_of(row: dict, known: set[str] | frozenset[str] = frozenset()) -> str:
+    """§17.2001 — the module whose TEST file a step fixes in place (and not the module): its `tool_config.fixes_tests_of`
+    (the engine's own tests-only fix step, §17.1942), else a test file its title leads with -- "Fix
+    test_paper_wire_engine_entry_module (its tests fail with the job's)" -- when the module exists (`app/modules`, or
+    `known`). "" otherwise."""
+    cfg = row.get("tool_config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except ValueError:
+            cfg = None
+    if isinstance(cfg, dict) and cfg.get("fixes_tests_of"):
+        return str(cfg["fixes_tests_of"])
+    have = {k.rpartition(".")[2] for k in module_index() if k.startswith("app.modules.")} | set(known)
+    m = _FIX_LEAD_RE.match(str(row.get("title") or ""))
+    t = re.fullmatch(r"test_(\w+)", m.group(2)) if m else None
+    return t.group(1) if t and t.group(1) in have else ""
+
+
 def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     """§17.1762 — what each module this job's steps have already written defines: its top-level names and the call
     shape of each function, ``{"alpaca_stream": {"node": "T10", "names": {...}, "funcs": {...}}}``. A step not yet
@@ -2588,7 +2607,12 @@ def module_tests(rows: list[dict], node: dict) -> dict:
     from app.sandbox.engine_tests import files_of
     key = str(node.get("node_key") or "")
     others = [r for r in rows if str(r.get("node_key") or "") != key]
-    mod = fixed_module(node, {step_module(r) for r in others} - {""})
+    known = {step_module(r) for r in others} - {""}
+    mod = fixed_module(node, known)
+    # §17.2001 — and a step that fixes a module's test file keeps that file's tests the same way. Live (69fe61c4
+    # T12L1, 2026-11-22): told to fix the one test that failed with the job's ("every test kept"), it came back with
+    # 6 of REACH's 19 -- the /dashboard and static-mount tests gone -- and was recorded done; the delivery took its file
+    tests_only = not mod and bool(mod := fixed_tests_of(node, known))
     if not mod:
         return {}
     path = f"tests/test_{mod}.py"
@@ -2621,7 +2645,7 @@ def module_tests(rows: list[dict], node: dict) -> dict:
         return {}
     body = code if code.lstrip().startswith(f"# {path}") else f"# {path}\n{code}"
     return {"module": mod, "path": path, "key": src, "tests": kept, "retired": retired,
-            "source": f"```python\n{body.rstrip()}\n```\n"}
+            "source": f"```python\n{body.rstrip()}\n```\n", **({"tests_only": True} if tests_only else {})}
 
 
 def with_module_tests(passing: dict | None, prior: dict | None, mt: dict) -> dict[str, dict[str, str]]:
@@ -2696,9 +2720,11 @@ def module_tests_block(mt: dict | None) -> str:
     gone = (f" Your task retires {', '.join(f'`{t}`' for t in mt['retired'])}: those may go." if mt.get("retired")
             else "")
     return (f"\n\n## The tests `{mt['path']}` already holds (step {mt['key']}) -- keep every one\n"
-            f"This step edits `{mt['module']}` in place, so its test file is not new. Keep each of these tests, by name "
-            "and as it is, unless this step's change makes it wrong (then fix it -- never drop it), and write this "
-            "step's own tests beside them; a test left out is put back by the engine as it stands." + gone
+            + (f"This step fixes `{mt['path']}` in place (the tests of `{mt['module']}`), so the file is not new. "
+               if mt.get("tests_only") else                                                        # §17.2001
+               f"This step edits `{mt['module']}` in place, so its test file is not new. ")
+            + "Keep each of these tests, by name and as it is, unless this step's change makes it wrong (then fix "
+            "it -- never drop it), and write this step's own tests beside them; a test left out is put back by the engine as it stands." + gone
             + "\n    " + ", ".join(f"`{t}`" for t in mt["tests"]) + "\n")
 
 
