@@ -184,9 +184,10 @@ def test_the_keep_list_is_read_on_every_attempt_not_only_a_retry():
     from app.modules import execution_agent as xa
     src = inspect.getsource(xa.execute_next_node)
     before = src.index('node_snapshot["prior_tests"] = await prior_tests(')
-    guard = src.rindex('if node_snapshot["retry_count"]:', 0, before)
-    # the read sits after the retry-only block, at the block's own indentation, not inside it
+    # §17.1997 — the retry-only block became `_carry_refusals` (no `retry_count` guard left in the function); the
+    # read sits after that call, at its indentation plus the `try`, not inside any retry guard
+    assert 'if node_snapshot["retry_count"]:' not in src
+    guard = src.rindex("await _carry_refusals(", 0, before)
     line = src[src.rindex("\n", 0, before) + 1: before]
     guard_line = src[src.rindex("\n", 0, guard) + 1: guard]
-    # inside the guard the read would sit two levels in (`if` -> `try` -> the read); outside, one (`try` -> the read)
     assert len(line) - len(line.lstrip()) == len(guard_line) - len(guard_line.lstrip()) + 4

@@ -47,6 +47,7 @@ contract so a re-inlined body would fail review.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import deque
 
@@ -62,11 +63,20 @@ def _format_reviewer_feedback(node: dict) -> str:
     """Return a Reviewer-feedback block to prepend on retry, or '' if N/A.
 
     Gated on ``retry_count > 0`` so a first attempt never sees the block,
-    even if a stale reason somehow made it onto the row.
+    even if a stale reason somehow made it onto the row. §17.1997 — but a
+    new round's first attempt does, from the run log's window (``round_refusal``).
     """
     retry_count = node.get("retry_count") or 0
     reason = (node.get("last_verification_reason") or "").strip()
-    if retry_count <= 0 or not reason:
+    # §17.1997 — a new round's first attempt (retry_count back to 0) answers the newest refusal of the step's
+    # §17.1815 window (`round_refusal`, read by `execution_agent._carry_refusals`), never the row's stale reason
+    head = (f"## Reviewer feedback (attempt {retry_count + 1})\n"
+            f"The previous attempt was rejected by the verifier. Reason:\n")
+    if retry_count <= 0:
+        reason = str(node.get("round_refusal") or "").strip()
+        head = ("## Reviewer feedback (a new round of this step)\n"
+                "This step's last attempt, before this round, was rejected by the verifier. Reason:\n")
+    if not reason:
         return ""
     # §17.1779 — the earlier refusals too: each one must stay fixed, not only the last
     norm = " ".join(reason.split())[:240]
@@ -76,8 +86,7 @@ def _format_reviewer_feedback(node: dict) -> str:
         history = ("Earlier attempts of this step were refused for these too -- every one must stay fixed:\n"
                    + "".join(f"  {i}. {str(r).strip()[:900]}\n" for i, r in enumerate(earlier, 1)) + "\n")
     return (
-        f"## Reviewer feedback (attempt {retry_count + 1})\n"
-        f"The previous attempt was rejected by the verifier. Reason:\n"
+        head +
         f"  {reason}\n\n"
         + history +
         "Address that specifically in your next output. Do not repeat the\n"
@@ -105,12 +114,39 @@ def _format_prior_draft(node: dict) -> str:
     )
 
 
+def _escalation_model(new_retry_count: int, tool_config: object) -> str | None:
+    """§17.577 — the model rung for this retry, or None (no escalation: the step keeps its model).
+
+    §17.1996 — None for a step the engine switched to another model (§17.1848 `model_switched_from`): that model is
+    the engine's choice for the step's rounds, and the rung is the model it was switched AWAY from (with
+    `node_escalation_order` = [`model_cloud_heavy`], every switch in the corpus left the heavy model). Live (69fe61c4
+    T8, 2026-11-21 22:27:58 UTC): switched deepseek-v4-pro -> deepseek-v4.1-flash, and the next retry wrote pro back;
+    every attempt since ran on pro, and 6 of 6 switched steps stored sit on the model they were switched from."""
+    if not (settings.node_escalation_enabled and settings.node_escalation_order):
+        return None
+    cfg = tool_config if isinstance(tool_config, dict) else {}
+    if isinstance(tool_config, str) and tool_config.strip():
+        try:
+            cfg = json.loads(tool_config)
+        except ValueError:
+            cfg = {}
+    if isinstance(cfg, dict) and cfg.get("model_switched_from"):
+        return None
+    order = settings.node_escalation_order
+    rung_role = order[min(new_retry_count - 1, len(order) - 1)]
+    try:
+        return get_model(rung_role)
+    except Exception as exc:  # fail-soft — unknown role → no escalation
+        logger.warning("escalation_model_resolve_failed: rung=%s err=%s", rung_role, exc)
+        return None
+
+
 async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dict:
     """Reset a failed node to pending and cascade-reset downstream nodes."""
     # ---- Stage 1: Validate ----
     row = (await db.execute(
         text("""
-            SELECT node_key, status, retry_count, max_retries
+            SELECT node_key, status, retry_count, max_retries, tool_config
             FROM dag_nodes
             WHERE job_id = :jid AND node_key = :nk
         """),
@@ -186,14 +222,7 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
     # §17.577 — adaptive escalation: pick the model rung for THIS retry
     # (retry 1 → order[0], clamped to the last rung). Set on the node row in
     # Stage 5 so both serial + parallel re-execution honor it via assigned_model.
-    escalation_model: str | None = None
-    if settings.node_escalation_enabled and settings.node_escalation_order:
-        order = settings.node_escalation_order
-        rung_role = order[min(new_retry_count - 1, len(order) - 1)]
-        try:
-            escalation_model = get_model(rung_role)
-        except Exception as exc:  # fail-soft — unknown role → no escalation
-            logger.warning("escalation_model_resolve_failed: rung=%s err=%s", rung_role, exc)
+    escalation_model = _escalation_model(new_retry_count, getattr(row, "tool_config", None))
 
     # ---- Stage 2: Load full DAG topology ----
     all_rows = (await db.execute(
