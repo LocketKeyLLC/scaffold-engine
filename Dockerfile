@@ -80,7 +80,7 @@ RUN for i in 1 2 3 4 5; do \
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Stage 2: runtime — production image. No dev deps, no tests, no Makefile.
+# Stage 2: runtime — production image. No dev deps, no tests but the labs' (§17.1998), no Makefile.
 # Runs as non-root user `scaffold` (UID/GID 10001). The named-volume mount
 # points (/code/.cache/huggingface, /var/log/scaffold) are pre-created and
 # chowned so first-creation of the volumes inherits the non-root ownership.
@@ -149,6 +149,10 @@ COPY --chown=root:root sdk/scaffold_client/       /code/sdk/scaffold_client/
 # cli/scaffold_cli backs the host-side make targets that shell into the
 # running container.
 COPY --chown=root:root cli/scaffold_cli/          /code/cli/scaffold_cli/
+# §17.1998 — the delivered labs' tests (no other tests): a step that fixes a lab module in place keeps the tests its
+# file holds (§17.1992 `engine_source.module_tests` reads them here). Without them a follow-up job, whose own steps
+# never wrote the file, was told of none, and its fix step dropped all 8 (69fe61c4 T8, 2026-11-22).
+COPY --chown=root:root tests/labs/                /code/tests/labs/
 
 # Pre-create the log mount point with scaffold ownership so a fresh
 # scaffold-logs named volume is created writable for UID 10001. /code

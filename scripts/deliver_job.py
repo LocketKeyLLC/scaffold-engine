@@ -6,13 +6,16 @@
 Reads ``GET /jobs/{id}/code?content=true`` (the engine's own export: each file as its last finished step left it),
 writes every file at its path, and lists the job's wiring module in ``app/labs.py`` so the engine starts the lab
 (``install(app)``) when it starts. §17.1932 — its tests go under ``tests/labs/<lab>/`` with a ``conftest.py`` that
-empties the job's tables before each test, as the engine's sandbox ran them (§17.1819). It writes files and nothing else -- branch, commit and pull request are the
-operator's (or their agent's), and the review is theirs. §17.1988 — a job delivered before writes only what its steps
+empties the job's tables before each test, as the engine's sandbox ran them (§17.1819) -- §17.1999 with
+the tables the lab's conftest lists already. §17.1998 — a test the lab's file holds and the job's copy dropped is put
+back, loudly. It writes files and nothing else -- branch, commit and pull request are the operator's (or their
+agent's), and the review is theirs. §17.1988 — a job delivered before writes only what its steps
 changed since that delivery (merged onto the reviewed copy here); every other file is kept as the review left it,
 unless ``--full``. The API key is read from ``SCAFFOLD_API_KEY`` or ``.env``."""
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -120,6 +123,117 @@ def place(path: str, where: str) -> str:
     return f"tests/labs/{where}/{path[len('tests/'):]}" if path.startswith("tests/test_") else path
 
 
+def test_names(code: str) -> list[str]:
+    """§17.1998 — the tests a file holds, as `engine_source.module_tests` reads them: each top-level `test…` function
+    and each `Test…` class with a test in it, in file order."""
+    out: list[str] = []
+    for n in ast.parse(code).body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test"):
+            out.append(n.name)
+        elif isinstance(n, ast.ClassDef) and n.name.startswith("Test") and any(
+                isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name.startswith("test") for x in n.body):
+            out.append(n.name)
+    return out
+
+
+def _bound(n: ast.stmt) -> set[str]:
+    """The top-level names a statement binds."""
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {n.name}
+    if isinstance(n, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in n.names}
+    targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, (ast.AnnAssign, ast.AugAssign)) else []
+    return {x.id for t in targets for x in ast.walk(t) if isinstance(x, ast.Name)}
+
+
+def _reads(n: ast.stmt) -> set[str]:
+    """The names a statement reads, a pytest fixture it asks for by parameter name among them."""
+    return {x.id for x in ast.walk(n) if isinstance(x, ast.Name)} | {
+        a.arg for f in ast.walk(n) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for a in (*f.args.posonlyargs, *f.args.args, *f.args.kwonlyargs)}
+
+
+def keep_tests(current: str, new: str) -> tuple[str, list[str]]:
+    """§17.1998 — the job's test file (`new`) with each test the file here (`current`, as the engine holds it) has and
+    the job's copy dropped put back: the test as it stands, with the helpers, fixtures and imports it reads that the
+    job's copy lacks. Returns (text, the tests put back). A test file is the lab's record of what it guarantees; a
+    fix step that rewrote it without them (live 69fe61c4 T8, 2026-11-22: 15 tests, none of the 8 on main) would have
+    deleted that record in the delivery. Put back rather than refused: the step's own tests are kept too, and the
+    review sees both (a test the step's change made wrong is the review's to fix or retire, said loudly)."""
+    try:
+        old_tree, new_tree = ast.parse(current), ast.parse(new)
+        gone = [t for t in test_names(current) if t not in {getattr(n, "name", "") for n in new_tree.body}]
+    except SyntaxError:
+        return new, []
+    if not gone:
+        return new, []
+    have = set().union(*(_bound(n) for n in new_tree.body))
+    lines = current.splitlines(keepends=True)
+    defs: list[ast.stmt] = []
+    names: dict[str, set[str]] = {}                             # import statement index -> the names it must bind
+    want, seen = list(gone), set()
+    while want:
+        name = want.pop()
+        if name in seen or (name in have and name not in gone):
+            continue
+        seen.add(name)
+        for i, n in enumerate(old_tree.body):
+            if name not in _bound(n):
+                continue
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                names.setdefault(i, set()).add(name)
+            elif n not in defs:
+                defs.append(n)
+                want += sorted(_reads(n) - seen)
+    imports = []
+    for i, bind in sorted(names.items()):
+        n = old_tree.body[i]
+        keep = [a for a in n.names if (a.asname or a.name).split(".")[0] in bind]
+        imports.append(ast.unparse(ast.ImportFrom(module=n.module, names=keep, level=n.level)
+                                   if isinstance(n, ast.ImportFrom) else ast.Import(names=keep)) + "\n")
+    body = ["\n\n# §17.1998 — kept by the delivery: tests this file held that the job's copy dropped\n"]
+    for n in sorted(defs, key=lambda d: d.lineno):
+        start = min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))])
+        body += ["\n\n", *lines[start - 1:n.end_lineno]]
+    out_lines = new.splitlines(keepends=True)
+    if out_lines and not out_lines[-1].endswith("\n"):
+        out_lines[-1] += "\n"
+    at = max((n.end_lineno for n in new_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))), default=0)
+    text = "".join(out_lines[:at] + imports + out_lines[at:]).rstrip("\n") + "\n" + "".join(body).rstrip("\n") + "\n"
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return new, []
+    return text, gone
+
+
+#: §17.1999 — the conftest's table list, as `_CONFTEST` writes it
+_TABLES_LINE = re.compile(r"^TABLES = (\[.*?\])$", re.M)
+
+
+def lab_tables(conftest: str | None, tables: list[str]) -> list[str]:
+    """§17.1999 — the tables the lab's conftest empties: those it lists already (the lab's earlier jobs'), then this
+    job's not among them. Live (69fe61c4, 2026-11-22): a follow-up that creates no table wrote `TABLES = []` over the
+    paper lab's 8, and every lab test would have run on the rows the one before it left."""
+    have: list[str] = []
+    m = _TABLES_LINE.search(conftest or "")
+    if m:
+        try:
+            have = [str(t) for t in ast.literal_eval(m.group(1))]
+        except (ValueError, SyntaxError):
+            have = []
+    return have + [t for t in tables if t not in have]
+
+
+def lab_conftest(conftest: str | None, lab: str, tables: list[str]) -> str:
+    """§17.1999 — the lab's conftest with `lab_tables`: the file here with its table list replaced (a reviewed edit
+    elsewhere in it kept), else a new one."""
+    joined = lab_tables(conftest, tables)
+    if conftest and _TABLES_LINE.search(conftest):
+        return _TABLES_LINE.sub(lambda _m: f"TABLES = {joined!r}", conftest, count=1)
+    return _CONFTEST.format(lab=lab, tables=joined)
+
+
 def merge3(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     """§17.1988 — a line three-way merge: the reviewed copy (`ours`) with what the job's steps changed since the
     delivery (`base` -> `theirs`) carried onto it. Returns (text, clean); changes that touch the same lines of the
@@ -200,18 +314,20 @@ def main() -> int:
 
 
 def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
-    """Write the export `out` into this checkout (`ROOT`); 1 when a merge left a conflict for the review."""
+    """Write the export `out` into this checkout (`ROOT`); 1 when a merge left a conflict for the review, or a test
+    file had tests the job dropped put back (§17.1998)."""
     lab = lab_arg or (out["wiring"][0] if len(out["wiring"]) == 1 else None)
     where = lab_dir([Path(f["path"]).stem for f in out["files"] if f["path"].startswith("app/modules/")], lab)
     if out.get("delivered_at") and not full:
         print(f"last delivered {out['delivered_at']}: writing what the job's steps changed since; the rest is kept "
               "(--full writes every file as the job holds it)")
-    conflicts = []
+    conflicts, carried = [], []
     for f in out["files"]:
         if not _SAFE.match(f["path"]):
             sys.exit(f"refusing to write {f['path']!r}: not a job module, test or revision")
         dest = ROOT / place(f["path"], where)
-        act, body = decide(f, dest.read_text() if dest.exists() else None, full)
+        current = dest.read_text() if dest.exists() else None
+        act, body = decide(f, current, full)
         if act == "kept":
             print(f"kept {place(f['path'], where)}: changed in the engine since delivery (reviewed edit), "
                   "not rewritten")
@@ -222,6 +338,13 @@ def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
             continue
         if act == "same":
             continue
+        if act in ("write", "merged") and current is not None and f["path"].startswith("tests/test_"):
+            body, back = keep_tests(current, body)                                      # §17.1998
+            if back:
+                carried.append(place(f["path"], where))
+                print(f"KEPT {len(back)} test(s) in {place(f['path'], where)} that the job's copy dropped: "
+                      + ", ".join(back) + " -- review them beside the step's own (fix or retire one its change made "
+                      "wrong; never let a delivery delete them)", file=sys.stderr)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(body)
         if act == "conflict":
@@ -244,9 +367,10 @@ def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
     if any(f["path"].startswith("tests/test_") for f in out["files"]):
         for pkg in (ROOT / "tests" / "labs", ROOT / "tests" / "labs" / where):
             (pkg / "__init__.py").touch()
-        (ROOT / "tests" / "labs" / where / "conftest.py").write_text(
-            _CONFTEST.format(lab=where, tables=list(out["tables"])))
-        print(f"wrote tests/labs/{where}/conftest.py (empties {', '.join(out['tables']) or 'no tables'} before each test)")
+        conf = ROOT / "tests" / "labs" / where / "conftest.py"                         # §17.1999
+        tables = lab_tables(conf.read_text() if conf.exists() else None, list(out["tables"]))
+        conf.write_text(lab_conftest(conf.read_text() if conf.exists() else None, where, list(out["tables"])))
+        print(f"wrote tests/labs/{where}/conftest.py (empties {', '.join(tables) or 'no tables'} before each test)")
     if lab:
         labs = ROOT / "app" / "labs.py"
         labs.write_text(list_lab(labs.read_text(), lab))
@@ -257,7 +381,9 @@ def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
     print(f"tables: {', '.join(out['tables']) or '-'}; secrets read: {', '.join(out['secrets']) or '-'}")
     if conflicts:
         print(f"{len(conflicts)} file(s) left with merge markers: {', '.join(conflicts)}", file=sys.stderr)
-    return 1 if conflicts else 0
+    if carried:
+        print(f"{len(carried)} test file(s) with tests the job dropped put back: {', '.join(carried)}", file=sys.stderr)
+    return 1 if conflicts or carried else 0
 
 
 if __name__ == "__main__":
