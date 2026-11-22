@@ -1251,6 +1251,44 @@ async def prior_refusals(db, job_id: str, node_id: str, limit: int = 8) -> list[
     return seen[-limit:]
 
 
+#: §17.1994 chars of the last failed draft handed back to a CodeGen retry; every live T5 draft (23-35k) fits whole
+_PRIOR_DRAFT_KEEP = 40_000
+
+
+async def prior_draft(db, job_id: str, node_id: str) -> str:
+    """§17.1994 — the draft this step's LAST refused attempt wrote (its `-> failed` log, §17.1974), over the same
+    window as `prior_refusals` (since the step itself last changed), so the retry corrects it instead of starting
+    over. Live (69fe61c4 T5, 2026-11-22 14:15-14:26 UTC): four attempts, each refused with line numbers into a draft
+    the next one never saw -- each redraw wrote the module again from nothing (span labels "1w" -> "1 week" ->
+    "1week" -> "1 week", `exchange_date`'s signature changed) and drew a new set of findings. Nothing when that
+    attempt left no draft: the refusal's line numbers point at it and no other. A long draft keeps head and tail."""
+    row = (await db.execute(text(
+        "SELECT l.details->>'draft' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'reason' IS NOT NULL "
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at DESC LIMIT 1"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().first()
+    out = str(row or "").strip()
+    if len(out) <= _PRIOR_DRAFT_KEEP:
+        return out
+    tail = _PRIOR_DRAFT_KEEP // 4
+    head = _PRIOR_DRAFT_KEEP - tail
+    return f"{out[:head]}\n… [§17.1994: {len(out) - head - tail} chars of this draft cut] …\n{out[-tail:]}"
+
+
+async def _carry_prior_draft(db, job_id: str, node_id: str, node_snapshot: dict, tool: object) -> None:
+    """§17.1994 — a CodeGen retry is handed its last refused draft (`prior_draft`). Not for other tools: a Shell
+    step carries its run forward (`previous_attempt.carry_forward`). A helper: `execute_next_node` sits at pyright's
+    complexity limit (#1178)."""
+    if str(tool or "").lower() != "codegen" or not node_snapshot.get("retry_count"):
+        return
+    try:
+        draft = await prior_draft(db, job_id, node_id)
+        if draft:
+            node_snapshot["prior_draft"] = draft
+    except Exception as exc:
+        logger.warning("prior_draft_read_failed job=%s node=%s err=%r", job_id, node_snapshot.get("node_key"), exc)
+
+
 def _ec_module_imports(output: str) -> list[str]:
     from app.modules.engine_contracts import module_imports
     try:
@@ -2291,6 +2329,7 @@ async def execute_next_node(
         except Exception as exc:
             logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
         await _inherit_module_tests(db, job_id, node_snapshot, node, tool)          # §17.1992
+        await _carry_prior_draft(db, job_id, str(node_id), node_snapshot, tool)     # §17.1994
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router

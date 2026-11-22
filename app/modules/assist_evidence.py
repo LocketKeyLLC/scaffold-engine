@@ -688,6 +688,10 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _VERSION_RE = re.compile(
     r"\b\d{1,4}(?:\.\d{1,4}){2,}\b"
     r"|(?<![$£€%\d.])\b\d{1,2}\.\d{2}\b(?!\s*(?:%|percent|per\s+cent|/|per\b))")
+# §17.1995 — in CODE the two-digit-minor arm is a float literal, never a release: live (69fe61c4 T5, every attempt)
+# `0.05`, `0.10`, `0.25` -- the metrics module's thresholds -- were "Unverified specifics … (version)"; of 126 CodeGen
+# node reports, the commonest flags were `0.05` (15), `0.03` (10), `1.00` (9). Code keeps the dotted-triple arm only.
+_CODE_VERSION_RE = re.compile(r"\b\d{1,4}(?:\.\d{1,4}){2,}\b")
 # `port 8096` or `host:8096`. Ports below 1024 are protocol constants that any
 # answer may state; registered/ephemeral ports are instance-specific.
 _PORT_RE = re.compile(r"(?i)\bport\s*(\d{4,5})\b|(?<=[A-Za-z0-9\]}]):(\d{4,5})\b")
@@ -746,10 +750,11 @@ def sourced_values_from_environment(environment: Optional[dict]) -> set[str]:
     return out
 
 
-def extract_specifics(answer: str) -> list[dict]:
+def extract_specifics(answer: str, *, code: bool = False) -> list[dict]:
     """Every concrete value the answer states — ``{kind, value}`` — before any
     crediting. Placeholders, templated URLs, local URLs and example addresses
-    are not values (see the notes on each pattern above)."""
+    are not values (see the notes on each pattern above). ``code`` (§17.1995):
+    the answer is source code, where a two-decimal number is a literal."""
     text = _PLACEHOLDER_RE.sub(" ", answer or "")
     found: list[dict] = []
 
@@ -768,7 +773,7 @@ def extract_specifics(answer: str) -> list[dict]:
         if not _EXAMPLE_IP_RE.match(ip):
             _add("ip", ip)
     text = _IPV4_RE.sub(" ", text)
-    for v in _VERSION_RE.findall(text):
+    for v in (_CODE_VERSION_RE if code else _VERSION_RE).findall(text):
         _add("version", v)
     for m in _PORT_RE.finditer(text):
         p = m.group(1) or m.group(2)
@@ -866,7 +871,7 @@ def _credited(item: dict, hay: str, owned: Optional[set] = None) -> bool:
 def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
                           flagged: Optional[set] = None,
                           sourced: Optional[set] = None,
-                          owned: Optional[set] = None) -> list[dict]:
+                          owned: Optional[set] = None, code: bool = False) -> list[dict]:
     """Concrete values the answer states that its grounding never mentions.
 
     ``corpus`` is what the generation was given that counts as provenance:
@@ -897,7 +902,7 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
     flagged_l = {v.lower() for v in (flagged or ())}
     sourced_l = {v.lower() for v in (sourced or ())}
     out: list[dict] = []
-    for item in extract_specifics(answer):
+    for item in extract_specifics(answer, code=code):
         v = item["value"].lower()
         if v in sourced_l:
             continue
@@ -1201,8 +1206,14 @@ async def verify_answer(
     topology: Optional[dict] = None,
     focus: str = "",
     prerequisite_env: Optional[dict] = None,
+    code: bool = False,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
+
+    ``code`` — §17.1995: the answer is source code (a CodeGen step). A float
+    literal is not a version, and ``rows[1]`` is an index, not a citation: the
+    citation judge is not run (live 69fe61c4 T5: "7 of 7 cited statements are
+    not backed", score 0.0, a model call per attempt spent on subscripts).
 
     ``topology`` — §17.1083b: the session's system map (`build_system_map`).
     A draft whose forwarding/reservation steps target a machine that is not
@@ -1243,8 +1254,9 @@ async def verify_answer(
     # shown on /health instead of vanishing inside a fail-soft handler.
     from app.modules.assist_gates import run_gate, run_gate_async
     unsupported = run_gate("unsourced_values", unsupported_specifics, answer, corpus, trusted=trusted,
-                           flagged=flagged, sourced=sourced, owned=owned_hosts, default=[])
-    cite = await run_gate_async("citation_backing", citation_report, answer, sources, default=None)
+                           flagged=flagged, sourced=sourced, owned=owned_hosts, code=code, default=[])
+    # §17.1995 — code cites nothing: `rows[1]` is a subscript, not a `[1]` marker
+    cite = None if code else await run_gate_async("citation_backing", citation_report, answer, sources, default=None)
     off = not run_gate("addresses_question", addresses_question, answer, need, default=True)  # §17.1031
     if off:
         logger.warning("assist_answer_offtopic node_key=%s label=%s question_terms=%r",
@@ -1290,8 +1302,9 @@ async def verify_answer(
         if candidate:
             candidate = strip_verifier_footers(candidate)  # §17.1037d
             c_uns = run_gate("unsourced_values", unsupported_specifics, candidate, corpus, trusted=trusted,
-                             flagged=flagged, sourced=sourced, owned=owned_hosts, default=[])
-            c_cite = await run_gate_async("citation_backing", citation_report, candidate, sources, default=None)
+                             flagged=flagged, sourced=sourced, owned=owned_hosts, code=code, default=[])
+            c_cite = None if code else await run_gate_async("citation_backing", citation_report, candidate, sources,
+                                                            default=None)
             c_off = not run_gate("addresses_question", addresses_question, candidate, need, default=True)
             c_shape = run_gate("command_shape", command_shape_issues, candidate, default=[])
             c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, focus=focus, default=[])
@@ -1325,7 +1338,7 @@ async def verify_answer(
     # the entire point of [[feedback_failsafes_are_a_registry]].
     _unconfirmed = run_gate("plan_only_values", unsupported_specifics, answer, confirmed or "",
                             trusted=trusted, flagged=flagged, sourced=sourced,
-                            owned=owned_hosts, default=[])
+                            owned=owned_hosts, code=code, default=[])
     _uns_vals = {u["value"].lower() for u in unsupported}
     plan_only = [u for u in _unconfirmed if u["value"].lower() not in _uns_vals]
     # §17.1036 — interface specifics with no documentation behind them.

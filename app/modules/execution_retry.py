@@ -82,7 +82,26 @@ def _format_reviewer_feedback(node: dict) -> str:
         + history +
         "Address that specifically in your next output. Do not repeat the\n"
         "prior failure mode.\n\n"
+        + _format_prior_draft(node) +
         "---\n\n"
+    )
+
+
+def _format_prior_draft(node: dict) -> str:
+    """§17.1994 — the refused draft itself, for a code step's retry (`execution_agent.prior_draft`): the findings
+    above cite its lines, and a retry that cannot see them writes the module again from nothing and draws new ones.
+    Live (69fe61c4 T5, 2026-11-22): 6/5/7/6 findings over four attempts, the module a different shape each time."""
+    draft = str(node.get("prior_draft") or "").strip()
+    if not draft:
+        return ""
+    return (
+        "Your previous draft -- the one refused above -- is below. The file paths and line numbers in that\n"
+        "reason are lines of THIS draft. Correct it, do not start over: keep everything the findings do not\n"
+        "name exactly as it is (names, signatures, constants, labels, tests), fix every finding, and return\n"
+        "the whole corrected answer in the usual form.\n"
+        "<<<<< PREVIOUS DRAFT\n"
+        f"{draft}\n"
+        ">>>>> END OF PREVIOUS DRAFT\n\n"
     )
 
 
