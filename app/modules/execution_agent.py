@@ -1326,6 +1326,54 @@ async def prior_passing_tests(db, job_id: str, node_id: str) -> dict[str, dict[s
     return out
 
 
+def _blocks_that_say(block: str | None) -> list[str]:
+    """A grounding block when it says something, else nothing (a helper: `execute_next_node` sits at pyright's
+    complexity limit, #1178)."""
+    return [block] if block else []
+
+
+async def _surface_inherited_quietly(job_id: str, inherited: list[dict], title: str) -> None:
+    """§17.1991 — the operator's alert for a defect the engine's own copy already has. A notice: it never stops the
+    gate (a helper: `execute_next_node` sits at pyright's complexity limit, #1178)."""
+    if not inherited:
+        return
+    try:
+        from app.modules import engine_source as _es
+        await _es.surface_inherited(job_id, inherited)
+    except Exception as exc:          # noqa: BLE001 — the alert is a notice; the gate stands
+        logger.warning("engine_inherited_alert_failed node='%s' error=%r", title, exc)
+
+
+async def _engine_findings_split(job_id: str, node_key: str, output: str, test_syntax: list,
+                                 title: str) -> tuple[list, list[dict]]:
+    """§17.1749 findings for an engine-code output, with §17.1991's split: the findings on lines the engine's own copy
+    already has go to the second list (and to the operator's alert), not the step's refusals. A helper:
+    `execute_next_node` sits at pyright's complexity limit (#1178)."""
+    from app.modules import engine_source as _es
+    inherited: list[dict] = []
+    async with async_session() as db:
+        refs = test_syntax + await _es.engine_findings(db, job_id, node_key, output, inherited)
+    await _surface_inherited_quietly(job_id, inherited, title)
+    return refs, inherited
+
+
+async def _inherit_module_tests(db, job_id: str, node_snapshot: dict, node: dict, tool: object) -> None:
+    """§17.1992 — a code step that edits a module in place inherits that module's tests (`module_tests`): they join
+    the keep-list as its own passing ones do (§17.1891), so an answer that drops one gets it back, and the prompt
+    names them. A helper: `execute_next_node` sits at pyright's complexity limit (#1178)."""
+    if str(tool or "").lower() != "codegen":
+        return
+    try:
+        from app.modules import engine_source as _es
+        mt = _es.module_tests(await _es.code_rows(db, job_id), {**node_snapshot, "tool_config": node.get("tool_config")})
+        if mt:
+            node_snapshot["module_tests"] = mt
+            node_snapshot["prior_passing"] = _es.with_module_tests(
+                node_snapshot.get("prior_passing"), node_snapshot.get("prior_tests"), mt)
+    except Exception as exc:
+        logger.warning("module_tests_read_failed job=%s node=%s err=%r", job_id, node_snapshot.get("node_key"), exc)
+
+
 async def prior_imports(db, job_id: str, node_id: str) -> list[str]:
     """§17.1851 — the job modules this step's earlier attempts imported, over the same window as `prior_refusals`
     (since the step itself last changed): a retry clears the attempt's output, so this is how the next attempt is
@@ -1622,7 +1670,9 @@ def _splice_kept_tests(output: str, node_snapshot: dict, node_key: str) -> str:
         return output
     try:
         from app.modules import engine_contracts as _kc
-        output, _kept = _kc.splice_kept(output, node_snapshot["prior_passing"])
+        from app.modules.engine_source import inherited_kept                     # §17.1992
+        output, _kept = _kc.splice_kept(output, inherited_kept(output, node_snapshot["prior_passing"],
+                                                               node_snapshot.get("module_tests")))
         logger.info("kept_passing_tests_spliced node=%s n=%d", node_key, len(_kept))
     except Exception as exc:
         logger.warning("kept_passing_tests_splice_failed node=%s err=%r", node_key, exc)
@@ -2240,6 +2290,7 @@ async def execute_next_node(
             node_snapshot["prior_passing"] = await prior_passing_tests(db, job_id, str(node_id))   # §17.1891
         except Exception as exc:
             logger.warning("prior_tests_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        await _inherit_module_tests(db, job_id, node_snapshot, node, tool)          # §17.1992
     # ---- Session closed. LLM phase begins. ----
 
     # Sprint J.3.a — set cost-tracking ContextVars so every model_router
@@ -2421,6 +2472,7 @@ async def execute_next_node(
                     _eb = _es.edited_module_block(_sibling_rows, _fm)
                     if _eb:
                         _grounding_blocks.append(_eb)
+                    _grounding_blocks += _blocks_that_say(_es.module_tests_block(node_snapshot.get("module_tests")))  # §17.1992
             except Exception as exc:
                 logger.warning("carried_code_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
@@ -2885,8 +2937,9 @@ async def execute_next_node(
                 if _es.targets_the_engine(brief):
                     # §17.1759–1760 — and its SQL against the tables that exist, its migration against the
                     # engine's history, and no sample value or note handing its unfinished work on
-                    async with async_session() as _esdb:
-                        _refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output)
+                    # §17.1991 — a defect the engine's own copy of the file already has is not the step's: kept
+                    # out of its refusals, told to it as not its own, and surfaced to the operator
+                    _refs, _inherited = await _engine_findings_split(job_id, node_key, output, _test_syntax, title)
                     # §17.1922 — a kept test the gates refuse is dropped, and the gates read the output again
                     output, _refs = await _drop_refused_kept_tests(output, _refs, _test_syntax, node_snapshot,
                                                                    job_id, node_key)
@@ -2959,7 +3012,7 @@ async def execute_next_node(
                         (logger.info if not _refs else logger.warning)(
                             "engine_tests_redrawn: node='%s' test_findings=%d left=%d", title, _before, len(_refs))
                     if _refs:
-                        engine_reason = _es.unresolved_reason(_refs)
+                        engine_reason = _es.unresolved_reason(_refs, _inherited)
                     # §17.1788 — the steps whose modules this one imports become its dependencies
                     try:
                         async with async_session() as _esdb:

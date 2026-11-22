@@ -69,5 +69,5 @@ def test_ruff_does_not_repeat_the_engines_own_undefined_name():
 
 def test_the_gate_and_the_delivery_check_are_wired():
     src = inspect.getsource(es.engine_findings)
-    assert "await tool_audit_findings(" in src and "return without_repeated_names(found)" in src
+    assert "await tool_audit_findings(" in src and "found = without_repeated_names(found)" in src   # §17.1991
     assert "tool_audit_findings(" in inspect.getsource(lt.lint_fix_steps)

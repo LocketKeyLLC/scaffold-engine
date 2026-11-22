@@ -101,7 +101,8 @@ def test_the_executor_records_tests_at_a_refusal_reads_them_at_a_retry_and_the_g
     assert 'node_snapshot["prior_tests"] = await prior_tests(db, job_id, str(node_id))' in src
     assert xa._ec_written_tests(ATTEMPT_1) == written_tests(ATTEMPT_1) and xa._ec_written_tests(None) == {}      # type: ignore[arg-type]
     g = inspect.getsource(es.engine_findings)
-    assert 'dropped_tests(output, await prior_tests(db, job_id, str(me["node_id"])))' in g
+    assert '_prior = await prior_tests(db, job_id, str(me["node_id"]))' in g      # §17.1992 named, then
+    assert "found += dropped_tests(output, _prior)" in g
 
 
 @pytest.mark.integration

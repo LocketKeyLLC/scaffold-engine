@@ -1009,6 +1009,38 @@ def dropped_tests(output: str, prior: dict[str, list[str]] | None) -> list[str]:
     return found
 
 
+def dropped_module_tests(output: str, mt: dict | None, skip: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """§17.1992 — a step that edits a module in place and writes that module's test file keeps the tests the file
+    already holds (`engine_source.module_tests`: another step's, or the engine tree's), by name, unless its own text
+    retires one. `skip`: names the §17.1864 finding already reports. An output that does not carry the file leaves it
+    as it stands; one whose file does not compile is reported for that (§17.1869). Live (5b4880c0 FEX1, 2026-11-22):
+    the file came back with its 3 new tests and none of T9's 5, and the step was recorded done."""
+    if not mt or not mt.get("tests"):
+        return []
+    from app.sandbox.engine_tests import files_of
+    path = str(mt["path"])
+    code = files_of({"output_text": output}).get(path)
+    if code is None:
+        return []
+    try:
+        compile(code, "<block>", "exec", dont_inherit=True)
+    except SyntaxError:
+        return []
+    have = {n for ns in written_tests(output).values() for n in ns}
+    try:                                                    # a kept test class counts by its own name
+        have |= {n.name for n in ast.parse(code).body if isinstance(n, ast.ClassDef)}
+    except SyntaxError:
+        pass
+    gone = [n for n in mt["tests"] if n not in have and n not in skip]
+    if not gone:
+        return []
+    # no step key before the colon: `_DROPPED_RE` reads the names after the first one (a carried key holds a colon)
+    return [f"`{path}` dropped {len(gone)} of the {len(mt['tests'])} tests it already held for `{mt['module']}`, "
+            "the module this step edits in place: " + ", ".join(f"`{n}`" for n in gone)
+            + f" -- keep every existing test by name (step {mt.get('key') or '?'} wrote them); fix one only where "
+            "this step's change makes it wrong, and add this step's own tests beside them"]
+
+
 # ── §17.1863 a secret named by a constant is mocked by its name ─────────────────────────────────
 
 def _values_for_mocks(code: str) -> list[tuple[str, int, list[str] | None]]:
