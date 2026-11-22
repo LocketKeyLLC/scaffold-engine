@@ -235,6 +235,7 @@ async def verify_node_output(
         owned_hosts=owned_hosts({**(environment or {}), "_brief_text": given}),
         confirmed=given,
         annotate=False,
+        code=tool_l == "codegen",                     # §17.1995 — literals and subscripts are not claims
     )
     if report.get("unsupported"):
         logger.warning("node_output_unsupported node_key=%s tool=%s values=%r regenerated=%s",
