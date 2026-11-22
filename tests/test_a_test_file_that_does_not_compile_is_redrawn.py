@@ -31,7 +31,10 @@ def test_a_syntax_error_in_the_test_block_is_a_test_file_finding_and_one_in_the_
 def test_the_executor_routes_a_test_only_syntax_error_to_the_redraw():
     src = inspect.getsource(xa.execute_next_node)
     assert "_es_syn.syntax_only_in_tests(output)" in src and "_test_syntax = _es_syn.test_syntax_findings(output)" in src
-    assert "_refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output, _inherited)" in src
+    assert "_refs, _inherited = await _engine_findings_split(job_id, node_key, output, _test_syntax, title)" in src
+    # §17.1991 — the split helper puts the test file's syntax findings first, before the engine findings
+    assert "refs = test_syntax + await _es.engine_findings(db, job_id, node_key, output, inherited)" in \
+        inspect.getsource(xa._engine_findings_split)
     # and the redraw's own check compiles the candidate too, so a redraw that still does not parse is not taken
     assert "_es.test_syntax_findings(_cand) + await _es.engine_findings(_cdb, job_id, node_key, _cand)" in src
     assert 'return ["the module block does not compile"]' in src
