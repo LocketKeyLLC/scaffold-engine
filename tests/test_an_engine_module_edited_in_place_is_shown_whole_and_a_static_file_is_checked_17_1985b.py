@@ -40,7 +40,9 @@ def test_the_step_that_extends_the_labs_router_is_planned_as_a_fix_of_that_modul
     ep.complete_engine_plan(tasks, t.BRIEF, [])
     by = {x["id"]: x for x in tasks}
     assert by["T8"]["tool_config"] == {"fixes_module": "paper_wire_engine_entry_module"}
-    assert not any((x.get("tool_config") or {}).get("fixes_module") for x in tasks if x["id"] != "T8")
+    # §17.2000 — and the step that makes the entry use T9/T10 (planned after it) edits it too; no other step does
+    assert by["REACH"]["tool_config"]["fixes_module"] == "paper_wire_engine_entry_module"
+    assert not any((x.get("tool_config") or {}).get("fixes_module") for x in tasks if x["id"] not in ("T8", "REACH"))
     assert ep.complete_engine_plan(tasks, t.BRIEF, []) == []                     # a second pass adds nothing
 
 

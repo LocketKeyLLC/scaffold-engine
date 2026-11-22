@@ -8,7 +8,8 @@ writes every file at its path, and lists the job's wiring module in ``app/labs.p
 (``install(app)``) when it starts. §17.1932 — its tests go under ``tests/labs/<lab>/`` with a ``conftest.py`` that
 empties the job's tables before each test, as the engine's sandbox ran them (§17.1819) -- §17.1999 with
 the tables the lab's conftest lists already. §17.1998 — a test the lab's file holds and the job's copy dropped is put
-back, loudly. It writes files and nothing else -- branch, commit and pull request are the operator's (or their
+back, loudly. §17.2000 — a module of the job nothing reaches (not the lab's entry, nor imported from the engine's
+code) is named, loudly, with what must import it. It writes files and nothing else -- branch, commit and pull request are the operator's (or their
 agent's), and the review is theirs. §17.1988 — a job delivered before writes only what its steps
 changed since that delivery (merged onto the reviewed copy here); every other file is kept as the review left it,
 unless ``--full``. The API key is read from ``SCAFFOLD_API_KEY`` or ``.env``."""
@@ -25,6 +26,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from app.modules.module_reach import imported_modules, reached  # noqa: E402  -- §17.2000, standard library only
 _SAFE = re.compile(r"^(?:app/modules/[a-z_][a-z0-9_]*\.py|tests/test_[a-z0-9_]+\.py|alembic/versions/\w+\.py"
                    # §17.1985 — a static file beside the code: a page template, the lab's own asset, its vendor manifest
                    r"|app/(?:static|templates)/[a-z][a-z0-9_]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:html|css|js|json|svg))$")
@@ -234,6 +237,30 @@ def lab_conftest(conftest: str | None, lab: str, tables: list[str]) -> str:
     return _CONFTEST.format(lab=lab, tables=joined)
 
 
+def labs_listed(labs_py: str) -> list[str]:
+    """The labs `app/labs.py` lists (its LABS tuple)."""
+    m = re.search(r"^LABS: tuple\[str, \.\.\.\] = \((.*?)\)$", labs_py, re.M | re.S)
+    return re.findall(r"[\"'](\w+)[\"']", m.group(1)) if m else []
+
+
+def unreached(root: Path, modules: list[str]) -> list[str]:
+    """§17.2000 — the job's modules (leaves under `app/modules/`) that nothing in the checkout at ``root`` reaches: not
+    a lab `app/labs.py` lists (the engine imports each by name when it starts), and not imported, transitively, from
+    the engine's own code (every other file under `app/`). Live (69fe61c4, 2026-11-22): the delivered dashboard
+    carried `paper_serve_static_asset_under` (the StaticFiles mount its Chart.js loads from) and
+    `paper_enforce_read_only_data`; nothing imported either -- the chart would 404 and the route read through a plain
+    session -- and the delivery said nothing."""
+    mods = root / "app" / "modules"
+    codes = {p.stem: p.read_text() for p in mods.glob("*.py")}
+    labs = root / "app" / "labs.py"
+    seeds = set(labs_listed(labs.read_text()) if labs.exists() else []) | (set(codes) - set(modules))
+    for p in (root / "app").rglob("*.py"):
+        if p.parent != mods:
+            seeds |= imported_modules(p.read_text(), None)
+    got = reached(codes, seeds)
+    return [m for m in modules if m in codes and m not in got]
+
+
 def merge3(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     """§17.1988 — a line three-way merge: the reviewed copy (`ours`) with what the job's steps changed since the
     delivery (`base` -> `theirs`) carried onto it. Returns (text, clean); changes that touch the same lines of the
@@ -315,7 +342,7 @@ def main() -> int:
 
 def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
     """Write the export `out` into this checkout (`ROOT`); 1 when a merge left a conflict for the review, or a test
-    file had tests the job dropped put back (§17.1998)."""
+    file had tests the job dropped put back (§17.1998), or a module of the job is reached by nothing (§17.2000)."""
     lab = lab_arg or (out["wiring"][0] if len(out["wiring"]) == 1 else None)
     where = lab_dir([Path(f["path"]).stem for f in out["files"] if f["path"].startswith("app/modules/")], lab)
     if out.get("delivered_at") and not full:
@@ -379,11 +406,22 @@ def deliver(out: dict, lab_arg: str | None = None, full: bool = False) -> int:
         print(f"no single wiring module (install(app)): {out['wiring'] or 'none'} -- app/labs.py left as it is; "
               "pass --lab once the job has one", file=sys.stderr)
     print(f"tables: {', '.join(out['tables']) or '-'}; secrets read: {', '.join(out['secrets']) or '-'}")
+    job_mods = {Path(f["path"]).stem: f["step"] for f in out["files"] if f["path"].startswith("app/modules/")}
+    dead = unreached(ROOT, list(job_mods))                                               # §17.2000
+    listed = labs_listed((ROOT / "app" / "labs.py").read_text()) if (ROOT / "app" / "labs.py").exists() else []
+    entry = lab or next((x for x in listed if x in job_mods), None)
+    for m in dead:
+        print(f"UNREACHED app/modules/{m}.py (step {job_mods[m]}): nothing imports it -- not the lab's entry, not the "
+              "engine -- so none of it runs. "
+              + (f"`{entry}` (the lab's entry: its install(app) and routes) must import and use it"
+                 if entry else "the engine module that serves it (its router, or the lab's entry) must import it")
+              + f"; `POST /jobs/{out.get('job_id') or '<job>'}/complete-plan` adds the step that does (§17.2000)",
+              file=sys.stderr)
     if conflicts:
         print(f"{len(conflicts)} file(s) left with merge markers: {', '.join(conflicts)}", file=sys.stderr)
     if carried:
         print(f"{len(carried)} test file(s) with tests the job dropped put back: {', '.join(carried)}", file=sys.stderr)
-    return 1 if conflicts or carried else 0
+    return 1 if conflicts or carried or dead else 0
 
 
 if __name__ == "__main__":

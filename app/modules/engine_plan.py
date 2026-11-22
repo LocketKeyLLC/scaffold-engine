@@ -864,6 +864,10 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
                 have["notes"] = notes
                 changes.append(f"api_audit_reworded: {aid} names each module's step")
 
+    # 4c. §17.2000 — every module the job writes is reached from the lab's entry: a step the entry does not stand on
+    #     (or whose finished code it does not import) gets a step that edits the entry to use it
+    changes += reach_the_entry(tasks, extends, carried, engine_leaves, sources)
+
     # 7. §17.1905 — a job that writes code for the engine is delivered into it before anything runs that code: the
     #    engine exports the files (`GET /jobs/{id}/code`), the operator merges the pull request and redeploys, and the
     #    answer is checked against the running engine -- whenever the plan runs the code for real (the keys question,
@@ -902,6 +906,102 @@ def complete_engine_plan(tasks: list[dict], brief: dict | None, carried: list[st
         want = wires or [str(m["id"]) for m in modules]
         t["depends_on"] = list(dict.fromkeys([*(t.get("depends_on") or []), *want]))
     return changes
+
+
+#: §17.2000 — the step that makes the lab's entry use the modules nothing else reaches
+_REACH_NOTE = ("Python module `{entry}.py` -- {whose}: edit it in place (the whole file, every existing public name, "
+               "route and its auth kept). It is the lab's entry, and nothing imports {names}: {why}, so none of it "
+               "runs. Import each by its real name and use it where its step says it belongs ({uses}) -- mount what "
+               "it serves in `install(app)`, run the route's queries through what it provides -- calling what that "
+               "module defines, never re-implementing it here. Nothing else changes. ")
+_REACH_ENGINE = "the engine's own, which this job extends"
+_REACH_OWN = "the lab's entry module, which this job wrote"
+
+
+def _edits(t: dict) -> str | None:
+    """The module a code step writes or edits in place (`fixes_module` first)."""
+    return (t.get("tool_config") or {}).get("fixes_module") or _module_of(t)
+
+
+def _entry_modules(tasks: list[dict], extends: set[str], carried: list[str]) -> list[str]:
+    """§17.2000 — the lab's entry modules: an engine module the brief extends, a lab `app/labs.py` lists that this
+    plan or the job it builds on writes, and the module of a wiring step (§17.1909), in plan order."""
+    from app.labs import LABS
+    written = [m for t in tasks if (m := _module_of(t))]
+    wiring = [m for t in tasks if (m := _module_of(t)) and (str(t.get("id", "")).startswith("WIRE")
+                                                         or _WIRE_STEP_RE.search(str(t.get("name") or "")))]
+    out = sorted(extends) + [m for m in LABS if m in written or m in carried] + wiring
+    return list(dict.fromkeys(out))
+
+
+def _unreached_steps(tasks: list[dict], entries: list[str], roots: list[dict], skip: set[str],
+                     sources: dict[str, str] | None) -> list[dict]:
+    """§17.2000 — the code steps whose NEW module the entry can never import, one per module (its last writer): a
+    step not yet run whose module no step the entry's writers stand on writes; a finished one whose module the
+    entry's finished code does not import, transitively (`module_reach`) -- judged only once every writer of the
+    entry has finished and its code is read. A fix step, a revision, the job it builds on and the engine's own are
+    not new."""
+    from app.modules.module_reach import reached
+    up = {str(r["id"]) for r in roots}.union(*(_upstream_of(tasks, str(r["id"])) for r in roots))
+    planned = {_module_of(t) for t in tasks if str(t["id"]) in up}
+    code = None
+    if sources and all(r.get("status") == "done" for r in roots) and all(e in sources for e in entries):
+        code = reached(sources, entries)
+    out: dict[str, dict] = {}
+    for t in tasks:
+        mod = _module_of(t)
+        if (not mod or mod in skip or t in roots or t.get("status") == "skipped"
+                or (t.get("tool_config") or {}).get("fixes_module") or "alembic/versions/" in _text(t)):
+            continue
+        if (t.get("status") != "done" and mod not in planned) or (
+                t.get("status") == "done" and code is not None and mod in (sources or {}) and mod not in code):
+            out.pop(mod, None)
+            out[mod] = t
+    return list(out.values())
+
+
+def reach_the_entry(tasks: list[dict], extends: set[str], carried: list[str], engine_leaves: set[str],
+                    sources: dict[str, str] | None = None) -> list[str]:
+    """§17.2000 — a module nothing reaches is not done: each module the plan writes is imported, transitively, from
+    the lab's entry. One step (`REACH`) edits the entry to import and use the modules that steps after it wrote (or
+    that its finished code leaves out), standing on them and on the entry's own steps; whatever waited on them waits
+    on it too. Live (69fe61c4, 2026-11-22): T9 "Serve static asset under router" and T10 "Enforce read-only data
+    access" were planned as new modules that "start from" T8, the step that edits the lab's router, and told not to
+    touch it; each passed its own tests, nothing imported either, and the delivered page's Chart.js would 404."""
+    entries = _entry_modules(tasks, extends, carried)
+    roots = [t for t in tasks if str(t.get("tool") or "").lower() == "codegen" and _edits(t) in entries]
+    if not roots:
+        return []
+    lost = _unreached_steps(tasks, entries, roots, set(entries) | set(carried) | engine_leaves, sources)
+    if not lost:
+        return []
+    entry = _edits(roots[0]) or entries[0]
+    ids = {str(t.get("id")) for t in tasks}
+    rid, n = "REACH", 2
+    while rid in ids:
+        rid, n = f"REACH{n}", n + 1
+    mods = [str(_module_of(t)) for t in lost]
+    lost_ids = [str(t["id"]) for t in lost]
+    after =[t for t in lost if any(str(r["id"]) in _upstream_of(tasks, str(t["id"])) for r in roots)]
+    why = ("steps after the entry's own wrote them" if len(after) == len(lost)
+           else "the entry's code does not import them")
+    tasks.append({
+        "id": rid, "name": f"Use {', '.join(lost_ids)} from the lab's entry", "type": "action", "tool": "CodeGen",
+        "depends_on": list(dict.fromkeys([*(str(r["id"]) for r in roots), *lost_ids])), "inputs": [], "outputs": [],
+        "notes": _REACH_NOTE.format(entry=entry, whose=_REACH_ENGINE if entry in engine_leaves else _REACH_OWN,
+                                    names=", ".join(f"`{m}.py`" for m in mods), why=why,
+                                    uses="; ".join(f"`{m}` -- {t.get('id')} {t.get('name')}"
+                                                   for m, t in zip(mods, lost, strict=True)))
+                 + _tests_note(entry),
+        "tool_config": {"fixes_module": entry, "reaches": mods},
+    })
+    below = _upstream_of(tasks, rid)
+    for u in tasks:                       # what waited on a module waits on its use (the checks, the delivery)
+        if (u["id"] != rid and str(u["id"]) not in below and set(lost_ids) & set(map(str, u.get("depends_on") or []))
+                and str(u.get("tool") or "").lower() != "codegen"):
+            u["depends_on"] = [*(u.get("depends_on") or []), rid]
+    return [f"entry_reaches: {rid} edits `{entry}.py` to use " + ", ".join(f"`{m}`" for m in mods)
+            + f" ({', '.join(lost_ids)}: nothing imports them)"]
 
 
 def _research_step(api: dict) -> dict:

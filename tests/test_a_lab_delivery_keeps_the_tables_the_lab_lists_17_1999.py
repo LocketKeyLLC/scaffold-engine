@@ -23,6 +23,7 @@ def dj(tmp_path, monkeypatch):
     spec.loader.exec_module(mod)
     (tmp_path / "app" / "modules").mkdir(parents=True)
     (tmp_path / "app" / "labs.py").write_text("LABS: tuple[str, ...] = ()\n")
+    (tmp_path / "app" / "main.py").write_text("from app.modules import paper_dashboard\n")   # §17.2000: it is reached
     monkeypatch.setattr(mod, "ROOT", tmp_path)
     return mod
 
