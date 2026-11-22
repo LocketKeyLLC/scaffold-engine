@@ -1209,13 +1209,25 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
 _system_for_tool = system_for_tool
 
 
+#: §17.1997 — the keys the engine's own round machinery writes into a step's tool_config: §17.1923
+#: `extend_converging_step` (converging_rounds, converging_from) and §17.1848 `switch_code_model` (model_switched_from,
+#: switched_for). They record a NEW ROUND of the same step, not a change of the step.
+ROUND_BOOKKEEPING_KEYS = ("converging_rounds", "converging_from", "model_switched_from", "switched_for")
+_TC_WITHOUT_ROUNDS = ("CASE WHEN jsonb_typeof(e.{side}->'tool_config') = 'object' THEN (e.{side}->'tool_config') - "
+                      "array[" + ", ".join(f"'{k}'" for k in ROUND_BOOKKEEPING_KEYS) + "] "
+                      "ELSE e.{side}->'tool_config' END")
 #: §17.1815 — the run-log window since the step itself last changed (shared by prior_refusals and prior_imports)
+#: §17.1997 — a tool_config edit closes it only when it changed more than the round bookkeeping: live (69fe61c4 T8,
+#: 2026-11-22 15:35:08 and 15:48:01 UTC) each §17.1923 round edit closed it, so the round's first attempt was shown
+#: no refusal and no draft and repeated the refusal the round before it had ended on. A text or tool edit still cuts.
 _SINCE_THE_STEP_CHANGED = (
     "AND l.created_at > COALESCE((SELECT max(e.created_at) FROM dag_node_edits e JOIN dag_nodes d "
     "  ON d.job_id = e.job_id AND d.node_key = e.node_key WHERE d.id = CAST(:n AS uuid) "
     "  AND (e.op IN ('replan', 'restore') OR (e.op = 'edit' "
-    "       AND COALESCE(e.after, '{}'::jsonb) ?| array['prompt_template', 'tool', 'tool_config']))), "
-    "  '-infinity') ")
+    "       AND (COALESCE(e.after, '{}'::jsonb) ?| array['prompt_template', 'tool'] "
+    "            OR (COALESCE(e.after, '{}'::jsonb) ? 'tool_config' AND "
+    + _TC_WITHOUT_ROUNDS.format(side="after") + " IS DISTINCT FROM " + _TC_WITHOUT_ROUNDS.format(side="before")
+    + "))))), '-infinity') ")
 #: §17.1884 — the keep-list (§17.1864) starts over at a RESET: within one run every attempt keeps the names its
 #: predecessors wrote; across resets the union snowballed (110, 133, 160, then 267 names a draw -- 94k chars, past the
 #: generation ceiling, the redraws left with 68 findings they could not clear). A reset is a new run.
@@ -1275,11 +1287,54 @@ async def prior_draft(db, job_id: str, node_id: str) -> str:
     return f"{out[:head]}\n… [§17.1994: {len(out) - head - tail} chars of this draft cut] …\n{out[-tail:]}"
 
 
+async def newest_refusal(db, job_id: str, node_id: str) -> str:
+    """§17.1997 — the reason this step's LAST refused attempt was given, over the `prior_refusals` window: the
+    refusal a new round's first attempt answers (its row's own reason was cleared by the round's reset)."""
+    row = (await db.execute(text(
+        "SELECT l.details->>'reason' FROM execution_logs l WHERE l.job_id = :j AND l.node_id = :n "
+        "AND l.message LIKE :failed AND l.details->>'reason' IS NOT NULL "
+        + _SINCE_THE_STEP_CHANGED + " ORDER BY l.created_at DESC LIMIT 1"),
+        {"j": job_id, "n": node_id, "failed": "%-> failed"})).scalars().first()
+    return str(row or "").strip()
+
+
+async def _carry_refusals(db, job_id: str, node_id: str, node_snapshot: dict) -> None:
+    """§17.1779 — every earlier refusal of this step (`prior_refusals`), §17.1851 the modules its attempts imported.
+
+    §17.1997 — read on EVERY attempt: a step whose window still holds refusals is retrying, whatever `retry_count`
+    says. A new round -- §17.1923 converging, §17.1848 model switch, the operator's reset -- sets it back to 0, and the
+    round's first attempt was handed neither. Live (69fe61c4 T8, 2026-11-22 15:30:48, 15:40:19, 15:51:52 UTC, 61,773
+    chars each, no "Reviewer feedback"): each round opened with the refusal the one before it had cleared
+    (`get_spy_benchmark(…)` without `start_date`/`end_date`; no table `paper_audit_trail`). The round's first attempt
+    is given the newest refusal as its reason (`round_refusal`). A helper: `execute_next_node` sits at pyright's
+    complexity limit (#1178)."""
+    try:
+        refusals = [str(r) for r in (await prior_refusals(db, job_id, node_id) or []) if str(r or "").strip()]
+        if refusals:
+            node_snapshot["prior_refusals"] = refusals
+    except Exception as exc:
+        logger.warning("prior_refusals_read_failed job=%s node=%s err=%r", job_id, node_snapshot.get("node_key"), exc)
+    if not (node_snapshot.get("retry_count") or node_snapshot.get("prior_refusals")):
+        return
+    if not node_snapshot.get("retry_count"):
+        try:
+            node_snapshot["round_refusal"] = await newest_refusal(db, job_id, node_id)
+        except Exception as exc:
+            logger.warning("newest_refusal_read_failed job=%s node=%s err=%r", job_id, node_snapshot.get("node_key"),
+                           exc)
+    try:                                                    # §17.1851
+        node_snapshot["prior_imports"] = await prior_imports(db, job_id, node_id)
+    except Exception as exc:
+        logger.warning("prior_imports_read_failed job=%s node=%s err=%r", job_id, node_snapshot.get("node_key"), exc)
+
+
 async def _carry_prior_draft(db, job_id: str, node_id: str, node_snapshot: dict, tool: object) -> None:
     """§17.1994 — a CodeGen retry is handed its last refused draft (`prior_draft`). Not for other tools: a Shell
     step carries its run forward (`previous_attempt.carry_forward`). A helper: `execute_next_node` sits at pyright's
-    complexity limit (#1178)."""
-    if str(tool or "").lower() != "codegen" or not node_snapshot.get("retry_count"):
+    complexity limit (#1178). §17.1997 — and a new round's first attempt (`retry_count` 0, refusals in the window,
+    `_carry_refusals`), the switched model's too: the refusals cite lines of that draft."""
+    if str(tool or "").lower() != "codegen" or not (node_snapshot.get("retry_count")
+                                                     or node_snapshot.get("prior_refusals")):
         return
     try:
         draft = await prior_draft(db, job_id, node_id)
@@ -2309,16 +2364,9 @@ async def execute_next_node(
         }
         # §17.1779 — and every earlier refusal of this step, not only the last: live (job f00ea97f T7/T8, six attempts
         # each) one attempt fixed the sample contact and re-invented `write_ingested_item`, the next fixed that and
-        # brought the sample back. A retry that sees one reason trades one defect for another.
-        if node_snapshot["retry_count"]:
-            try:
-                node_snapshot["prior_refusals"] = await prior_refusals(db, job_id, str(node_id))
-            except Exception as exc:
-                logger.warning("prior_refusals_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
-            try:                                                    # §17.1851
-                node_snapshot["prior_imports"] = await prior_imports(db, job_id, str(node_id))
-            except Exception as exc:
-                logger.warning("prior_imports_read_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # brought the sample back. A retry that sees one reason trades one defect for another. §17.1997 — a new
+        # round's first attempt too.
+        await _carry_refusals(db, job_id, str(node_id), node_snapshot)
         # §17.1868 — on every attempt, not only a retry: the history outlives a plain reset (§17.1864), so the first
         # attempt after one is held to the names its earlier attempts wrote -- it is shown them too. Live (5b4880c0 T5,
         # 2026-10-30): attempt 1 was refused for "dropped 30 of the 30 tests your earlier attempts wrote", a list its
