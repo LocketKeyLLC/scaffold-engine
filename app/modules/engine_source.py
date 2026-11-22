@@ -2517,6 +2517,146 @@ def edited_module_block(rows: list[dict], module: str) -> str:
             f"only what the task asks.\n```python\n{code}\n```\n")
 
 
+#: §17.1992 — a sentence of the step's own text that retires a test it names: "replace `test_a` with …", "drop test_b"
+_RETIRES_RE = re.compile(r"\b(?:remov|delet|drop|replac|rewrit|retir|supersed)\w*", re.I)
+
+
+def _engine_test_file(module: str) -> Path | None:
+    """§17.1992 — the engine tree's test file for `module`: where a delivery puts it (`tests/labs/<lab>/`, §17.1932),
+    else the engine's own (`tests/`); None when the tree has none (the runtime image carries no tests)."""
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", module or ""):
+        return None
+    root = ENGINE_PKG.parent / "tests"
+    for p in [root / f"test_{module}.py", *sorted(root.glob(f"labs/*/test_{module}.py"))]:
+        if p.is_file():
+            return p
+    return None
+
+
+def module_tests(rows: list[dict], node: dict) -> dict:
+    """§17.1992 — the tests a step that edits a module in place (§17.1983 `fixed_module`) inherits: that module's test
+    file as it is now -- the job's last finished writer of `tests/test_<module>.py`, or the engine tree's copy when the
+    module was delivered since (§17.1988b) or no step of the job wrote one (§17.1985b) -- less each test the step's
+    own text retires by name. {} when the step edits no module, or the module has no tests yet. Live (5b4880c0 FEX1,
+    2026-11-22 00:09 UTC): "Fix paper_wire_engine_entry_module" wrote the test file with its 3 new route tests and
+    dropped the 5 T9 had written, and was recorded done -- the keep-list held only its own attempts' tests."""
+    from app.sandbox.engine_tests import files_of
+    key = str(node.get("node_key") or "")
+    others = [r for r in rows if str(r.get("node_key") or "") != key]
+    mod = fixed_module(node, {step_module(r) for r in others} - {""})
+    if not mod:
+        return {}
+    path = f"tests/test_{mod}.py"
+    code, src, done = None, "", None
+    for r in others:                                            # `code_rows` order: the last finished writer wins
+        if r.get("status") == "done" and (c := files_of(r).get(path)) is not None:
+            code, src, done = c, str(r.get("node_key") or ""), r.get("completed_at")
+    own = _engine_test_file(mod)
+    if own is not None:
+        marks = [delivered_at(rows), delivered_at(rows, src.split(":", 1)[0]) if ":" in src else None]
+        at = max((t for t in marks if t is not None), default=None)
+        if code is None or (at is not None and done is not None and done <= at):
+            code, src = own.read_text(encoding="utf-8"), (f"{src}, " if src else "") + "as in the engine's tree"
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return {}
+    tests: list[str] = []
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test"):
+            tests.append(n.name)
+        elif isinstance(n, ast.ClassDef) and n.name.startswith("Test") and any(
+                isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name.startswith("test") for x in n.body):
+            tests.append(n.name)
+    text = " ".join(str(node.get(k) or "") for k in ("title", "description", "prompt_template"))
+    sentences = [s for s in re.split(r"(?<=[.;!?])\s+|\n+", text) if _RETIRES_RE.search(s)]
+    retired = [t for t in tests if any(re.search(rf"(?<![\w.]){re.escape(t)}(?!\w)", s) for s in sentences)]
+    kept = [t for t in tests if t not in retired]
+    if not kept or code is None:
+        return {}
+    body = code if code.lstrip().startswith(f"# {path}") else f"# {path}\n{code}"
+    return {"module": mod, "path": path, "key": src, "tests": kept, "retired": retired,
+            "source": f"```python\n{body.rstrip()}\n```\n"}
+
+
+def with_module_tests(passing: dict | None, prior: dict | None, mt: dict) -> dict[str, dict[str, str]]:
+    """§17.1992 — the keep-list (§17.1891 `prior_passing`) with the edited module's existing tests (`module_tests`)
+    this run's own attempts have not written yet: the engine puts those back verbatim when an answer drops them
+    (`splice_kept`), with the fixtures and helpers they stand on. Once an attempt has carried them, its own record
+    (passed and kept, or failed and rewritten -- still held by name, §17.1864) governs them, as any test it wrote.
+    Names the tests it adds in `mt["inherited"]` (`inherited_kept` splices those only where an answer drops them)."""
+    out = {p: dict(d) for p, d in (passing or {}).items() if isinstance(d, dict)}
+    if not mt:
+        return out
+    path = mt["path"]
+    mt["inherited"], mt["added"] = [], []
+    seen = set((prior or {}).get(path) or []) | set(out.get(path) or {})
+    want = [t for t in mt["tests"] if t not in seen]
+    if not want:
+        return out
+    from app.modules.engine_contracts import kept_test_sources
+    from app.sandbox.engine_tests import files_of
+    try:
+        tree = ast.parse(files_of({"output_text": mt["source"]}).get(path, ""))
+    except SyntaxError:
+        return out
+    named: list[str] = []                                       # pytest's naming, as `kept_test_sources` reads it
+    for n in tree.body:
+        if isinstance(n, ast.ClassDef) and n.name in want:
+            named += [f"{path}::{n.name}::{x.name}" for x in n.body
+                      if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name.startswith("test")]
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in want:
+            named.append(f"{path}::{n.name}")
+    defs = kept_test_sources(mt["source"], named).get(path) or {}
+    # the file's imports the kept tests and their helpers read go with each test: the answer's file may import the
+    # module differently (live: FEX1 `import … as mod`, T9 `from … import install`), and `splice_definitions` adds an
+    # import the file lacks once (§17.1920 would leave out a test that reads a name bound nowhere)
+    reads = {x.id for v in defs.values() for x in ast.walk(ast.parse(v)) if isinstance(x, ast.Name)} | {
+        x.value.id for v in defs.values() for x in ast.walk(ast.parse(v))
+        if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)}
+    imports = "\n".join(ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))
+                        and not (isinstance(n, ast.ImportFrom) and n.module == "__future__")
+                        and {(a.asname or a.name).split(".")[0] for a in n.names} & reads)
+    mine = out.setdefault(path, {})
+    mt["added"] = [k for k in defs if k not in mine]
+    for k in mt["added"]:
+        mine[k] = f"{imports}\n\n\n{defs[k]}" if imports and k in want and k.startswith("test") else defs[k]
+    mt["inherited"] = [k for k in want if k in defs]
+    return out
+
+
+def inherited_kept(output: str, passing: dict | None, mt: dict | None) -> dict[str, dict[str, str]]:
+    """§17.1992 — the keep-list to splice into `output`: an inherited test (`with_module_tests`) goes back only where
+    the answer DROPPED it. One the answer carries is the step's to change -- its fix may make the old one wrong --
+    where a test the step's own attempt passed is put back over its namesake (§17.1891)."""
+    inh = set((mt or {}).get("inherited") or [])
+    if not passing or not inh:
+        return passing or {}
+    from app.sandbox.engine_tests import files_of
+    path = mt["path"]                                                           # type: ignore[index]
+    try:
+        have = {n.name for n in ast.parse(files_of({"output_text": output}).get(path, "")).body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    except SyntaxError:
+        return passing
+    return {p: ({k: v for k, v in d.items() if not (k in inh and k in have)} if p == path else d)
+            for p, d in passing.items()}
+
+
+def module_tests_block(mt: dict | None) -> str:
+    """§17.1992 — what a step that edits a module in place is told of that module's tests: the file is not new, and
+    every test in it stays."""
+    if not mt:
+        return ""
+    gone = (f" Your task retires {', '.join(f'`{t}`' for t in mt['retired'])}: those may go." if mt.get("retired")
+            else "")
+    return (f"\n\n## The tests `{mt['path']}` already holds (step {mt['key']}) -- keep every one\n"
+            f"This step edits `{mt['module']}` in place, so its test file is not new. Keep each of these tests, by name "
+            "and as it is, unless this step's change makes it wrong (then fix it -- never drop it), and write this "
+            "step's own tests beside them; a test left out is put back by the engine as it stands." + gone
+            + "\n    " + ", ".join(f"`{t}`" for t in mt["tests"]) + "\n")
+
+
 def carried_block(rows: list[dict], node: dict, budget: int = 40000,
                   rewritten: dict[str, str] | None = None,
                   current: dict[str, tuple[str, str, str]] | None = None) -> str:
@@ -3180,10 +3320,16 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     found += misnamed_required_tests(output, " ".join(str(me.get(k) or "") for k in ("title", "prompt_template")))
     found += static_file_findings(output, me)                                                 # §17.1985b
     # §17.1864 — a retry keeps every test its earlier attempts wrote
-    from app.modules.engine_contracts import dropped_tests
+    from app.modules.engine_contracts import dropped_module_tests, dropped_tests
     if me.get("node_id"):                       # the row's own id (`code_rows`); a fake row without one: no history
         from app.modules.execution_agent import prior_tests
-        found += dropped_tests(output, await prior_tests(db, job_id, str(me["node_id"])))
+        _prior = await prior_tests(db, job_id, str(me["node_id"]))
+        found += dropped_tests(output, _prior)
+        # §17.1992 — and a step that edits a module in place keeps the tests that module's file already holds
+        _cfg = (await db.execute(text("SELECT tool_config FROM dag_nodes WHERE id = CAST(:n AS uuid)"),
+                                 {"n": str(me["node_id"])})).scalar()
+        found += dropped_module_tests(output, module_tests(rows, {**me, "tool_config": _cfg}),
+                                      {n for ns in _prior.values() for n in ns})
     # §17.1836 — its tests do not stand in for a finished module that never leaves the engine
     from app.modules.engine_contracts import internal_fakes
     from app.sandbox.engine_tests import files_of
@@ -3842,6 +3988,12 @@ def block_for(node: dict, siblings: set[str] = frozenset(), budget: int = 15000,
                         "named, never drop them)\n" + "".join(
                             f"    {path}: {', '.join(names)}\n" for path, names in sorted(prior.items()) if names))
     passing = node.get("prior_passing") or {}
+    _mt = node.get("module_tests") or {}
+    if isinstance(passing, dict) and _mt.get("inherited"):
+        # §17.1992 — the edited module's tests are told apart (`module_tests_block`): they did not pass in a run of this
+        # step, and the answer keeps them itself -- the engine puts back only one it drops
+        passing = {p: {k: v for k, v in d.items() if not (p == _mt["path"] and k in _mt.get("added", []))}
+                   for p, d in passing.items()}
     if isinstance(passing, dict) and any(passing.values()):
         # §17.1891 — the ones that passed are kept as they are: the engine puts them back by name after the draw, so
         # the attempt writes the failing and the new ones, and keeps the helpers the passing ones use
