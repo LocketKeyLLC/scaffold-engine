@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, FastAPI
 
 from app.authz import get_principal
+from app.database import async_session
 from app.modules.paper_daily_signal_proposal_batch import (
     run_daily_batch,
     run_on_demand_batch,
@@ -65,7 +67,14 @@ def _make_router() -> APIRouter:
 
     @router.post("/execution")
     async def execution(_principal: Any = Depends(get_principal)) -> dict[str, Any]:
-        result = await run_execution_entry_point()
+        # Approvals are recorded per operator_id, so the operator who presses
+        # execute only sends the proposals they themselves approved.
+        async with async_session() as db:
+            result = await run_execution_entry_point(
+                db=db,
+                operator_id=_principal.identity,
+                timestamp=datetime.now(timezone.utc),
+            )
         return result
 
     # Views (GET routes).
