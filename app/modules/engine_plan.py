@@ -1152,9 +1152,10 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
     if not engine_source.targets_the_engine(brief):
         return {"error": "this job does not write code for the engine", "http_status": 409}
     rows = (await db.execute(_text_sql(
-        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on, tool_config, completed_at "
-        "FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
+        "SELECT node_key, title, prompt_template, tool, node_type, status, depends_on, tool_config, completed_at, "
+        "output_text FROM dag_nodes WHERE job_id = :j ORDER BY execution_order"), {"j": job_id})).mappings().all()
     status = {r["node_key"]: r["status"] for r in rows}
+    outputs = {r["node_key"]: r.get("output_text") for r in rows}                                # §17.1993
     tasks = [{"id": r["node_key"], "name": r["title"], "notes": r["prompt_template"] or "", "tool": r["tool"],
               "status": r["status"],                                              # §17.1799 skipped entry points
               "_done_at": r.get("completed_at"),                                   # §17.1928
@@ -1189,7 +1190,7 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
                                       edited_by="engine §17.1928" + (f" for {edited_by}" if edited_by else ""))
         for k in [*_gaps_reset, *_reopen]:
             status[k] = "pending"
-    inserted, edited, kept = [], [], []
+    inserted, edited, kept, named = [], [], [], []
     for t in new_in_dependency_order(tasks, set(before)):   # new steps first: an edit may depend on one
         out = await node_editor.insert_node(job_id, {
             "node_key": t["id"], "title": t["name"], "tool": t.get("tool") or "LLM",
@@ -1229,6 +1230,10 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         if not fields:
             continue
         if status.get(t["id"]) not in ("pending", "failed"):
+            if status.get(t["id"]) == "done" and await _record_planned_name(
+                    db, job_id, t, b, fields, outputs.get(t["id"]), edited_by):
+                named.append(t["id"])
+                continue
             kept.append(t["id"])
             continue
         out = await node_editor.edit_node(job_id, t["id"], fields, edited_by=edited_by, db=db)
@@ -1248,12 +1253,40 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
             # §17.1989 — a step settled here takes its parked question with it (`edit_node` and `_reset_keys` do so
             # for the steps this pass rewrote or reset)
             await node_editor._drop_parked_frame(db, job_id, [t["id"]], "skipped")
-    if _gaps_reset or any(status.get(t["id"]) == "skipped" for t in tasks if t["id"] in edited):
+    if _gaps_reset or named or any(status.get(t["id"]) == "skipped" for t in tasks if t["id"] in edited):
         await db.commit()
     refreshed = [] if only_reviews else await refresh_stale_research(db, job_id, tasks, edited_by=edited_by)
     changes += [f"research_refreshed: {k} (read more than {RESEARCH_FRESH_DAYS} days ago; its audit reads it again)"
                 for k in refreshed if not k.endswith("_AUDIT")]
-    return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept, "refreshed": refreshed}
+    return {"changes": changes, "inserted": inserted, "edited": edited, "kept_finished": kept, "refreshed": refreshed,
+            "named_finished": named}
+
+
+async def _record_planned_name(db, job_id: str, t: dict, b: dict, fields: dict, output: str | None,
+                               edited_by: str | None) -> bool:
+    """§17.1993 — a finished code step the plan names a module (`module_named`) keeps that name: its text takes the
+    plan's, with no reset, when its code names no module of its own (no `# app/modules/x.py` header) -- what it wrote
+    IS that module, and a reset later runs it told so. Live (69fe61c4 T5, 2026-11-21 21:55): complete-plan named T5
+    `paper_write_metrics_computation_module.py`, T5 was done so the name was kept out, the operator reset T5 13 s
+    later, and it ran naming no module -- it called itself `app.modules.paper_dashboard` in its docstring, which
+    no step owned, and its siblings could not import it. Any other change to a finished step is still kept out."""
+    from sqlalchemy import text as _text_sql
+
+    from app.modules import engine_source, node_editor
+    if set(fields) != {"prompt_template"} or str(t.get("tool") or "").lower() != "codegen":
+        return False
+    was = {"title": b.get("name"), "prompt_template": b.get("notes"), "tool": b.get("tool"),
+           "tool_config": b.get("tool_config")}
+    now = {**was, "prompt_template": fields["prompt_template"]}
+    if engine_source.step_module({**was, "output_text": output}) or not engine_source.step_module(now):
+        return False
+    await db.execute(_text_sql(
+        "UPDATE dag_nodes SET prompt_template = :p, updated_at = NOW() WHERE job_id = :j AND node_key = :k "
+        "AND status = 'done'"), {"p": fields["prompt_template"], "j": job_id, "k": t["id"]})
+    await node_editor._audit(db, job_id, t["id"], "edit", {"prompt_template": b.get("notes")},
+                             {"prompt_template": fields["prompt_template"], "why": "§17.1993 planned module name"},
+                             edited_by)
+    return True
 
 
 #: §17.1908 — an API's research older than this is read again before the code that calls it is delivered

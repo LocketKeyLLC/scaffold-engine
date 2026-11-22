@@ -121,8 +121,10 @@ def _block_paths(text: str) -> list[str]:
 def files_of(row: dict) -> dict[str, str]:
     """The files one step writes: each Python block at the path its `# path.py` header names, else (the first
     unnamed block) at the step's own module -- `app/modules/x.py`, or `tests/test_x.py` for a test module."""
-    from app.modules.engine_source import step_module
+    from app.modules.engine_source import step_module, writes_code
     out: dict[str, str] = {}
+    if not writes_code(row):
+        return out                                          # §17.1993 — a survey's suggested code is no file
     unnamed_used = False
     for lang, code in extract_code_blocks(after_reasoning(str(row.get("output_text") or ""))):
         if lang not in PYTHON_LANGS or not code.strip():

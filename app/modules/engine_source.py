@@ -1648,8 +1648,20 @@ def job_own_code(texts: list[str]) -> tuple[set[str], set[str]]:
 _MODULE_OF_STEP_RE = re.compile(r"^\s*#\s*((?:[\w.-]+/)*)([A-Za-z_]\w*)\.py\b")
 
 
+def writes_code(row: dict) -> bool:
+    """§17.1993 — a step that writes the job's code: a CodeGen step (a row whose tool is not known counts). A survey,
+    a check, a delivery question or a command (Milvus, LLM, Shell, …) writes no module, whatever its output quotes.
+    Live (69fe61c4 T2, 2026-11-22): the read-only survey "Inspect existing lab modules" suggested a block headed
+    `# app/modules/paper_dashboard.py`; T2 was taken to own that module, T6 was told so and copied T5's math rather
+    than import it, and T8's import of it was refused as "step T2's and is not written yet"."""
+    tool = row.get("tool")
+    return not tool or str(tool).lower() == "codegen"
+
+
 def step_module_path(row: dict) -> str:
     """The dotted module a step writes (`app.modules.x` unless its header names another folder)."""
+    if not writes_code(row):
+        return ""                                                                           # §17.1993
     for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
         m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
         if m:
@@ -1661,7 +1673,10 @@ def step_module_path(row: dict) -> str:
 
 def step_module(row: dict, known: set[str] | frozenset[str] = frozenset()) -> str:
     """The module a step writes: its code's `# app/modules/x.py` header, else the module it fixes (§17.1983), else
-    the first `x.py` its own text names. `known`: the modules the job's other steps write."""
+    the first `x.py` its own text names. `known`: the modules the job's other steps write. §17.1993 — none for a step
+    that writes no code (`writes_code`)."""
+    if not writes_code(row):
+        return ""
     for lang, code in extract_code_blocks(str(row.get("output_text") or "")):
         m = _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]) if lang in PYTHON_LANGS and code.strip() else None
         if m and not re.match(r"(?:test_\w+|\w+_test|conftest)$", m.group(2)):     # a step's tests are not its module
@@ -1712,6 +1727,8 @@ def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     codes: dict[str, str] = {}                  # §17.1863 -- each module's source, for the secrets its functions read
     for r in rows:
+        if not writes_code(r):
+            continue                                        # §17.1993 — a survey's suggested code defines nothing
         first = step_module(r)
         acc: dict[str, dict] = {}
         for lang, code in extract_code_blocks(str(r.get("output_text") or "")):
@@ -2106,6 +2123,32 @@ def writes_a_siblings_module(output: str, row: dict, others: list[dict]) -> list
     return found
 
 
+#: §17.1993 — a module docstring that opens with the module's dotted name: `"""app.modules.paper_dashboard — …`
+_DOC_NAMES_MODULE_RE = re.compile(r'^\s*[rRuU]?("""|\'\'\')\s*app\.modules\.([A-Za-z_]\w*)\b')
+
+
+def calls_itself_another_module(output: str, row: dict, others: list[dict]) -> list[str]:
+    """§17.1993 — the step's own module (its unheaded code, which is delivered as the module the plan names) whose
+    docstring calls it another module. Live (69fe61c4 T5): run naming no module, T5's code opened with the docstring
+    "app.modules.paper_dashboard — read-only series math"; T8 read that and imported
+    `app.modules.paper_dashboard`, a module no step writes. The planned name wins: the step heads its block with it."""
+    own = step_module({k: v for k, v in row.items() if k != "output_text"}, {step_module(r) for r in others} - {""})
+    if not own:
+        return []
+    for lang, code in extract_code_blocks(output or ""):
+        if lang not in PYTHON_LANGS or not code.strip():
+            continue
+        if _MODULE_OF_STEP_RE.match(code.lstrip().splitlines()[0]):
+            continue                                    # a headed block is the file its header names
+        m = _DOC_NAMES_MODULE_RE.match(code)
+        if m and m.group(2) != own:
+            return [f"`app.modules.{m.group(2)}`: the code's docstring names that module, but this step writes "
+                    f"`app/modules/{own}.py` -- its siblings import it by that name; head the block "
+                    f"`# app/modules/{own}.py` and name it `app.modules.{own}`"]
+        return []                                       # only the first unheaded block is the step's module
+    return []
+
+
 def replaces_an_engine_module(output: str, row: dict) -> list[str]:
     """§17.1762 — a step whose module has the name of an engine module it does not keep. Live: T12 wrote
     `kill_switch.py`; `app/modules/kill_switch.py` is the engine's VPN kill switch (§17.1670), imported by
@@ -2149,6 +2192,7 @@ async def code_rows(db, job_id: str) -> list[dict]:
         "SELECT * FROM ("
         " SELECT 0 AS src, d.execution_order AS ord, left(d.job_id::text, 8) || ':' || d.node_key AS node_key,"
         "        d.title, d.description, d.prompt_template, d.output_text, d.status, d.id AS node_id, d.completed_at,"
+        "        d.tool, d.tool_config,"
         f"       {_DELIVERED_MARK} AS delivered_at"
         "   FROM jobs j CROSS JOIN LATERAL jsonb_array_elements_text("
         "        CASE WHEN jsonb_typeof(j.metadata->'builds_on') = 'array' THEN j.metadata->'builds_on'"
@@ -2157,7 +2201,7 @@ async def code_rows(db, job_id: str) -> list[dict]:
         "  WHERE j.id = :j AND d.status = 'done' AND d.output_text IS NOT NULL"
         " UNION ALL"
         " SELECT 1, execution_order, node_key, title, description, prompt_template, output_text, status, id,"
-        f"       completed_at, {_DELIVERED_MARK}"
+        f"       completed_at, tool, tool_config, {_DELIVERED_MARK}"
         "   FROM dag_nodes d WHERE job_id = :j"
         ") r ORDER BY src, ord NULLS LAST, node_key"),
         {"j": job_id})).mappings().all()
@@ -2246,7 +2290,7 @@ def rewritten_here(rows: list[dict]) -> dict[str, str]:
     """§17.1830 — the earlier job's modules this job's own finished steps rewrote: module -> that step's key."""
     out: dict[str, str] = {}
     for r in rows:
-        if not is_carried(r) and r.get("status") == "done":
+        if not is_carried(r) and r.get("status") == "done" and writes_code(r):                 # §17.1993
             for m in _written_modules(str(r.get("output_text") or "")):
                 out[m] = str(r.get("node_key") or "")
     return out
@@ -2733,7 +2777,7 @@ async def job_code(db, job_id: str, *, except_node: str | None = None) -> tuple[
     rows = await code_rows(db, job_id)
     texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
                       + (() if r["node_key"] == except_node else ("output_text",)))
-             for r in rows]
+             for r in rows if writes_code(r)]                                       # §17.1993 — a step writing code
     return job_own_code(texts)
 
 
@@ -3291,7 +3335,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str, inherited
     others = [str(r["output_text"] or "") for r in _others]
     texts = [" ".join(str(r[k] or "") for k in ("title", "description", "prompt_template")
                       + (("output_text",) if r["node_key"] != node_key and r.get("status") in (None, "done") else ()))
-             for r in rows]
+             for r in rows if writes_code(r)]                                       # §17.1993
     mods, names = job_own_code(texts)
     found = unresolved_refs(output, mods, names)
     me = next((dict(r) for r in rows if r["node_key"] == node_key), {"node_key": node_key})
@@ -3309,6 +3353,7 @@ async def engine_findings(db, job_id: str, node_key: str, output: str, inherited
     found += imports_an_unwritten_sibling(output, _all_others, _defs)
     found += replaces_an_engine_module(output, me)
     found += writes_a_siblings_module(output, me, _all_others)
+    found += calls_itself_another_module(output, me, _all_others)                             # §17.1993
     tables = dict(await engine_schema.live_tables(db))
     jobs_own = engine_schema.tables_in_code(others)
     for k, v in jobs_own.items():
