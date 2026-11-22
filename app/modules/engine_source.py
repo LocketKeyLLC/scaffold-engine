@@ -3133,8 +3133,10 @@ def importers_left_without(files: dict[str, str], current: dict) -> list[str]:
     return out
 
 
-async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[str]:
-    """Every §17.1749–1760 refusal for one CodeGen output written for the engine."""
+async def engine_findings(db, job_id: str, node_key: str, output: str, inherited: list[dict] | None = None, *,
+                          _base: bool = False) -> list[str]:
+    """Every §17.1749–1760 refusal for one CodeGen output written for the engine. §17.1991 — less what the engine's
+    own copy of the file already has (`split_inherited`): those go to `inherited` when given, never refused."""
     from sqlalchemy import text
 
     from app.modules import engine_schema
@@ -3255,7 +3257,13 @@ async def engine_findings(db, job_id: str, node_key: str, output: str) -> list[s
     from app.modules.engine_contracts import append_only_tables, raw_dict_binds
     found += raw_dict_binds(files_of({**me, "output_text": output}))                 # §17.1843
     found += deletes_in_tests(files_of({**me, "output_text": output}), append_only_tables(others) & set(jobs_own))
-    return without_repeated_names(found)                                              # §17.1939
+    found = without_repeated_names(found)                                             # §17.1939
+    if _base:
+        return found
+    found, theirs = await split_inherited(db, job_id, node_key, output, found, _all_others, me)   # §17.1991
+    if inherited is not None:
+        inherited.extend(theirs)
+    return found
 
 
 def answers_read_where_asked(output: str) -> list[str]:
@@ -3345,12 +3353,181 @@ async def adopt_imported_siblings(db, job_id: str, node_key: str, output: str) -
     return add
 
 
-def unresolved_reason(findings: list[str]) -> str:
-    """The refusal the next attempt is drafted from (W.1 retry loop)."""
+# ── §17.1991 — a defect the engine's own copy already has is not the step's ─────────────────────────────────────
+
+#: a finding located at a line of an engine module: "`app/modules/x.py:80` calls `f(…)` is missing …"
+_FINDING_AT_RE = re.compile(r"^`(app/modules/[a-z_][a-z0-9_]*\.py):(\d+)`\s*(.*)$", re.S)
+
+
+def _finding_text(msg: str) -> str:
+    """A finding's words without its line numbers: the same defect wherever the step's edit moved its line."""
+    return re.sub(r"(\.py):\d+|\bline \d+", lambda m: f"{m.group(1)}:N" if m.group(1) else "line N", " ".join(msg.split()))
+
+
+def engine_copy(rows: list[dict], path: str) -> tuple[str, str] | None:
+    """§17.1991 — (code, holder) of the copy of an engine module the ENGINE holds, when that copy is the file a step
+    edits: one no step of the job (or of a job it builds on) wrote -- the engine's own, as merged (§17.1985b; holder
+    "") -- or one delivered and not rewritten since, as reviewed into the engine (§17.1988b; holder the step that
+    wrote it, `<job>:<key>`). None for a module the job holds undelivered (its defects are still the job's) or one
+    the engine does not have."""
+    m = re.fullmatch(r"app/modules/([a-z_][a-z0-9_]*)\.py", path or "")
+    own = ENGINE_PKG / "modules" / f"{m.group(1)}.py" if m else None
+    if own is None or not own.is_file():
+        return None
+    cur = current_sources(rows).get(m.group(1))
+    if cur is None:
+        return own.read_text(encoding="utf-8"), ""
+    seen = reviewed_copy(rows, m.group(1), cur)
+    return (seen[1], cur[2]) if seen is not cur and cur[0] == path else None
+
+
+def _base_block(path: str, code: str) -> str:
+    """The engine's copy as an output of its own (its header first), for the same gates to read."""
+    body = code.lstrip("\n")
+    head = "" if _header_path(body) == path else f"# {path}\n"
+    return f"```python\n{head}{body}\n```\n"
+
+
+def inherited_candidates(found: list[str], output: str, rows: list[dict], me: dict | None = None) -> dict[str, dict]:
+    """§17.1991 — the findings that may be inherited, by path: located at a line of an engine module whose copy the
+    engine holds (`engine_copy`), the line's text unchanged from that copy, and written no more often than that copy
+    has it (a step that writes the same bad line again in its own new code owns the new one).
+    path -> {"code", "holder", "items": [(index, line number, line text, message)]}.
+    Never for a module this job delivered (holder one of its own steps: its defects are its own), nor for a step
+    that FIXES the module (`me` leads with "Fix <module>", as every fix step the engine or the operator adds does):
+    live (5b4880c0 FEX1, 2026-11-22) the operator's fix of this very route -- a draft that kept the line must stay
+    refused for it."""
+    from app.sandbox.engine_tests import files_of
+    mine = files_of({"node_key": "", "output_text": output})
+    fixing = {(m.group(2) if (m := _FIX_LEAD_RE.match(str((me or {}).get(k) or ""))) else "")
+              for k in ("title", "prompt_template")} - {""}
+    out: dict[str, dict | None] = {}
+    for i, f in enumerate(found):
+        m = _FINDING_AT_RE.match(f)
+        if not m or m.group(1) not in mine:
+            continue
+        lines, n = mine[m.group(1)].splitlines(), int(m.group(2))
+        line = lines[n - 1].strip() if 0 < n <= len(lines) else ""
+        if not line:
+            continue
+        if m.group(1) not in out:
+            base = engine_copy(rows, m.group(1)) if Path(m.group(1)).stem not in fixing else None
+            ok = base and (not base[1] or ":" in base[1])          # the engine's own, or a job this one builds on
+            out[m.group(1)] = {"code": base[0], "holder": base[1], "items": []} if ok else None
+        if (c := out[m.group(1)]) is None:
+            continue
+        held = [x.strip() for x in c["code"].splitlines()]
+        if 0 < sum(x.strip() == line for x in lines) <= held.count(line):
+            c["items"].append((i, n, line, m.group(3)))
+    return {p: c for p, c in out.items() if c and c["items"]}
+
+
+def inherited_of(path: str, cand: dict, base_found: list[str]) -> set[int]:
+    """§17.1991 — the candidates whose finding the same gates also make on the engine's copy, at a line of the same
+    text: that defect is the copy's, not the step's."""
+    blines = _base_block(path, cand["code"]).split("\n")[1:]
+    seen: set[tuple[str, str]] = set()
+    for f in base_found:
+        m = _FINDING_AT_RE.match(f)
+        if m and m.group(1) == path and 0 < int(m.group(2)) <= len(blines):
+            seen.add((blines[int(m.group(2)) - 1].strip(), _finding_text(m.group(3))))
+    return {i for i, _n, line, msg in cand["items"] if (line, _finding_text(msg)) in seen}
+
+
+async def line_owner(db, job_id: str, path: str, line: str, holder: str = "") -> dict:
+    """§17.1991 — the job and step whose finished copy of `path` holds `line` (its latest such writer), and the
+    later steps of that job that have changed the file since (a fix not delivered yet). `holder`: the step
+    `engine_copy` named, when the job builds on the owner."""
+    from sqlalchemy import text
+
+    from app.sandbox.engine_tests import files_of
+    if ":" in holder:
+        return {"job": holder.split(":", 1)[0], "owner_step": holder.split(":", 1)[1], "changed_by": []}
+    rows = (await db.execute(text(
+        "SELECT job_id::text AS job, node_key, output_text FROM dag_nodes WHERE status = 'done' "
+        "AND job_id::text <> :j AND strpos(output_text, :h) > 0 ORDER BY completed_at DESC NULLS LAST LIMIT 50"),
+        {"j": str(job_id), "h": f"# {path}"})).mappings().all()
+    later: dict[str, list[str]] = {}
+    for r in rows:
+        code = files_of(dict(r)).get(path)
+        if code is None:
+            continue
+        if line in (x.strip() for x in code.splitlines()):
+            return {"job": r["job"][:8], "owner_step": r["node_key"], "changed_by": later.get(r["job"], [])}
+        later.setdefault(r["job"], []).append(r["node_key"])
+    return {"job": "", "owner_step": "", "changed_by": []}
+
+
+async def split_inherited(db, job_id: str, node_key: str, output: str, found: list[str],
+                          rows: list[dict], me: dict | None = None) -> tuple[list[str], list[dict]]:
+    """§17.1991 — (the step's own findings, the inherited ones). A finding at a line the step only KEPT from the
+    engine's copy of the module it edits -- the line unchanged, and the same gates making the same finding on that
+    copy -- is the copy's defect: never refused (it cost the step every attempt, and the step cannot know the fix),
+    told to the step as not its own, and surfaced to the operator against the job that owns the line.
+    Live (69fe61c4 T8 "Add dashboard route", 2026-11-21): extending the lab's merged router, 11 of its 16 refusals
+    carried `paper_wire_engine_entry_module.py:<n>` calls `run_execution_entry_point(…)` is missing required
+    argument(s) `db`, `operator_id`, `timestamp` -- 5b4880c0:T9's POST /execution route (#1161), kept as it was."""
+    gone: set[int] = set()
+    theirs: list[dict] = []
+    for path, cand in inherited_candidates(found, output, rows, me).items():
+        base_found = await engine_findings(db, job_id, node_key, _base_block(path, cand["code"]), _base=True)
+        for i, n, line, msg in cand["items"]:
+            if i in inherited_of(path, cand, base_found):
+                gone.add(i)
+                theirs.append({"path": path, "line_no": n, "line": line, "finding": msg, "step": node_key,
+                               **await line_owner(db, job_id, path, line, cand["holder"])})
+    if theirs:
+        logger.warning("engine_inherited_findings job=%s node=%s %s", job_id, node_key,
+                       [(t["path"], t["line_no"], t["job"], t["owner_step"]) for t in theirs])
+    return [f for i, f in enumerate(found) if i not in gone], theirs
+
+
+def _owned_by(t: dict) -> str:
+    return f"owned by job {t['job']} step {t['owner_step']}" if t.get("job") else "the engine's own"
+
+
+def inherited_note(inherited: list[dict]) -> str:
+    """§17.1991 — what the step is told of the inherited findings: not its own; keep the line. The finding's own
+    words stay out: a refusal's kinds are read from its text (`switch_code_model`), and this is none of its own."""
+    if not inherited:
+        return ""
+    return ("\nNot yours (§17.1991) -- these lines are pre-existing in the engine's own copy of the file this step "
+            "edits, with a defect the step is not refused for (the operator is told). Keep each exactly as it is: do "
+            "not fix it, copy it into new code, or work around it:\n"
+            + "\n".join(f"    `{t['path']}` line {t['line_no']}: `{t['line'][:120]}` ({_owned_by(t)})"
+                        for t in inherited))
+
+
+async def surface_inherited(job_id: str, inherited: list[dict]) -> int:
+    """§17.1991 — each inherited finding as an operator alert against the job that owns the line. That job delivered
+    the line into the engine's tree, so its fix is a change to that job and a re-delivery -- the operator's call,
+    never a step the engine slips into another job (the engine's fix steps, §17.1831, go into the job that is
+    running); and here the fix needs a value only the operator has (which operator id the route runs as). One alert
+    per line and finding (deduplicated). Returns how many were emitted."""
+    import hashlib
+
+    from app.observability import alerts
+    n = 0
+    for t in inherited:
+        key = hashlib.sha1(f"{t['path']}|{t['line']}|{_finding_text(t['finding'])}".encode()).hexdigest()[:16]
+        since = f"; changed since by {', '.join(t['changed_by'])}, not delivered yet" if t.get("changed_by") else ""
+        res = await alerts.emit(
+            kind="engine_code.inherited_defect", severity="warning",
+            message=(f"`{t['path']}` line `{t['line'][:160]}` ({_owned_by(t)}{since}): {t['finding'][:400]} -- step "
+                     f"{t['step']} of job {str(job_id)[:8]} only keeps that line and is not refused for it; fix it in "
+                     "the owning job and deliver"),
+            payload={**t, "job_id": str(job_id)}, dedup_key=f"inherited:{key}")
+        n += bool(res.get("emitted"))
+    return n
+
+
+def unresolved_reason(findings: list[str], inherited: list[dict] | None = None) -> str:
+    """The refusal the next attempt is drafted from (W.1 retry loop). §17.1991 — and what is not its own."""
     return ("§17.1749 this step writes code for the engine itself, and it reaches for things the engine does not have:\n"
             + "\n".join(f"  - {f}" for f in findings)
             + "\nUse the modules, functions and settings listed in \"The engine's own code\" above, or a module this "
-              "job's own steps write. Do not guess a name, and do not hide a guessed import behind try/except.")
+              "job's own steps write. Do not guess a name, and do not hide a guessed import behind try/except."
+            + inherited_note(inherited or []))
 
 
 # ── the block a CodeGen step is shown ────────────────────────────────────────

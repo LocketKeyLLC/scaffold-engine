@@ -2885,8 +2885,16 @@ async def execute_next_node(
                 if _es.targets_the_engine(brief):
                     # §17.1759–1760 — and its SQL against the tables that exist, its migration against the
                     # engine's history, and no sample value or note handing its unfinished work on
+                    # §17.1991 — a defect the engine's own copy of the file already has is not the step's: kept
+                    # out of its refusals, told to it as not its own, and surfaced to the operator
+                    _inherited: list[dict] = []
                     async with async_session() as _esdb:
-                        _refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output)
+                        _refs = _test_syntax + await _es.engine_findings(_esdb, job_id, node_key, output, _inherited)
+                    if _inherited:
+                        try:
+                            await _es.surface_inherited(job_id, _inherited)
+                        except Exception as exc:          # noqa: BLE001 — the alert is a notice; the gate stands
+                            logger.warning("engine_inherited_alert_failed node='%s' error=%r", title, exc)
                     # §17.1922 — a kept test the gates refuse is dropped, and the gates read the output again
                     output, _refs = await _drop_refused_kept_tests(output, _refs, _test_syntax, node_snapshot,
                                                                    job_id, node_key)
@@ -2959,7 +2967,7 @@ async def execute_next_node(
                         (logger.info if not _refs else logger.warning)(
                             "engine_tests_redrawn: node='%s' test_findings=%d left=%d", title, _before, len(_refs))
                     if _refs:
-                        engine_reason = _es.unresolved_reason(_refs)
+                        engine_reason = _es.unresolved_reason(_refs, _inherited)
                     # §17.1788 — the steps whose modules this one imports become its dependencies
                     try:
                         async with async_session() as _esdb:
