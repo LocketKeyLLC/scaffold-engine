@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Paper trading — dashboard</title>
+{#
+  Rendered with the dict returned by
+  app/modules/paper_dashboard_view_builder.py:build_dashboard_context():
+
+    span, chart{dates, account_values, spy_values, net_return, gross_return,
+                 costs, max_drawdown, sharpe_ratio, turnover},
+    net_return, gross_return, costs, drawdown, sharpe, turnover,
+    open_positions, recent_orders, fills, proposals, audit
+
+  Every string in that context was already HTML-escaped by the builder, so the
+  template emits it with |safe. Escaping it a second time here would print
+  &amp;lt; where the operator wrote "<". Numbers and datetimes pass through the
+  builder untouched and are formatted, never marked safe.
+
+  Chart.js 4.5.1 UMD is served from the vendored copy that
+  app/static/paper/vendor.json pins into
+  app/static/paper/vendor/chart.umd.min.js. The serving module may pass
+  `vendor_chart_url`, or `static_prefix` (default /labs/paper/static), to put
+  the file behind its API-key guard; the default below matches the lab mount.
+#}
+{%- set _static_prefix = static_prefix | default('/labs/paper/static', true) -%}
+{%- set chart_js = vendor_chart_url | default(_static_prefix ~ '/vendor/chart.umd.min.js', true) -%}
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #1b1f24;
+    --muted: #5b6470;
+    --line: #e2e5ea;
+    --accent: #2f6fed;
+    --pos: #12805c;
+    --neg: #b5342a;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b;
+      --panel: #1b1f24;
+      --ink: #e8eaee;
+      --muted: #9ba3ae;
+      --line: #2b3138;
+      --accent: #6ea0ff;
+      --pos: #4ec99a;
+      --neg: #ff8b7e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .page { max-width: 1180px; margin: 0 auto; padding: 24px 16px 56px; }
+  .page-head {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    align-items: flex-end; justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  .page-head h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+  .page-head .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; max-width: 60ch; }
+  .spans { display: inline-flex; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px; }
+  .span-btn {
+    display: inline-block; min-width: 52px; text-align: center;
+    padding: 6px 10px; border-radius: 7px;
+    color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .span-btn:hover { color: var(--ink); border-color: var(--line); }
+  .span-btn.is-active { background: var(--accent); color: #fff; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card > h2 {
+    margin: 0 0 12px; font-size: 15px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .card > h2 .count {
+    font-size: 12px; font-weight: 600; letter-spacing: 0;
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 999px; padding: 1px 8px; color: var(--muted);
+  }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .kpi-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .kpi-value { display: block; font-size: 21px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi.is-net { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .kpi.is-net .kpi-value { color: var(--accent); }
+  .kpi .kpi-cost { color: var(--neg); }
+  .chart-wrap { position: relative; height: 340px; }
+  .chart-wrap canvas { width: 100% !important; height: 100% !important; }
+  .fallback { color: var(--muted); font-size: 13px; margin: 0; }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .grid > .card { margin-bottom: 0; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  .tbl th, .tbl td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .tbl th { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+  .tbl tbody tr:last-child td { border-bottom: 0; }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tag { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tag-buy { color: var(--pos); border-color: var(--pos); }
+  .tag-sell { color: var(--neg); border-color: var(--neg); }
+  .empty { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .proposals { list-style: none; margin: 0; padding: 0; }
+  .proposal { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+  .proposal:last-child { margin-bottom: 0; }
+  .proposal > details > summary {
+    cursor: pointer; padding: 9px 12px; display: flex; gap: 10px; align-items: baseline;
+    list-style: none; flex-wrap: nowrap;
+  }
+  .proposal > details > summary::-webkit-details-marker { display: none; }
+  .proposal > details > summary::before { content: "\25B8"; color: var(--muted); font-size: 11px; flex: none; }
+  .proposal > details[open] > summary::before { content: "\25BE"; }
+  .proposal > details > summary:hover { background: var(--bg); border-radius: 8px; }
+  .prop-id { font-size: 12px; color: var(--muted); flex: none; }
+  .prop-ticker { font-weight: 700; flex: none; }
+  .prop-qty { flex: none; font-variant-numeric: tabular-nums; }
+  .prop-type { flex: none; color: var(--muted); font-size: 12.5px; }
+  .prop-rationale {
+    flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .proposal-body { padding: 0 12px 12px 30px; border-top: 1px solid var(--line); }
+  .proposal-body h3 {
+    margin: 12px 0 4px; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
+  }
+  .proposal-body .rationale { margin: 0; white-space: pre-wrap; }
+  .proposal-body .sources { margin: 0; padding-left: 18px; font-size: 13px; }
+  .proposal-body .sources li { margin: 2px 0; word-break: break-word; }
+  .audit-scroll { max-height: 420px; overflow: auto; }
+  .audit-summary { cursor: pointer; font-weight: 600; font-size: 14px; padding: 2px 0; }
+  .audit-summary::marker { color: var(--muted); }
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .pager button {
+    font: inherit; padding: 3px 12px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+  }
+  .pager button:disabled { opacity: 0.45; cursor: default; }
+  .page-foot { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  @media (max-width: 620px) {
+    .prop-rationale { display: none; }
+    .kpi-value { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+{% macro num(value, spec='%.2f') -%}
+{%- if value is number -%}{{ spec|format(value) }}{%- elif value is none -%}—{%- else -%}{{ value|safe }}{%- endif -%}
+{%- endmacro %}
+{% macro pct(value, sign=true) -%}
+{%- if value is number -%}{{ ('%+.2f' if sign else '%.2f')|format(value * 100) }}%{%- elif value is none -%}—{%- else -%}{{ value|safe }}{%- endif -%}
+{%- endmacro %}
+{% macro ts(value) -%}
+{%- if value is none -%}—
+{%- elif value is string -%}{{ value|safe }}
+{%- elif value.strftime is defined -%}{{ value.strftime('%Y-%m-%d %H:%M') }}
+{%- else -%}{{ value }}
+{%- endif -%}
+{%- endmacro %}
+
+<div class="page">
+  <header class="page-head">
+    <div>
+      <h1>Paper trading</h1>
+      <p class="sub">Read-only view of the lab's recorded snapshots, orders and audit trail. Nothing here places, changes or cancels an order, and the page only changes when you reload it.</p>
+    </div>
+    <nav class="spans" aria-label="Chart span">
+      {% for value in ['1w', '1m', '3m', 'all'] %}
+      <a class="span-btn{% if span == value %} is-active{% endif %}"
+         href="?span={{ value }}"
+         title="{{ {'1w': '1 week', '1m': '1 month', '3m': '3 months', 'all': 'All history'}[value] }}"
+         {% if span == value %}aria-current="true"{% endif %}>{{ value }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+
+  <section class="card" aria-labelledby="perf-h">
+    <h2 id="perf-h">Performance <span class="count">{{ span }}</span></h2>
+    <div class="kpis">
+      <div class="kpi is-net">
+        <span class="kpi-label">Net return</span>
+        <span class="kpi-value" title="return after costs">{{ pct(net_return) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Gross return</span>
+        <span class="kpi-value">{{ pct(gross_return) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Costs subtracted</span>
+        <span class="kpi-value kpi-cost">&minus;{{ pct(costs, false) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Max drawdown</span>
+        <span class="kpi-value">{{ pct(drawdown, false) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Sharpe ratio</span>
+        <span class="kpi-value">{{ num(sharpe) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Turnover</span>
+        <span class="kpi-value">{{ pct(turnover, false) }}</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="chart-h">
+    <h2 id="chart-h">Account value vs SPY <span class="count">{{ span }}</span></h2>
+    <div class="chart-wrap">
+      <canvas id="equity-chart" role="img" aria-label="Account value of the paper account and the SPY benchmark over the selected span"></canvas>
+    </div>
+    <p class="fallback" id="chart-fallback" hidden></p>
+    <noscript><p class="fallback">The chart needs JavaScript. Every figure it plots is also recorded in the lab's tables.</p></noscript>
+  </section>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="positions-h">
+      <h2 id="positions-h">Open positions <span class="count">{{ open_positions|length }}</span></h2>
+      {% if open_positions %}
+      <table class="tbl">
+        <thead>
+          <tr><th scope="col">Ticker</th><th scope="col" class="num">Quantity</th><th scope="col">Side</th></tr>
+        </thead>
+        <tbody>
+          {% for row in open_positions %}
+          {% set side = (row.side|default('', true))|lower|string %}
+          <tr>
+            <td class="mono">{{ row.ticker|default('—', true)|safe }}</td>
+            <td class="num">{{ row.quantity|default('—', true) }}</td>
+            <td><span class="tag{% if side in ('buy', 'long') %} tag-buy{% elif side in ('sell', 'short') %} tag-sell{% endif %}">{{ row.side|default('—', true)|safe }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty">No open positions in this snapshot.</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="orders-h">
+      <h2 id="orders-h">Recent orders <span class="count">{{ recent_orders|length }}</span></h2>
+      {% if recent_orders %}
+      <table class="tbl">
+        <thead>
+          <tr><th scope="col">Ticker</th><th scope="col">Side</th><th scope="col" class="num">Quantity</th><th scope="col">Status</th></tr>
+        </thead>
+        <tbody>
+          {% for row in recent_orders %}
+          <tr>
+            <td class="mono">{{ row.ticker|default('—', true)|safe }}</td>
+            <td>{{ row.side|default('—', true)|safe }}</td>
+            <td class="num">{{ row.quantity|default('—', true) }}</td>
+            <td>{{ row.status|default('—', true)|safe }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty">No recent orders.</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="fills-h">
+      <h2 id="fills-h">Fills <span class="count">{{ fills|length }}</span></h2>
+      {% if fills %}
+      <table class="tbl">
+        <thead>
+          <tr><th scope="col">Ticker</th><th scope="col">Side</th><th scope="col" class="num">Quantity</th><th scope="col" class="num">Price</th></tr>
+        </thead>
+        <tbody>
+          {% for row in fills %}
+          <tr>
+            <td class="mono">{{ row.ticker|default('—', true)|safe }}</td>
+            <td>{{ row.side|default('—', true)|safe }}</td>
+            <td class="num">{{ row.quantity|default('—', true) }}</td>
+            <td class="num">{{ num(row.price) if row.price is defined else '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty">No fills recorded.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="proposals-h" style="margin-top:16px">
+    <h2 id="proposals-h">Proposals <span class="count">{{ proposals|length }}</span></h2>
+    {% if proposals %}
+    <ul class="proposals">
+      {% for p in proposals %}
+      <li class="proposal">
+        <details>
+          <summary class="proposal-line">
+            <span class="prop-id">{{ p.id|default('—', true)|safe }}</span>
+            <span class="prop-ticker">{{ p.ticker|default('—', true)|safe }}</span>
+            <span class="prop-qty">{{ p.side|default('', true)|safe }} {{ p.quantity|default('', true) }}</span>
+            <span class="prop-type">{{ p.order_type|default('', true)|safe }}{% if p.limit_price %} @ {{ p.limit_price }}{% endif %}</span>
+            <span class="prop-rationale">{{ p.rationale|default('no rationale recorded', true)|safe }}</span>
+          </summary>
+          <div class="proposal-body">
+            <h3>Rationale</h3>
+            <p class="rationale">{{ p.rationale|default('No rationale recorded for this proposal.', true)|safe }}</p>
+            <h3>Sources</h3>
+            {% if p.sources %}
+            <ul class="sources">
+              {% for source in p.sources %}
+              <li>{{ source|safe }}</li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No sources recorded.</p>
+            {% endif %}
+          </div>
+        </details>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No proposals recorded.</p>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="audit-h">
+    <h2 id="audit-h">Audit trail <span class="count">{{ audit|length }}</span></h2>
+    {% if audit %}
+    <details>
+      <summary class="audit-summary">Show the {{ audit|length }} recorded audit event{{ '' if audit|length == 1 else 's' }}</summary>
+      <div class="audit-scroll">
+        <table class="tbl" id="audit-table">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Event</th>
+              <th scope="col">Ticker</th>
+              <th scope="col">Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for event in audit %}
+            <tr>
+              <td class="mono">{{ ts(event.data_ts|default(none, true)) }}</td>
+              <td>{{ event.event_type|default('—', true)|safe }}</td>
+              <td class="mono">{{ event.ticker|default('', true)|safe }}</td>
+              <td>{{ event.details|default('', true)|safe }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="pager" id="audit-pager">
+        <button type="button" id="audit-prev">Previous</button>
+        <span id="audit-page-label"></span>
+        <button type="button" id="audit-next">Next</button>
+      </div>
+    </details>
+    {% else %}
+    <p class="empty">The audit trail is empty.</p>
+    {% endif %}
+  </section>
+
+  <p class="page-foot">All figures are read from the lab's existing snapshot, order and audit records for the selected span. Reload the page to pick up new snapshots.</p>
+</div>
+
+<script src="{{ chart_js }}"></script>
+<script>
+(function () {
+  "use strict";
+
+  var chartData = {{ chart|tojson }};
+  var canvas = document.getElementById("equity-chart");
+  var fallback = document.getElementById("chart-fallback");
+
+  function showFallback(message) {
+    if (canvas) { canvas.hidden = true; }
+    if (fallback) { fallback.hidden = false; fallback.textContent = message; }
+  }
+
+  if (!canvas || !fallback) { return; }
+  if (!chartData || !chartData.dates || chartData.dates.length === 0) {
+    showFallback("No snapshots recorded in this span yet.");
+    return;
+  }
+  if (!window.Chart) {
+    showFallback("The chart library did not load from " + canvas.dataset.vendor + "; the figures on this page are unaffected.");
+    return;
+  }
+
+  new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels: chartData.dates,
+      datasets: [
+        {
+          label: "Account value",
+          data: chartData.account_values || [],
+          yAxisID: "y",
+          borderColor: "#2f6fed",
+          backgroundColor: "rgba(47,111,237,0.10)",
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHitRadius: 8,
+          tension: 0.2,
+          fill: true
+        },
+        {
+          label: "SPY",
+          data: chartData.spy_values || [],
+          yAxisID: "y1",
+          borderColor: "#9aa1ab",
+          backgroundColor: "transparent",
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          pointHitRadius: 8,
+          tension: 0.2,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 12, usePointStyle: true } },
+        tooltip: {
+          callbacks: {
+            label: function (ctx) {
+              var value = ctx.parsed.y;
+              if (value === null || value === undefined) { return ctx.dataset.label + ": —"; }
+              return ctx.dataset.label + ": " + Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
+        },
+        y: {
+          position: "left",
+          title: { display: true, text: "Account value" },
+          ticks: { callback: function (v) { return Number(v).toLocaleString(); } }
+        },
+        y1: {
+          position: "right",
+          title: { display: true, text: "SPY" },
+          grid: { drawOnChartArea: false },
+          ticks: { callback: function (v) { return Number(v).toFixed(2); } }
+        }
+      }
+    }
+  });
+})();
+</script>
+<script>
+(function () {
+  "use strict";
+
+  var table = document.getElementById("audit-table");
+  var pager = document.getElementById("audit-pager");
+  if (!table || !pager || !table.tBodies.length) { return; }
+
+  var rows = Array.prototype.slice.call(table.tBodies[0].rows);
+  var perPage = 25;
+  var page = 0;
+  var pages = Math.max(1, Math.ceil(rows.length / perPage));
+  var label = document.getElementById("audit-page-label");
+  var prev = document.getElementById("audit-prev");
+  var next = document.getElementById("audit-next");
+
+  if (rows.length <= perPage || !label || !prev || !next) {
+    pager.hidden = true;
+    return;
+  }
+
+  function render() {
+    var start = page * perPage;
+    var end = start + perPage;
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].hidden = i < start || i >= end;
+    }
+    label.textContent = "Page " + (page + 1) + " of " + pages + " · " + rows.length + " events";
+    prev.disabled = page === 0;
+    next.disabled = page === pages - 1;
+  }
+
+  prev.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });
+  next.addEventListener("click", function () { if (page < pages - 1) { page += 1; render(); } });
+  render();
+})();
+</script>
+</body>
+</html>
