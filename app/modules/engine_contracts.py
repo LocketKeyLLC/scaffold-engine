@@ -759,6 +759,15 @@ def secrets_read(modules: dict[str, str], mod: str, name: str, depth: int = 0,
                      and m.name == (meth or "__init__")), None)
         if node is None:
             return {}
+    # §17.2003 — `outer.inner`: a function defined inside a module function, as a route handler inside `install(app)`
+    # is. Live (69fe61c4, 2026-11-23): the dashboard handler inside `install` reached the Alpaca keys through
+    # `get_spy_benchmark`, and the delivery said "secrets read: -"
+    inner = {x.name: x for x in ast.walk(funcs[cls_name]) if x is not funcs[cls_name]
+             and isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))} if cls is None and cls_name in funcs else {}
+    if node is None and meth and inner:
+        node = inner.get(meth)
+        if node is None:
+            return {}
     if node is None:
         if cls_name not in imports:
             return {}
@@ -815,6 +824,9 @@ def secrets_read(modules: dict[str, str], mod: str, name: str, depth: int = 0,
                     out.setdefault("", mod)
             if not elts:
                 out.setdefault("", mod)
+        elif isinstance(n.func, ast.Name) and meth and callee in inner and callee not in funcs:
+            for k, v in secrets_read(modules, mod, f"{cls_name}.{callee}", depth + 1, seen, patched).items():
+                out.setdefault(k, v)                                                   # a sibling nested helper
         elif isinstance(n.func, ast.Name) and callee != name and (callee in funcs or callee in imports
                                                                    or any(isinstance(c, ast.ClassDef) and c.name == callee
                                                                           for c in tree.body)):
@@ -825,6 +837,32 @@ def secrets_read(modules: dict[str, str], mod: str, name: str, depth: int = 0,
                     isinstance(c, ast.ClassDef) and c.name == n.func.value.id for c in tree.body)):
             for k, v in secrets_read(modules, mod, f"{n.func.value.id}.{callee}", depth + 1, seen, patched).items():
                 out.setdefault(k, v)                                                   # `Class.method(…)`
+    return out
+
+
+def view_routes(code: str) -> list[tuple[str, str, int]]:
+    """§17.2003 — the GET routes a module declares: (path, the handler as `secrets_read` names it, line). A handler at
+    module level is `name`; one inside a module function (`install(app)` mounting its router) is `outer.name`."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    def _path(fn: ast.AST) -> str | None:
+        for d in fn.decorator_list:
+            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "get" and d.args
+                    and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
+                return d.args[0].value
+        return None
+    out: list[tuple[str, str, int]] = []
+    for top in tree.body:
+        if not isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if (p := _path(top)) is not None:
+            out.append((p, top.name, top.lineno))
+        for x in ast.walk(top):
+            if x is not top and isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and (p := _path(x)) is not None:
+                out.append((p, f"{top.name}.{x.name}", x.lineno))
     return out
 
 
@@ -856,6 +894,57 @@ def _expects_a_raise(tree: ast.Module) -> list[tuple[int, int]]:
     return out
 
 
+def _test_scopes(tree: ast.Module, code: str, targets: list[tuple[str, str, int]] | None = None):
+    """§17.1900 — a test file's function scopes, and `covering(scope)`: the (module, name) patches that hold in a test
+    function (its own, module level, autouse fixtures, the fixtures it takes, the helpers it calls). `targets`: the
+    patches to place (default: the file's own, `_patch_targets`)."""
+    # §17.1900 — a scope is a function AT a line: two tests may share a name (a class's and a module-level one, a
+    # redraw appending its version), and one's patches are not the other's
+    fn_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes = [(min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno or n.lineno, f"{n.name}@{n.lineno}")
+              for n in fn_nodes]
+    # a patch counts for the test function it is in (its decorators too); one outside any test -- a fixture, a
+    # helper, module level -- for the whole file. Live (5b4880c0 T8): other tests patched the SPY tracker, the
+    # one at line 457 ran it for real; a file-wide set would have hidden it
+    by_scope: dict[str, set[tuple[str, str]]] = {}
+    for m, name, ln in (_patch_targets(code) if targets is None else targets):
+        by_scope.setdefault(_scope_of(scopes, ln), set()).add((m, name))     # §17.1900 each function's own
+    # §17.1900 — a patch made in a helper covers the tests that CALL the helper; one made in a fixture, the tests
+    # that take it (an autouse fixture, every test); the file-wide bucket is module level alone. Live (5b4880c0
+    # T5 a3, 2026-11-03 23:56 UTC): `patch_values_for(...)` called by OTHER tests counted for the whole file, and
+    # `run_backtest` ran the Alpaca client for real -- "Missing Alpaca paper trading secrets"
+    fns = {f"{n.name}@{n.lineno}": n for n in fn_nodes}
+    by_name: dict[str, list[str]] = {}
+    for k, n in fns.items():
+        by_name.setdefault(n.name, []).append(k)
+
+    def _deco_name(d: ast.AST) -> str | None:
+        f = d.func if isinstance(d, ast.Call) else d
+        return getattr(f, "attr", None) or getattr(f, "id", None)
+    fixtures = {k for k, n in fns.items() if any(_deco_name(d) == "fixture" for d in n.decorator_list)}
+    fixture_names = {fns[k].name: k for k in fixtures}
+    autouse = {k for k in fixtures if any(isinstance(d, ast.Call) and any(
+        kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value for kw in d.keywords)
+        for d in fns[k].decorator_list)}
+
+    def covering(test: str) -> frozenset:
+        out = set(by_scope.get("", set())) | set(by_scope.get(test, set()))
+        for k in autouse:
+            out |= by_scope.get(k, set())
+        fn = fns.get(test)
+        if fn is not None:
+            for a in fn.args.args + fn.args.kwonlyargs:
+                if a.arg in fixture_names:
+                    out |= by_scope.get(fixture_names[a.arg], set())
+            for c in _own_nodes(fn):
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in by_name:
+                    for k in by_name[c.func.id]:                     # a helper the test calls, by its name
+                        if not fns[k].name.startswith("test"):
+                            out |= by_scope.get(k, set())
+        return frozenset(out)
+    return scopes, covering, fns
+
+
 def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
     """§17.1857 — each test that runs a job function (or builds a job class) that reads an operator secret, in a
     test file that patches `values_for` nowhere. Live (5b4880c0 T5, 2026-10-28, two rounds): the EDGAR ingester ran
@@ -873,51 +962,7 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
         except SyntaxError:
             continue
         raises = _expects_a_raise(tree)
-        # §17.1900 — a scope is a function AT a line: two tests may share a name (a class's and a module-level one, a
-        # redraw appending its version), and one's patches are not the other's
-        fn_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        scopes = [(min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno or n.lineno, f"{n.name}@{n.lineno}")
-                  for n in fn_nodes]
-        # a patch counts for the test function it is in (its decorators too); one outside any test -- a fixture, a
-        # helper, module level -- for the whole file. Live (5b4880c0 T8): other tests patched the SPY tracker, the
-        # one at line 457 ran it for real; a file-wide set would have hidden it
-        by_scope: dict[str, set[tuple[str, str]]] = {}
-        for m, name, ln in _patch_targets(code):
-            by_scope.setdefault(_scope_of(scopes, ln), set()).add((m, name))     # §17.1900 each function's own
-        # §17.1900 — a patch made in a helper covers the tests that CALL the helper; one made in a fixture, the tests
-        # that take it (an autouse fixture, every test); the file-wide bucket is module level alone. Live (5b4880c0
-        # T5 a3, 2026-11-03 23:56 UTC): `patch_values_for(...)` called by OTHER tests counted for the whole file, and
-        # `run_backtest` ran the Alpaca client for real -- "Missing Alpaca paper trading secrets"
-        fns = {f"{n.name}@{n.lineno}": n for n in fn_nodes}
-        by_name: dict[str, list[str]] = {}
-        for k, n in fns.items():
-            by_name.setdefault(n.name, []).append(k)
-
-        def _deco_name(d: ast.AST) -> str | None:
-            f = d.func if isinstance(d, ast.Call) else d
-            return getattr(f, "attr", None) or getattr(f, "id", None)
-        fixtures = {k for k, n in fns.items() if any(_deco_name(d) == "fixture" for d in n.decorator_list)}
-        fixture_names = {fns[k].name: k for k in fixtures}
-        autouse = {k for k in fixtures if any(isinstance(d, ast.Call) and any(
-            kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value for kw in d.keywords)
-            for d in fns[k].decorator_list)}
-
-        def covering(test: str) -> frozenset:
-            out = set(by_scope.get("", set())) | set(by_scope.get(test, set()))
-            for k in autouse:
-                out |= by_scope.get(k, set())
-            fn = fns.get(test)
-            if fn is not None:
-                for a in fn.args.args + fn.args.kwonlyargs:
-                    if a.arg in fixture_names:
-                        out |= by_scope.get(fixture_names[a.arg], set())
-                for c in _own_nodes(fn):
-                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in by_name:
-                        for k in by_name[c.func.id]:                     # a helper the test calls, by its name
-                            if not fns[k].name.startswith("test"):
-                                out |= by_scope.get(k, set())
-            return frozenset(out)
-
+        scopes, covering, _fns = _test_scopes(tree, code)
         seen: set[tuple[str, str]] = set()
         for mod, fname, line in _test_calls(code):
             if mod not in reach or (mod, fname) in seen or any(a <= line <= b for a, b in raises):
@@ -944,6 +989,124 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
                 + " (where the module looks it up) to return a test value for each name"
                 + (f" ({', '.join(f'`{s}`' for s in named)})" if named else "")
                 + "; mock the network it then reaches as well")
+    return found
+
+
+def _is_empty_dict(e: ast.AST) -> bool:
+    return (isinstance(e, ast.Dict) and not e.keys) or (
+        isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "dict" and not e.args and not e.keywords)
+
+
+def _empty_secret_patches(tree: ast.Module, code: str) -> list[tuple[str, str, int]]:
+    """§17.2003 — each `values_for` patch whose stand-in gives no secret at all (`return_value={}`, `lambda *a: {}`,
+    a function of the file that returns `{}`), as a pseudo-target `(module, "values_for#empty", line)`."""
+    empties = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and (rets := [r for r in ast.walk(n) if isinstance(r, ast.Return)])
+               and all(r.value is not None and _is_empty_dict(r.value) for r in rets)}
+    calls = {n.lineno: n for n in ast.walk(tree) if isinstance(n, ast.Call) and (
+        getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in ("patch", "setattr", "object")}
+    out = []
+    for m, name, ln in _patch_targets(code):
+        c = calls.get(ln)
+        if name != "values_for" or c is None:
+            continue
+        stand_ins = list(c.args[1:]) + [k.value for k in c.keywords]
+        if any(_is_empty_dict(x) for a in stand_ins for x in ast.walk(a)) or any(
+                isinstance(a, ast.Name) and a.id in empties for a in stand_ins):
+            out.append((m, "values_for#empty", ln))
+    return out
+
+
+def _requests(fn: ast.AST, route: str, helpers: dict[str, ast.AST]) -> bool:
+    """A test function (or a helper it calls by name) names the route's URL: a string ending in `route`, its query
+    aside -- `client.get("/labs/paper/dashboard?span=all")`, an f-string's last literal part."""
+    todo, done = [fn], set()
+    while todo:
+        f = todo.pop()
+        if id(f) in done:
+            continue
+        done.add(id(f))
+        for c in _own_nodes(f):
+            if isinstance(c, ast.Constant) and isinstance(c.value, str) and route != "/" and \
+                    c.value.split("?")[0].rstrip("/").endswith(route.rstrip("/")):
+                return True
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in helpers:
+                todo.append(helpers[c.func.id])
+    return False
+
+
+def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
+    """§17.2003 — each GET view of a module this step writes that reaches an operator secret (through `values_for`,
+    itself or through what it calls) with no test that requests it with the secret missing: the test's stand-in for
+    `values_for` gives nothing, and nothing between the view and the reader is stood in for. A key the operator has
+    not stored yet is the normal state of a lab; a view shows that part unavailable and still answers. Live
+    (69fe61c4, 2026-11-23): `/labs/paper/dashboard` 500'd live -- `get_spy_benchmark` -> `AlpacaPaperClient` ->
+    `AlpacaSecretsMissingError` -- and every one of its 46 tests stood in for `get_spy_benchmark`."""
+    reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
+                          if p.startswith("app/") and p.endswith(".py")}}
+    tests: list[tuple[ast.Module, str]] = []
+    for path, code in files.items():
+        if path.startswith("tests/") and path.endswith(".py"):
+            try:
+                tests.append((ast.parse(code), code))
+            except SyntaxError:
+                continue
+    found: list[str] = []
+    for path, code in files.items():
+        mod = path.rsplit("/", 1)[1][:-3] if path.startswith("app/modules/") and path.endswith(".py") else ""
+        if not mod or mod not in own:
+            continue
+        d = _defs(code)
+        imports = d[1] if d else {}
+        for route, handler, line in view_routes(code):
+            secrets = secrets_read(reach, mod, handler)
+            if not secrets:
+                continue
+            readers = sorted(set(secrets.values()))
+            ok = False
+            for tree, tcode in tests:
+                scopes, covering, fns = _test_scopes(tree, tcode, _patch_targets(tcode) + _empty_secret_patches(tree, tcode))
+                helpers = {n.name: n for n in fns.values() if not n.name.startswith("test")}
+                for key, fn in fns.items():
+                    if not fn.name.startswith("test") or not _requests(fn, route, helpers):
+                        continue
+                    patched = covering(key)
+                    empty = {m for m, n in patched if n == "values_for#empty"}
+                    if not ("runner_secrets" in empty or set(readers) <= empty):
+                        continue
+                    if secrets_read(reach, mod, handler, patched=frozenset(p for p in patched if "#" not in p[1])):
+                        ok = True                                 # the chain runs for real, into an empty reader
+                        break
+                if ok:
+                    break
+            if ok:
+                continue
+            named = sorted(k for k in secrets if k)
+            # the imported names the view uses, itself or through the helpers beside it it calls
+            outer = (d[0] if d else {}).get(handler.split(".")[0])
+            local = {x.name: x for x in ast.walk(outer) if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))} \
+                if outer is not None else {}
+            used: set[str] = set()
+            todo = [x for x in local.values() if x.lineno == line]
+            while todo:
+                fn = todo.pop()
+                for n in ast.walk(fn):
+                    if isinstance(n, ast.Name) and n.id not in used:
+                        used.add(n.id)
+                        if n.id in local:
+                            todo.append(local[n.id])
+            via = sorted(n for n in used if n in imports and secrets_read(reach, *imports[n]))
+            found.append(
+                f"`{path}:{line}` the view `GET {route}` (`{handler}`) reaches the operator secret"
+                + (f"{'s' if len(named) > 1 else ''} {', '.join(f'`{s}`' for s in named)}" if named else "s it needs")
+                + (f" through {', '.join(f'`{v}`' for v in via)}" if via else "")
+                + f" (read by {', '.join(f'`{r}`' for r in readers)}) -- a secret the operator has not stored yet must "
+                "not fail the page (§17.2003): catch the error the call raises without it"
+                + (f" where the view calls {', '.join(f'`{v}`' for v in via)}" if via else "")
+                + ", show that part as unavailable, and still answer 200. Add a test that requests the route with "
+                + ", ".join(f"`app.modules.{r}.values_for`" for r in readers)
+                + " patched to return `{}` -- standing in for nothing between the view and the reader -- and checks "
+                "it answers 200")
     return found
 
 
@@ -1125,12 +1288,22 @@ def wrong_secret_mocks(files: dict[str, str], modules: dict[str, str], own: set[
         # §17.1875 — a test that expects a raise may hand the module no secret on purpose. Live (5b4880c0 T5 a1,
         # 2026-10-30): `patch(…values_for, AsyncMock(return_value={}))` under `pytest.raises(AlpacaSecretsMissingError)`
         raises = _expects_a_raise(tree)
+        routes = {r for p, c in files.items() if p.startswith("app/") and p.endswith(".py") for r, _h, _l in view_routes(c)}
+        routes |= {r for c in reach.values() for r, _h, _l in view_routes(c)} if routes or "TestClient" in code else set()
+        fns_all = [f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        helpers = {f.name: f for f in fns_all if not f.name.startswith("test")}
+        test_fns = [f for f in fns_all if f.name.startswith("test")]
         fn_ranges = sorted((f.lineno, getattr(f, "end_lineno", None) or f.lineno) for f in ast.walk(tree)
                            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)))
         for mod, line, keys in mocks:
             if keys is None or (mod != "runner_secrets" and mod not in reach):
                 continue
             rng = next((r for r in reversed(fn_ranges) if r[0] <= line <= r[1]), None)
+            # §17.2003 — no secret at all, in a test that requests a view: the not-stored case, on purpose (the view
+            # answers without it); elsewhere it is still a run handed nothing (§17.1875)
+            if not keys and any(_requests(f, r, helpers) for f in test_fns if f.lineno <= line <= (f.end_lineno or f.lineno)
+                                for r in routes):
+                continue
             if rng and any(rng[0] <= a and b <= rng[1] for a, b in raises):
                 continue
             sc = _scope_of(scopes, line)

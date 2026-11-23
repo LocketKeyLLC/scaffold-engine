@@ -1004,6 +1004,64 @@ def reach_the_entry(tasks: list[dict], extends: set[str], carried: list[str], en
             + f" ({', '.join(lost_ids)}: nothing imports them)"]
 
 
+#: §17.2003 — what the step that makes a view answer without an operator secret is told
+_NOKEY_NOTE = ("Edit `{mod}.py` in place -- the module as it is now is shown whole -- so that each view below answers "
+               "when the operator has not stored the secret it reaches. A lab runs for weeks before its keys are "
+               "stored, and the page is how the operator sees it: the part that needs the key says it is unavailable "
+               "(and why: the secret is not stored), the rest renders as it does now. Catch the error the call raises "
+               "without the secret where the view makes the call; never a 500. The engine found:\n{found}\n"
+               "Keep every other route, test and behaviour as it is; in `tests/test_{mod}.py` add, beside the tests "
+               "it has, a test for each view that requests it with the reader's `values_for` patched to return `{{}}` "
+               "-- standing in for nothing between the view and the reader -- and checks it answers 200 and says the "
+               "part is unavailable.")
+
+
+def views_answer_without_secrets(tasks: list[dict], files: dict[str, tuple[str, str]],
+                                 reach: dict[str, str]) -> list[str]:
+    """§17.2003 — each finished module of the job with a GET view that fails when an operator secret it reaches is
+    not stored (`engine_contracts.views_fail_without_secrets` over the job's current files, through the engine's own
+    modules) gets one step that edits it in place to answer without it, after the module's and its tests' last
+    writers; the checks and the delivery that waited on those writers wait on it. Idempotent: a module that already
+    has its step is left alone. Live (69fe61c4, 2026-11-23): `/labs/paper/dashboard` 500'd in the running engine with
+    no Alpaca key stored, and the job's delivery question was next."""
+    from app.modules.engine_contracts import views_fail_without_secrets
+    code = {p: c for p, (c, _k) in files.items()}
+    mods = {Path(p).stem for p in code if p.startswith("app/modules/")}
+    found = views_fail_without_secrets(code, {**reach, **{Path(p).stem: c for p, c in code.items()
+                                                          if p.startswith("app/modules/")}}, mods)
+    by_mod: dict[str, list[str]] = {}
+    for f in found:
+        m = re.match(r"`app/modules/(\w+)\.py:", f)
+        if m:
+            by_mod.setdefault(m.group(1), []).append(f)
+    changes: list[str] = []
+    ids = {str(t.get("id")) for t in tasks}
+    for mod, fs in by_mod.items():
+        if any((t.get("tool_config") or {}).get("answers_without_secrets") == mod for t in tasks):
+            continue
+        writers = list(dict.fromkeys(k for p, (_c, k) in files.items()
+                                     if p in (f"app/modules/{mod}.py", f"tests/test_{mod}.py") and k in ids))
+        sid, n = "NOKEY", 2
+        while sid in ids:
+            sid, n = f"NOKEY{n}", n + 1
+        ids.add(sid)
+        routes = re.findall(r"the view `GET ([^`]+)`", "\n".join(fs))
+        tasks.append({
+            "id": sid, "name": f"Make {', '.join(f'GET {r}' for r in routes)} answer without the secrets it reaches",
+            "type": "action", "tool": "CodeGen", "depends_on": writers, "inputs": [], "outputs": [],
+            "notes": _NOKEY_NOTE.format(mod=mod, found="\n".join(f"- {f}" for f in fs)),
+            "tool_config": {"fixes_module": mod, "answers_without_secrets": mod},
+        })
+        below = _upstream_of(tasks, sid)
+        for u in tasks:                   # what waited on the module's writers waits on its fix (the checks, delivery)
+            if (u["id"] != sid and str(u["id"]) not in below and set(writers) & set(map(str, u.get("depends_on") or []))
+                    and str(u.get("tool") or "").lower() != "codegen" and u.get("status") != "done"):
+                u["depends_on"] = [*(u.get("depends_on") or []), sid]
+        changes.append(f"views_answer_without_secrets: {sid} edits `{mod}.py` so "
+                       + ", ".join(f"`GET {r}`" for r in routes) + " answers with no key stored")
+    return changes
+
+
 def _research_step(api: dict) -> dict:
     return {
         "id": f"API_{api['key']}", "name": f"Research the {api['name']} as its documentation states it",
@@ -1071,6 +1129,10 @@ _INSTALL_NOTE = ("The engine starts the lab through this module: it exposes `def
                  "as a task -- and nothing else (no work at import, no secrets read in `install` itself). This step "
                  "does NOT write `app/labs.py`: the delivery adds `{mod}` there, and `install_labs(app)` calls it "
                  "when the engine starts. "
+                 "A GET view that calls something reading an operator secret (a broker or data client) still answers "
+                 "when the operator has not stored that secret: it catches the error the call raises and shows that "
+                 "part as unavailable, and a test requests it with that module's `values_for` patched to return `{{}}` "
+                 "(§17.2003). "
                  "Its tests call `install` with a FastAPI app and a stand-in scheduler, patch the stream consumer it "
                  "starts (it reads the operator's secrets and the network), and read the routes and jobs it "
                  "registered (the routes from `app.openapi()[\"paths\"]`: this engine's FastAPI keeps an included "
@@ -1277,9 +1339,15 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         _gc, _gaps_reset = ask_research_gaps(tasks, reviews, [*carried, *sorted(sources)])     # §17.1928
         changes += _gc
         from app.modules.lab_together import RERAN_KEY, narrow_stale_test_steps            # §17.1934
+        _crows: list[dict] | None = None
         if any((t.get("tool_config") or {}).get(RERAN_KEY) for t in tasks):
             _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
             changes += narrow_stale_test_steps(tasks, _crows, engine_source.job_files(_crows))
+        if sources and not only_reviews:                    # §17.2003 — a job with finished modules of its own
+            if _crows is None:
+                _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+            changes += views_answer_without_secrets(tasks, engine_source.job_files(_crows),
+                                                    {**engine_source.engine_module_sources(), **sources})
     else:
         _gaps_reset = []
     # §17.1928 — the research read again and its audit, and the fix steps a review finds wanting again, go back to
@@ -2027,24 +2095,32 @@ def job_tables(files: dict[str, tuple[str, str]]) -> list[str]:
 
 def secrets_the_code_reads(files: dict[str, tuple[str, str]]) -> list[str]:
     """Every operator secret the job's modules read through `values_for` (§17.1857), from any public function or
-    class -- what the keys question is answered by."""
+    class -- what the keys question is answered by.
+
+    §17.2003 — through the engine's own modules too (the job's copy winning), and from the route handlers a module
+    function mounts. Live (69fe61c4, 2026-11-23): the dashboard calls the lab's `get_spy_benchmark`, which is in the
+    engine, not the job, and reads the Alpaca keys; the delivery said "secrets read: -" and the page 500'd live."""
     import ast as _ast
 
-    from app.modules.engine_contracts import secrets_read
+    from app.modules.engine_contracts import secrets_read, view_routes
+    from app.modules.engine_source import engine_module_sources
     mods = {Path(p).stem: code for p, (code, _k) in files.items() if p.startswith("app/modules/")}
+    reach = {**engine_module_sources(), **mods}
     names: set[str] = set()
     for mod, code in mods.items():
         try:
             tree = _ast.parse(code)
         except SyntaxError:
             continue
+        for _path, handler, _ln in view_routes(code):
+            names |= set(secrets_read(reach, mod, handler))
         for n in tree.body:
             if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                names |= set(secrets_read(mods, mod, n.name))
+                names |= set(secrets_read(reach, mod, n.name))
             elif isinstance(n, _ast.ClassDef):
                 for m in n.body:
                     if isinstance(m, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                        names |= set(secrets_read(mods, mod, f"{n.name}.{m.name}"))
+                        names |= set(secrets_read(reach, mod, f"{n.name}.{m.name}"))
     return sorted(k for k in names if k)
 
 
