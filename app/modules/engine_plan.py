@@ -1339,10 +1339,13 @@ async def apply_to_job(db, job_id: str, *, edited_by: str | None = None, only_re
         _gc, _gaps_reset = ask_research_gaps(tasks, reviews, [*carried, *sorted(sources)])     # §17.1928
         changes += _gc
         from app.modules.lab_together import RERAN_KEY, narrow_stale_test_steps            # §17.1934
-        _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+        _crows: list[dict] | None = None
         if any((t.get("tool_config") or {}).get(RERAN_KEY) for t in tasks):
+            _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
             changes += narrow_stale_test_steps(tasks, _crows, engine_source.job_files(_crows))
-        if not only_reviews:                                                                       # §17.2003
+        if sources and not only_reviews:                    # §17.2003 — a job with finished modules of its own
+            if _crows is None:
+                _crows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
             changes += views_answer_without_secrets(tasks, engine_source.job_files(_crows),
                                                     {**engine_source.engine_module_sources(), **sources})
     else:
