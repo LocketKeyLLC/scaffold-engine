@@ -1481,6 +1481,17 @@ def _coroutines_used_as_values(tree: ast.AST, engine_funcs: dict, engine_mods: d
 
 
 @lru_cache(maxsize=1)
+def engine_module_sources() -> dict[str, str]:
+    """§17.2003 — the source of each module of the running engine's `app/modules/`, by module name."""
+    out: dict[str, str] = {}
+    for path in sorted((ENGINE_PKG / "modules").glob("*.py")):
+        try:
+            out[path.stem] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
 def module_index() -> dict[str, dict]:
     """``{"app.modules.x": {"doc": first docstring line, "names": every top-level name, "public": [signatures]}}``."""
     out: dict[str, dict] = {}
@@ -3477,6 +3488,11 @@ async def engine_findings(db, job_id: str, node_key: str, output: str, inherited
     found += unknown_patch_targets(files_of({**me, "output_text": output}), _cur, _own)
     # §17.1857 — a test mocks the secret a module reads; §17.1858 — and never writes a child row with a made-up id
     found += runs_secrets_for_real(files_of({**me, "output_text": output}), _cur, _own)
+    # §17.2003 — a view that reaches a secret answers without it, through the engine's own modules too (a lab view
+    # calls the lab's earlier modules, as the dashboard calls `get_spy_benchmark`)
+    from app.modules.engine_contracts import views_fail_without_secrets
+    found += views_fail_without_secrets(files_of({**me, "output_text": output}), {**engine_module_sources(), **_cur},
+                                        _own)
     # §17.1863 — and a `values_for` stand-in returns each secret by its own name
     from app.modules.engine_contracts import wrong_secret_mocks
     found += wrong_secret_mocks(files_of({**me, "output_text": output}), _cur, _own)
