@@ -3,7 +3,7 @@
 # Stage 1: builder — installs ALL deps (prod + dev), pre-downloads HF weights.
 # Discarded once runtime/dev are built.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS builder
+FROM python:3.15.2-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
 WORKDIR /code
 
@@ -87,7 +87,7 @@ RUN for i in 1 2 3 4 5; do \
 # Existing volumes from a root-era build need a one-time chown — see
 # scripts/chown_named_volumes.sh.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
+FROM python:3.15.2-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 
 WORKDIR /code
 
@@ -172,7 +172,7 @@ CMD ["python", "-m", "app.run_server"]
 # Runs as the same scaffold UID/GID (10001) as runtime so test artifacts
 # created via the writable bench mount land at predictable ownership.
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS dev
+FROM python:3.15.2-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS dev
 
 WORKDIR /code
 
