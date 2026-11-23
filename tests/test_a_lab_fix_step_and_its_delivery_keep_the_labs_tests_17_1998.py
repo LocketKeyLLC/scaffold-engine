@@ -20,6 +20,9 @@ from app.modules import engine_source
 REPO = Path(__file__).resolve().parent.parent
 MOD = "paper_wire_engine_entry_module"
 LAB_TEST = REPO / "tests" / "labs" / "paper" / f"test_{MOD}.py"
+#: the lab's file as it stood when T8 ran (main 328ecb17): the delivery tests below are about THAT file -- the tree's
+#: copy grows as the lab does (the dashboard's delivery, #1191, made it 46 tests)
+LAB_BEFORE = REPO / "tests" / "fixtures" / "lab_paper_entry_tests_before_the_dashboard_2026_11_22.py.txt"
 MAIN_TESTS = [
     "test_install_registers_daily_batch_job", "test_install_registers_routes",
     "test_install_no_scheduler_does_not_schedule", "test_install_starts_stream_consumer_task",
@@ -100,7 +103,7 @@ def test_dashboard_route_renders(client):
 
 
 def test_the_delivery_puts_back_every_test_the_job_dropped(dj):
-    current = LAB_TEST.read_text()
+    current = LAB_BEFORE.read_text()
     text, back = dj.keep_tests(current, JOB_FILE)
     assert back == [t for t in dj.test_names(current) if t in MAIN_TESTS]
     assert set(MAIN_TESTS) <= set(dj.test_names(text))
@@ -124,7 +127,7 @@ def test_the_delivery_puts_back_every_test_the_job_dropped(dj):
 
 def test_a_job_copy_that_keeps_every_test_is_written_as_it_is(dj):
     """The correct miss: nothing dropped, nothing added."""
-    current = LAB_TEST.read_text()
+    current = LAB_BEFORE.read_text()
     new = current + "\n\ndef test_a_new_one():\n    assert True\n"
     assert dj.keep_tests(current, new) == (new, [])
 
@@ -132,7 +135,7 @@ def test_a_job_copy_that_keeps_every_test_is_written_as_it_is(dj):
 def test_the_live_delivery_keeps_the_tests_and_says_so(dj, tmp_path, capsys):
     dest = tmp_path / "tests" / "labs" / "paper" / f"test_{MOD}.py"
     dest.parent.mkdir(parents=True)
-    dest.write_text(LAB_TEST.read_text())
+    dest.write_text(LAB_BEFORE.read_text())
     out = {"files": [{"path": f"tests/test_{MOD}.py", "step": "T8", "lines": JOB_FILE.count("\n"),
                       "content": JOB_FILE},
                      {"path": f"app/modules/{MOD}.py", "step": "T8", "lines": 1, "content": "X = 1\n"}],
