@@ -1463,8 +1463,11 @@ async def _inherit_module_tests(db, job_id: str, node_snapshot: dict, node: dict
         return
     try:
         from app.modules import engine_source as _es
+        # §17.2002 — the tests the step is there to change are never spliced back over its answer's
+        node_snapshot["tests_to_fix"] = sorted(_es.tests_to_fix({**node_snapshot, "tool_config": node.get("tool_config")}))
         mt = _es.module_tests(await _es.code_rows(db, job_id), {**node_snapshot, "tool_config": node.get("tool_config")})
         if mt:
+            mt["to_fix"] = node_snapshot["tests_to_fix"]
             node_snapshot["module_tests"] = mt
             node_snapshot["prior_passing"] = _es.with_module_tests(
                 node_snapshot.get("prior_passing"), node_snapshot.get("prior_tests"), mt)
@@ -1769,8 +1772,9 @@ def _splice_kept_tests(output: str, node_snapshot: dict, node_key: str) -> str:
     try:
         from app.modules import engine_contracts as _kc
         from app.modules.engine_source import inherited_kept                     # §17.1992
-        output, _kept = _kc.splice_kept(output, inherited_kept(output, node_snapshot["prior_passing"],
-                                                               node_snapshot.get("module_tests")))
+        from app.modules.engine_source import without_tests_to_fix                # §17.2002
+        _keep = without_tests_to_fix(node_snapshot["prior_passing"], set(node_snapshot.get("tests_to_fix") or ()))
+        output, _kept = _kc.splice_kept(output, inherited_kept(output, _keep, node_snapshot.get("module_tests")))
         logger.info("kept_passing_tests_spliced node=%s n=%d", node_key, len(_kept))
     except Exception as exc:
         logger.warning("kept_passing_tests_splice_failed node=%s err=%r", node_key, exc)

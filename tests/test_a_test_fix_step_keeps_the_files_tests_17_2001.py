@@ -168,7 +168,7 @@ async def test_the_engines_test_fix_step_is_marked_with_the_module_whose_tests_i
         "j", "T12", [("REACH", PATH, ["test_load_series_reads_committed_pnl_rows_oldest_first"])], "1 failed")
     assert got == ["T12L1"]
     assert insert.await_args.args[3] == T12L1_TITLE
-    assert insert.await_args.kwargs["tool_config"] == {"fixes_tests_of": MOD}
+    assert insert.await_args.kwargs["tool_config"]["fixes_tests_of"] == MOD
 
 
 @pytest.mark.asyncio

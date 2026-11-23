@@ -168,9 +168,11 @@ def test_the_failed_attempt_records_what_passed_and_the_next_draw_splices_before
     assert src.index("output = await _complete_required_tests(") < src.index("codegen_syntax_gate_error")
     crt = inspect.getsource(ea._complete_required_tests)
     assert crt.index("await _draw_required_tests(") < crt.index("return _splice_kept_tests(output, node_snapshot, node_key)")
-    # §17.1992 — less the inherited tests the answer itself carries
-    assert "splice_kept(output, inherited_kept(output, node_snapshot[\"prior_passing\"]," in inspect.getsource(
-        ea._splice_kept_tests)
+    # §17.1992 — less the inherited tests the answer itself carries; §17.2002 — and less the tests the step is there
+    # to fix
+    sk = inspect.getsource(ea._splice_kept_tests)
+    assert 'without_tests_to_fix(node_snapshot["prior_passing"], set(node_snapshot.get("tests_to_fix") or ()))' in sk
+    assert "splice_kept(output, inherited_kept(output, _keep," in sk
     assert ea._kept_after_check("x", type("R", (), {"passed": []})()) == {}
     assert ea._splice_kept_tests("out", {}, "T5") == "out"
 
