@@ -314,3 +314,48 @@ def test_the_pass_leaves_a_view_that_answers_without_its_secret_and_a_job_with_n
     assert ep.views_answer_without_secrets(tasks, {WIRE_PATH: (WIRE, "T8"), TEST_PATH: (NO_KEY, "T12L1")}, ENGINE) == []
     assert ep.views_answer_without_secrets(tasks, {"app/modules/lab_tracker.py": (TRACKER, "T8")}, ENGINE) == []
     assert len(tasks) == 5
+
+
+# ── the live NOKEY shapes: constants, f-strings, and a fixture that stands in for the chain ─────────────────────
+
+#: NOKEY's draft (69fe61c4, 2026-11-23, three attempts): the reader and the route through module constants, the
+#: patch an f-string, and the no-key test still taking the fixture that stands in for the benchmark
+LIVE_SHAPE = HEAD.replace("from fastapi import FastAPI", "import pytest\nfrom fastapi import FastAPI") + '''
+_CLIENT = "app.modules.lab_client"
+_WIRE = "app.modules.lab_wire"
+DASHBOARD_PATH = "/labs/lab/dashboard"
+
+
+@pytest.fixture()
+def benchmark():
+    with patch(f"{_WIRE}.get_benchmark", AsyncMock(return_value=[])):
+        yield
+
+
+def test_dashboard_answers_200_when_the_secret_is_not_stored(benchmark):
+    with patch(f"{_CLIENT}.values_for", AsyncMock(return_value={})):
+        assert _client().get(DASHBOARD_PATH).status_code == 200
+'''
+
+
+def test_a_patch_target_and_a_url_spelled_through_constants_and_f_strings_are_read():
+    from app.modules.engine_contracts import _patch_targets
+    assert [(m, n) for m, n, _ln in _patch_targets(LIVE_SHAPE)] == [("lab_wire", "get_benchmark"),
+                                                                     ("lab_client", "values_for")]
+    span = LIVE_SHAPE.replace("assert _client().get(DASHBOARD_PATH)",
+                              'span = "1m"\n        assert _client().get(f"{DASHBOARD_PATH}?span={span}")')
+    assert 'get(f"{DASHBOARD_PATH}?span={span}")' in span
+    unknown = LIVE_SHAPE.replace('f"{_CLIENT}.values_for"', 'f"{_SOMEWHERE}.values_for"')
+    assert [(m, n) for m, n, _ln in _patch_targets(unknown)] == [("lab_wire", "get_benchmark")]   # not guessed
+    no_fixture = LIVE_SHAPE.replace("_not_stored(benchmark)", "_not_stored()")
+    assert ec.views_fail_without_secrets(_files(no_fixture), ENGINE, {"lab_wire"}) == []
+    assert ec.views_fail_without_secrets(_files(span.replace("_not_stored(benchmark)", "_not_stored()")),
+                                         ENGINE, {"lab_wire"}) == []
+
+
+def test_a_no_key_test_whose_fixture_stands_in_for_the_chain_is_refused_by_name():
+    found = ec.views_fail_without_secrets(_files(LIVE_SHAPE), ENGINE, {"lab_wire"})
+    assert len(found) == 1, found
+    assert ("`test_dashboard_answers_200_when_the_secret_is_not_stored` requests it with no secret, but "
+            "`lab_wire.get_benchmark` is stood in for there") in found[0], found[0]
+    assert "leave that stand-in out of this test" in found[0]

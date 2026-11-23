@@ -359,14 +359,35 @@ def _aliases_at(tree: ast.AST):
     return alias_for
 
 
+def _const_str(e: ast.AST, consts: dict[str, str]) -> str | None:
+    """§17.2003 — a string the code spells out: a literal, a module-level string constant, or an f-string / `+` of
+    those. Live (69fe61c4 NOKEY, 2026-11-23): `patch(f"{_ALPACA}.values_for", …)` and `c.get(DASHBOARD_PATH)` with
+    `_ALPACA = "app.modules.paper_alpaca_paper_client"`, `DASHBOARD_PATH = "/labs/paper/dashboard"` -- read as no
+    patch and no request, three times."""
+    if isinstance(e, ast.Constant):
+        return e.value if isinstance(e.value, str) else None
+    if isinstance(e, ast.Name):
+        return consts.get(e.id)
+    if isinstance(e, ast.JoinedStr):
+        parts = [_const_str(v.value if isinstance(v, ast.FormattedValue) and v.format_spec is None and v.conversion == -1
+                            else v, consts) for v in e.values]
+        return "".join(parts) if all(p is not None for p in parts) else None   # type: ignore[arg-type]
+    if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):
+        a, b = _const_str(e.left, consts), _const_str(e.right, consts)
+        return a + b if a is not None and b is not None else None
+    return None
+
+
 def _patch_targets(code: str) -> list[tuple[str, str, int]]:
     """(module, name, line) of each `patch("app.modules.m.name")`, `monkeypatch.setattr("app.modules.m.name", …)`,
-    `patch.object(m, "name")` / `monkeypatch.setattr(m, "name", …)` with `m` a module imported from `app.modules`."""
+    `patch.object(m, "name")` / `monkeypatch.setattr(m, "name", …)` with `m` a module imported from `app.modules`.
+    §17.2003 — the target may be a module constant or an f-string of them (`f"{_ALPACA}.values_for"`)."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return []
     alias_for = _aliases_at(tree)                          # §17.1888
+    consts = _str_consts(tree)
     out: list[tuple[str, str, int]] = []
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
@@ -377,8 +398,9 @@ def _patch_targets(code: str) -> list[tuple[str, str, int]]:
             continue
         alias = alias_for(n)
         a0 = n.args[0]
-        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
-            parts = a0.value.split(".")
+        target = _const_str(a0, consts) if not (isinstance(a0, ast.Name) and a0.id in alias) else None
+        if target is not None and target.startswith("app.modules."):
+            parts = target.split(".")
             if len(parts) >= 4:                   # §17.1870 -- `app.modules.m.httpx.AsyncClient` needs `m.httpx` first
                 out.append((parts[2], parts[3], n.lineno))
         elif (isinstance(a0, ast.Name) and a0.id in alias and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
@@ -1017,9 +1039,26 @@ def _empty_secret_patches(tree: ast.Module, code: str) -> list[tuple[str, str, i
     return out
 
 
-def _requests(fn: ast.AST, route: str, helpers: dict[str, ast.AST]) -> bool:
+def _requests(fn: ast.AST, route: str, helpers: dict[str, ast.AST], consts: dict[str, str] | None = None) -> bool:
     """A test function (or a helper it calls by name) names the route's URL: a string ending in `route`, its query
-    aside -- `client.get("/labs/paper/dashboard?span=all")`, an f-string's last literal part."""
+    aside -- `client.get("/labs/paper/dashboard?span=all")`, an f-string's last literal part, or a module constant
+    (`client.get(DASHBOARD_PATH)`, `f"{DASHBOARD_PATH}?span=1m"`)."""
+    consts = consts or {}
+
+    def _url(c: ast.AST) -> str | None:
+        if isinstance(c, ast.Constant) and isinstance(c.value, str):
+            return c.value
+        if isinstance(c, ast.Name):
+            return consts.get(c.id)
+        if isinstance(c, ast.JoinedStr):           # the known head: `f"{DASHBOARD_PATH}?span={span}"`
+            head = ""
+            for v in c.values:
+                part = _const_str(v.value if isinstance(v, ast.FormattedValue) else v, consts)
+                if part is None:
+                    break
+                head += part
+            return head or None
+        return None
     todo, done = [fn], set()
     while todo:
         f = todo.pop()
@@ -1027,8 +1066,8 @@ def _requests(fn: ast.AST, route: str, helpers: dict[str, ast.AST]) -> bool:
             continue
         done.add(id(f))
         for c in _own_nodes(f):
-            if isinstance(c, ast.Constant) and isinstance(c.value, str) and route != "/" and \
-                    c.value.split("?")[0].rstrip("/").endswith(route.rstrip("/")):
+            u = _url(c)
+            if u is not None and route != "/" and u.split("?")[0].rstrip("/").endswith(route.rstrip("/")):
                 return True
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in helpers:
                 todo.append(helpers[c.func.id])
@@ -1064,19 +1103,23 @@ def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], o
                 continue
             readers = sorted(set(secrets.values()))
             ok = False
+            cut: list[tuple[str, list[tuple[str, str]]]] = []      # a no-key test whose stand-in stops the chain
             for tree, tcode in tests:
                 scopes, covering, fns = _test_scopes(tree, tcode, _patch_targets(tcode) + _empty_secret_patches(tree, tcode))
                 helpers = {n.name: n for n in fns.values() if not n.name.startswith("test")}
+                tconsts = _str_consts(tree)
                 for key, fn in fns.items():
-                    if not fn.name.startswith("test") or not _requests(fn, route, helpers):
+                    if not fn.name.startswith("test") or not _requests(fn, route, helpers, tconsts):
                         continue
                     patched = covering(key)
                     empty = {m for m, n in patched if n == "values_for#empty"}
                     if not ("runner_secrets" in empty or set(readers) <= empty):
                         continue
-                    if secrets_read(reach, mod, handler, patched=frozenset(p for p in patched if "#" not in p[1])):
+                    real = frozenset(p for p in patched if "#" not in p[1])
+                    if secrets_read(reach, mod, handler, patched=real):
                         ok = True                                 # the chain runs for real, into an empty reader
                         break
+                    cut.append((fn.name, sorted(p for p in real if secrets_read(reach, mod, handler, patched=real - {p}))))
                 if ok:
                     break
             if ok:
@@ -1106,7 +1149,11 @@ def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], o
                 + ", show that part as unavailable, and still answer 200. Add a test that requests the route with "
                 + ", ".join(f"`app.modules.{r}.values_for`" for r in readers)
                 + " patched to return `{}` -- standing in for nothing between the view and the reader -- and checks "
-                "it answers 200")
+                "it answers 200"
+                + "".join(f". `{t}` requests it with no secret, but "
+                          + (", ".join(f"`{m}.{n}`" for m, n in stand) if stand else "a stand-in")
+                          + " is stood in for there (its own patch or a fixture it takes), so the view never reaches "
+                          "the reader -- leave that stand-in out of this test" for t, stand in cut[:2]))
     return found
 
 
@@ -1293,6 +1340,7 @@ def wrong_secret_mocks(files: dict[str, str], modules: dict[str, str], own: set[
         fns_all = [f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
         helpers = {f.name: f for f in fns_all if not f.name.startswith("test")}
         test_fns = [f for f in fns_all if f.name.startswith("test")]
+        tconsts = _str_consts(tree)
         fn_ranges = sorted((f.lineno, getattr(f, "end_lineno", None) or f.lineno) for f in ast.walk(tree)
                            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)))
         for mod, line, keys in mocks:
@@ -1301,7 +1349,7 @@ def wrong_secret_mocks(files: dict[str, str], modules: dict[str, str], own: set[
             rng = next((r for r in reversed(fn_ranges) if r[0] <= line <= r[1]), None)
             # §17.2003 — no secret at all, in a test that requests a view: the not-stored case, on purpose (the view
             # answers without it); elsewhere it is still a run handed nothing (§17.1875)
-            if not keys and any(_requests(f, r, helpers) for f in test_fns if f.lineno <= line <= (f.end_lineno or f.lineno)
+            if not keys and any(_requests(f, r, helpers, tconsts) for f in test_fns if f.lineno <= line <= (f.end_lineno or f.lineno)
                                 for r in routes):
                 continue
             if rng and any(rng[0] <= a and b <= rng[1] for a, b in raises):
