@@ -1,6 +1,6 @@
 apscheduler==3.11.3
 asyncpg==0.32.0
-fastapi==0.162.5
+fastapi==0.165.0
 # §17.584 — pin starlette explicitly (fastapi 0.139 allows >=0.46). 1.3.1 clears
 # CVE-2026-48710 "BadHost" host-header auth-bypass (fix 1.0.1) + PYSEC-2026-248/
 # 249 (fix 1.3.0/1.3.1). fastapi bumped 0.115.6→0.139.0 to permit starlette 1.x.
@@ -21,12 +21,12 @@ httpx==0.28.1
 mcp==2.3.0
 mcp-types==2.3.0
 sse-starlette==3.7.0
-httpx2==2.16.0
-httpcore2==2.16.0
+httpx2==2.16.2
+httpcore2==2.16.2
 PyJWT==2.15.1
 truststore==0.10.5
 json_repair==0.64.9
-pydantic==2.14.3
+pydantic==2.14.4
 pydantic-settings==2.16.3
 pymilvus==3.0.3
 redis==8.1.0
@@ -35,7 +35,7 @@ requests==2.34.2
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==6.3.0
 setuptools==84.2.1  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
-sqlalchemy[asyncio]==2.1.8
+sqlalchemy[asyncio]==2.1.9
 structlog==26.1.0
 trafilatura==2.1.0  # HELD: 2.2.0 drops <h1> headings from extraction (audit M12) — see .github/dependabot.yml ignore
 tzlocal==5.4.5
@@ -51,7 +51,7 @@ psycopg2-binary==2.9.13
 # §17.1878 — 6.21.2→6.21.4 (CVE-2026-119203..119209; pip-audit red on every PR).
 pypdf==6.21.4
 pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
-python-multipart==0.0.33  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
+python-multipart==0.0.34  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.
 # Already present transitively via rich; pinned explicitly now that app code is
 # a direct consumer. Used with html=False (raw HTML escaped) — see app/web/routes.py.
@@ -102,7 +102,7 @@ transitions==0.9.3
 # §17.1075 — Alembic for schema changes after db/migrations/075
 alembic==1.20.1
 # §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
-procrastinate==3.11.0
+procrastinate==3.12.0
 psycopg[binary,pool]==3.3.9
 # §17.1380 — the engine type-checks the program it DRAFTS before offering Run.
 # A runtime gate, not a dev tool: it runs inside the orchestrator, pure Python
@@ -110,7 +110,7 @@ psycopg[binary,pool]==3.3.9
 mypy==2.4.1
 # §17.1936 — the repo's own linter, run by the engine over the code it writes for itself (the rules mirror
 # pyproject's [tool.ruff.lint]; the version is pre-commit's): a delivered lab must pass the commit hook
-ruff==0.16.3
+ruff==0.17.6
 # §17.1939 — CI's tool-audit gate (pyright basic over app/, vulture at 100 %), run by the engine over the code it
 # writes for itself: a delivered lab must pass the gate that holds the merge. Versions are CI's. pyright runs on
 # its own Node (`nodejs-wheel-binaries`, pyright's `nodejs` extra) and the wheel carries its npm package, so it
