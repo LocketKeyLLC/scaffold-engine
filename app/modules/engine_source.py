@@ -1480,7 +1480,6 @@ def _coroutines_used_as_values(tree: ast.AST, engine_funcs: dict, engine_mods: d
     return out
 
 
-@lru_cache(maxsize=1)
 def engine_module_sources() -> dict[str, str]:
     """§17.2003 — the source of each module of the running engine's `app/modules/`, by module name."""
     out: dict[str, str] = {}
@@ -1492,6 +1491,7 @@ def engine_module_sources() -> dict[str, str]:
     return out
 
 
+@lru_cache(maxsize=1)
 def module_index() -> dict[str, dict]:
     """``{"app.modules.x": {"doc": first docstring line, "names": every top-level name, "public": [signatures]}}``."""
     out: dict[str, dict] = {}
