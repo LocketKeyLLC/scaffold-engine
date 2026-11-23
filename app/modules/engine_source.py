@@ -1736,6 +1736,44 @@ def fixed_tests_of(row: dict, known: set[str] | frozenset[str] = frozenset()) ->
     return t.group(1) if t and t.group(1) in have else ""
 
 
+#: §17.2002 — tool_config keys naming the tests a step is there to change: `fails_together` (the engine's tests-only fix
+#: step, §17.1942) and `stale_tests_reran` (`lab_together.RERAN_KEY`, a writer reset for its stale tests, §17.1933)
+FAILS_TOGETHER_KEY = "fails_together"
+_TESTS_TO_FIX_KEYS = (FAILS_TOGETHER_KEY, "stale_tests_reran")
+_THESE_FAIL_RE = re.compile(r"these fail:\n((?:- `[\w:\[\]./-]+`\n?)+)")
+
+
+def tests_to_fix(row: dict) -> set[str]:
+    """§17.2002 — the tests a step is there to change: the ones that failed run with the job's tests (each passes alone,
+    so the step's own sandbox records it as passing). By their top-level name (a class for `TestX::test_y`); from the
+    step's tool_config, else the "these fail:" list of a §17.1942 fix step's own text (one added before this)."""
+    cfg = row.get("tool_config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except ValueError:
+            cfg = None
+    names: list[str] = []
+    if isinstance(cfg, dict):
+        for k in _TESTS_TO_FIX_KEYS:
+            names += [str(n) for n in (cfg.get(k) or []) if isinstance(n, str)]
+    if not names and (m := _THESE_FAIL_RE.search(str(row.get("prompt_template") or ""))):
+        names = re.findall(r"`([^`]+)`", m.group(1))
+    return {n.split("::", 1)[0].split("[", 1)[0] for n in names if n}
+
+
+def without_tests_to_fix(kept: dict | None, fix: set[str]) -> dict:
+    """§17.2002 — the keep-list (§17.1891 / §17.1992) less the tests the step is there to change: those stay held by
+    name (dropping one is still refused), but the answer's version of each is the one that runs -- splicing back the
+    copy that "passed" (alone) would undo every fix. Live (69fe61c4 T12L1, 2026-11-22 23:58–00:01 UTC): the step's
+    sandbox recorded `test_load_series_reads_committed_pnl_rows_oldest_first` as passed, each later draft's rewrite
+    of it was replaced by the old body (`kept_passing_tests_spliced n=45`), and the verifier refused three times:
+    "the failing test … was never actually changed"."""
+    if not kept or not fix:
+        return kept or {}
+    return {p: {k: v for k, v in d.items() if k not in fix} for p, d in kept.items()}
+
+
 def sibling_definitions(rows: list[dict]) -> dict[str, dict]:
     """§17.1762 — what each module this job's steps have already written defines: its top-level names and the call
     shape of each function, ``{"alpaca_stream": {"node": "T10", "names": {...}, "funcs": {...}}}``. A step not yet
@@ -2719,6 +2757,10 @@ def module_tests_block(mt: dict | None) -> str:
         return ""
     gone = (f" Your task retires {', '.join(f'`{t}`' for t in mt['retired'])}: those may go." if mt.get("retired")
             else "")
+    fix = [t for t in mt["tests"] if t in set(mt.get("to_fix") or ())]                            # §17.2002
+    if fix:
+        gone += (f" This step is here to fix {', '.join(f'`{t}`' for t in fix)}: rewrite "
+                 + ("it" if len(fix) == 1 else "them") + " (same name) -- your version is the one that runs.")
     return (f"\n\n## The tests `{mt['path']}` already holds (step {mt['key']}) -- keep every one\n"
             + (f"This step fixes `{mt['path']}` in place (the tests of `{mt['module']}`), so the file is not new. "
                if mt.get("tests_only") else                                                        # §17.2001

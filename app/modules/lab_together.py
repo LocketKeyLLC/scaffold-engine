@@ -246,7 +246,8 @@ async def failing_test_fix_steps(job_id: str, deliver_key: str, files: list[tupl
         # §17.2001 — the step fixes this test file, and keeps every test it holds (`engine_source.module_tests`)
         mod = re.fullmatch(r"test_(\w+)", Path(path).stem)
         key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt,
-                                     tool_config={"fixes_tests_of": mod.group(1)} if mod else None)
+                                     tool_config={**({"fixes_tests_of": mod.group(1)} if mod else {}),
+                                                  "fails_together": names[:200]})               # §17.2002
         if key:
             added.append(key)
             logger.warning("lab_test_fix_added job=%s step=%s file=%s failed=%d", job_id, key, path, len(names))
