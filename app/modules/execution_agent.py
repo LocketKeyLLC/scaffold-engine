@@ -4790,9 +4790,12 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
             # so the research steps after them "researched" with no data. A registered runner that cannot be
             # reached HOLDS the step (pending, needs_approval): the work waits for the machine, nothing is faked.
             _state, _why = await _sr.channel_state(db)
-            if _state != "unreachable":
+            # §17.2014 — "open" here is a cached failure the fresh probe overturned: the channel is there after all, so
+            # the step is asked like any hands-on step instead of taking the ordinary path.
+            if _state not in ("unreachable", "open"):
                 return None
-            logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
+            if _state == "unreachable":
+                logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
         # §17.1200 — a decision is consumed by the attempt it authorised. It is
         # recorded to stop ONE pending node being asked twice in a single pass;
         # it must not silence the ask for a node that has since run and been
@@ -5387,6 +5390,11 @@ async def execute_all_nodes(
         # here makes the finally-block cleanup a no-op (status != 'running').
         if settings.hands_on_assist_gate_enabled:
             async with async_session() as db:
+                # §17.2014 — the runner is read (fresh, when its cached probe failed) BEFORE the steps are classified:
+                # the classifier reads the cached channel, and a failure cached during the engine's own rebuild
+                # must not make every hands-on step count as the operator's.
+                from app.modules import supervised_runs as _sr_chan
+                _ch_state, _ch_why = await _sr_chan.channel_state(db)
                 _cls = await _classify_dag_executability(db, job_id)
                 # §17.1369 — an UNREACHABLE runner is not a hand-off. Live,
                 # 2026-10-05: the Proxmox host went off the LAN (`no route to
@@ -5397,8 +5405,6 @@ async def execute_all_nodes(
                 # a plan to carry out by hand because one probe had failed.
                 # Absence of a reading rendered as a conclusion: §17.1363's shape
                 # at the job level. The engine waits for the machine instead.
-                from app.modules import supervised_runs as _sr_chan
-                _ch_state, _ch_why = await _sr_chan.channel_state(db)
             if _cls["hands_on"] and _ch_state == "unreachable":
                 logger.warning(
                     "hands_on_gate_held job=%s nonexec=%d/%d runner_unreachable=%s",
