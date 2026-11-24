@@ -2629,6 +2629,52 @@ def edited_module_block(rows: list[dict], module: str) -> str:
             f"only what the task asks.\n```python\n{code}\n```\n")
 
 
+def rendered_templates(code: str, rows: list[dict]) -> dict[str, tuple[str, str]]:
+    """§17.2006 — the page templates a module renders: each `app/templates/<lab>/<file>` the job carries (its last
+    writer's copy) or the engine holds, whose name under `app/templates/` the module's code spells out
+    (`"paper/dashboard.html"`). path -> (content, whose)."""
+    out: dict[str, tuple[str, str]] = {}
+    job = {p: (c, f"step {k}") for p, (c, k) in job_static_files(rows).items() if p.startswith("app/templates/")}
+    engine = {f"app/templates/{q.relative_to(ENGINE_PKG / 'templates').as_posix()}": q
+              for q in (ENGINE_PKG / "templates").rglob("*.html")} if (ENGINE_PKG / "templates").is_dir() else {}
+    for path in sorted(set(job) | set(engine)):
+        name = path[len("app/templates/"):]
+        if not re.search(r"[\"']" + re.escape(name) + r"[\"']", code):
+            continue
+        if path in job:
+            out[path] = job[path]
+        else:
+            try:
+                out[path] = (engine[path].read_text(encoding="utf-8"), "the engine's own, as merged")
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def rendered_templates_block(rows: list[dict], module: str) -> str:
+    """§17.2006 — a step that edits a module in place is shown the page templates that module renders, whole, and may
+    rewrite them. Live (69fe61c4 NOKEY, 2026-11-23): the view learned to mark the SPY benchmark unavailable, but only
+    its built-in fallback page said so -- the step never saw `app/templates/paper/dashboard.html`, the page the engine
+    actually serves, and its tests stood in for the template; the live page drew an empty SPY line with no word why."""
+    cur = current_sources(rows).get(module)
+    code = cur[1] if cur else ""
+    if not code:
+        own = ENGINE_PKG / "modules" / f"{module}.py"
+        code = own.read_text(encoding="utf-8") if re.fullmatch(r"[a-z_][a-z0-9_]*", module or "") and own.is_file() else ""
+    tpls = rendered_templates(code, rows) if code else {}
+    if not tpls:
+        return ""
+    out = ["\n\n## The page templates this module renders, as they are now (§17.2006)\n"
+           "This module's views render these. A change to what a view puts in the page's context (a part marked "
+           "unavailable, a new figure) shows on the page only when the template uses it: rewrite a template here when "
+           "the task changes what the page must show -- the WHOLE file, in a fenced block whose first line is its "
+           "path as a comment (`<!-- app/templates/… -->`); the delivery ships it. Tests render this template (the "
+           "sandbox has it): never stand in for the template to test the page.\n"]
+    for path, (content, whose) in tpls.items():
+        out.append(f"### `{path}` ({whose})\n```html\n<!-- {path} -->\n{content.rstrip()}\n```\n")
+    return "".join(out)
+
+
 #: §17.1992 — a sentence of the step's own text that retires a test it names: "replace `test_a` with …", "drop test_b"
 _RETIRES_RE = re.compile(r"\b(?:remov|delet|drop|replac|rewrit|retir|supersed)\w*", re.I)
 

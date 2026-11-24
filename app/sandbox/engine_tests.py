@@ -472,11 +472,14 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
     mine = files_of({**node, "output_text": output})
     if not mine:
         return EngineTestResult("skip", "no Python file to run", [])
+    from app.modules.engine_source import static_files_of
     files: dict[str, str] = {}
     for r in siblings:
         if r.get("status") == "done" and r.get("node_key") != node.get("node_key"):
             files.update(files_of(r))
+            files.update(static_files_of(r))     # §17.2006 — the job's pages and assets too, as the delivery ships them
     files.update(mine)
+    files.update(static_files_of({**node, "output_text": output}))
     for p in list(files):                                   # every folder a test imports through is a package
         if p.startswith("alembic/"):
             continue        # §17.1783 — never: an `alembic/__init__.py` shadows the alembic library itself
