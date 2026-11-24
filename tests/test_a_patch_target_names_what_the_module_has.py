@@ -97,12 +97,12 @@ def test_a(monkeypatch):
         pass
     with patch("app.modules.not_this_job.anything"):                           # not a job module: not ours
         pass
-    with patch("app.modules.paper_operator_approval_gate.write_approval"):     # the same miss twice: once
+    with patch("app.modules.paper_operator_approval_gate.write_approval"):     # the same miss twice: once, both lines
         pass
 '''
     found = unknown_patch_targets(_files(test), MODULES, {"paper_tests_runner"})
     assert [f.split(" -- ")[0] for f in found] == [
-        "`tests/test_paper_twelve_modules.py:6` patches `write_approval` on `paper_operator_approval_gate`, which has no "
+        "`tests/test_paper_twelve_modules.py:6` (and line 20) patches `write_approval` on `paper_operator_approval_gate`, which has no "
         "such name (it has APPROVAL_MODULE, request_approval, handle_approval_answer; it imports logging, Any, Optional, "
         "text, async_session, answer_handler, decision, open_decision_job)",
         "`tests/test_paper_twelve_modules.py:8` patches `nothing_here` on `paper_operator_approval_gate`, which has no "

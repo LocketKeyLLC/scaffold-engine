@@ -692,13 +692,18 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
     for path, code in files.items():
         if not path.startswith("tests/"):
             continue
-        for mod, name, line in _patch_targets(code):
+        targets = _patch_targets(code)
+        for mod, name, line in targets:
             if mod not in reach or (mod, name) in seen:
                 continue
             defined, imported = _top_names(reach[mod])
             if name in defined or name in imported:
                 continue
             seen.add((mod, name))
+            # §17.2010 — every line that patches it: a retry keeps what its findings do not name. Live (69fe61c4
+            # NOKEY2, 2026-11-24): five tests patched `values_for` on the entry module; each refusal named one line
+            # (799, 763, 787, 757, 834), each retry fixed that one and kept the other four
+            also = sorted({ln for m, n, ln in targets if (m, n) == (mod, name) and ln != line})
             public = [n for n in defined if not n.startswith("_")]
             where = [m for m, c in sorted(modules.items()) if name in _top_names(c)[0]]
             inserts = _inserts_of(reach[mod])
@@ -720,7 +725,8 @@ def unknown_patch_targets(files: dict[str, str], modules: dict[str, str], own: s
                     f"`{f}`, which imports {', '.join('`' + i + '`' for i in imps[:3])} at call time"
                     for f, imps in sorted(late.items())[:3]) + " -- patch THOSE names on their own modules"
             found.append(
-                f"`{path}:{line}` patches `{name}` on `{mod}`, which has no such name (it has "
+                f"`{path}:{line}`" + (f" (and line{'s' if len(also) > 1 else ''} {', '.join(map(str, also))})" if also else "")
+                + f" patches `{name}` on `{mod}`, which has no such name (it has "
                 f"{', '.join(public[:12]) or 'nothing public'}; it imports {', '.join(imported[:12]) or 'nothing'}) -- "
                 "the sandbox raises AttributeError"
                 + (f". `{name}` is defined in `{where[0]}`, which `{mod}` never imports: patching it anywhere changes "
