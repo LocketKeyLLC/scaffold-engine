@@ -2571,6 +2571,14 @@ async def execute_next_node(
                     _grounding_blocks += _blocks_that_say(_es.module_tests_block(node_snapshot.get("module_tests")))  # §17.1992
             except Exception as exc:
                 logger.warning("carried_code_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        # §17.2005 — a check after the delivery reads the lab's pages as the running engine serves them
+        try:
+            from app.modules.lab_pages import block_for_step as _lab_pages_block
+            _lp = await _lab_pages_block(db, job_id, {**node, "node_key": node_key, "title": title, "tool": tool})
+            if _lp:
+                _grounding_blocks.append(_lp)
+        except Exception as exc:
+            logger.warning("lab_pages_block_failed job=%s node=%s err=%r", job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
