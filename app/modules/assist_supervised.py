@@ -264,15 +264,25 @@ _policy_cache: dict[str, tuple[float, Optional[dict]]] = {}
 #: "no writes allowed"; this one's None means "the runner could not be asked".
 #: Rebuilding an install line needs those two apart — see `runner_setup`.
 _setup_cache: dict[str, tuple[float, Optional[dict]]] = {}
+#: §17.2014 — why the newest probe of a runner FAILED, kept apart from `_policy_cache`, whose None cannot say whether
+#: the runner answered "no writes" or never answered at all. Cleared by the next probe that is answered.
+_policy_error: dict[str, str] = {}
 
 
 def clear_policy_cache(name: Optional[str] = None) -> None:
     if name is None:
         _policy_cache.clear()
         _setup_cache.clear()
+        _policy_error.clear()
     else:
         _policy_cache.pop(name, None)
         _setup_cache.pop(name, None)
+        _policy_error.pop(name, None)
+
+
+def policy_failure(spec) -> Optional[str]:
+    """§17.2014 — what the newest probe of this runner failed with, or None when it was answered."""
+    return _policy_error.get(getattr(spec, "name", "") or "")
 
 
 def cached_policy(spec) -> tuple[bool, Optional[dict]]:
@@ -311,6 +321,7 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
             return pol
     try:
         names = {t.get("name") for t in await mcp_client.list_tools(spec, use_cache=use_cache)}
+        _policy_error.pop(name, None)
         if WRITE_TOOL not in names or POLICY_TOOL not in names:
             return None
         # §17.1271 — whether this runner can be handed a FILE. An older helper
@@ -331,6 +342,7 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
             raise ValueError(f"policy reply is {type(pol).__name__}, not an object")
     except Exception as exc:
         logger.warning("supervised_policy_unavailable runner=%s err=%r", getattr(spec, "name", "?"), exc)
+        _policy_error[name] = str(exc)[:200] or type(exc).__name__
         _policy_cache[name] = (time.monotonic() + 60.0, None)
         _setup_cache[name] = (time.monotonic() + 60.0, None)
         return None

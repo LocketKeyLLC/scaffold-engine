@@ -299,6 +299,22 @@ def _clear_searxng_probe_cache():
     health._searxng_probe_cache.update(at=0.0, result=None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_runner_policy_cache():
+    """§17.2014 — `assist_supervised` keeps each runner's write policy, and why its newest probe failed, in
+    module-level state; `channel_state` re-probes a runner whose probe failed. Without this a test that probes a
+    failing fake runner leaves the failure for the next one: in CI's order §17.1369's "answered with no policy" test
+    was re-probed through a fake that takes no `use_cache` and read `TypeError`. Same shape as §17.991's above."""
+    try:
+        from app.modules import assist_supervised
+    except Exception:  # pragma: no cover — app not importable in some lanes
+        yield
+        return
+    assist_supervised.clear_policy_cache()
+    yield
+    assist_supervised.clear_policy_cache()
+
+
 # §17.1935 — a lab delivered into the engine (`app/labs.py`) adds real modules under the names the engine's own tests
 # use as fixtures for the jobs that wrote it (`paper_trade_proposer`, `paper_fill_tracker`, …): live, delivering the
 # paper-trading lab turned 28 of those tests red -- the gates read the delivered module where the test hands in its

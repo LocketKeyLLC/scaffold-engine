@@ -51,6 +51,10 @@ def enabled() -> bool:
     return bool(settings.execution_supervised_runs_enabled)
 
 
+#: §17.2014 — how long `channel_state` waits between fresh probes of a runner whose last probe failed.
+_REPROBE_PAUSES = (3.0, 8.0)
+
+
 async def channel_state(db: AsyncSession) -> tuple[str, str]:
     """``(state, detail)`` — WHY there is no write channel, when there is none.
 
@@ -82,10 +86,19 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
         name = str(getattr(spec, "name", "") or "the registered runner")
         try:
             pol = await _sw.write_policy(spec)
+            # §17.2014 — a failed probe is cached for 60s so the views do not hammer a dead runner, but this reading
+            # BLOCKS a job or holds a step, so a cached failure is never its answer: it asks again, fresh, and gives a
+            # machine that is still coming up (the engine's own rebuild, a host reboot) a few seconds to answer.
+            for pause in ((0.0, *_REPROBE_PAUSES) if not pol and _sw.policy_failure(spec) else ()):
+                await asyncio.sleep(pause)
+                pol = await _sw.write_policy(spec, use_cache=False)
+                if pol or not _sw.policy_failure(spec):
+                    break
         except Exception as exc:
             return ("unreachable", f"{name}: {type(exc).__name__}")
         if not pol:
-            return ("unreachable", f"{name}: it answered with no write policy")
+            fail = _sw.policy_failure(spec)
+            return ("unreachable", f"{name}: {fail}" if fail else f"{name}: it answered with no write policy")
         return ("open", name)
     except Exception as exc:
         logger.warning("channel_state_failed err=%r", exc)
