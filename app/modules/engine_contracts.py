@@ -4411,6 +4411,69 @@ def _finding_path(finding: str) -> str:
     return finding[1:].split("`", 1)[0].split(":", 1)[0]
 
 
+def _is_test_fragment(code: str) -> bool:
+    """Code that is only tests: at least one top-level `test_*` function, and every top-level function or class a
+    test, a `Test*` class, a private helper or a pytest fixture."""
+    try:
+        body = ast.parse(code).body
+    except SyntaxError:
+        return False
+    defs = [n for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+
+    def _ok(n: ast.AST) -> bool:
+        name = getattr(n, "name", "")
+        if isinstance(n, ast.ClassDef):
+            return name.startswith("Test")
+        return name.startswith(("test", "_")) or any("fixture" in ast.unparse(d) for d in n.decorator_list)
+    return any(getattr(n, "name", "").startswith("test") for n in defs) and all(_ok(n) for n in defs)
+
+
+def answer_with_its_module(output: str, prior: str, leaf: str) -> str:
+    """§17.2013 — a retry's answer that holds only tests is read as tests, and keeps its module.
+
+    Live (69fe61c4 NOKEY2 a2, 2026-11-24 16:20 UTC): the prompt says the tests that passed are put back by the engine
+    ("do not write them again"); with one test failing of 62 the model answered that one test, in an unnamed block,
+    and no module. `files_of` reads the first unnamed block as the step's MODULE: `paper_wire_engine_entry_module`
+    became one test function ("it has test_load_series_returns_empty_for_unknown_series; it imports nothing"), and
+    the next attempt rewrote the module from nothing -- 40 failed, 10 errors. Now an unnamed block that is only tests
+    is the step's test file (dropped when the answer also names that file), and an answer that writes no module of
+    its own carries the module of the previous draft (`prior`), which the run it is fixing ran."""
+    from app.modules.execution_codegen_gate import PYTHON_LANGS
+    from app.sandbox.engine_tests import files_of
+    if not leaf or not output:
+        return output
+    test_path, mod_path = f"tests/test_{leaf}.py", f"app/modules/{leaf}.py"
+    fence = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)```", re.S)
+    named: set[str] = set()
+    fragments: list[re.Match] = []
+    other_code = False
+    for m in fence.finditer(output):
+        if m.group(1).lower() not in PYTHON_LANGS or not m.group(2).strip():
+            continue
+        hm = re.match(r"^\s*#\s*((?:[\w.-]+/)*\w+\.py)\b", m.group(2).lstrip().splitlines()[0])
+        if hm:
+            path = hm.group(1)
+            named.add(path if "/" in path else (f"tests/{path}" if path.startswith("test_") else f"app/modules/{path}"))
+        elif _is_test_fragment(m.group(2)):
+            fragments.append(m)
+        else:
+            other_code = True
+    if other_code or any(p.startswith("app/") for p in named) or not (fragments or test_path in named):
+        return output                                       # it writes code of its own, or no tests: as it is
+    for i, m in reversed(list(enumerate(fragments))):
+        keep = "" if test_path in named or i else f"```python\n# {test_path}\n{m.group(2).strip()}\n```"
+        output = output[:m.start()] + keep + output[m.end():]
+    module = files_of({"output_text": prior}).get(mod_path) if prior else None
+    try:
+        ast.parse(module or "")
+    except SyntaxError:
+        module = None                                       # a draft cut short (§17.1974) is no module to carry
+    if module:
+        output = replace_file_block(output, mod_path, module)
+        logger.info("tests_only_answer_kept_its_module module=%s fragments=%d", leaf, len(fragments))
+    return output
+
+
 def replace_file_block(output: str, path: str, block: str) -> str:
     """`output` with the fenced Python block headed `# path` replaced by `block` (a fenced block, or bare code that
     is then fenced); appended when there is none."""

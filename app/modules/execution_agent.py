@@ -1727,6 +1727,12 @@ async def _complete_required_tests(output: str, *, tool: str, node_snapshot: dic
     """§17.1801 — the required test file drawn when it is missing (`_draw_required_tests`), then §17.1891 — every
     test that passed in an earlier attempt put back as it passed, whatever path the draw took. Live (5b4880c0 T5 a3,
     2026-11-03 21:13 UTC): the splice sat after the draw's early `return output` and never ran."""
+    # §17.2013 — a retry that answered only tests is read as tests, with the module of the draft it is fixing
+    from app.modules.engine_contracts import answer_with_its_module
+    from app.modules.engine_source import step_module
+    _prior = str(node_snapshot.get("prior_draft") or "")
+    output = answer_with_its_module(output, _prior, step_module({**node_snapshot, "tool": tool, "output_text": _prior})
+                                    or step_module({**node_snapshot, "tool": tool}))
     output = await _draw_required_tests(output, tool=tool, node_snapshot=node_snapshot, brief=brief,
                                         exec_prompt=exec_prompt, exec_role=exec_role, exec_overrides=exec_overrides,
                                         gen_budget=gen_budget, job_id=job_id, node_key=node_key)
