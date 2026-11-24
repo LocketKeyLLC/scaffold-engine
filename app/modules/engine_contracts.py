@@ -347,16 +347,42 @@ def _aliases_at(tree: ast.AST):
             for d in fn.decorator_list:
                 owner.update({id(x): id(fn) for x in ast.walk(d)})
             la = _module_aliases(ast.Module(body=[x for x in own if isinstance(x, (ast.Import, ast.ImportFrom))], type_ignores=[]))
+            la = {**la, **_bound_modules(own)}
             if la:
                 local[id(fn)] = la
     # the file's own aliases: every import no function owns (a function's stays that function's)
     base = _module_aliases(ast.Module(body=[x for x in ast.walk(tree) if isinstance(x, (ast.Import, ast.ImportFrom))
                                             and id(x) not in owner], type_ignores=[]))
+    base = {**base, **_bound_modules(x for x in ast.walk(tree) if id(x) not in owner)}
 
     def alias_for(node: ast.AST) -> dict[str, str]:
         la = local.get(owner.get(id(node), 0))
         return {**base, **la} if la else base
     return alias_for
+
+
+_IMPORT_CALLS = frozenset({"importorskip", "import_module"})
+
+
+def _bound_modules(nodes) -> dict[str, str]:
+    """§17.2008 — `alpaca = pytest.importorskip("app.modules.paper_x")` / `importlib.import_module(…)`: a name bound to
+    a job module by a call, as `{name: leaf}`. Live (69fe61c4 NOKEY2 a4, 2026-11-24): the no-key fixture patched
+    `monkeypatch.setattr(alpaca, "values_for", _empty)` on such a name; the view gate read no patch at all and
+    refused the step for a test it had."""
+    out: dict[str, str] = {}
+    for n in nodes:
+        if not (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, ast.Call) and n.value.args):
+            continue
+        f = n.value.func
+        if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) not in _IMPORT_CALLS:
+            continue
+        a0 = n.value.args[0]
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) and a0.value.startswith("app.modules."):
+            parts = a0.value.split(".")
+            if len(parts) == 3:
+                out[n.targets[0].id] = parts[2]
+    return out
 
 
 def _const_str(e: ast.AST, consts: dict[str, str]) -> str | None:
