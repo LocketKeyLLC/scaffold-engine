@@ -1013,7 +1013,9 @@ _NOKEY_NOTE = ("Edit `{mod}.py` in place -- the module as it is now is shown who
                "Keep every other route, test and behaviour as it is; in `tests/test_{mod}.py` add, beside the tests "
                "it has, a test for each view that requests it with the reader's `values_for` patched to return `{{}}` "
                "-- standing in for nothing between the view and the reader -- and checks it answers 200 and says the "
-               "part is unavailable.")
+               "part is unavailable. When the view renders a page template (shown below when it does), the page the "
+               "operator opens is that template: it must say the part is unavailable too -- rewrite the template "
+               "whole, and render the real template in the test (never stand in for it) (§17.2006).")
 
 
 def views_answer_without_secrets(tasks: list[dict], files: dict[str, tuple[str, str]],
@@ -1037,7 +1039,11 @@ def views_answer_without_secrets(tasks: list[dict], files: dict[str, tuple[str, 
     changes: list[str] = []
     ids = {str(t.get("id")) for t in tasks}
     for mod, fs in by_mod.items():
-        if any((t.get("tool_config") or {}).get("answers_without_secrets") == mod for t in tasks):
+        # once: a step already asked to do it and not finished yet is left to finish; §17.2006 -- one that FINISHED
+        # with the view still failing (NOKEY passed with its no-key tests standing in for the page's template) gets
+        # a successor, after it
+        if any((t.get("tool_config") or {}).get("answers_without_secrets") == mod and t.get("status") != "done"
+               for t in tasks):
             continue
         writers = list(dict.fromkeys(k for p, (_c, k) in files.items()
                                      if p in (f"app/modules/{mod}.py", f"tests/test_{mod}.py") and k in ids))

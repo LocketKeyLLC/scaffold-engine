@@ -1074,6 +1074,39 @@ def _requests(fn: ast.AST, route: str, helpers: dict[str, ast.AST], consts: dict
     return False
 
 
+#: §17.2006 — what standing in for a page's template patches (Starlette/Jinja)
+_TEMPLATE_NAMES = frozenset({"TemplateResponse", "get_template", "templates", "TemplateNotFound", "render_template",
+                             "Jinja2Templates"})
+
+
+def _template_stand_in(fn: ast.AST, helpers: dict[str, ast.AST]) -> str | None:
+    """§17.2006 — the function (the test itself, a helper it calls or a fixture it takes) that patches the page's
+    template away -- `patch.object(entry.templates, "TemplateResponse", side_effect=TemplateNotFound(…))` -- else None.
+    Live (69fe61c4 NOKEY): every no-key test rendered through `_no_template()`, so the page the engine serves was
+    never the one tested."""
+    todo, done = [fn], set()
+    while todo:
+        f = todo.pop()
+        if id(f) in done:
+            continue
+        done.add(id(f))
+        for c in _own_nodes(f):
+            if not isinstance(c, ast.Call):
+                continue
+            fname = c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id if isinstance(c.func, ast.Name) else ""
+            if fname in ("patch", "object", "setattr") and any(
+                    (isinstance(a, ast.Constant) and isinstance(a.value, str)
+                     and a.value.rsplit(".", 1)[-1] in _TEMPLATE_NAMES)
+                    or (isinstance(a, ast.Attribute) and a.attr in _TEMPLATE_NAMES)
+                    for a in [*c.args, *(k.value for k in c.keywords)]):
+                return getattr(f, "name", "")
+            if isinstance(c.func, ast.Name) and c.func.id in helpers:
+                todo.append(helpers[c.func.id])
+        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            todo += [helpers[a.arg] for a in f.args.args + f.args.kwonlyargs if a.arg in helpers]   # its fixtures
+    return None
+
+
 def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], own: set[str]) -> list[str]:
     """§17.2003 — each GET view of a module this step writes that reaches an operator secret (through `values_for`,
     itself or through what it calls) with no test that requests it with the secret missing: the test's stand-in for
@@ -1104,6 +1137,8 @@ def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], o
             readers = sorted(set(secrets.values()))
             ok = False
             cut: list[tuple[str, list[tuple[str, str]]]] = []      # a no-key test whose stand-in stops the chain
+            renders = bool(re.search(r"[\"'][\w./-]+\.html[\"']", code))     # §17.2006 — the view renders a page
+            faked: list[tuple[str, str]] = []                      # a no-key test that stands in for that page
             for tree, tcode in tests:
                 scopes, covering, fns = _test_scopes(tree, tcode, _patch_targets(tcode) + _empty_secret_patches(tree, tcode))
                 helpers = {n.name: n for n in fns.values() if not n.name.startswith("test")}
@@ -1116,6 +1151,10 @@ def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], o
                     if not ("runner_secrets" in empty or set(readers) <= empty):
                         continue
                     real = frozenset(p for p in patched if "#" not in p[1])
+                    stand = _template_stand_in(fn, helpers) if renders else None
+                    if stand is not None and secrets_read(reach, mod, handler, patched=real):
+                        faked.append((fn.name, stand))
+                        continue
                     if secrets_read(reach, mod, handler, patched=real):
                         ok = True                                 # the chain runs for real, into an empty reader
                         break
@@ -1153,7 +1192,10 @@ def views_fail_without_secrets(files: dict[str, str], modules: dict[str, str], o
                 + "".join(f". `{t}` requests it with no secret, but "
                           + (", ".join(f"`{m}.{n}`" for m, n in stand) if stand else "a stand-in")
                           + " is stood in for there (its own patch or a fixture it takes), so the view never reaches "
-                          "the reader -- leave that stand-in out of this test" for t, stand in cut[:2]))
+                          "the reader -- leave that stand-in out of this test" for t, stand in cut[:2])
+                + "".join(f". `{t}` requests it with no secret, but stands in for the page's template (through "
+                          f"`{s}`), so the page the engine serves is never the one tested: render the real template "
+                          "(the sandbox has it) and check what it shows" for t, s in faked[:2]))
     return found
 
 

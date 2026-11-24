@@ -2565,7 +2565,8 @@ async def execute_next_node(
                 _fm = _es.fixed_module({**node_snapshot, "tool_config": node.get("tool_config")},
                                        {_es.step_module(r) for r in _sibling_rows} - {""})
                 if _fm:
-                    _eb = _es.edited_module_block(_sibling_rows, _fm)
+                    _eb = (_es.edited_module_block(_sibling_rows, _fm)
+                           + _es.rendered_templates_block(_sibling_rows, _fm))               # §17.2006 its pages
                     if _eb:
                         _grounding_blocks.append(_eb)
                     _grounding_blocks += _blocks_that_say(_es.module_tests_block(node_snapshot.get("module_tests")))  # §17.1992
