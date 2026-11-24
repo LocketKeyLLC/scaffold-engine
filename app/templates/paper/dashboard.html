@@ -150,6 +150,10 @@
   }
   .pager button:disabled { opacity: 0.45; cursor: default; }
   .page-foot { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .unavailable-note {
+    border: 1px solid #d9a400; background: rgba(217,164,0,.10);
+    border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 0 0 12px;
+  }
   @media (max-width: 620px) {
     .prop-rationale { display: none; }
     .kpi-value { font-size: 18px; }
@@ -219,6 +223,9 @@
 
   <section class="card" aria-labelledby="chart-h">
     <h2 id="chart-h">Account value vs SPY <span class="count">{{ span }}</span></h2>
+    {% if spy_unavailable %}
+    <p class="unavailable-note" data-unavailable="spy">{{ spy_unavailable_note }}</p>
+    {% endif %}
     <div class="chart-wrap">
       <canvas id="equity-chart" role="img" aria-label="Account value of the paper account and the SPY benchmark over the selected span"></canvas>
     </div>
