@@ -26,6 +26,7 @@ from app.modules.paper_execution_entry_point import run_execution_entry_point
 from app.modules.paper_fill_tracker import track_fills
 from app.modules.paper_operator_view import get_operator_view
 from app.modules.paper_serve_static_asset_under import install as install_static_assets
+from app.modules.paper_serve_static_asset_under import vendor_url, vendored_files
 from app.modules.paper_spy_benchmark_tracker import get_spy_benchmark
 from app.scheduler import get_scheduler
 
@@ -38,6 +39,14 @@ DAILY_BATCH_HOUR = 13
 DAILY_BATCH_MINUTE = 0
 DASHBOARD_SPANS = ("1w", "1m", "3m", "all")
 DASHBOARD_TEMPLATE = "paper/dashboard.html"
+
+SPY_SECRET_NAMES = ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY")
+SPY_UNAVAILABLE_REASON = "the operator secret is not stored yet"
+SPY_UNAVAILABLE_NOTE = (
+    "The SPY benchmark is unavailable: the operator secret is not stored yet "
+    "(ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY). Store them on the Machines page "
+    "\u2192 Secrets; the rest of the page is unaffected."
+)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -57,6 +66,12 @@ def _as_utc(value: Any) -> Any:
     if isinstance(value, datetime) and value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _raw_session(ro: Any) -> Any:
+    """The plain AsyncSession under a read-only one, however that module exposes it."""
+    raw = getattr(ro, "raw", None)
+    return raw() if callable(raw) else raw
 
 
 def _attach_costs(series: List[Dict[str, Any]], fill_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -91,7 +106,7 @@ def _series_window(series: List[Dict[str, Any]]) -> tuple:
 
 def _fmt_number(value: Any, spec: str = "{:.2f}") -> str:
     if value is None:
-        return "—"
+        return "\u2014"
     try:
         return spec.format(value)
     except (TypeError, ValueError):
@@ -100,7 +115,7 @@ def _fmt_number(value: Any, spec: str = "{:.2f}") -> str:
 
 def _fmt_pct(value: Any) -> str:
     if value is None:
-        return "—"
+        return "\u2014"
     try:
         return "{:+.2f}%".format(float(value) * 100.0)
     except (TypeError, ValueError):
@@ -111,7 +126,7 @@ def _one_line(value: Any, limit: int = 120) -> str:
     if not value:
         return ""
     collapsed = " ".join(str(value).split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "\u2026"
 
 
 def _sources(value: Any) -> str:
@@ -131,6 +146,21 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[str]], empty: str) ->
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _chart_script() -> str:
+    """Point the page at the lab's own vendored Chart.js bundle; never a CDN."""
+    try:
+        names = vendored_files()
+    except Exception:  # the manifest is absent until the delivery flow writes it
+        return ""
+    for name in names:
+        if "chart" in str(name).lower():
+            try:
+                return f'<script src="{vendor_url(str(name))}" defer></script>'
+            except (ValueError, OSError):
+                return ""
+    return ""
+
+
 _DASHBOARD_FALLBACK = Template(
     """<!DOCTYPE html>
 <html lang="en">
@@ -138,7 +168,7 @@ _DASHBOARD_FALLBACK = Template(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Paper trading — dashboard</title>
+<title>Paper trading \u2014 dashboard</title>
 <style>
  :root { color-scheme: light dark; --line:#e2e5ea; --muted:#5b6470; }
  body { margin:0; padding:24px 16px 56px; font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -154,18 +184,23 @@ _DASHBOARD_FALLBACK = Template(
  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
  th { font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
  .empty, .note { color:var(--muted); font-size:13px; margin:0; }
+ .unavailable { border:1px solid #d9a400; background:rgba(217,164,0,.10); border-radius:8px; padding:8px 12px; font-size:13px; margin:0 0 8px; }
  .proposal { border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin-bottom:8px; }
  .proposal summary { cursor:pointer; }
  .sources { margin:6px 0 0; padding-left:18px; font-size:13px; word-break:break-word; }
+ .chart { margin:0 0 12px; }
 </style>
 </head>
 <body>
-<h1>Paper trading — dashboard</h1>
+<h1>Paper trading \u2014 dashboard</h1>
 <nav class="spans">$spans</nav>
 <p class="note">Built-in page: the dashboard template $template is not installed in this engine.</p>
 <h2>Returns after costs</h2>
 <section class="kpis">$kpis</section>
 <h2>Account value vs SPY</h2>
+$spy_note
+<figure class="chart"><canvas id="account-value-vs-spy" data-chart-lib="chart.js"></canvas></figure>
+$chart_script
 $table
 <h2>Open positions</h2>
 $positions
@@ -184,7 +219,12 @@ $audit
 
 def _builtin_dashboard(context: Dict[str, Any]) -> str:
     span = context.get("span", "all")
-    chart = context.get("chart") or {}
+    chart: Dict[str, Any] = {}
+    nested = context.get("chart")
+    if isinstance(nested, dict):
+        chart = nested
+    if not chart.get("dates") and isinstance(context.get("dates"), list):
+        chart = context
     dates = list(chart.get("dates") or [])
     account_values = list(chart.get("account_values") or [])
     spy_values = list(chart.get("spy_values") or [])
@@ -200,8 +240,8 @@ def _builtin_dashboard(context: Dict[str, Any]) -> str:
         ("Net return", _fmt_pct(context.get("net_return"))),
         ("Gross return", _fmt_pct(context.get("gross_return"))),
         ("Costs", _fmt_number(context.get("costs"))),
-        ("Max drawdown", _fmt_pct(context.get("drawdown"))),
-        ("Sharpe ratio", _fmt_number(context.get("sharpe"))),
+        ("Max drawdown", _fmt_pct(context.get("max_drawdown", context.get("drawdown")))),
+        ("Sharpe ratio", _fmt_number(context.get("sharpe_ratio", context.get("sharpe")))),
         ("Turnover", _fmt_number(context.get("turnover"))),
     )
     kpis = "".join(
@@ -211,7 +251,7 @@ def _builtin_dashboard(context: Dict[str, Any]) -> str:
 
     series_rows = [
         (str(day), _fmt_number(value, "{:,.2f}"),
-         _fmt_number(spy_values[index], "{:.2f}") if index < len(spy_values) else "—")
+         _fmt_number(spy_values[index], "{:.2f}") if index < len(spy_values) else "\u2014")
         for index, (day, value) in enumerate(zip(dates, account_values, strict=False))
     ]
 
@@ -248,10 +288,18 @@ def _builtin_dashboard(context: Dict[str, Any]) -> str:
         for row in context.get("audit") or [] if isinstance(row, dict)
     ]
 
+    spy_note = ""
+    if context.get("spy_unavailable"):
+        spy_note = '<p class="unavailable" data-unavailable="spy">{}</p>'.format(
+            context.get("spy_unavailable_note") or SPY_UNAVAILABLE_NOTE
+        )
+
     return _DASHBOARD_FALLBACK.substitute(
         spans=spans,
         template=DASHBOARD_TEMPLATE,
         kpis=kpis,
+        spy_note=spy_note,
+        chart_script=_chart_script(),
         table=_table(("Date", "Account value", "SPY"), series_rows, "No snapshots recorded in this span yet."),
         positions=_table(("Ticker", "Side", "Quantity", "Market value"), position_rows, "No open positions."),
         orders=_table(("Ticker", "Side", "Quantity", "Status"), order_rows, "No recent orders."),
@@ -316,14 +364,44 @@ def _make_router() -> APIRouter:
         view_data = await get_operator_view()
         if not isinstance(view_data, dict):
             view_data = {}
-        summary = {key: view_data.get(key) or [] for key in ("open_positions", "recent_orders", "fills", "proposals")}
-        audit = view_data.get("audit") or view_data.get("audit_entries") or view_data.get("audit_trail") or []
+        summary: Dict[str, Any] = {
+            key: view_data.get(key) or []
+            for key in ("open_positions", "recent_orders", "fills", "proposals")
+        }
+        raw_audit: Any = (
+            view_data.get("audit")
+            or view_data.get("audit_entries")
+            or view_data.get("audit_trail")
+            or []
+        )
+        audit: List[Dict[str, Any]] = raw_audit if isinstance(raw_audit, list) else []
 
         start, end = _series_window(series)
-        async with read_only_session() as ro:
-            spy = await get_spy_benchmark(start_date=start, end_date=end, db=ro.raw)
 
-        context = build_dashboard_context(series, summary, audit, spy or [], span)
+        # The SPY benchmark needs the operator's Alpaca keys through
+        # paper_alpaca_paper_client. Until they are stored it raises; the rest of the
+        # page must still render, so the failure is contained here and reported as
+        # "this part is unavailable" (§17.2003).
+        spy: Any = []
+        spy_unavailable = False
+        try:
+            async with read_only_session() as ro:
+                spy = await get_spy_benchmark(start_date=start, end_date=end, db=_raw_session(ro))
+        except Exception:
+            logger.info("SPY benchmark unavailable on the dashboard", exc_info=True)
+            spy = []
+            spy_unavailable = True
+        if not isinstance(spy, list):
+            spy = []
+
+        context = build_dashboard_context(series, summary, audit, spy, span)
+        if not isinstance(context, dict):
+            context = {}
+        if spy_unavailable:
+            context["spy_unavailable"] = True
+            context["spy_unavailable_note"] = SPY_UNAVAILABLE_NOTE
+            context["spy_unavailable_reason"] = SPY_UNAVAILABLE_REASON
+            context["spy_unavailable_secrets"] = list(SPY_SECRET_NAMES)
         return _render_dashboard(request, context)
 
     return router
