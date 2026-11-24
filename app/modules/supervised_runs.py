@@ -53,6 +53,9 @@ def enabled() -> bool:
 
 #: §17.2014 — how long `channel_state` waits between fresh probes of a runner whose last probe failed.
 _REPROBE_PAUSES = (3.0, 8.0)
+#: §17.2015 — a runner found down after those pauses is, for this long, probed fresh ONCE without waiting: every held
+#: step asks `channel_state`, and 11s of patience per step, while the host is really off, adds up to minutes.
+_DOWN_WINDOW = 120.0
 
 
 async def channel_state(db: AsyncSession) -> tuple[str, str]:
@@ -89,11 +92,16 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
             # §17.2014 — a failed probe is cached for 60s so the views do not hammer a dead runner, but this reading
             # BLOCKS a job or holds a step, so a cached failure is never its answer: it asks again, fresh, and gives a
             # machine that is still coming up (the engine's own rebuild, a host reboot) a few seconds to answer.
-            for pause in ((0.0, *_REPROBE_PAUSES) if not pol and _sw.policy_failure(spec) else ()):
+            # §17.2015 — a runner already found down after waiting gets one fresh probe, not the wait again: it
+            # still answers at once if it is back, and a host that is really off costs one probe per step.
+            patience = () if _sw.down_within(spec, _DOWN_WINDOW) else _REPROBE_PAUSES
+            for pause in ((0.0, *patience) if not pol and _sw.policy_failure(spec) else ()):
                 await asyncio.sleep(pause)
                 pol = await _sw.write_policy(spec, use_cache=False)
                 if pol or not _sw.policy_failure(spec):
                     break
+            if not pol and _sw.policy_failure(spec):
+                _sw.mark_down(spec)
         except Exception as exc:
             return ("unreachable", f"{name}: {type(exc).__name__}")
         if not pol:
