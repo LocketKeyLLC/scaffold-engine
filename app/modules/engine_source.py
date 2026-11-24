@@ -3494,6 +3494,10 @@ async def engine_findings(db, job_id: str, node_key: str, output: str, inherited
     if len(_defs_rows) != len(_others):
         _defs_rows.append({**me, "output_text": output})
     _defs = sibling_definitions(_defs_rows)
+    # §17.2008 — and so is a module of THIS job the output edits in place: live (69fe61c4 NOKEY2, 2026-11-24) four
+    # attempts' tests of the new `_load_spy`/`_spy_missing` were refused as "`paper_wire_engine_entry_module` (step
+    # NOKEY) has no `_load_spy`" -- NOKEY's file, the one being replaced; only a carried row was set aside above.
+    _defs.update({m: d for m, d in sibling_definitions([{**me, "output_text": output}]).items() if m in mine})
     _fks = engine_schema.foreign_keys_in_code(others)
     found += sibling_refs(output, _defs, fks=_fks, rules=engine_schema.column_rules_in_code(others))   # §17.1866
     found += imports_an_unwritten_sibling(output, _all_others, _defs)
