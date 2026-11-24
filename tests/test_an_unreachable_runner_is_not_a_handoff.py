@@ -55,7 +55,7 @@ def _state(monkeypatch, *, spec=_Spec(), policy=None, raises=None, enabled=True,
     async def fake_spec(db):
         return spec
 
-    async def fake_policy(s):
+    async def fake_policy(s, **_kw):
         if raises is not None:
             raise raises
         return policy
