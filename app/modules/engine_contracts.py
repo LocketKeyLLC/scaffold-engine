@@ -4593,6 +4593,8 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
     dropped-tests gate."""
     from app.sandbox.engine_tests import files_of
     names: list[str] = []
+    mine = {p.rsplit("/", 1)[1][:-3]: c for p, c in files_of({"output_text": output}).items()
+            if p.startswith("app/modules/") and p.endswith(".py")}                     # §17.2011
     for path, defs in sorted((kept or {}).items()):
         if not defs:
             continue
@@ -4631,11 +4633,46 @@ def splice_kept(output: str, kept: dict[str, dict[str, str]]) -> tuple[str, list
                 if not any(_is_kept_test(k, v) for k, v in defs.items()):
                     continue
                 spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
+        # §17.2011 — and one that patches a name a module this output writes no longer has: the gate refuses it before
+        # the sandbox, so no verdict ever takes it off the keep-list. Live (69fe61c4 NOKEY2, 2026-11-24): tests that
+        # passed under a draft whose module read `values_for` itself were put back into every later draft with
+        # `patch.object(entry, "values_for", …)`, and each attempt was refused for lines it had not written
+        if spliced is not None:
+            bad = _missing_patch_lines(spliced, mine)
+            gone = [k for k, (a, b) in _test_spans(spliced).items() if k in defs and _is_kept_test(k, defs[k])
+                    and any(a <= ln <= b for ln in bad)]
+            if gone:
+                logger.info("kept_tests_not_spliced path=%s tests=%s (they patch a name the rewritten module "
+                            "no longer has)", path, gone)
+                defs = {k: v for k, v in defs.items() if k not in gone}
+                if not any(_is_kept_test(k, v) for k, v in defs.items()):
+                    continue
+                spliced = splice_definitions(code, "\n\n\n".join(defs.values()))
         if spliced is None or spliced == code:
             continue
         output = replace_file_block(output, path, spliced)
         names.extend(f"{path}::{n}" for n, v in defs.items() if _is_kept_test(n, v))
     return output, names
+
+
+def _missing_patch_lines(code: str, modules: dict[str, str]) -> set[int]:
+    """§17.2011 — the lines of `code` that patch a name one of `modules` (leaf -> source) neither defines nor imports."""
+    out: set[int] = set()
+    for mod, name, line in _patch_targets(code):
+        if mod in modules:
+            defined, imported = _top_names(modules[mod])
+            if name not in defined and name not in imported:
+                out.add(line)
+    return out
+
+
+def _test_spans(code: str) -> dict[str, tuple[int, int]]:
+    """Each top-level function or class of `code`, by name, with its first and last line."""
+    try:
+        return {n.name: (n.lineno, n.end_lineno or n.lineno) for n in ast.parse(code).body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    except SyntaxError:
+        return {}
 
 
 def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: list[str]) -> tuple[str, list[str]]:
