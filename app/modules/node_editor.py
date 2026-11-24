@@ -728,6 +728,26 @@ async def mark_satisfied(
             "node_status": "done", "cascade": []}
 
 
+async def _give_back_rounds(db: AsyncSession, job_id: str, node_key: str, edited_by: str | None) -> int:
+    """§17.2012 — the operator's reset gives the step its extra rounds back, as §17.1752 gives its retries: the rounds
+    §17.1923 grants a converging step are counted in its tool_config and never cleared. Live (69fe61c4 NOKEY2,
+    2026-11-24): both rounds went on attempts the engine's own gates refused wrongly (§17.2008-2011); after those
+    fixes and a reset the step converged 24 -> 20 -> 13 -> 6 failing of 61, and was failed with no round left. A
+    reset the engine makes for itself (`edited_by` naming the engine, §17.1896) keeps the count. Returns the rounds
+    given back."""
+    if "engine" in (edited_by or ""):
+        return 0
+    row = (await db.execute(text(
+        "SELECT tool_config->>'converging_rounds' FROM dag_nodes WHERE job_id = :j AND node_key = :k "
+        "AND jsonb_typeof(tool_config) = 'object'"), {"j": job_id, "k": node_key})).scalar()
+    if not row:
+        return 0
+    await db.execute(text(
+        "UPDATE dag_nodes SET tool_config = tool_config - 'converging_rounds' WHERE job_id = :j AND node_key = :k"),
+        {"j": job_id, "k": node_key})
+    return int(row)
+
+
 async def reset_node(
     job_id: str, node_key: str, *, edited_by: str | None = None, db: AsyncSession,
     cascade: bool = False,
@@ -761,9 +781,11 @@ async def reset_node(
     await _drop_engine_half_marks(db, job_id, reset_keys)
     await _drop_parked_frame(db, job_id, reset_keys, "reset")   # §17.1639 — its draft is gone with it
     await _reopen_job(db, job_id)
+    rounds = await _give_back_rounds(db, job_id, node_key, edited_by)
     await _audit(
         db, job_id, node_key, "reset",
-        {"status": node["status"]}, {"status": "pending", "cascade": sorted(downstream)},
+        {"status": node["status"], **({"converging_rounds": rounds} if rounds else {})},
+        {"status": "pending", "cascade": sorted(downstream)},
         edited_by,
     )
     await db.commit()
