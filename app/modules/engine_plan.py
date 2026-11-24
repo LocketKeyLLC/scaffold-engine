@@ -2093,6 +2093,14 @@ def job_tables(files: dict[str, tuple[str, str]]) -> list[str]:
     return out
 
 
+def wiring_modules(files: dict[str, tuple[str, str]]) -> list[str]:
+    """§17.1905/§17.2004 — the job's lab entries: its modules that expose `install(app)` and that no other such module
+    of the job imports (a helper the entry calls is part of it)."""
+    from app.modules.module_reach import entries
+    codes = {Path(p).stem: code for p, (code, _k) in files.items() if p.startswith("app/modules/")}
+    return entries(codes, [m for m, c in codes.items() if re.search(r"^def install\(", c, re.M)])
+
+
 def secrets_the_code_reads(files: dict[str, tuple[str, str]]) -> list[str]:
     """Every operator secret the job's modules read through `values_for` (§17.1857), from any public function or
     class -- what the keys question is answered by.
@@ -2157,7 +2165,7 @@ async def answer_unmet(db, job_id: str, title: str) -> dict | None:
         # §17.1985 — and each static file it carries is in the engine's tree
         verdicts += [f"`{p}` is not in the running engine" for p in engine_source.job_static_files(rows)
                      if not (engine_source.ENGINE_PKG.parent / p).is_file()]
-        wiring = [m for m in mods if re.search(r"^def install\(", files[f"app/modules/{m}.py"][0], re.M)]
+        wiring = wiring_modules(files)                                                    # §17.2004
         if not wiring:
             verdicts.append("no module of this job exposes `install(app)` -- nothing would start the lab")
         for m in wiring:

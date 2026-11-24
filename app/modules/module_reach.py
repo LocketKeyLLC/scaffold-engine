@@ -62,3 +62,15 @@ def reached(codes: dict[str, str], seeds: Iterable[str]) -> set[str]:
         if m in codes:
             todo.extend(imported_modules(codes[m]) - seen)
     return seen
+
+
+def entries(codes: dict[str, str], candidates: Iterable[str]) -> list[str]:
+    """§17.2004 — of the modules that expose `install(app)` (``candidates``), the lab's own entries: those no OTHER
+    candidate reaches through its imports. A helper the entry imports and calls is part of the entry, not a second one.
+    Live (69fe61c4 T12, 2026-11-24): `paper_serve_static_asset_under` mounts the static files through its own
+    `install(app)`, and the lab's entry `paper_wire_engine_entry_module` imports and calls it (§17.2000 REACH); the
+    delivery check asked for both in `app/labs.py` and refused the operator's "merged and redeployed". Two candidates
+    that reach each other are both kept."""
+    cands = list(dict.fromkeys(candidates))
+    reach = {c: reached(codes, [c]) - {c} for c in cands}
+    return [c for c in cands if not any(c in reach[o] and o not in reach[c] for o in cands if o != c)]

@@ -216,8 +216,7 @@ async def job_code_endpoint(
         raise HTTPException(status_code=409, detail="this job does not write code for the engine")
     rows = await engine_source.code_rows(db, str(job_id))
     files = engine_source.job_files(rows)
-    wiring = [p.rsplit("/", 1)[1][:-3] for p, (code, _k) in files.items()
-              if p.startswith("app/modules/") and re.search(r"^def install\(", code, re.M)]
+    wiring = engine_plan.wiring_modules(files)                                              # §17.2004
     # §17.1985 — and the static files beside the code (a page template, the lab's assets, its vendor manifest)
     static = engine_source.job_static_files(rows)
     # §17.1988 — and what each file did since the job's last delivery, so a re-delivery keeps the reviewed copy
