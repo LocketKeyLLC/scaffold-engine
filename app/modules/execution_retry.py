@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import deque
 
 from sqlalchemy import text
@@ -80,11 +81,16 @@ def _format_reviewer_feedback(node: dict) -> str:
         return ""
     # §17.1779 — the earlier refusals too: each one must stay fixed, not only the last
     norm = " ".join(reason.split())[:240]
-    earlier = [r for r in (node.get("prior_refusals") or []) if " ".join(str(r).split())[:240] != norm]
+    prior = [str(r) for r in (node.get("prior_refusals") or [])]          # oldest first
+    earlier = [_superseded(r, "\n".join(prior[i + 1:] + [reason])) for i, r in enumerate(prior)
+               if " ".join(r.split())[:240] != norm]
     history = ""
     if earlier:
-        history = ("Earlier attempts of this step were refused for these too -- every one must stay fixed:\n"
-                   + "".join(f"  {i}. {str(r).strip()[:900]}\n" for i, r in enumerate(earlier, 1)) + "\n")
+        # §17.2009 — each earlier reason was read against ITS draft; where one asks for what the newest says this
+        # draft does not have, the newest one wins
+        history = ("Earlier attempts of this step were refused for these too -- every one must stay fixed, except "
+                   "where the reason above, read against this draft, says otherwise:\n"
+                   + "".join(f"  {i}. {r.strip()[:900]}\n" for i, r in enumerate(earlier, 1)) + "\n")
     return (
         head +
         f"  {reason}\n\n"
@@ -94,6 +100,24 @@ def _format_reviewer_feedback(node: dict) -> str:
         + _format_prior_draft(node) +
         "---\n\n"
     )
+
+
+#: an engine gate's "this draft patches a name the module does not have" (`engine_contracts.unknown_patch_targets`)
+_NO_SUCH_PATCH_RE = re.compile(r"patches `(\w+)` on `(\w+)`, which has no such name")
+
+
+def _superseded(earlier: str, newest: str) -> str:
+    """§17.2009 — an earlier refusal, with each patch target it asked for that a later refusal (or the newest) says the
+    module does not have marked as not applying. Live (69fe61c4 NOKEY2, 2026-11-24): one draft's module read `values_for`
+    itself, so the view gate asked for a test patching `app.modules.paper_wire_engine_entry_module.values_for`; the
+    next drafts dropped that read, the patch-target gate refused the patch ("which has no such name"), and the
+    history still said "every one must stay fixed" -- the step kept the patch through six attempts and failed."""
+    for name, mod in dict.fromkeys(_NO_SUCH_PATCH_RE.findall(newest or "")):
+        target = f"app.modules.{mod}.{name}"
+        if target in earlier:
+            earlier = earlier.replace(f"`{target}`", f"`{target}` (no longer: `{mod}` has no `{name}` now -- patch "
+                                                     f"it nowhere)", 1)
+    return earlier
 
 
 def _format_prior_draft(node: dict) -> str:
