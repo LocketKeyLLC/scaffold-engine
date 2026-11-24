@@ -1013,8 +1013,8 @@ _NOKEY_NOTE = ("Edit `{mod}.py` in place -- the module as it is now is shown who
                "Keep every other route, test and behaviour as it is; in `tests/test_{mod}.py` add, beside the tests "
                "it has, a test for each view that requests it with the reader's `values_for` patched to return `{{}}` "
                "-- standing in for nothing between the view and the reader -- and checks it answers 200 and says the "
-               "part is unavailable. When the view renders a page template (shown below when it does), the page the "
-               "operator opens is that template: it must say the part is unavailable too -- rewrite the template "
+               "part is unavailable. When the view renders a page template (shown below when it does), what the "
+               "browser shows is that template: it must say the part is unavailable too -- rewrite the template "
                "whole, and render the real template in the test (never stand in for it) (§17.2006).")
 
 
