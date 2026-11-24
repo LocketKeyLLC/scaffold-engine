@@ -295,6 +295,32 @@ def mark_down(spec) -> None:
     _down_at[getattr(spec, "name", "") or ""] = time.monotonic()
 
 
+async def port_answers(spec, seconds: float) -> Optional[bool]:
+    """§17.2016 — whether the runner's HTTP endpoint accepts a TCP connection within ``seconds``. None when there is
+    no such port to try (a stdio runner, an endpoint without a host): the caller then probes the usual way."""
+    import asyncio
+    from urllib.parse import urlsplit
+    if getattr(spec, "transport", "streamable_http") == "stdio":
+        return None
+    try:
+        u = urlsplit(str(getattr(spec, "endpoint", "") or ""))
+        host, port = u.hostname, u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if not host:
+        return None
+    try:
+        _r, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=seconds)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    w.close()
+    try:
+        await w.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
 def down_within(spec, seconds: float) -> bool:
     """§17.2015 — whether the runner was found down after waiting, within the last ``seconds``, and has not answered
     a probe since."""
