@@ -86,6 +86,12 @@ def operators_part(node: Optional[dict]) -> str:
     body = _text(node)
     if tool == "human":   # §17.1461 — `human_review` is an optional review Auto mode may skip
         return body.strip()
+    # §17.2007 — a step the engine inserted to edit one of the job's modules (`tool_config.fixes_module`) is the
+    # engine's own work, whatever its brief says about the operator. Live (69fe61c4 NOKEY2, 2026-11-24): §17.2006's
+    # "the page the operator opens is that template" read as "the operator opens", and the code fix was parked as
+    # "Your turn" with nothing written.
+    if _as_dict_md((node or {}).get("tool_config")).get("fixes_module"):
+        return ""
     work = _DONE_WHEN_RE.split(body, 1)[0]
     hits = [s.strip() for s in _SENTENCE_RE.findall(work) if _OPERATORS_RE.search(s)]
     return " ".join(dict.fromkeys(hits)).strip()

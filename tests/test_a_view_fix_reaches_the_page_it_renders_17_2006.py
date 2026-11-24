@@ -140,5 +140,5 @@ def test_a_finished_fix_step_whose_view_still_fails_gets_a_successor_after_it():
     files = {WIRE_PATH: (PAGE_WIRE, "NOKEY"), TEST_PATH: (NO_TEMPLATE, "NOKEY")}
     assert ep.views_answer_without_secrets(tasks, files, ENGINE) == [
         "views_answer_without_secrets: NOKEY2 edits `lab_wire.py` so `GET /dashboard` answers with no key stored"]
-    assert tasks[-1]["depends_on"] == ["NOKEY"] and "the page the operator opens is that template" in tasks[-1]["notes"]
+    assert tasks[-1]["depends_on"] == ["NOKEY"] and "what the browser shows is that template" in tasks[-1]["notes"]
     assert ep.views_answer_without_secrets(tasks, files, ENGINE) == []          # NOKEY2 not finished yet
