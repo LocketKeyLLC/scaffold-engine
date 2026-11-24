@@ -267,6 +267,9 @@ _setup_cache: dict[str, tuple[float, Optional[dict]]] = {}
 #: §17.2014 — why the newest probe of a runner FAILED, kept apart from `_policy_cache`, whose None cannot say whether
 #: the runner answered "no writes" or never answered at all. Cleared by the next probe that is answered.
 _policy_error: dict[str, str] = {}
+#: §17.2015 — when `supervised_runs.channel_state` last found a runner down after waiting for it (monotonic seconds).
+#: Cleared, like `_policy_error`, by the next probe that is answered.
+_down_at: dict[str, float] = {}
 
 
 def clear_policy_cache(name: Optional[str] = None) -> None:
@@ -274,15 +277,29 @@ def clear_policy_cache(name: Optional[str] = None) -> None:
         _policy_cache.clear()
         _setup_cache.clear()
         _policy_error.clear()
+        _down_at.clear()
     else:
         _policy_cache.pop(name, None)
         _setup_cache.pop(name, None)
         _policy_error.pop(name, None)
+        _down_at.pop(name, None)
 
 
 def policy_failure(spec) -> Optional[str]:
     """§17.2014 — what the newest probe of this runner failed with, or None when it was answered."""
     return _policy_error.get(getattr(spec, "name", "") or "")
+
+
+def mark_down(spec) -> None:
+    """§17.2015 — the runner was probed fresh, waited for, and still did not answer."""
+    _down_at[getattr(spec, "name", "") or ""] = time.monotonic()
+
+
+def down_within(spec, seconds: float) -> bool:
+    """§17.2015 — whether the runner was found down after waiting, within the last ``seconds``, and has not answered
+    a probe since."""
+    at = _down_at.get(getattr(spec, "name", "") or "")
+    return at is not None and time.monotonic() - at < seconds
 
 
 def cached_policy(spec) -> tuple[bool, Optional[dict]]:
@@ -322,6 +339,7 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
     try:
         names = {t.get("name") for t in await mcp_client.list_tools(spec, use_cache=use_cache)}
         _policy_error.pop(name, None)
+        _down_at.pop(name, None)
         if WRITE_TOOL not in names or POLICY_TOOL not in names:
             return None
         # §17.1271 — whether this runner can be handed a FILE. An older helper
