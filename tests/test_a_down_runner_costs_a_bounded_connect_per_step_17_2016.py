@@ -3,7 +3,7 @@ r"""§17.2016 — while a runner is known down, a held step costs a bounded TCP 
 §17.2015 cut the per-step reading of a runner already found down to one fresh probe. That probe is an MCP session,
 whose HTTP client connects with a 10s timeout (`mcp_client._open_session`): a host that drops packets instead of
 refusing them (powered off behind a switch, a firewall DROP) still held every step for up to 10s. Inside the down
-window the probe is now first a TCP connect to the runner's port, bounded at `_DOWN_CONNECT_SECONDS`; only a port that
+window the probe is now first a TCP connect to the runner's port, bounded at `DOWN_CONNECT_SECONDS`; only a port that
 answers gets the MCP probe, so a runner that is back is still read `open` at once.
 """
 from __future__ import annotations
@@ -111,7 +111,7 @@ async def test_a_known_down_runner_whose_port_is_silent_gets_no_session(runner, 
     state, why = await _read(lt)
     assert state == "unreachable" and "ConnectError" in why
     assert lt.await_count == 0                                   # no MCP session at all
-    assert sw.down_within(runner, sr._DOWN_WINDOW)               # and it is still known down
+    assert sw.down_within(runner, sw.DOWN_WINDOW)               # and it is still known down
 
 
 @pytest.mark.asyncio

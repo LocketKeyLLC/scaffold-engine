@@ -27,7 +27,7 @@ def _db():
 async def test_an_unreachable_runner_holds_the_step():
     db, calls = _db()
     with patch.object(sr, "channel", AsyncMock(return_value=None)), \
-         patch.object(sr, "channel_state", AsyncMock(return_value=("unreachable", "pve-runner"))):
+         patch.object(sr, "runner_registered", AsyncMock(return_value=("registered", "pve-runner"))):
         out = await ea._hand_back_for_approval(db, "j", NODE, "Shell")
     assert out and out["status"] == "needs_approval" and out["node_key"] == "M1"
     assert any("SET status = 'pending'" in c for c in calls)              # back to pending, not done
@@ -38,5 +38,5 @@ async def test_no_runner_at_all_keeps_the_old_path():
     db, _ = _db()
     for state in ("none", "off"):
         with patch.object(sr, "channel", AsyncMock(return_value=None)), \
-             patch.object(sr, "channel_state", AsyncMock(return_value=(state, ""))):
+             patch.object(sr, "runner_registered", AsyncMock(return_value=(state, ""))):
             assert await ea._hand_back_for_approval(db, "j", NODE, "Shell") is None
