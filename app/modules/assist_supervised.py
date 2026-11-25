@@ -270,6 +270,12 @@ _policy_error: dict[str, str] = {}
 #: §17.2015 — when `supervised_runs.channel_state` last found a runner down after waiting for it (monotonic seconds).
 #: Cleared, like `_policy_error`, by the next probe that is answered.
 _down_at: dict[str, float] = {}
+#: §17.2015 — for this long after `channel_state` found a runner down after waiting, it is probed fresh ONCE without
+#: waiting again: every held step used to ask, and 11s of patience per step, while the host is off, adds up to minutes.
+DOWN_WINDOW = 120.0
+#: §17.2016/2017 — inside that window `write_policy` first tries the runner's port, bounded by this, before any MCP
+#: session: a host that drops packets instead of refusing them otherwise holds the caller for the 10s connect timeout.
+DOWN_CONNECT_SECONDS = 2.0
 
 
 def clear_policy_cache(name: Optional[str] = None) -> None:
@@ -362,6 +368,11 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         known, pol = cached_policy(spec)
         if known:
             return pol
+    # §17.2017 — a runner `channel_state` found down: its port is tried, bounded, before an MCP session (whose connect
+    # waits 10s on a host that drops packets) -- every caller that misses the cache, not only `channel_state`.
+    if down_within(spec, DOWN_WINDOW) and await port_answers(spec, DOWN_CONNECT_SECONDS) is False:
+        _policy_cache[name] = (time.monotonic() + 60.0, None)
+        return None
     try:
         names = {t.get("name") for t in await mcp_client.list_tools(spec, use_cache=use_cache)}
         _policy_error.pop(name, None)

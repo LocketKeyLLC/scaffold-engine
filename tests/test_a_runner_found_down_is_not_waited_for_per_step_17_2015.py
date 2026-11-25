@@ -4,7 +4,7 @@ r"""§17.2015 — a runner found down after waiting is probed once per step, not
 machine still coming up (the engine's own rebuild, a host reboot) is not read as down. But every held step asks
 `channel_state` (`_hand_back_for_approval`), so while the Proxmox host is really off (it reboots at 02/10/18 ET and has
 died silently before) each step paid ~11s plus three connection attempts. Once a runner has been found down after the
-wait, later readings within `_DOWN_WINDOW` probe it fresh ONCE, without pausing: a runner that is back still answers
+wait, later readings within `DOWN_WINDOW` probe it fresh ONCE, without pausing: a runner that is back still answers
 at once, and one that is still down costs a single probe. The first answered probe clears it.
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ async def test_a_runner_back_inside_the_window_is_read_open_at_once(pauses):
     assert (await _read(AsyncMock(side_effect=_DOWN)))[0] == "unreachable"
     pauses.clear()
     assert await _read(AsyncMock(return_value=_TOOLS)) == ("open", "pve-runner")
-    assert not sw.down_within(_Spec(), sr._DOWN_WINDOW)     # the answer clears it
+    assert not sw.down_within(_Spec(), sw.DOWN_WINDOW)     # the answer clears it
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,7 @@ async def test_after_it_answered_a_new_outage_is_waited_for_again(pauses):
 @pytest.mark.asyncio
 async def test_outside_the_window_it_is_waited_for_again(pauses, monkeypatch):
     await _read(AsyncMock(side_effect=_DOWN))
-    sw._down_at["pve-runner"] -= sr._DOWN_WINDOW + 1
+    sw._down_at["pve-runner"] -= sw.DOWN_WINDOW + 1
     pauses.clear()
     await _read(AsyncMock(side_effect=_DOWN))
     assert pauses == [0.0, 3.0, 8.0]

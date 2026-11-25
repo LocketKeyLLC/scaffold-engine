@@ -110,5 +110,6 @@ def test_the_gate_reads_the_runner_before_it_classifies_the_steps():
 
 
 def test_a_step_whose_cached_failure_is_overturned_is_asked_not_run_the_old_way():
+    """§17.2017 — the held step now asks only whether a runner is registered, which holds it either way."""
     src = inspect.getsource(ea._hand_back_for_approval)
-    assert 'if _state not in ("unreachable", "open"):' in src
+    assert "_sr.runner_registered(db)" in src and 'if _state != "registered":' in src

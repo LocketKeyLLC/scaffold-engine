@@ -4789,13 +4789,13 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
             # measurement steps (M1–M3) took the ordinary path -- their RUNBOOK written as output and marked done --
             # so the research steps after them "researched" with no data. A registered runner that cannot be
             # reached HOLDS the step (pending, needs_approval): the work waits for the machine, nothing is faked.
-            _state, _why = await _sr.channel_state(db)
-            # §17.2014 — "open" here is a cached failure the fresh probe overturned: the channel is there after all, so
-            # the step is asked like any hands-on step instead of taking the ordinary path.
-            if _state not in ("unreachable", "open"):
+            # §17.2017 — whether a runner is REGISTERED, not whether it answers: a registered runner holds the step
+            # either way (§17.2014: a cached failure the runner has since overturned is asked like any hands-on
+            # step), so asking it cost every held step a connect while the host was down, and decided nothing.
+            _state, _why = await _sr.runner_registered(db)
+            if _state != "registered":
                 return None
-            if _state == "unreachable":
-                logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
+            logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
         # §17.1200 — a decision is consumed by the attempt it authorised. It is
         # recorded to stop ONE pending node being asked twice in a single pass;
         # it must not silence the ask for a node that has since run and been
