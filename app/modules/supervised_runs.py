@@ -56,6 +56,9 @@ _REPROBE_PAUSES = (3.0, 8.0)
 #: §17.2015 — a runner found down after those pauses is, for this long, probed fresh ONCE without waiting: every held
 #: step asks `channel_state`, and 11s of patience per step, while the host is really off, adds up to minutes.
 _DOWN_WINDOW = 120.0
+#: §17.2016 — inside that window the one probe is a TCP connect bounded by this, before any MCP session: a host that
+#: drops packets instead of refusing them otherwise holds each step for the session's 10s connect timeout.
+_DOWN_CONNECT_SECONDS = 2.0
 
 
 async def channel_state(db: AsyncSession) -> tuple[str, str]:
@@ -94,7 +97,12 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
             # machine that is still coming up (the engine's own rebuild, a host reboot) a few seconds to answer.
             # §17.2015 — a runner already found down after waiting gets one fresh probe, not the wait again: it
             # still answers at once if it is back, and a host that is really off costs one probe per step.
-            patience = () if _sw.down_within(spec, _DOWN_WINDOW) else _REPROBE_PAUSES
+            down = _sw.down_within(spec, _DOWN_WINDOW)
+            patience = () if down else _REPROBE_PAUSES
+            # §17.2016 — and that one probe is first a bounded TCP connect: a port that does not answer is still down.
+            if not pol and down and _sw.policy_failure(spec) and await _sw.port_answers(spec, _DOWN_CONNECT_SECONDS) is False:
+                _sw.mark_down(spec)
+                return ("unreachable", f"{name}: {_sw.policy_failure(spec)}")
             for pause in ((0.0, *patience) if not pol and _sw.policy_failure(spec) else ()):
                 await asyncio.sleep(pause)
                 pol = await _sw.write_policy(spec, use_cache=False)

@@ -44,6 +44,8 @@ def pauses(monkeypatch):
     async def no_sleep(s):
         seen.append(s)
     monkeypatch.setattr(sr.asyncio, "sleep", no_sleep)
+    # §17.2016's TCP pre-check is its own file's subject; here the endpoint is TEST-NET, so say "no port to try".
+    monkeypatch.setattr(sw, "port_answers", AsyncMock(return_value=None))
     return seen
 
 
