@@ -5421,6 +5421,7 @@ async def execute_all_nodes(
                     await _js.transition(db, job_id, to="blocked",
                                          expected_from=("running", "executing"),
                                          reason="hands_on_gate:runner_unreachable")
+                    await _sr_chan.mark_waiting_for_runner(db, job_id)     # §17.2020 — survives a restart
                     await db.commit()
                 # §17.2019 — the gate no longer waits for the runner; the engine starts the job again itself once
                 # the runner answers (a machine still coming up, or a host back from its reboot).

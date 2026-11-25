@@ -129,14 +129,49 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
         return ("unreachable", f"the registered runner: {type(exc).__name__}")
 
 
-def resume_when_runner_answers(job_id: str) -> None:
+async def mark_waiting_for_runner(db: AsyncSession, job_id: str) -> None:
+    """§17.2020 — stamp the job as blocked on its runner, in the transaction that blocks it (not committed here).
+
+    `NOW()` is the transaction's start, the same value the `jobs.updated_at` trigger writes, so the stamp equals the
+    row's `updated_at` exactly until anything else touches the job. `resume_waiting_jobs_on_startup` restarts only
+    the jobs where it still does: an engine restart no longer loses the watcher, and a stale stamp is inert."""
+    await db.execute(text(
+        "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('runner_wait_since', NOW()) "
+        "WHERE id = :id"), {"id": job_id})
+
+
+async def resume_waiting_jobs_on_startup() -> list[str]:
+    """§17.2020 — restart `resume_when_runner_answers` for every job still blocked, untouched, on its runner, for
+    what is left of its window. Fail-soft: boot never stops on it."""
+    try:
+        from app.database import async_session
+        async with async_session() as db:
+            rows = (await db.execute(text(
+                "SELECT id, EXTRACT(EPOCH FROM (NOW() - updated_at)) AS age FROM jobs "
+                "WHERE status = 'blocked' AND metadata->>'runner_wait_since' IS NOT NULL "
+                "AND (metadata->>'runner_wait_since')::timestamptz = updated_at "
+                "AND updated_at > NOW() - make_interval(secs => :window)"),
+                {"window": RESUME_WINDOW_SECONDS})).all()
+    except Exception as exc:
+        logger.warning("runner_resume_startup_failed err=%r", exc)
+        return []
+    ids = []
+    for job_id, age in rows:
+        resume_when_runner_answers(str(job_id), window=max(0.0, RESUME_WINDOW_SECONDS - float(age)))
+        ids.append(str(job_id))
+    if ids:
+        logger.info("runner_resume_restored jobs=%s", ",".join(ids))
+    return ids
+
+
+def resume_when_runner_answers(job_id: str, *, window: Optional[float] = None) -> None:
     """§17.2019 — start a job again, as Run would, once the runner it was blocked on answers.
 
     The hands-on gate blocks a job whose runner cannot be read rather than hand its plan over (§17.1369), and it no
     longer waits for the runner first. This re-reads it every `RESUME_POLL_SECONDS` for `RESUME_WINDOW_SECONDS` and
     starts the run when the channel is open -- only if the job is still blocked and nothing has touched it since
     (`updated_at` unchanged), so a job the operator cancelled, re-ran or changed is left alone. One watcher per job;
-    it does not survive an engine restart (Run still starts the job)."""
+    after an engine restart `resume_waiting_jobs_on_startup` restores it for what is left of ``window`` (§17.2020)."""
     task = _resuming.get(job_id)
     if task is not None and not task.done():
         return
@@ -149,7 +184,7 @@ def resume_when_runner_answers(job_id: str) -> None:
                     "SELECT updated_at FROM jobs WHERE id = :id AND status = 'blocked'"), {"id": job_id})).scalar()
             if stamp is None:
                 return
-            deadline = asyncio.get_running_loop().time() + RESUME_WINDOW_SECONDS
+            deadline = asyncio.get_running_loop().time() + (RESUME_WINDOW_SECONDS if window is None else window)
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(RESUME_POLL_SECONDS)
                 async with async_session() as db:

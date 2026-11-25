@@ -461,6 +461,13 @@ async def lifespan(app: FastAPI):
             )
     except Exception as exc:
         logger.warning("crash_resume_hook_failed: err=%s", exc)
+    # §17.2020 — jobs the hands-on gate blocked on an unreachable runner get their watcher back (§17.2019): it was
+    # in-process, so every deploy dropped it and the job waited for a Run press that the warning said it did not need.
+    try:
+        from app.modules.supervised_runs import resume_waiting_jobs_on_startup
+        await resume_waiting_jobs_on_startup()
+    except Exception as exc:
+        logger.warning("runner_resume_hook_failed: err=%s", exc)
 
     # §17.135 — Embedder-identity drift detection. Must run AFTER the
     # migration runner (we need the cache_metadata table) but BEFORE any
