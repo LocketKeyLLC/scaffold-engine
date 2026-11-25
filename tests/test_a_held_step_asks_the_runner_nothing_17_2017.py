@@ -86,7 +86,8 @@ async def test_the_cache_refresh_for_a_down_runner_tries_the_port_first():
     lt = AsyncMock(side_effect=AssertionError("no MCP session for a silent port"))
     with patch("app.modules.mcp_client.list_tools", new=lt), \
          patch.object(sw, "port_answers", new=AsyncMock(return_value=False)) as pa:
-        assert await sw.write_policy(_Spec()) is None
+        # the probe itself; since §17.2018 a cache miss for a down runner runs it in the background
+        assert await sw.write_policy(_Spec(), use_cache=False) is None
     assert pa.await_args.args[1] == sw.DOWN_CONNECT_SECONDS
     assert sw.cached_policy(_Spec()) == (True, None)          # and the reading is cached like any failure
 

@@ -284,11 +284,13 @@ def clear_policy_cache(name: Optional[str] = None) -> None:
         _setup_cache.clear()
         _policy_error.clear()
         _down_at.clear()
+        _refreshing.clear()
     else:
         _policy_cache.pop(name, None)
         _setup_cache.pop(name, None)
         _policy_error.pop(name, None)
         _down_at.pop(name, None)
+        _refreshing.pop(name, None)
 
 
 def policy_failure(spec) -> Optional[str]:
@@ -325,6 +327,27 @@ async def port_answers(spec, seconds: float) -> Optional[bool]:
     except OSError:
         pass
     return True
+
+
+#: §17.2018 — the background refresh per runner, so concurrent callers start one probe, not one each.
+_refreshing: dict[str, Any] = {}
+
+
+def _refresh_in_background(spec) -> None:
+    import asyncio
+    name = getattr(spec, "name", "") or ""
+    task = _refreshing.get(name)
+    if task is not None and not task.done():
+        return
+
+    async def _run() -> None:
+        try:
+            await write_policy(spec, use_cache=False)
+        except Exception as exc:                             # write_policy swallows its own; this is the backstop
+            logger.warning("supervised_policy_refresh_failed runner=%s err=%r", name, exc)
+        finally:
+            _refreshing.pop(name, None)
+    _refreshing[name] = asyncio.get_running_loop().create_task(_run())
 
 
 def down_within(spec, seconds: float) -> bool:
@@ -368,10 +391,17 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         known, pol = cached_policy(spec)
         if known:
             return pol
+        # §17.2018 — a runner found down whose cached failure expired: the caller (a held step's `channel()`, a page)
+        # gets that failure at once and ONE background probe refreshes it; a runner that is back is read open as soon
+        # as that probe answers, and no step waits on a host that is off.
+        if down_within(spec, DOWN_WINDOW) and name in _policy_error:
+            _refresh_in_background(spec)
+            return None
     # §17.2017 — a runner `channel_state` found down: its port is tried, bounded, before an MCP session (whose connect
     # waits 10s on a host that drops packets) -- every caller that misses the cache, not only `channel_state`.
     if down_within(spec, DOWN_WINDOW) and await port_answers(spec, DOWN_CONNECT_SECONDS) is False:
         _policy_cache[name] = (time.monotonic() + 60.0, None)
+        mark_down(spec)                    # §17.2018 — still down: held steps no longer renew it via `channel_state`
         return None
     try:
         names = {t.get("name") for t in await mcp_client.list_tools(spec, use_cache=use_cache)}
@@ -398,6 +428,8 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
     except Exception as exc:
         logger.warning("supervised_policy_unavailable runner=%s err=%r", getattr(spec, "name", "?"), exc)
         _policy_error[name] = str(exc)[:200] or type(exc).__name__
+        if down_within(spec, DOWN_WINDOW):
+            mark_down(spec)                # §17.2018 — a failure while known down keeps it known down
         _policy_cache[name] = (time.monotonic() + 60.0, None)
         _setup_cache[name] = (time.monotonic() + 60.0, None)
         return None
