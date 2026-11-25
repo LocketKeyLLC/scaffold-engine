@@ -8,7 +8,7 @@ as None for 60s, and every run inside the window was blocked from the cache:
     hands_on_gate_held job=0fb4ea7f… nonexec=207/209 runner_unreachable=pve-runner: it answered with no write policy
 
 The runner was answering by then; and it had never "answered with no write policy" -- it had not answered at all. So
-`channel_state` asks again, fresh, when the cached probe failed (with a short wait for a machine still coming up), says
+`channel_state` asks again, fresh, when the cached probe failed (§17.2019: once, no wait), says
 WHY the probe failed, and the gate reads the runner before it classifies the steps.
 """
 from __future__ import annotations
@@ -44,7 +44,8 @@ def _runner(monkeypatch):
     monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=_Spec()))
     monkeypatch.setattr(sr, "enabled", lambda: True)
     monkeypatch.setattr(sr.settings, "mcp_tool_enabled", True)
-    monkeypatch.setattr(sr, "_REPROBE_PAUSES", (0.0, 0.0))
+    # §17.2019 — the fresh probe is first a TCP connect; the endpoint is TEST-NET, so say "no port to try".
+    monkeypatch.setattr(sw, "port_answers", AsyncMock(return_value=None))
     sw.clear_policy_cache()
     yield
     sw.clear_policy_cache()
@@ -72,18 +73,9 @@ async def test_a_runner_that_answers_now_is_open_despite_a_cached_failure():
 
 
 @pytest.mark.asyncio
-async def test_a_runner_that_comes_up_a_moment_later_is_waited_for():
-    await _fail_once_then_cache()
-    err = McpError("mcp server 'pve-runner': list_tools failed: ConnectError: All connection attempts failed")
-    lt = AsyncMock(side_effect=[err, _TOOLS])
-    with patch("app.modules.mcp_client.list_tools", new=lt), \
-         patch("app.modules.mcp_client.call_tool", new=AsyncMock(return_value=_policy_reply())):
-        assert await sr.channel_state(None) == ("open", "pve-runner")
-    assert lt.await_count == 2
-
-
-@pytest.mark.asyncio
 async def test_a_runner_still_down_is_unreachable_and_says_why():
+    """§17.2019 — one fresh probe and no wait: a runner that comes up a moment later restarts the job by itself
+    (`resume_when_runner_answers`, its own file's subject)."""
     await _fail_once_then_cache()
     err = McpError("mcp server 'pve-runner': list_tools failed: ConnectError: All connection attempts failed")
     lt = AsyncMock(side_effect=err)
@@ -91,7 +83,7 @@ async def test_a_runner_still_down_is_unreachable_and_says_why():
         state, why = await sr.channel_state(None)
     assert state == "unreachable"
     assert "ConnectError" in why and "answered with no write policy" not in why
-    assert lt.await_count == 3                     # one at once, then one after each pause; bounded
+    assert lt.await_count == 1                     # one fresh probe, not the cached failure
 
 
 @pytest.mark.asyncio

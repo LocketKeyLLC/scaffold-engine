@@ -380,7 +380,7 @@ def cached_setup(spec) -> tuple[bool, Optional[dict]]:
 _SECRET_REF_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
-async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
+async def write_policy(spec, *, use_cache: bool = True, port_first: bool = False) -> Optional[dict]:
     """``{allow, sudo, helper, secrets}`` when the runner exposes the supervised
     channel with a non-empty allow-list; None when it does not (an older
     helper, or one installed without ``--write-allow``). Cached per runner
@@ -399,8 +399,10 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
             return None
     # §17.2017 — a runner `channel_state` found down: its port is tried, bounded, before an MCP session (whose connect
     # waits 10s on a host that drops packets) -- every caller that misses the cache, not only `channel_state`.
-    if down_within(spec, DOWN_WINDOW) and await port_answers(spec, DOWN_CONNECT_SECONDS) is False:
+    # §17.2019 — and a first outage too when the caller asks (`port_first`): the start of a job no longer waits.
+    if (port_first or down_within(spec, DOWN_WINDOW)) and await port_answers(spec, DOWN_CONNECT_SECONDS) is False:
         _policy_cache[name] = (time.monotonic() + 60.0, None)
+        _policy_error.setdefault(name, f"its port did not accept a connection within {DOWN_CONNECT_SECONDS:g}s")
         mark_down(spec)                    # §17.2018 — still down: held steps no longer renew it via `channel_state`
         return None
     try:

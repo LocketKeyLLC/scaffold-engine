@@ -70,8 +70,11 @@ async def runner_registered(db: AsyncSession) -> tuple[str, str]:
     return ("registered", str(getattr(spec, "name", "") or "the registered runner"))
 
 
-#: §17.2014 — how long `channel_state` waits between fresh probes of a runner whose last probe failed.
-_REPROBE_PAUSES = (3.0, 8.0)
+#: §17.2019 — how often, and for how long, a job blocked at its start for an unreachable runner is re-read, and
+#: started again by the engine when the runner answers.
+RESUME_POLL_SECONDS = 15.0
+RESUME_WINDOW_SECONDS = 3600.0
+_resuming: dict[str, Any] = {}
 
 
 async def channel_state(db: AsyncSession) -> tuple[str, str]:
@@ -104,19 +107,15 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
             return ("none", "")
         name = str(getattr(spec, "name", "") or "the registered runner")
         try:
-            pol = await _sw.write_policy(spec)
             # §17.2014 — a failed probe is cached for 60s so the views do not hammer a dead runner, but this reading
-            # BLOCKS a job or holds a step, so a cached failure is never its answer: it asks again, fresh, and gives a
-            # machine that is still coming up (the engine's own rebuild, a host reboot) a few seconds to answer.
-            # §17.2015 — a runner already found down after waiting gets one fresh probe, not the wait again: it
-            # still answers at once if it is back, and a host that is really off costs one probe per step.
-            # §17.2016/2017 — and that one probe is first a bounded TCP connect, inside `write_policy`.
-            patience = () if _sw.down_within(spec, _sw.DOWN_WINDOW) else _REPROBE_PAUSES
-            for pause in ((0.0, *patience) if not pol and _sw.policy_failure(spec) else ()):
-                await asyncio.sleep(pause)
-                pol = await _sw.write_policy(spec, use_cache=False)
-                if pol or not _sw.policy_failure(spec):
-                    break
+            # BLOCKS a job, so a cached failure is never its answer: it asks again, fresh.
+            # §17.2019 — once, with no wait: it used to give a machine still coming up 3s and 8s more (11s, three
+            # more probes, each up to an MCP session's 10s connect on a host that drops packets) before every job
+            # whose runner was really off. The fresh probe is first a bounded TCP connect (`port_first`), and a job
+            # blocked on it is started again by `resume_when_runner_answers` once the runner answers.
+            known, pol = _sw.cached_policy(spec)
+            if not known or (not pol and _sw.policy_failure(spec)):
+                pol = await _sw.write_policy(spec, use_cache=False, port_first=True)
             if not pol and _sw.policy_failure(spec):
                 _sw.mark_down(spec)
         except Exception as exc:
@@ -128,6 +127,57 @@ async def channel_state(db: AsyncSession) -> tuple[str, str]:
     except Exception as exc:
         logger.warning("channel_state_failed err=%r", exc)
         return ("unreachable", f"the registered runner: {type(exc).__name__}")
+
+
+def resume_when_runner_answers(job_id: str) -> None:
+    """§17.2019 — start a job again, as Run would, once the runner it was blocked on answers.
+
+    The hands-on gate blocks a job whose runner cannot be read rather than hand its plan over (§17.1369), and it no
+    longer waits for the runner first. This re-reads it every `RESUME_POLL_SECONDS` for `RESUME_WINDOW_SECONDS` and
+    starts the run when the channel is open -- only if the job is still blocked and nothing has touched it since
+    (`updated_at` unchanged), so a job the operator cancelled, re-ran or changed is left alone. One watcher per job;
+    it does not survive an engine restart (Run still starts the job)."""
+    task = _resuming.get(job_id)
+    if task is not None and not task.done():
+        return
+
+    async def _watch() -> None:
+        from app.database import async_session
+        try:
+            async with async_session() as db:
+                stamp = (await db.execute(text(
+                    "SELECT updated_at FROM jobs WHERE id = :id AND status = 'blocked'"), {"id": job_id})).scalar()
+            if stamp is None:
+                return
+            deadline = asyncio.get_running_loop().time() + RESUME_WINDOW_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(RESUME_POLL_SECONDS)
+                async with async_session() as db:
+                    still = (await db.execute(text(
+                        "SELECT updated_at FROM jobs WHERE id = :id AND status = 'blocked'"),
+                        {"id": job_id})).scalar()
+                    if still != stamp:
+                        logger.info("runner_resume_dropped job=%s reason=job_changed", job_id)
+                        return
+                    state, why = await channel_state(db)
+                if state == "unreachable":
+                    continue
+                if state != "open":
+                    logger.info("runner_resume_dropped job=%s reason=%s", job_id, state)
+                    return
+                from app.modules import run_broker
+                from app.modules.execution_agent import execute_all_nodes
+                from app.modules.profiles import resolve_job_overrides
+                overrides = await resolve_job_overrides(job_id, None)
+                run_broker.start(job_id, lambda: execute_all_nodes(job_id, model_overrides=overrides))
+                logger.info("runner_resume_started job=%s runner=%s", job_id, why)
+                return
+            logger.info("runner_resume_dropped job=%s reason=window_elapsed", job_id)
+        except Exception as exc:
+            logger.warning("runner_resume_failed job=%s err=%r", job_id, exc)
+        finally:
+            _resuming.pop(job_id, None)
+    _resuming[job_id] = asyncio.get_running_loop().create_task(_watch())
 
 
 async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:

@@ -5422,6 +5422,9 @@ async def execute_all_nodes(
                                          expected_from=("running", "executing"),
                                          reason="hands_on_gate:runner_unreachable")
                     await db.commit()
+                # §17.2019 — the gate no longer waits for the runner; the engine starts the job again itself once
+                # the runner answers (a machine still coming up, or a host back from its reboot).
+                _sr_chan.resume_when_runner_answers(job_id)
                 # §17.1369 — `warning` is the name the operator's page already
                 # renders, and it is the honest one: something is wrong with what
                 # can be READ, and nothing about the work has changed. `blocked` is
@@ -5431,8 +5434,11 @@ async def execute_all_nodes(
                     "message": (f"{_ch_why} could not be reached, so the engine cannot tell which of "
                                 f"these {_cls['total']} steps it can carry out itself. It has NOT handed "
                                 f"the plan over — nothing about the work changed, only what can be read "
-                                f"right now. The job is blocked; press Run again once the machine "
-                                f"answers."),
+                                f"right now. The job is blocked; the engine starts it again by itself "
+                                f"once the machine answers (it checks every "
+                                f"{_sr_chan.RESUME_POLL_SECONDS:g} s for "
+                                f"{_sr_chan.RESUME_WINDOW_SECONDS / 60:g} minutes), and Run starts it "
+                                f"sooner."),
                     "job_id": job_id, "reason": "runner_unreachable",
                     "hands_on_nodes": _cls["nonexec"], "total_nodes": _cls["total"]})
                 return
