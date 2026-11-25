@@ -125,10 +125,12 @@ async def test_a_known_down_runner_whose_port_answers_is_probed_and_read_open(ru
 
 
 @pytest.mark.asyncio
-async def test_the_first_outage_is_not_pre_checked(runner, monkeypatch):
-    """The pre-check is only for a runner already found down: a first failure still gets §17.2014's wait."""
+async def test_the_first_outage_is_pre_checked_too(runner, monkeypatch):
+    """§17.2019 — the start of a job reads a first outage with the same bounded connect: no MCP session, no wait."""
     pa = AsyncMock(return_value=False)
     monkeypatch.setattr(sw, "port_answers", pa)
     lt = AsyncMock(side_effect=_DOWN)
-    await _read(lt)
-    assert pa.await_count == 0 and lt.await_count == 4
+    state, why = await _read(lt)
+    assert state == "unreachable" and "did not accept a connection within 2s" in why
+    assert pa.await_count == 1 and lt.await_count == 0
+    assert sw.down_within(runner, sw.DOWN_WINDOW)

@@ -128,7 +128,7 @@ def _gate_source() -> str:
     from app.modules import execution_agent as ea
     src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
     i = src.index("if settings.hands_on_assist_gate_enabled:")
-    return src[i:i + 4200]
+    return src[i:i + 5000]
 
 
 def test_the_gate_asks_why_there_is_no_channel():
@@ -163,7 +163,7 @@ def test_the_operator_is_told_what_could_not_be_read():
     assert '_sse("warning"' in body
     assert "could not be reached" in body
     assert "has NOT handed" in body and "nothing about the work changed" in body
-    assert "press Run again once the machine" in body
+    assert "starts it again by itself" in body
 
 
 def test_the_event_name_is_one_the_page_renders():

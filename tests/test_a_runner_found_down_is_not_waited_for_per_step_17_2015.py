@@ -56,16 +56,15 @@ async def _read(list_tools):
 
 
 @pytest.mark.asyncio
-async def test_the_first_reading_waits_and_the_next_probes_once(pauses):
+async def test_every_reading_probes_once_and_never_pauses(pauses):
+    """§17.2019 — the first reading no longer waits either (it was 3s + 8s and three more probes)."""
     lt = AsyncMock(side_effect=_DOWN)
-    assert (await _read(lt))[0] == "unreachable"            # the cold probe, then the wait: 1 + 3 probes
-    assert lt.await_count == 4 and pauses == [0.0, 3.0, 8.0]
-    lt.reset_mock(); pauses.clear()
-    assert (await _read(lt))[0] == "unreachable"            # a held step a moment later: one fresh probe, no pause
-    assert lt.await_count == 1 and pauses == [0.0]
-    lt.reset_mock(); pauses.clear()
-    assert (await _read(lt))[0] == "unreachable"            # and the next
-    assert lt.await_count == 1 and pauses == [0.0]
+    assert (await _read(lt))[0] == "unreachable"            # the cold probe: one, no pause
+    assert lt.await_count == 1 and pauses == []
+    assert sw.down_within(_Spec(), sw.DOWN_WINDOW)
+    lt.reset_mock()
+    assert (await _read(lt))[0] == "unreachable"            # a moment later: one fresh probe, no pause
+    assert lt.await_count == 1 and pauses == []
 
 
 @pytest.mark.asyncio
@@ -74,23 +73,3 @@ async def test_a_runner_back_inside_the_window_is_read_open_at_once(pauses):
     pauses.clear()
     assert await _read(AsyncMock(return_value=_TOOLS)) == ("open", "pve-runner")
     assert not sw.down_within(_Spec(), sw.DOWN_WINDOW)     # the answer clears it
-
-
-@pytest.mark.asyncio
-async def test_after_it_answered_a_new_outage_is_waited_for_again(pauses):
-    await _read(AsyncMock(side_effect=_DOWN))
-    await _read(AsyncMock(return_value=_TOOLS))
-    sw._policy_cache.pop("pve-runner", None)                # the good answer's cache expires
-    pauses.clear()
-    lt = AsyncMock(side_effect=_DOWN)
-    await _read(lt)
-    assert pauses == [0.0, 3.0, 8.0]
-
-
-@pytest.mark.asyncio
-async def test_outside_the_window_it_is_waited_for_again(pauses, monkeypatch):
-    await _read(AsyncMock(side_effect=_DOWN))
-    sw._down_at["pve-runner"] -= sw.DOWN_WINDOW + 1
-    pauses.clear()
-    await _read(AsyncMock(side_effect=_DOWN))
-    assert pauses == [0.0, 3.0, 8.0]
