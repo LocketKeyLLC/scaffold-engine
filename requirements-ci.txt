@@ -16,7 +16,7 @@ httpx==0.28.1
 # httpx2/httpcore2 transport stack alongside our httpx 0.28.1.
 mcp==2.3.0
 mcp-types==2.3.0
-sse-starlette==3.7.0
+sse-starlette==3.7.1
 httpx2==2.16.2
 httpcore2==2.16.2
 PyJWT==2.15.1
@@ -27,10 +27,10 @@ json_repair==0.64.9
 requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
-redis==8.1.0
+redis==8.2.0
 trafilatura==2.1.0  # HELD at 2.1.x (mirror requirements.txt) — 2.2.0 heading-loss regression, audit M12
 pypdf==7.1.1  # §17.1878 CVE-2026-119203..119209; §17.585, §17.724 GHSA bump; §17.1723 CVE-2026-113792..113795; §17.1739 CVE-2026-113786; §17.1778 CVE-2026-115572/115580/115585
-pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
+pdfplumber==0.11.11  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
 tzlocal==5.4.5
 jinja2==3.1.6  # §17.585
@@ -49,7 +49,7 @@ defusedxml==0.7.1
 # §17.1064 — credential redaction at the assist capture funnel
 detect-secrets==1.5.0
 # §17.1067 — shell commands judged on their AST (state-check probe gate)
-tree-sitter==0.26.1
+tree-sitter==0.27.0
 tree-sitter-bash==0.25.1
 # §17.1066 — browser-fingerprint retry on 403/429 for research fetches
 curl_cffi==0.17.0

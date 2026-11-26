@@ -20,7 +20,7 @@ httpx==0.28.1
 # together (same discipline as the opentelemetry block below).
 mcp==2.3.0
 mcp-types==2.3.0
-sse-starlette==3.7.0
+sse-starlette==3.7.1
 httpx2==2.16.2
 httpcore2==2.16.2
 PyJWT==2.15.1
@@ -29,7 +29,7 @@ json_repair==0.64.9
 pydantic==2.14.4
 pydantic-settings==2.16.3
 pymilvus==3.0.3
-redis==8.1.0
+redis==8.2.0
 requests==2.34.2
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
@@ -50,7 +50,7 @@ psycopg2-binary==2.9.13
 # §17.1723 — 6.19.0→6.20.1 (CVE-2026-113792..113795).
 # §17.1878 — 6.21.2→6.21.4 (CVE-2026-119203..119209; pip-audit red on every PR).
 pypdf==7.1.1
-pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
+pdfplumber==0.11.11  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 python-multipart==0.0.34  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.
 # Already present transitively via rich; pinned explicitly now that app code is
@@ -91,7 +91,7 @@ defusedxml==0.7.1
 # §17.1064 — credential redaction at the assist capture funnel
 detect-secrets==1.5.0
 # §17.1067 — shell commands judged on their AST (state-check probe gate)
-tree-sitter==0.26.1
+tree-sitter==0.27.0
 tree-sitter-bash==0.25.1
 # §17.1066 — browser-fingerprint retry on 403/429 for research fetches
 curl_cffi==0.17.0
