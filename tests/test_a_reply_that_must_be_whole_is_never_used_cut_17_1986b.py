@@ -201,8 +201,12 @@ def _stream_ending(reason, used):
 
 async def _drive_shell(stream, chat_mock):
     import asyncio
+    from app.config import settings
     from tests import test_execution_agent_token_stream as ts
-    with patch.object(ts, "_node_row", _shell_node):
+    # §17.2039 — with no runner a hands-on step is the operator's and nothing is drawn; the streamed DRAW these
+    # tests read is the runbook path, which supervised runs off keeps (or both would pass with no draw at all).
+    with patch.object(ts, "_node_row", _shell_node), \
+            patch.object(settings, "execution_supervised_runs_enabled", False):
         await ts._drive("4e3b8f01-145c-4c54-a0f6-5639101ee1ca", stream_mock=stream, chat_mock=chat_mock,
                         token_q=asyncio.Queue())
 
@@ -219,5 +223,11 @@ async def test_a_cut_streamed_script_is_redrawn_whole_not_kept(caplog):
 async def test_a_streamed_script_that_ended_is_kept():
     from tests.test_execution_agent_token_stream import _ok
     chat_mock = AsyncMock(return_value=_ok("unused"))
-    await _drive_shell(_stream_ending("stop", 60), chat_mock)
-    assert chat_mock.await_count == 0
+    drawn: list = []
+    _ended = _stream_ending("stop", 60)
+
+    def _stream(messages, stop_info=None, **kw):
+        drawn.append(1)
+        return _ended(messages, stop_info=stop_info, **kw)
+    await _drive_shell(_stream, chat_mock)
+    assert drawn and chat_mock.await_count == 0   # the script WAS streamed, and kept: no whole redraw
