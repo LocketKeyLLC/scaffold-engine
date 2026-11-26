@@ -175,7 +175,7 @@ def test_empty_data_returns_zero_metrics_and_empty_lists():
     assert ctx["gross_return"] == 0.0
     assert ctx["costs"] == 0.0
     assert ctx["drawdown"] == 0.0
-    assert ctx["sharpe"] == 0.0
+    assert ctx["sharpe"] == "not enough data"   # §17.2045
     assert ctx["turnover"] == 0.0
     assert ctx["open_positions"] == []
     assert ctx["recent_orders"] == []
