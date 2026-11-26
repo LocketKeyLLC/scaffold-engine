@@ -76,11 +76,48 @@ VERIFY_TOOL = Tool(
 )
 
 
+#: §17.2025 — the code reviewer's tool: the defects it found, as a list the engine reads, not prose in the reason. Live
+#: (5b4880c0 T6, 2026-10-26): PASS at 0.62, "residual risk is only the undocumented 'equity' context key" -- a key the
+#: data module never returns, so in production the step proposed nothing. Of the 23 code passes in the 14 days' traces
+#: (2026-11-26), one named a real defect in the reason ("only a cosmetic flaw exists (… never set, printing
+#: 'undefined')"); four more carried a "caveat"/"residual risk" that was an assumption it could not confirm.
+CODEGEN_VERIFY_TOOL = Tool(
+    name="record_verification",
+    description=VERIFY_TOOL.description,
+    input_schema={
+        "type": "object",
+        "properties": {
+            **VERIFY_TOOL.input_schema["properties"],
+            "defects": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Every defect you found in the code itself, however small: a key or value it reads that "
+                               "nothing provides, a value never set, a wrong result, a call that would raise. [] when "
+                               "there is none. Not a defect: an assumption you cannot check from what you were shown.",
+            },
+        },
+        "required": ["pass", "reason", "confidence", "defects"],
+    },
+)
+
+
+def named_defects(args: dict) -> list[str]:
+    """§17.2025 — the defects a verdict lists (`defects`), each once; [] when it lists none or no list."""
+    raw = args.get("defects")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out = [str(x).strip()[:300] for x in raw if str(x).strip() and str(x).strip().lower() not in ("none", "n/a", "[]")]
+    return list(dict.fromkeys(out))[:10]
+
+
 async def _run_verification(
     messages: list[dict],
     *,
     role: str = "model_verifier",
     overrides: dict | None = None,
+    tool: Tool = VERIFY_TOOL,
 ) -> tuple[Literal["pass", "fail"], str, float]:
     """Shared verifier dispatch: cache → tool_call → parse, fail-closed.
 
@@ -92,7 +129,7 @@ async def _run_verification(
     §17.89 Pattern 3 — dispatch via ``role=`` so the configured
     ``MODEL_VERIFIER_PROVIDER`` is honored.
     """
-    status, reason, confidence = await _verify_once(messages, role=role, overrides=overrides)
+    status, reason, confidence = await _verify_once(messages, role=role, overrides=overrides, tool=tool)
     # §17.1844 — a verifier that returns no verdict has not judged the output: one other model is asked before
     # the step is failed on it. Live (5b4880c0 T6U8, 2026-10-27): the attempt passed every engine check and the
     # sandbox; glm-5.3-flash spent its whole 12,288-token budget deliberating in six draws and the step failed on
@@ -101,7 +138,7 @@ async def _run_verification(
     if reason in _NO_VERDICT and fallback and fallback != role:
         logger.warning("verifier_fallback role=%s -> %s reason=%s", role, fallback, reason)
         try:
-            status, reason, confidence = await _verify_once(messages, role=fallback, overrides=None)
+            status, reason, confidence = await _verify_once(messages, role=fallback, overrides=None, tool=tool)
         except Exception as exc:                        # noqa: BLE001 — a bad fallback role leaves the verdict as is
             logger.warning("verifier_fallback_failed role=%s err=%r", fallback, exc)
             return status, reason, confidence
@@ -120,13 +157,14 @@ async def _verify_once(
     *,
     role: str,
     overrides: dict | None,
+    tool: Tool = VERIFY_TOOL,
 ) -> tuple[Literal["pass", "fail"], str, float]:
     # Cache lookup key needs a concrete model tag, not a role — the same role
     # can resolve to different tags via overrides. Resolution is cheap (dict
     # lookup) and the result is stable for the call.
     resolved_model = get_model(role, overrides)
     cache = get_verifier_cache()
-    cache_args = (messages, VERIFY_TOOL.input_schema, resolved_model, 0.0)
+    cache_args = (messages, tool.input_schema, resolved_model, 0.0)
 
     async def _body() -> tuple[Literal["pass", "fail"], str, float]:
         cached = await cache.get(*cache_args)
@@ -134,7 +172,7 @@ async def _verify_once(
             return cached
         try:
             resp = await model_router.tool_call(
-                messages=messages, tools=[VERIFY_TOOL],
+                messages=messages, tools=[tool],
                 role=role, overrides=overrides,
                 temperature=0.0,
                 max_tokens=settings.verifier_max_tokens,   # §17.1751 — room for the verdict
@@ -169,6 +207,12 @@ async def _verify_once(
             "pass" if bool(args.get("pass", False)) else "fail"
         )
         reason = str(args.get("reason", ""))
+        # §17.2025 — a defect the reviewer names is a FAIL, however its verdict reads
+        named = named_defects(args) if "defects" in tool.input_schema["properties"] else []
+        if status == "pass" and named:
+            logger.warning("verifier_named_defects_on_pass n=%d first=%r", len(named), named[0][:200])
+            status, reason = "fail", ("The reviewer passed it but named defect(s) in the code: "
+                                      + "; ".join(named) + f" (its verdict: {reason})")
         await cache.put(*cache_args, status, reason, confidence)
         return status, reason, confidence
 
@@ -223,16 +267,21 @@ FAIL when:
 - The requested functionality is missing, stubbed where real code was required, or fundamentally incorrect.
 - It calls an upstream symbol with a signature that does not match the upstream definition (signature drift → it would raise at runtime).
 - It silently drops enumerated requirements from the brief.
+- You found a defect in the code, however small. List every one in `defects` -- a key or value it reads that nothing provides, a value never set, a wrong result, a call that would raise -- and set pass=false. Never PASS with a "residual risk", a "caveat" or a "minor flaw" that is a defect in the code. What you cannot check from what you are shown (an upstream you see truncated, a page you do not have) is not a defect: leave it out of `defects`.
 
 Be precise in `reason`: name the specific gap (the missing item, the mismatched signature, the leftover stub) so the next attempt can fix exactly that. confidence: 0.0 to 1.0.
 
 Example — FAIL (signature drift):
 UPSTREAM defines `def render_table(rows): ...`; OUTPUT calls `render_table(rows, headers=hdr)`.
-record_verification(pass=false, reason="Calls upstream render_table(rows, headers=...) but the upstream signature is render_table(rows) — the extra 'headers' arg raises TypeError at runtime", confidence=0.9)
+record_verification(pass=false, reason="Calls upstream render_table(rows, headers=...) but the upstream signature is render_table(rows) — the extra 'headers' arg raises TypeError at runtime", confidence=0.9, defects=["render_table(rows, headers=hdr): upstream takes no 'headers' (TypeError)"])
+
+Example — FAIL (a defect named, the rest complete):
+UPSTREAM `load_context()` returns {"signals", "positions"}; OUTPUT sizes every order from `context["equity"]`.
+record_verification(pass=false, reason="Everything else is implemented, but it reads context['equity'], which load_context never returns, so every quantity is 0", confidence=0.85, defects=["reads context['equity']; load_context returns no 'equity' key"])
 
 Example — PASS:
 TASK "implement parse_line splitting 'key=value'"; OUTPUT defines parse_line that partitions on '=' and strips whitespace.
-record_verification(pass=true, reason="parse_line implemented per spec: partitions on '=', strips whitespace, returns (key, value)", confidence=0.92)"""
+record_verification(pass=true, reason="parse_line implemented per spec: partitions on '=', strips whitespace, returns (key, value)", confidence=0.92, defects=[])"""
 
 
 def extract_brief_goal(brief: dict | None) -> str:
@@ -342,7 +391,7 @@ async def _verify_codegen_output(
         {"role": "system", "content": CODEGEN_VERIFY_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
     ]
-    return await _run_verification(messages, role=role, overrides=overrides)
+    return await _run_verification(messages, role=role, overrides=overrides, tool=CODEGEN_VERIFY_TOOL)   # §17.2025
 
 
 # ---------------------------------------------------------------------------
