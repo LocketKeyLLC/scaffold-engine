@@ -357,7 +357,12 @@ async def runner_missing(db: AsyncSession) -> bool:
         return False
     from app.modules import supervised_runs
     state, _name = await supervised_runs.runner_registered(db)
-    return state != "registered"
+    if state == "registered":
+        return False
+    # The executor's own reading (`_hand_back_for_approval`): a write channel first, the registry only when there is
+    # none. Read from the registry alone, a step the executor holds for a runner was claimed here as the operator's.
+    # With nothing registered, channel() answers from the registry without asking any runner.
+    return await supervised_runs.channel(db) is None
 
 
 async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]:
