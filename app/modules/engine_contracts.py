@@ -4738,6 +4738,21 @@ def _test_spans(code: str) -> dict[str, tuple[int, int]]:
         return {}
 
 
+#: §17.2021 — "`path:L1` (and lines L2, L3)": the lines a finding names after its leading one (§17.2010)
+_ALSO_LINES_RE = re.compile(r"^`[^`]+:\d+` \(and lines? ([\d, ]+)\)")
+
+
+def _lines_named(finding: str) -> set[int]:
+    """§17.2021 — every line a `path:line` finding names: the leading one and each of "(and lines L2, …)". Live
+    (69fe61c4 NOKEY2, 2026-11-24): the §17.2010 finding named six kept tests' lines, `drop_refused_kept` read the
+    first, and the other five were spliced back into every draw the same gate then refused."""
+    m = re.match(r"`[^`:]+\.py:(\d+)`", finding)
+    if not m:
+        return set()
+    also = _ALSO_LINES_RE.match(finding)
+    return {int(m.group(1))} | ({int(x) for x in also.group(1).replace(" ", "").split(",") if x} if also else set())
+
+
 def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: list[str]) -> tuple[str, list[str]]:
     """§17.1922 — a kept test a gate refuses is dropped, not the attempt: it passed against the module as it WAS, and
     the module has changed under it. Returns the output without the kept tests (or kept classes) a finding points
@@ -4750,7 +4765,7 @@ def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: li
     for f in findings:
         m = re.match(r"`([^`:]+\.py):(\d+)`", f)
         if m:
-            at.setdefault(m.group(1), set()).add(int(m.group(2)))
+            at.setdefault(m.group(1), set()).update(_lines_named(f))
     dropped: list[str] = []
     for path, lines in sorted(at.items()):
         names = set((kept or {}).get(path) or {})
