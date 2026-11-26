@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -11,7 +12,6 @@ from sqlalchemy import text
 
 from app.database import async_session
 from app.modules.paper_finra_data_ingestion import (
-    FINRA_ATS_VOLUME_URL,
     FINRA_SHORT_INTEREST_URL,
     FinraFile,
     FinraRecord,
@@ -62,8 +62,11 @@ async def test_finra_file_url_short_interest() -> None:
 
 @pytest.mark.asyncio
 async def test_finra_file_url_ats_volume() -> None:
+    # §17.2044 — FINRA serves no weekly ATS file (cdn.finra.org/ats/weekly/ATSvolume<date>.txt answers 403); the weekly
+    # totals come from its Query API (ingest_finra_ats_weekly), so no file URL is built for it
     f = FinraFile(source="ats_volume", release_date=date(2026, 11, 3), version=1)
-    assert f.url == FINRA_ATS_VOLUME_URL.format(date="20261103")
+    with pytest.raises(ValueError, match="weekly ATS"):
+        f.url
 
 
 @pytest.mark.asyncio
@@ -113,39 +116,17 @@ async def test_ingest_finra_file_short_interest() -> None:
 
 @pytest.mark.asyncio
 async def test_ingest_finra_file_ats_volume() -> None:
-    content = "20261103|AAPL|1000|5000|20.0\n"
+    # §17.2044 — the file path fetches nothing for the weekly ATS totals (FINRA serves no such file)
+    fake_get = AsyncMock()
 
-    async def fake_get(url: str) -> FakeResponse:
-        return _http_response(text=content)
-
-    counts = await ingest_finra_file(
-        source="ats_volume",
-        release_date=date(2026, 11, 3),
-        version=1,
-        http_get=fake_get,
-    )
-    assert counts == {"ingested_items": 1, "signals": 1}
-
-    async with async_session() as db:
-        item = await db.execute(
-            text("SELECT source, external_id, payload FROM ingested_item")
+    with pytest.raises(ValueError, match="weekly ATS"):
+        await ingest_finra_file(
+            source="ats_volume",
+            release_date=date(2026, 11, 3),
+            version=1,
+            http_get=fake_get,
         )
-        row = item.fetchone()
-        assert row is not None
-        assert row[0] == "finra"
-        assert row[1] == "2026-11-03:AAPL:ats_volume:1"
-        payload = row[2]
-        assert payload["ats_volume"] == "1000"
-        assert payload["total_volume"] == "5000"
-
-        sig = await db.execute(
-            text("SELECT ticker, signal_type, direction FROM signal")
-        )
-        sig_row = sig.fetchone()
-        assert sig_row is not None
-        assert sig_row[0] == "AAPL"
-        assert sig_row[1] == "finra_context"
-        assert sig_row[2] == "long"
+    fake_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio

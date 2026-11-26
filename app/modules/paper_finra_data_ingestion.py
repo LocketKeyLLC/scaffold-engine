@@ -1,13 +1,13 @@
 # app/modules/paper_finra_data_ingestion.py
 """FINRA short interest and ATS volume data ingestion for paper trading.
 
-Downloads pipe-delimited FINRA files (short interest from the daily
-regsho directory, ATS volume from the weekly directory), parses each
-record, stores it in `ingested_item`, and creates a `finra_context`
-signal for every symbol with non-zero volume data.
+Downloads FINRA's daily short-volume file (the regsho directory) and the
+weekly per-symbol ATS totals (FINRA's public Query API), stores each record
+in `ingested_item`, and creates a `finra_context` signal for every symbol
+with non-zero volume data.
 
-The HTTP GET operation is injected as `http_get` so tests can use a
-fake response without touching the network.
+The HTTP operations are injected (`http_get`, `http_post`) so tests can use
+a fake response without touching the network.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import io
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol, Sequence
 
@@ -30,7 +30,19 @@ logger = logging.getLogger("scaffold")
 
 # Fixed URLs. The `{date}` placeholder is replaced with `YYYYMMDD`.
 FINRA_SHORT_INTEREST_URL: str = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{date}.txt"
-FINRA_ATS_VOLUME_URL: str = "https://cdn.finra.org/ats/weekly/ATSvolume{date}.txt"
+
+#: §17.2044 — FINRA serves no weekly ATS *file*: the URL this module built, cdn.finra.org/ats/weekly/ATSvolume<date>.txt,
+#: answers 403 (2026-11-26). Per-symbol weekly ATS totals are FINRA's public Query API (no key), summary type
+#: ATS_W_SMBL, published about three weeks after the week (the week of 2026-11-02 appeared 2026-11-23), so a run asks for
+#: the last ATS_WEEKLY_LOOKBACK_DAYS and stores the weeks it has not stored yet.
+FINRA_ATS_WEEKLY_API_URL: str = "https://api.finra.org/data/group/otcMarket/name/weeklySummary"
+ATS_WEEKLY_SUMMARY_TYPE: str = "ATS_W_SMBL"
+ATS_WEEKLY_LOOKBACK_DAYS: int = 35
+ATS_WEEKLY_PAGE_SIZE: int = 5000
+ATS_WEEKLY_FIELDS: tuple[str, ...] = (
+    "weekStartDate", "issueSymbolIdentifier", "totalWeeklyShareQuantity", "totalWeeklyTradeCount",
+    "tierIdentifier", "lastUpdateDate",
+)
 
 FINRA_SOURCE: str = "finra"
 SUPPORTED_SOURCES: frozenset[str] = frozenset({"short_interest", "ats_volume"})
@@ -40,6 +52,13 @@ class HttpGet(Protocol):
     """Protocol for an async HTTP GET callable returning a response-like object."""
 
     async def __call__(self, url: str) -> Any:
+        ...
+
+
+class HttpPost(Protocol):
+    """Protocol for an async HTTP POST callable (httpx's ``client.post``) returning a response-like object."""
+
+    async def __call__(self, url: str, *, json: Any, headers: dict[str, str]) -> Any:
         ...
 
 
@@ -100,7 +119,8 @@ def _build_url(source: str, release_date: date, version: int) -> str:
     if source == "short_interest":
         return FINRA_SHORT_INTEREST_URL.format(date=date_str)
     if source == "ats_volume":
-        return FINRA_ATS_VOLUME_URL.format(date=date_str)
+        raise ValueError("FINRA serves no weekly ATS file; the weekly ATS totals come from its Query API "
+                         "(ingest_finra_ats_weekly)")
     raise AssertionError(f"source {source!r} passed SUPPORTED_SOURCES but has no URL")
 
 
@@ -139,30 +159,32 @@ def _parse_short_interest(
     )
 
 
-def _parse_ats_volume(
-    row: list[str], release_date: date, version: int
-) -> FinraRecord | None:
-    """Parse a 5-field ATS volume row into a FinraRecord.
+def _parse_ats_weekly(item: Any, version: int) -> FinraRecord | None:
+    """Parse one ``weeklySummary`` record (summary type ATS_W_SMBL) into a FinraRecord.
 
-    Expected fields: week end date, symbol, ATS volume,
-    total volume, ATS market share.
+    The record's week (``weekStartDate``) is its release date; the totals are the symbol's ATS shares and trades for
+    that week across every ATS.
     """
-    if len(row) != 5:
+    if not isinstance(item, dict):
         return None
-    week_end_date, symbol, ats_volume, total_volume, ats_market_share = [
-        cell.strip() for cell in row
-    ]
+    symbol = str(item.get("issueSymbolIdentifier") or "").strip()
+    week = str(item.get("weekStartDate") or "").strip()
+    try:
+        week_start = date.fromisoformat(week)
+    except ValueError:
+        return None
     if not symbol:
         return None
     return FinraRecord(
         source_type="ats_volume",
-        release_date=release_date,
+        release_date=week_start,
         version=version,
         symbol=symbol,
-        week_end_date=week_end_date,
-        ats_volume=ats_volume,
-        total_volume=total_volume,
-        ats_market_share=ats_market_share,
+        week_start_date=week,
+        ats_volume=str(item.get("totalWeeklyShareQuantity", "")),
+        trade_count=str(item.get("totalWeeklyTradeCount", "")),
+        tier=str(item.get("tierIdentifier") or ""),
+        last_update_date=str(item.get("lastUpdateDate") or ""),
     )
 
 
@@ -171,8 +193,6 @@ def _parse_row(
 ) -> FinraRecord | None:
     if source == "short_interest":
         return _parse_short_interest(row, release_date, version)
-    if source == "ats_volume":
-        return _parse_ats_volume(row, release_date, version)
     return None
 
 
@@ -182,7 +202,7 @@ def _direction_for(record: FinraRecord) -> str:
     if record.source_type == "short_interest":
         numeric_keys = ("short_volume", "short_exempt_volume", "total_volume")
     else:  # ats_volume
-        numeric_keys = ("ats_volume", "total_volume", "ats_market_share")
+        numeric_keys = ("ats_volume", "trade_count")
 
     values: list[Decimal] = []
     for key in numeric_keys:
@@ -222,20 +242,29 @@ async def ingest_finra_file(
         return {"ingested_items": 0, "signals": 0}
 
     rows = list(csv.reader(io.StringIO(content), delimiter="|"))
+    records = []
+    for row in rows:
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        record = _parse_row(row, source, release_date, version)
+        if record is not None:
+            records.append(record)
+    return await _store_records(records)
+
+
+async def _store_records(records: Sequence[FinraRecord]) -> dict[str, int]:
+    """Store each record once (keyed by its date, symbol, source and version) with its `finra_context` signal."""
     counts = {"ingested_items": 0, "signals": 0}
+    if not records:
+        return counts
 
     async with async_session() as db:
-        for row in rows:
-            if not row or all(not cell.strip() for cell in row):
-                continue
-            record = _parse_row(row, source, release_date, version)
-            if record is None:
-                continue
-
+        for record in records:
+            source = record.source_type
             payload = record.payload()
-            external_id = f"{release_date.isoformat()}:{record.symbol}:{source}:{version}"
+            external_id = f"{record.release_date.isoformat()}:{record.symbol}:{source}:{record.version}"
             published_ts = datetime.combine(
-                release_date, datetime.min.time(), tzinfo=timezone.utc
+                record.release_date, datetime.min.time(), tzinfo=timezone.utc
             )
 
             result = await db.execute(
@@ -269,7 +298,7 @@ async def ingest_finra_file(
                     "ingested_item_id": inserted_id,
                     "ticker": record.symbol,
                     "direction": direction,
-                    "rationale": f"FINRA {source} for {release_date.isoformat()}",
+                    "rationale": f"FINRA {source} for {record.release_date.isoformat()}",
                 },
             )
             counts["signals"] += 1
@@ -297,3 +326,51 @@ async def ingest_finra_files(
         total["ingested_items"] += counts["ingested_items"]
         total["signals"] += counts["signals"]
     return total
+
+
+def ats_weekly_query(symbols: Sequence[str], until: date, *, offset: int = 0) -> dict[str, Any]:
+    """The ``weeklySummary`` request body: ATS_W_SMBL rows for ``symbols`` whose week starts in the lookback window."""
+    since = until - timedelta(days=ATS_WEEKLY_LOOKBACK_DAYS)
+    return {
+        "limit": ATS_WEEKLY_PAGE_SIZE,
+        "offset": offset,
+        "fields": list(ATS_WEEKLY_FIELDS),
+        "compareFilters": [
+            {"compareType": "EQUAL", "fieldName": "summaryTypeCode", "fieldValue": ATS_WEEKLY_SUMMARY_TYPE},
+        ],
+        "dateRangeFilters": [
+            {"fieldName": "weekStartDate", "startDate": since.isoformat(), "endDate": until.isoformat()},
+        ],
+        "domainFilters": [{"fieldName": "issueSymbolIdentifier", "values": sorted(set(symbols))}],
+    }
+
+
+async def ingest_finra_ats_weekly(
+    *,
+    symbols: Sequence[str],
+    until: date,
+    http_post: HttpPost,
+) -> dict[str, int]:
+    """§17.2044 — store the weekly ATS totals FINRA has published for ``symbols`` in the lookback window.
+
+    Pages through FINRA's Query API until a page comes back short; a week already stored is not stored twice.
+    Returns ``{"ingested_items": int, "signals": int}``.
+    """
+    records: list[FinraRecord] = []
+    offset = 0
+    while True:
+        response = await http_post(
+            FINRA_ATS_WEEKLY_API_URL,
+            json=ats_weekly_query(symbols, until, offset=offset),
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        page = response.json() or []
+        for item in page:
+            record = _parse_ats_weekly(item, version=1)
+            if record is not None:
+                records.append(record)
+        if len(page) < ATS_WEEKLY_PAGE_SIZE:
+            break
+        offset += ATS_WEEKLY_PAGE_SIZE
+    return await _store_records(records)

@@ -1,0 +1,72 @@
+{
+ "_source": "api.finra.org/data/group/otcMarket/name/weeklySummary, POST with no key, fetched 2026-11-26, HTTP 200, record-total 4; the response is verbatim",
+ "request": {
+  "limit": 5000,
+  "offset": 0,
+  "fields": [
+   "weekStartDate",
+   "issueSymbolIdentifier",
+   "totalWeeklyShareQuantity",
+   "totalWeeklyTradeCount",
+   "tierIdentifier",
+   "lastUpdateDate"
+  ],
+  "compareFilters": [
+   {
+    "compareType": "EQUAL",
+    "fieldName": "summaryTypeCode",
+    "fieldValue": "ATS_W_SMBL"
+   }
+  ],
+  "dateRangeFilters": [
+   {
+    "fieldName": "weekStartDate",
+    "startDate": "2026-10-22",
+    "endDate": "2026-11-26"
+   }
+  ],
+  "domainFilters": [
+   {
+    "fieldName": "issueSymbolIdentifier",
+    "values": [
+     "AAPL",
+     "SPY"
+    ]
+   }
+  ]
+ },
+ "response": [
+  {
+   "totalWeeklyShareQuantity": 62664057,
+   "totalWeeklyTradeCount": 945431,
+   "issueSymbolIdentifier": "AAPL",
+   "lastUpdateDate": "2026-11-23",
+   "weekStartDate": "2026-11-02",
+   "tierIdentifier": "T1"
+  },
+  {
+   "totalWeeklyShareQuantity": 78928373,
+   "totalWeeklyTradeCount": 628193,
+   "issueSymbolIdentifier": "SPY",
+   "lastUpdateDate": "2026-11-23",
+   "weekStartDate": "2026-11-02",
+   "tierIdentifier": "T1"
+  },
+  {
+   "totalWeeklyShareQuantity": 41764073,
+   "totalWeeklyTradeCount": 438178,
+   "issueSymbolIdentifier": "SPY",
+   "lastUpdateDate": "2026-11-16",
+   "weekStartDate": "2026-10-26",
+   "tierIdentifier": "T1"
+  },
+  {
+   "totalWeeklyShareQuantity": 32964086,
+   "totalWeeklyTradeCount": 591501,
+   "issueSymbolIdentifier": "AAPL",
+   "lastUpdateDate": "2026-11-16",
+   "weekStartDate": "2026-10-26",
+   "tierIdentifier": "T1"
+  }
+ ]
+}
