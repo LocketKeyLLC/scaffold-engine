@@ -252,3 +252,44 @@ def calls_that_cannot_work(commands: list[str], files: Optional[list[dict]], nod
                                    f"`GET /api/v3/series` by `tvdbId == {n}` and use its `id`."})
                 break
     return out
+
+
+#: §17.2030 — the resources only Prowlarr serves, from each app's own OpenAPI document (Radarr v3, Sonarr v3, Lidarr v1
+#: and Prowlarr v1, read 2026-11-26): Prowlarr manages the applications it syncs indexers TO, their sync profiles and
+#: indexer proxies; Radarr, Sonarr and Lidarr have none of the three.
+_PROWLARR_ONLY = ("applications", "appprofile", "indexerproxy")
+_API_V = {"Sonarr": "v3", "Radarr": "v3", "Lidarr": "v1"}
+_PROWLARR_ONLY_RE = re.compile(r"/(?P<res>" + "|".join(_PROWLARR_ONLY) + r")(?![\w-])")
+_APP_RESOURCE_RE = re.compile(r"(?:localhost|127\.0\.0\.1|\b(?:\d{1,3}\.){3}\d{1,3}):(?P<port>8989|7878|8686)/api/v\d+"
+                              r"/(?P<res>" + "|".join(_PROWLARR_ONLY) + r")(?![\w-])")
+
+
+def calls_to_prowlarrs_resources(commands: list[str], verify: list[str], files: Optional[list[dict]]) -> list[dict]:
+    """§17.2030 — ``[{command, why}]`` for a call to a resource only Prowlarr has, aimed at Radarr, Sonarr or Lidarr.
+
+    Live (job c75d77fa T3v2, 2026-10-12, §17.1499): the "Verify testable" step drafted `…/api/v3/applications/test` on
+    Radarr (CT 103) and Sonarr (CT 104). Measured then: Radarr answers 404 on `/api/v3/applications` and 200 on
+    `/api/v3/downloadclient`. `applications` is Prowlarr's list of the apps it syncs to; the check targets an endpoint
+    the service does not serve, and `/testall` (§17.1501) does not fix a wrong resource. A call written straight to
+    the app's port is refused; so is a program whose only *arr base is one of those apps and that names the resource."""
+    texts = [str(c) for c in list(commands or []) + list(verify or [])] + \
+        [str((f or {}).get("content") or "") for f in files or []]
+    for t in texts:
+        m = _APP_RESOURCE_RE.search(t)
+        if m:
+            app, res = _ARR_NAME[m.group("port")], m.group("res")
+            hit = next((ln.strip() for ln in t.splitlines() if _APP_RESOURCE_RE.search(ln)), m.group(0))
+        else:
+            ports = {p.group("port") for p in _ARR_API_RE.finditer(t)}
+            r = _PROWLARR_ONLY_RE.search(t)
+            if not (r and ports and "9696" not in ports):
+                continue
+            app, res = _ARR_NAME[sorted(ports)[0]], r.group("res")
+            hit = next((ln.strip() for ln in t.splitlines() if _PROWLARR_ONLY_RE.search(ln)), r.group(0))
+        return [{"command": hit[:200],
+                 "why": f"`/{res}` is a Prowlarr resource: {app} does not serve it (Radarr answered 404 on "
+                        f"`/api/v3/applications`, measured), so this call tests or reads nothing (§17.2030). In "
+                        f"{app}, a connection check is `POST /api/{_API_V[app]}/downloadclient/testall` or "
+                        f"`/api/{_API_V[app]}/indexer/testall` (no body); the apps Prowlarr syncs to are read from Prowlarr, "
+                        f"`GET http://<prowlarr>:9696/api/v1/applications`."}]
+    return []

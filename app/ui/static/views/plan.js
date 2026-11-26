@@ -35,6 +35,51 @@ export function nextNodeKey(keys) {
   return `T${n}`;
 }
 
+// §17.2031 — the steps that wait, directly or through others, on `key`.
+function downstreamOf(key, nodes) {
+  const held = new Set([key]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const n of nodes || [])
+      if (!held.has(n.node_key) && (n.depends_on || []).some((d) => held.has(d))) { held.add(n.node_key); grew = true; }
+  }
+  held.delete(key);
+  return (nodes || []).filter((n) => held.has(n.node_key)).map((n) => n.node_key);
+}
+
+// §17.2031 — a step that failed its retries holds the job. §17.1572 parked it: the job went `blocked` and the graph --
+// where an auto run is watched (§17.1513) -- showed a red box and nothing else; the why sat in the node's
+// last_verification_reason, which /nodes never carried. Pure, pinned by tests/ui/plan_failed_step.test.mjs.
+export function failedStepModel(node, jobStatus, nodes) {
+  if (!node || node.status !== "failed") return null;
+  const holds = downstreamOf(node.node_key, nodes);
+  const stopped = ["blocked", "failed"].includes(String(jobStatus || ""));
+  return {
+    headline: `This step failed after its retries`
+      + (holds.length ? ` and holds ${holds.length} step${holds.length === 1 ? "" : "s"} after it` : "")
+      + (stopped ? " — the run stopped here." : "."),
+    reason: String(node.failure_reason || "").trim() || "No reason was recorded for this failure.",
+    holds,
+    verbs: [
+      { key: "retry", label: `↻ Retry ${node.node_key} and run`, endpoint: "/exec/retry", body: { node_key: node.node_key } },
+      { key: "edit", label: "Edit the step" },
+      { key: "skip", label: "Skip it", endpoint: "/skip", body: { node_key: node.node_key },
+        confirm: holds.length ? `Skip ${node.node_key}? The ${holds.length} step(s) after it then run without its result.`
+                              : `Skip ${node.node_key}?` },
+    ],
+  };
+}
+
+// §17.2031 — the failed step a stopped job opens on: the one holding the most steps (then the earliest).
+export function stoppedOnKey(nodes, jobStatus) {
+  if (!["blocked", "failed"].includes(String(jobStatus || ""))) return null;
+  const failed = (nodes || []).filter((n) => n.status === "failed");
+  if (!failed.length) return null;
+  const score = (n) => downstreamOf(n.node_key, nodes).length;
+  return failed.slice().sort((a, b) => score(b) - score(a) || (a.execution_order ?? 0) - (b.execution_order ?? 0))[0].node_key;
+}
+
 function field(label, control, hint) {
   return el(
     "div",
@@ -196,6 +241,8 @@ export function renderPlan(container, jobId, opts = {}) {
       // §17.1513 — open the drawer only on the FIRST load. A poll tick must never re-open it:
       // that would clobber a step the operator is editing. The graph recolours live; clicking a
       // node (re)reads its current status and frame.
+      // §17.2031 — a stopped job opens on the failed step that holds it: the why is the first thing on the page
+      if (firstLoad && !selectedKey) selectedKey = stoppedOnKey(nodes, jobStatus);
       if (firstLoad && selectedKey && byKey[selectedKey]) {
         graph.setSelected(selectedKey);
         openEditDrawer(byKey[selectedKey]);
@@ -364,11 +411,50 @@ export function renderPlan(container, jobId, opts = {}) {
       actionRow);
   }
 
+  // §17.2031 — a failed step's panel: why, what it holds, and the verbs (the Run stage's showFailure, on the node).
+  function failedPanel(node) {
+    const m = failedStepModel(node, jobStatus, nodes);
+    if (!m) return null;
+    const btns = [];
+    const act = async (v) => {
+      if (v.key === "edit") { openEditDrawer(node, { edit: true }); return; }
+      if (v.confirm && !await askConfirm(v.confirm, { title: "Skip this step?", confirmText: v.label })) return;
+      btns.forEach((b) => { b.disabled = true; });
+      try {
+        await api.post(v.endpoint, { job_id: jobId, ...v.body });
+        if (v.key === "retry") {
+          // the theater starts the run when it opens (§17.818's one-shot hand-off)
+          sessionStorage.setItem("scaffold_autorun", jobId);
+          toast(`${node.node_key} reset to pending — running it again.`, "ok");
+          location.hash = `#/job/${jobId}/run`;
+          return;
+        }
+        toast(`${node.node_key} skipped.`, "ok");
+        closeDrawer();
+        await load();
+      } catch (e) {
+        toast(`Could not ${v.key} ${node.node_key}: ${(e && e.detail) || (e && e.message)}`, "err");
+        btns.forEach((b) => { b.disabled = false; });
+      }
+    };
+    for (const v of m.verbs)
+      btns.push(el("button", { class: "btn btn-sm" + (v.key === "retry" ? " btn-primary" : v.key === "skip" ? " btn-ghost" : ""),
+        text: v.label, onClick: () => act(v) }));
+    return el("div", { class: "card card-pad summary-card summary-failed" },
+      el("div", { class: "summary-title", text: m.headline }),
+      el("div", { class: "node-reason" },
+        el("div", { class: "node-reason-label", text: "Why it failed" }),
+        el("div", { class: "node-reason-text", text: m.reason })),
+      m.holds.length ? el("p", { class: "sub", text: `Waiting on it: ${m.holds.slice(0, 8).join(", ")}${m.holds.length > 8 ? " …" : ""}` }) : null,
+      el("div", { class: "row row-wrap summary-actions" }, ...btns));
+  }
+
   function readView(node) {
     const deps = node.depends_on || [];
     const tool = TOOL_LABELS[node.tool] || node.tool || "LLM";
     return el("div", { class: "step-read" },
       parkedPanel(node),
+      failedPanel(node),
       el("div", { class: "row row-wrap step-read-tags" },
         statusBadge(node.status),
         el("span", { class: "tag", text: tool }),
