@@ -4479,11 +4479,19 @@ def answer_with_its_module(output: str, prior: str, leaf: str) -> str:
             fragments.append(m)
         else:
             other_code = True
-    if other_code or any(p.startswith("app/") for p in named) or not (fragments or test_path in named):
-        return output                                       # it writes code of its own, or no tests: as it is
+    own_module = any(p.startswith("app/") for p in named)
+    if other_code or not (fragments or test_path in named) or (own_module and not fragments):
+        return output                                       # unnamed code that is not tests, or no tests: as it is
     for i, m in reversed(list(enumerate(fragments))):
         keep = "" if test_path in named or i else f"```python\n# {test_path}\n{m.group(2).strip()}\n```"
         output = output[:m.start()] + keep + output[m.end():]
+    if own_module:
+        # §17.2024 — an answer that names its module and writes its tests unnamed: the tests are its test file. Live
+        # (69fe61c4 NOKEY2 a4, 2026-11-24): `files_of` gave the unnamed full test file the module's path, which the
+        # named block already held, and dropped it; §17.1801 then drew the "left out" file again, and the answer
+        # held the test file twice -- the model's own version never read
+        logger.info("unnamed_tests_named module=%s fragments=%d", leaf, len(fragments))
+        return output
     module = files_of({"output_text": prior}).get(mod_path) if prior else None
     try:
         ast.parse(module or "")
