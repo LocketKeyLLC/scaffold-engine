@@ -611,28 +611,16 @@ async def lifespan(app: FastAPI):
     # here (not in a mounted sub-app's own lifespan, which Starlette does not
     # run for mounts) so tool calls have a live session manager.
     #
-    # §17.808 — `StreamableHTTPSessionManager.run()` is once-per-instance, and
-    # `mcp.session_manager` is a module-level singleton. In production the
-    # lifespan runs exactly once, so this is fine. But `with TestClient(app)`
-    # re-enters the lifespan on every test, and the 2nd entry's `run()` raises
-    # `RuntimeError: … can only be called once per instance`, which propagated
-    # out of `wait_startup` and ERRORed the setup of every subsequent web test
-    # (the 99 errors + 2 failures in the §17.807 baseline). Drive the context
-    # manually so a re-entry degrades gracefully — the mount just has no live
-    # session manager for that entry, which no test exercises — instead of
-    # taking the whole app startup down with it.
+    # §17.2037 (#182) — each entry builds a FRESH session manager (the SDK's is
+    # once-per-instance), so a repeated lifespan (`with TestClient(app)` again)
+    # serves /mcp too. §17.808 had skipped the manager on re-entry instead,
+    # which left the mount answering 500.
     _mcp_ctx = None
     if settings.mcp_server_enabled:
         from app.mcp_server import session_manager_context
-        try:
-            _mcp_ctx = session_manager_context()
-            await _mcp_ctx.__aenter__()
-            logger.info("mcp_server_mounted: /mcp streamable-http session manager running")
-        except RuntimeError as exc:
-            # Once-per-instance run() re-entered (only reachable via a repeated
-            # lifespan, i.e. TestClient). Skip the live session manager.
-            logger.warning('event="mcp_session_manager_reentry_skipped" error=%s', exc)
-            _mcp_ctx = None
+        _mcp_ctx = session_manager_context()
+        await _mcp_ctx.__aenter__()
+        logger.info("mcp_server_mounted: /mcp streamable-http session manager running")
     # §17.1008 reconcile_on_startup now runs inside settle_interrupted_runs()
     # above (§17.1106) — before any drain or the advance-chain resume task can
     # flip a row to running, and with crash-resumed jobs excluded.

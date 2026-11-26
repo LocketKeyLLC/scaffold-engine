@@ -34,9 +34,13 @@ async def test_an_unreachable_runner_holds_the_step():
 
 
 @pytest.mark.asyncio
-async def test_no_runner_at_all_keeps_the_old_path():
-    db, _ = _db()
+async def test_no_runner_at_all_hands_the_step_to_the_operator():
+    """§17.2039 (#110) — no runner used to keep the old path (the runbook recorded done); it is the operator's now."""
     for state in ("none", "off"):
+        db, calls = _db()
         with patch.object(sr, "channel", AsyncMock(return_value=None)), \
              patch.object(sr, "runner_registered", AsyncMock(return_value=(state, ""))):
-            assert await ea._hand_back_for_approval(db, "j", NODE, "Shell") is None
+            out = await ea._hand_back_for_approval(db, "j", NODE, "Shell")
+        assert out and out["status"] == "needs_approval"
+        assert any("operators_without_runner" in c for c in calls)
+        assert any("SET status = 'pending'" in c for c in calls)

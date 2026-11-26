@@ -4806,7 +4806,18 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
             # step), so asking it cost every held step a connect while the host was down, and decided nothing.
             _state, _why = await _sr.runner_registered(db)
             if _state != "registered":
-                return None
+                # §17.2039 (#110) — no runner at all: nothing can carry the step out, so it is the OPERATOR's.
+                # It used to take the ordinary path -- the runbook written as the step's output and recorded `done`,
+                # under a job reported `completed` -- whenever the plan was below the hands-on gate's majority.
+                # Handed back and marked, the drained loop parks it as `kind: "yours"` (operator_steps).
+                from app.modules import operator_steps as _ops_nr
+                await _ops_nr.mark_without_runner(db, job_id, str(node_key or ""))
+                await db.execute(
+                    text("UPDATE dag_nodes SET status = 'pending', started_at = NULL, updated_at = NOW() "
+                         "WHERE id = :id AND status = 'running'"), {"id": str(node.get("id"))})
+                await db.commit()
+                logger.info("hands_on_step_without_runner job=%s node=%s runner=%s", job_id, node_key, _state)
+                return {"status": "needs_approval", "node_key": node_key, "title": node.get("title"), "tool": tool}
             logger.warning("supervised_run_held_runner_unreachable job=%s node=%s why=%s", job_id, node_key, _why)
         # §17.1200 — a decision is consumed by the attempt it authorised. It is
         # recorded to stop ONE pending node being asked twice in a single pass;
@@ -4864,6 +4875,16 @@ async def _hands_on_peek(node: dict, job_id: str = "") -> bool:
     as hands-on (it must be routed to the develop path, not the sandbox). Cheap: one read, only when
     a job_id is given and the node is CodeGen."""
     from app.modules import supervised_runs
+    # §17.2039 — a step the executor handed to the operator for want of a runner (it may have rerouted an LLM step
+    # this peek does not see as hands-on) is asked before a claim, or the serial loop would claim it again and again.
+    if job_id:
+        from app.modules import operator_steps as _ops_nr
+        try:
+            async with async_session() as _db:
+                if str((node or {}).get("node_key") or "") in await _ops_nr.marked_without_runner(_db, job_id):
+                    return True
+        except Exception as exc:
+            logger.error("hands_on_peek_marker_failed job=%s err=%r", job_id, exc)
     brief = ""
     if job_id and str((node or {}).get("tool") or "").strip().lower() == "codegen":
         try:
