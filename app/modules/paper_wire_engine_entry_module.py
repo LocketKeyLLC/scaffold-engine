@@ -17,13 +17,25 @@ from sqlalchemy import text
 
 from app.authz import get_principal
 from app.database import async_session
-from app.modules.paper_daily_signal_proposal_batch import run_daily_batch, run_on_demand_batch
+from app.modules.paper_daily_signal_proposal_batch import run_on_demand_batch
 from app.modules.paper_dashboard_view_builder import build_dashboard_context
 from app.modules.paper_enforce_read_only_data import read_only_session
 from app.modules.paper_entry_approval import run_approval_entry_point
 from app.modules.paper_entry_backtesting import run_backtesting_entry_point
 from app.modules.paper_execution_entry_point import run_execution_entry_point
 from app.modules.paper_fill_tracker import track_fills
+from app.modules.paper_lab_schedule import (
+    DAILY_INGEST_JOB_ID,
+    DAILY_INGEST_TRIGGER,
+    EOD_SNAPSHOT_JOB_ID,
+    EOD_SNAPSHOT_TRIGGER,
+    WEEKLY_JOB_ID,
+    WEEKLY_TRIGGER,
+    run_daily_ingestion,
+    run_eod_snapshot,
+    run_scheduled_daily_batch,
+    run_weekly,
+)
 from app.modules.paper_operator_view import get_operator_view
 from app.modules.paper_serve_static_asset_under import install as install_static_assets
 from app.modules.paper_serve_static_asset_under import vendor_url, vendored_files
@@ -323,7 +335,8 @@ def _make_router() -> APIRouter:
 
     @router.post("/daily-batch")
     async def daily_batch(_principal: Any = Depends(get_principal)) -> dict[str, Any]:
-        return await run_daily_batch()
+        # §17.2041 -- the same run the scheduler starts: day-start equity, then the batch unless paused
+        return await run_scheduled_daily_batch()
 
     @router.post("/on-demand-batch")
     async def on_demand_batch(_principal: Any = Depends(get_principal)) -> dict[str, Any]:
@@ -418,14 +431,23 @@ def _start_stream_consumer() -> Optional[asyncio.Task]:
 def install(app: FastAPI) -> None:
     scheduler = get_scheduler()
     if scheduler is not None:
+        # §17.2041 -- the daily batch first records the day-start equity it reads and skips while the strategy is
+        # paused; the ingesters fill the point-in-time store two hours before it; the snapshot and the weekly
+        # re-evaluation run on their own times (paper_lab_schedule).
         scheduler.add_job(
-            run_daily_batch,
+            run_scheduled_daily_batch,
             trigger="cron",
             hour=DAILY_BATCH_HOUR,
             minute=DAILY_BATCH_MINUTE,
             id=DAILY_BATCH_JOB_ID,
             replace_existing=True,
         )
+        for run, job_id, trigger in (
+            (run_daily_ingestion, DAILY_INGEST_JOB_ID, DAILY_INGEST_TRIGGER),
+            (run_eod_snapshot, EOD_SNAPSHOT_JOB_ID, EOD_SNAPSHOT_TRIGGER),
+            (run_weekly, WEEKLY_JOB_ID, WEEKLY_TRIGGER),
+        ):
+            scheduler.add_job(run, id=job_id, replace_existing=True, **trigger)
 
     app.include_router(_make_router())
     install_static_assets(app)

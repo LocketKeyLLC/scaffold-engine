@@ -149,11 +149,20 @@ async def _latest_pnl_ts(db: object) -> datetime | None:
     return row[0] if row is not None else None
 
 
-async def calculate_pnl() -> list[PnlRecord]:
+async def calculate_pnl(
+    *,
+    account_cash: Decimal | None = None,
+    account_equity: Decimal | None = None,
+) -> list[PnlRecord]:
     """Compute realized and unrealized P&L per position from fills.
 
     Writes a `pnl` row for the current account state and returns the
     per-position records.
+
+    §17.2041 -- ``account_cash`` / ``account_equity``: the broker account's own
+    cash and equity (the end-of-day snapshot passes them). The row then records
+    the account as it is, so the dashboard's account-value series and the next
+    day's drawdown read the real account, not the open positions alone.
     """
     async with async_session() as db:
         fills = await _fetch_fills(db)
@@ -187,13 +196,16 @@ async def calculate_pnl() -> list[PnlRecord]:
                 )
             )
 
-        # Cash is not tracked in this module; assume zero cash for the
-        # pnl row. The performance-metrics module owns full account value.
+        # Cash is not tracked in this module; without the account's own
+        # figures the row assumes zero cash (positions only).
+        cash = ZERO if account_cash is None else Decimal(str(account_cash))
+        if account_equity is not None:
+            total_equity = Decimal(str(account_equity))
         now = datetime.now(timezone.utc)
         await write_pnl(
             as_of_ts=now,
             account_value=str(total_equity),
-            cash="0",
+            cash=str(cash),
             equity=str(total_equity),
             realized_pnl=str(total_realized),
             unrealized_pnl=str(total_unrealized),
