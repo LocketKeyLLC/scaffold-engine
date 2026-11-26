@@ -20,10 +20,10 @@ memray==1.20.0
 # CPU profiler for a test or a script (make profile-cpu)
 pyinstrument==5.1.3
 # module-boundary contracts, parses source via grimp (make lint-imports)
-import-linter==2.16
+import-linter==2.17
 # dead-code report with whitelist (make dead-code): vulture is in requirements.txt since §17.1939 (an engine gate;
 # listing it here too would prune it from the runtime image)
 # structural rules gate (make check-ast-grep / tests/test_ast_grep_rules.py)
-ast-grep-cli==0.51.2
+ast-grep-cli==0.51.3
 # §17.1068 — property tests over the phrase gates (tests/test_assist_policy_properties.py)
-hypothesis==6.170.15
+hypothesis==6.170.17

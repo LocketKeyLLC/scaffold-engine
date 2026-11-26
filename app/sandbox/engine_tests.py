@@ -42,6 +42,37 @@ class EngineTestResult:
     ran: list[str]
     passed: list[str] = field(default_factory=list)      # §17.1891 the tests that passed, as pytest names them
     failed: list[str] = field(default_factory=list)      # §17.1933 and the ones that failed or errored
+    imports: list[dict] = field(default_factory=list)    # §17.2027 an import run: each module that did not import
+
+
+#: §17.2027 — an import run imports every module, each on its own, and names each one that fails with the `app/` frames
+#: of its traceback (outer first): `IMPORT_FAILED app.modules.x frames=app/modules/x.py:3,app/modules/y.py:9 Err: msg`.
+#: It stopped at the first module that failed, and said nothing of which file the failure was in.
+_IMPORT_SCRIPT = """import importlib, sys, traceback
+mods = {mods!r}
+bad = 0
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except BaseException as e:
+        bad += 1
+        traceback.print_exc(limit=-8, file=sys.stdout)
+        tb = [(f.filename, f.lineno) for f in traceback.extract_tb(e.__traceback__)]
+        if isinstance(e, SyntaxError) and e.filename:
+            tb.append((e.filename, e.lineno or 0))
+        fr = ["app/" + p.rsplit("/app/", 1)[1] + ":" + str(n) for p, n in tb if "/app/" in p]
+        msg = " ".join(str(e).split())[:300]
+        print("IMPORT_FAILED " + m + " frames=" + ",".join(fr) + " " + type(e).__name__ + ": " + msg)
+print("imported", len(mods) - bad, "of", len(mods))
+sys.exit(1 if bad else 0)
+"""
+_IMPORT_FAILED_RE = re.compile(r"^IMPORT_FAILED (\S+) frames=(\S*) (.*)$", re.M)
+
+
+def import_failures(stdout: str) -> list[dict]:
+    """§17.2027 — each module an import run could not import: ``{module, frames (app/ path:line, outer first), error}``."""
+    return [{"module": m, "frames": [f for f in fr.split(",") if f], "error": err.strip()}
+            for m, fr, err in _IMPORT_FAILED_RE.findall(stdout or "")]
 
 
 #: §17.1891 — pytest's `-rA` summary names every passing test: `PASSED tests/test_x.py::test_a` (`::Cls::test_a`)
@@ -505,8 +536,7 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
         mods = [_module_name(p) for p in sorted(mine) if p.startswith("app/")]
         if not mods:
             return EngineTestResult("skip", "no module to import", [])
-        command = ["python", "-c", "import importlib, sys\n"
-                   f"for m in {mods!r}:\n    importlib.import_module(m)\nprint('imported', len({mods!r}))"]
+        command = ["python", "-c", _IMPORT_SCRIPT.format(mods=mods)]                  # §17.2027 each module, named
     res = await run_code(files, command, timeout_s=settings.engine_test_timeout_s,
                          cpu_seconds=int(settings.engine_test_timeout_s) + 10, mem_mb=1536,
                          base_url=url, database=True)
@@ -540,4 +570,5 @@ async def check(output: str, node: dict, siblings: list[dict]) -> EngineTestResu
            "in tests. ")
         + "Fix the code (or the test, when the test is what is wrong):"
         + known_causes(res.stdout + "\n" + res.stderr) + "\n\n" + why[:12000]), ran,
-        passed=passed_tests(res.stdout) if tests else [], failed=failed_tests(res.stdout) if tests else [])
+        passed=passed_tests(res.stdout) if tests else [], failed=failed_tests(res.stdout) if tests else [],
+        imports=[] if tests else import_failures(res.stdout))

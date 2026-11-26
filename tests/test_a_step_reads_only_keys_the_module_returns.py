@@ -79,7 +79,7 @@ LIVE = ("`app/modules/paper_daily_signal_proposal_batch.py:10` reads `equity` fr
 def test_the_live_read_of_a_key_the_function_never_returns_is_a_gap():
     assert unreturned_keys(BATCH, MODULES) == [{
         "producer": "paper_daily_signal_proposal_batch_data.load_batch_context", "var": "context", "key": "equity",
-        "carries": ["day_start_equity", "orders_today"], "line": 10}]
+        "carries": ["day_start_equity", "orders_today"], "line": 10, "also": []}]
     assert unreturned_reads(FILES, MODULES) == [LIVE]
 
 
