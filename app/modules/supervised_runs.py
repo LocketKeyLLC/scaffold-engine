@@ -8198,6 +8198,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + _wrong_fields(cmds, shape_files)                  # §17.1694
     from app.modules.arr_api_shapes import calls_that_cannot_work as _cannot_work
     refused = refused + _cannot_work(cmds, shape_files, node)             # §17.1717
+    from app.modules.arr_api_shapes import calls_to_prowlarrs_resources as _prowlarrs
+    refused = refused + _prowlarrs(cmds, verify, shape_files)             # §17.2030
     refused = refused + a_sed_program_that_does_not_compile(cmds)         # §17.1617
     from app.modules.guest_evidence import tools_only_in_containers as _toic   # §17.1614
     refused = refused + _toic(upstream, list(cmds) + [str((f or {}).get("content") or "") for f in shape_files or []])
