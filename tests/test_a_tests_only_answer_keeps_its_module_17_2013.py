@@ -46,9 +46,11 @@ def test_an_unnamed_test_beside_the_named_test_file_is_dropped():
 
 
 def test_an_answer_with_a_module_of_its_own_is_left_as_it_is():
-    # the correct misses: its own module (named or unnamed) stands, and a non-test unnamed block is code
+    # the correct misses: its own module (named or unnamed) stands, and a non-test unnamed block is code.
+    # §17.2024 — beside a named module, its unnamed tests become its test file (they were dropped before)
     own = f"```python\n# {MOD}\ndef load():\n    return 3\n```\n\n" + ONE_TEST
-    assert answer_with_its_module(own, PRIOR, LEAF) == own
+    fs = _files(answer_with_its_module(own, PRIOR, LEAF))
+    assert "return 3" in fs[MOD] and "def test_load_returns_two" in fs[TESTS]
     plain = "```python\ndef load():\n    return 3\n```"
     assert answer_with_its_module(plain, PRIOR, LEAF) == plain
 

@@ -499,6 +499,14 @@ def _returns_hint(code: str, fname: str) -> str:
     return query_return(code, fname)
 
 
+def _at_lines(path: str, line: int, also: list[int] | set[int]) -> str:
+    """§17.2010/§17.2022 — "`path:L1`" for a finding about one line, "`path:L1` (and lines L2, …)" for one about
+    several: a retry keeps what its findings do not name, so a finding names every line it is about (the leading
+    `path:line` kept for whatever reads it, §17.2021 reads the rest)."""
+    rest = sorted(set(also) - {line})
+    return f"`{path}:{line}`" + (f" (and line{'s' if len(rest) > 1 else ''} {', '.join(map(str, rest))})" if rest else "")
+
+
 def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str],
                    fks: dict[str, dict[str, str]] | None = None) -> list[str]:
     """§17.1836 — each test that replaces a function of another finished module of the job that never leaves the
@@ -510,23 +518,26 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
     reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
                           if p.startswith("app/") and p.endswith(".py")}}
     found: list[str] = []
-    seen: set[tuple[str, str]] = set()
     for path, code in files.items():
         if not path.startswith("tests/"):
             continue
-        for mod, name, line in _patch_targets(code):
-            origin = _origin(reach, mod, name) if mod in reach else None
+        # §17.2022 — one finding per stand-in and file, naming every line that makes it: the seen-set spanned the
+        # files and named the first line only, so a retry fixed that line and kept the rest (the §17.2010 shape)
+        seen: set[tuple[str, str]] = set()
+        targets = [(m, n, ln, _origin(reach, m, n) if m in reach else None) for m, n, ln in _patch_targets(code)]
+        for mod, name, line, origin in targets:
             if not origin or origin in own or origin not in modules or (origin, name) in seen:
                 continue
             if reaches_outside(modules[origin], job, reach, frozenset({origin})):
                 continue
             seen.add((origin, name))
+            also = {ln for _m, n, ln, o in targets if (o, n) == (origin, name)}
             hint = _returns_hint(modules[origin], name)
             # §17.1852 — and WHICH rows: the tables the real one reads (followed through the job's modules) and the
             # finished writers that insert them, so "insert the rows it reads" is an instruction, not a hope;
             # §17.1853 — parents first, along the job's foreign keys
             found.append(
-                f"`{path}:{line}` replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
+                f"{_at_lines(path, line, also)} replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
                 "a stand-in: call the real one -- against the scratch database, with the rows it reads, when it uses "
                 "one -- so the test sees what it really does"
                 + (f" (it returns {hint})" if hint else "")
@@ -1017,9 +1028,11 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
             continue
         raises = _expects_a_raise(tree)
         scopes, covering, _fns = _test_scopes(tree, code)
-        seen: set[tuple[str, str]] = set()
+        # §17.2022 — every call that runs it unpatched, one finding per function, naming all their lines: the first
+        # one alone was named, and a retry fixed that test and kept the others (the §17.2010 shape)
+        hits: dict[tuple[str, str], list[tuple[int, list[str], list[str]]]] = {}
         for mod, fname, line in _test_calls(code):
-            if mod not in reach or (mod, fname) in seen or any(a <= line <= b for a, b in raises):
+            if mod not in reach or any(a <= line <= b for a, b in raises):
                 continue
             scope = _scope_of(scopes, line)
             if scope and not scope.split("@")[0].startswith("test"):
@@ -1032,10 +1045,14 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
             readers = sorted(set(secrets.values()) - covered) if "runner_secrets" not in covered else []
             if not readers:
                 continue
-            seen.add((mod, fname))
-            named = sorted(s for s, r in secrets.items() if s and r in readers)
+            hits.setdefault((mod, fname), []).append(
+                (line, readers, sorted(s for s, r in secrets.items() if s and r in readers)))
+        for (mod, fname), calls in hits.items():
+            line = calls[0][0]
+            readers = sorted({r for _ln, rs, _n in calls for r in rs})
+            named = sorted({s for _ln, _r, ns in calls for s in ns})
             found.append(
-                f"`{path}:{line}` runs `{fname}` (`{mod}`) for real, and it reads the operator secret"
+                f"{_at_lines(path, line, {ln for ln, _r, _n in calls})} runs `{fname}` (`{mod}`) for real, and it reads the operator secret"
                 + (f"{'s' if len(named) > 1 else ''} {', '.join(f'`{s}`' for s in named)}" if named else "s it needs")
                 + f" through `values_for` ({', '.join(f'`{r}`' for r in readers)}) -- the sandbox has no secrets, "
                 "so the code refuses to run (§17.1776). Patch "
@@ -4070,11 +4087,15 @@ def unreturned_keys(code: str, modules: dict[str, str]) -> list[dict]:
             if not carries:
                 continue                                         # unknown, or no dict literal at all: no claim
             for key, line in _reads_of(fn, var):
-                if key in carries or (pmod, pfn, key) in seen:
+                if key in carries:
+                    continue
+                if (pmod, pfn, key) in seen:
+                    # §17.2022 — the same key read again: named on the first one's finding, not dropped
+                    next(g for g in out if (g["producer"], g["key"]) == (f"{pmod}.{pfn}", key))["also"].append(line)
                     continue
                 seen.add((pmod, pfn, key))
                 out.append({"producer": f"{pmod}.{pfn}", "var": var, "key": key, "carries": sorted(carries),
-                            "line": line})
+                            "line": line, "also": []})
     return out
 
 
@@ -4134,7 +4155,7 @@ def unreturned_reads(files: dict[str, str], modules: dict[str, str]) -> list[str
         for g in unreturned_keys(code, modules):
             pmod, pfn = g["producer"].split(".", 1)
             lives = _key_lives(modules, g["key"])
-            found.append(f"`{path}:{g['line']}` reads `{g['key']}` from what `{pfn}` (`{pmod}`) returns, and it "
+            found.append(f"{_at_lines(path, g['line'], g['also'])} reads `{g['key']}` from what `{pfn}` (`{pmod}`) returns, and it "
                          f"returns dicts with keys {', '.join(f'`{k}`' for k in g['carries'])} -- never `{g['key']}`"
                          + (f". {lives}" if lives else ""))
     return found
@@ -4458,11 +4479,19 @@ def answer_with_its_module(output: str, prior: str, leaf: str) -> str:
             fragments.append(m)
         else:
             other_code = True
-    if other_code or any(p.startswith("app/") for p in named) or not (fragments or test_path in named):
-        return output                                       # it writes code of its own, or no tests: as it is
+    own_module = any(p.startswith("app/") for p in named)
+    if other_code or not (fragments or test_path in named) or (own_module and not fragments):
+        return output                                       # unnamed code that is not tests, or no tests: as it is
     for i, m in reversed(list(enumerate(fragments))):
         keep = "" if test_path in named or i else f"```python\n# {test_path}\n{m.group(2).strip()}\n```"
         output = output[:m.start()] + keep + output[m.end():]
+    if own_module:
+        # §17.2024 — an answer that names its module and writes its tests unnamed: the tests are its test file. Live
+        # (69fe61c4 NOKEY2 a4, 2026-11-24): `files_of` gave the unnamed full test file the module's path, which the
+        # named block already held, and dropped it; §17.1801 then drew the "left out" file again, and the answer
+        # held the test file twice -- the model's own version never read
+        logger.info("unnamed_tests_named module=%s fragments=%d", leaf, len(fragments))
+        return output
     module = files_of({"output_text": prior}).get(mod_path) if prior else None
     try:
         ast.parse(module or "")
@@ -4738,6 +4767,21 @@ def _test_spans(code: str) -> dict[str, tuple[int, int]]:
         return {}
 
 
+#: §17.2021 — "`path:L1` (and lines L2, L3)": the lines a finding names after its leading one (§17.2010)
+_ALSO_LINES_RE = re.compile(r"^`[^`]+:\d+` \(and lines? ([\d, ]+)\)")
+
+
+def _lines_named(finding: str) -> set[int]:
+    """§17.2021 — every line a `path:line` finding names: the leading one and each of "(and lines L2, …)". Live
+    (69fe61c4 NOKEY2, 2026-11-24): the §17.2010 finding named six kept tests' lines, `drop_refused_kept` read the
+    first, and the other five were spliced back into every draw the same gate then refused."""
+    m = re.match(r"`[^`:]+\.py:(\d+)`", finding)
+    if not m:
+        return set()
+    also = _ALSO_LINES_RE.match(finding)
+    return {int(m.group(1))} | ({int(x) for x in also.group(1).replace(" ", "").split(",") if x} if also else set())
+
+
 def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: list[str]) -> tuple[str, list[str]]:
     """§17.1922 — a kept test a gate refuses is dropped, not the attempt: it passed against the module as it WAS, and
     the module has changed under it. Returns the output without the kept tests (or kept classes) a finding points
@@ -4750,7 +4794,7 @@ def drop_refused_kept(output: str, kept: dict[str, dict[str, str]], findings: li
     for f in findings:
         m = re.match(r"`([^`:]+\.py):(\d+)`", f)
         if m:
-            at.setdefault(m.group(1), set()).add(int(m.group(2)))
+            at.setdefault(m.group(1), set()).update(_lines_named(f))
     dropped: list[str] = []
     for path, lines in sorted(at.items()):
         names = set((kept or {}).get(path) or {})
