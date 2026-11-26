@@ -6349,6 +6349,12 @@ def _no_op_exit_guard(stmt: str) -> str:
         if len(words) < 2 or words[1].startswith("-"):
             return ""
         sudo, words = "sudo ", words[1:]
+    # §17.2035 — a stop run inside a container from the host: `pct exec N -- pkill …`. pct hands back the command's
+    # OWN exit status (measured in the engine's run records: `pct exec 103 -- df -h /downloads` -> rc=1, df's "No such
+    # file"), and pct's own failures are 255 ("container '111' not running!", rc=255), never the 1 tolerated here. The
+    # docker "No such" read goes through the same `pct exec`, so it asks the container's daemon, not the host's.
+    if words[:2] == ["pct", "exec"] and len(words) > 4 and words[2].isdigit() and words[3] == "--":
+        sudo, words = f"{sudo}pct exec {words[2]} -- ", words[4:]
     if not words:
         return ""
     head, args = words[0], words[1:]
