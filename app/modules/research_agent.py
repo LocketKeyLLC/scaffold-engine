@@ -59,6 +59,7 @@ from app.modules.research_extractors import (
     _extract_threshold,
     _fetch_url_bounded,
     _is_arxiv_ref,
+    is_pdf_text,
     _is_github_ref,
     _is_hf_ref,
     _is_hn_ref,
@@ -275,6 +276,8 @@ def _non_html_text(body: str) -> str | None:
     submissions JSON (`data.sec.gov/submissions/CIK….json`, the field names three audit lines called UNVERIFIED) and
     FINRA's daily short-sale file (`Date|Symbol|ShortVolume|…`) both loaded and both came back empty -- trafilatura
     extracts HTML only."""
+    if is_pdf_text(body):
+        return body                                                    # §17.2029 a PDF's text, read whole
     head = body.lstrip()[:1]
     if head == "<":
         return _xml_text(body)                                         # §17.1975 an XML document; HTML stays None
@@ -2468,10 +2471,13 @@ async def _run_research_url_mode(
         )
 
     from app.utils.html_extract import extract_text  # §17.1442
-    text_content = await asyncio.to_thread(
-        extract_text, html,
-        output_format="txt", with_metadata=False,
-    )
+    if is_pdf_text(html):
+        text_content = html                                            # §17.2029 a PDF, already its text
+    else:
+        text_content = await asyncio.to_thread(
+            extract_text, html,
+            output_format="txt", with_metadata=False,
+        )
     if not text_content or len(text_content) < 100:
         raise RuntimeError(
             f"No extractable content at {url} "

@@ -558,6 +558,8 @@ async def _fetch_impersonated(url: str, *, cap: int, timeout: float) -> str | No
         if len(body) > cap:
             logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d (impersonate)", url, len(body))
             return None
+        if _is_pdf(body, r.headers.get("content-type", "")):
+            return await _pdf_body_text(body, url)                     # §17.2029
         enc = r.encoding or "utf-8"
         return body.decode(enc, errors="replace")
     except Exception as exc:
@@ -662,6 +664,12 @@ async def _fetch_url_bounded(
                     logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
                     _fail("size_cap_exceeded")
                     return None
+            # §17.2029 — a PDF is read as its text; decoded as a string it was bytes nothing could read.
+            if _is_pdf(bytes(buf), resp.headers.get("content-type", "")):
+                text_out = await _pdf_body_text(bytes(buf), url)
+                if text_out is None:
+                    _fail("pdf_unreadable")
+                return text_out
             enc = resp.encoding or "utf-8"
             try:
                 return bytes(buf).decode(enc, errors="replace")
@@ -968,3 +976,33 @@ async def _extract_pdf_text(
         f"PDF appears to be scanned or unreadable: "
         f"pypdf={len(text_out)} chars, plumber={len(plumber_text)} chars, pages={pages}"
     )
+
+
+# §17.2029 — the head a fetched PDF's text starts with; `research_agent._non_html_text` reads a body carrying it whole.
+PDF_TEXT_HEAD = "PDF document, "
+_PDF_TEXT_HEAD_RE = re.compile(r"PDF document, \d+ pages?, read with \w+; its text:\n")
+
+
+def _is_pdf(body: bytes, content_type: str) -> bool:
+    """§17.2029 — a PDF by its own magic bytes or by the server's declared type."""
+    return body[:1024].lstrip().startswith(b"%PDF-") or "application/pdf" in (content_type or "").lower()
+
+
+def is_pdf_text(body: str) -> bool:
+    """§17.2029 — True for the text `_fetch_url_bounded` made of a PDF."""
+    return bool(_PDF_TEXT_HEAD_RE.match(body or ""))
+
+
+async def _pdf_body_text(body: bytes, url: str) -> str | None:
+    """§17.2029 — a fetched PDF as its text, under the head `is_pdf_text` knows; None when it has no readable text.
+    Live (2026-11-21, §17.1975): `sec.gov/files/form_13f_readme.pdf` loaded 200 through the engine's fetch and was
+    decoded as a string -- 300 kB of PDF bytes that nothing read. Extraction runs off the event loop under
+    `research_pdf_extract_timeout` (`_bounded_extract`), pypdf first and pdfplumber when pypdf reads too little."""
+    try:
+        text_out, pages, used, _fell_back = await _extract_pdf_text(body, "auto")
+    except Exception as exc:
+        logger.warning("url_fetch_pdf_unreadable: url=%s bytes=%d error=%s", url, len(body), exc)
+        return None
+    logger.info("url_fetch_pdf_read: url=%s bytes=%d pages=%d chars=%d extractor=%s",
+                url, len(body), pages, len(text_out), used)
+    return f"{PDF_TEXT_HEAD}{pages} page{'s' if pages != 1 else ''}, read with {used}; its text:\n{text_out}"
