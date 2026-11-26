@@ -104,30 +104,38 @@ def _build_url(source: str, release_date: date, version: int) -> str:
     raise AssertionError(f"source {source!r} passed SUPPORTED_SOURCES but has no URL")
 
 
+#: §17.2043 — the daily Reg SHO file's columns as FINRA serves it (live 2026-11-26, CNMSshvol20261125.txt):
+#: ``Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market``, a header row, decimal volumes, and a one-field
+#: record-count trailer. The ``short_interest`` source name is kept (the schedule and the engine's contracts use it);
+#: the file is daily short SALE volume, not bi-monthly short interest.
+SHORT_VOLUME_COLUMNS: int = 6
+
+
 def _parse_short_interest(
     row: list[str], release_date: date, version: int
 ) -> FinraRecord | None:
-    """Parse a 5-field short interest row into a FinraRecord.
+    """Parse one row of FINRA's daily short-volume file into a FinraRecord.
 
-    Expected fields: settlement date, symbol, short interest,
-    average daily volume, days to cover.
+    Fields: trade date (YYYYMMDD), symbol, short volume, short-exempt volume, total volume, reporting markets.
+    The header row, the record-count trailer and anything else not six fields wide return None.
     """
-    if len(row) != 5:
+    if len(row) != SHORT_VOLUME_COLUMNS:
         return None
-    settlement_date, symbol, short_interest, avg_daily_volume, days_to_cover = [
+    trade_date, symbol, short_volume, short_exempt_volume, total_volume, market = [
         cell.strip() for cell in row
     ]
-    if not symbol:
+    if not symbol or not (len(trade_date) == 8 and trade_date.isdigit()):
         return None
     return FinraRecord(
         source_type="short_interest",
         release_date=release_date,
         version=version,
         symbol=symbol,
-        settlement_date=settlement_date,
-        short_interest=short_interest,
-        avg_daily_volume=avg_daily_volume,
-        days_to_cover=days_to_cover,
+        trade_date=trade_date,
+        short_volume=short_volume,
+        short_exempt_volume=short_exempt_volume,
+        total_volume=total_volume,
+        market=market,
     )
 
 
@@ -172,7 +180,7 @@ def _direction_for(record: FinraRecord) -> str:
     """Return 'flat' when every volume field is zero, otherwise 'long'."""
     numeric_keys: tuple[str, ...]
     if record.source_type == "short_interest":
-        numeric_keys = ("short_interest", "avg_daily_volume", "days_to_cover")
+        numeric_keys = ("short_volume", "short_exempt_volume", "total_volume")
     else:  # ats_volume
         numeric_keys = ("ats_volume", "total_volume", "ats_market_share")
 
