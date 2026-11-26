@@ -22,6 +22,7 @@ block for the minutes/hours a full build takes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 from uuid import UUID
@@ -265,10 +266,9 @@ async def research_sessions(limit: int = 10) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # HTTP mount plumbing (used by main.py)
 # ---------------------------------------------------------------------------
-def streamable_http_app():
-    """The Starlette ASGI app for the Streamable-HTTP transport, to mount at
-    ``/mcp``. Its session manager must be run in the parent app's lifespan via
-    ``session_manager_context()``.
+def _build_streamable_http_app():
+    """One Starlette app for the Streamable-HTTP transport, with its OWN
+    session manager (the SDK makes a new one on every call).
 
     ``streamable_http_path='/'`` so that mounting the app under ``/mcp`` serves
     the endpoint at ``/mcp`` (the SDK default ``/mcp`` would double to
@@ -286,11 +286,57 @@ def streamable_http_app():
     )
 
 
-def session_manager_context():
-    """Async context manager that runs the Streamable-HTTP session manager for
-    the life of the parent app. Enter it around the orchestrator's lifespan
+# §17.2037 (#182) — `StreamableHTTPSessionManager.run()` is once-per-instance.
+# The mount used to hold the ONE manager made at import, so a second lifespan
+# entry (every `with TestClient(app)` after the first; §17.808 only kept it
+# from crashing startup) left /mcp with no running manager behind it. Each
+# `session_manager_context()` now builds a fresh transport app, and the mount
+# forwards to whichever one is live.
+_live_app = None
+
+
+class _LiveStreamableHTTPApp:
+    """The ASGI app mounted at ``/mcp``: forwards to the transport app whose
+    session manager the current lifespan is running."""
+
+    async def __call__(self, scope, receive, send):
+        target = _live_app
+        if target is None:
+            if scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 503,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body",
+                            "body": b"MCP session manager is not running"})
+            return
+        await target(scope, receive, send)
+
+
+def streamable_http_app():
+    """The ASGI app to mount at ``/mcp``. Its session manager is started (and
+    rebuilt) by ``session_manager_context()`` in the parent app's lifespan."""
+    return _LiveStreamableHTTPApp()
+
+
+def live_session_manager():
+    """The session manager behind the mount right now, or None outside a
+    lifespan."""
+    return None if _live_app is None else mcp.session_manager
+
+
+@contextlib.asynccontextmanager
+async def session_manager_context():
+    """Run a FRESH Streamable-HTTP session manager for the life of the parent
+    app and point the mount at it. Enter it around the orchestrator's lifespan
     ``yield`` when ``settings.mcp_server_enabled``."""
-    return mcp.session_manager.run()
+    global _live_app
+    built = _build_streamable_http_app()
+    async with mcp.session_manager.run():
+        _live_app = built
+        try:
+            yield
+        finally:
+            if _live_app is built:
+                _live_app = None
 
 
 class ApiKeyASGIGuard:
