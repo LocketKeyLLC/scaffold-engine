@@ -279,7 +279,7 @@ SSHO="-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new"
 if [ "${1:-}" = check ]; then
     IP="$(cat "$IPFILE" 2>/dev/null || true)"
     [ -n "$IP" ] || { echo "FAILED: no address recorded for VM $GID yet (no step has reached it over ssh)"; exit 1; }
-    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "${2:-true}")" <<< "$MASS_PASSWORD"
+    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "exec </dev/null; ${2:-true}")" <<< "$MASS_PASSWORD"
     exit $?
 fi
 # §17.1744 -- `boot`: start the VM and wait for it to answer, in its OWN phases, each inside the runner's 180 s. Live
@@ -318,7 +318,9 @@ if [ -z "$IP" ] || ! ssh $SSHO "$USER_NAME@$IP" true >/dev/null 2>&1; then
     printf '%s\n' "$IP" > "$IPFILE"
 fi
 # one root command inside the guest; sudo reads the password from the first line of stdin
-gsu() { ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "$1")" <<< "$MASS_PASSWORD" 2>/dev/null; }
+# §17.2033 -- and the command reads NOTHING from it: on a guest whose sudo needs no password (NOPASSWD, a cloud image's
+# default user) sudo leaves the password line unread, and a command that reads stdin would receive it
+gsu() { ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' bash -c $(printf '%q' "exec </dev/null; $1")" <<< "$MASS_PASSWORD" 2>/dev/null; }
 cat > /tmp/in_vm_{GID}_remote.sh <<'REMOTE'
 {STRICT}
 export DEBIAN_FRONTEND=noninteractive
@@ -326,8 +328,14 @@ export DEBIAN_FRONTEND=noninteractive
 REMOTE
 case "${1:-start}" in
   start)
-    ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' tee /root/.scaffold_step.sh >/dev/null" <<< "$MASS_PASSWORD
-$(cat /tmp/in_vm_{GID}_remote.sh)" || { echo "FAILED: could not write the step's script into VM $GID"; exit 1; }
+    # §17.2033 -- the script and the password never share a stream. This was ONE stdin, "password\nscript", into
+    # `sudo -S tee`, which assumed sudo consumes line 1: on a NOPASSWD guest sudo reads nothing, so tee wrote the
+    # password as the script's first line -- a root-owned file holding the secret, run as a command whose
+    # "command not found" names it in the step's log. The script goes in as the guest user (no sudo, umask 077),
+    # and sudo's stdin is the password alone, which a NOPASSWD sudo simply leaves unread.
+    ssh $SSHO "$USER_NAME@$IP" "umask 077 && cat > .scaffold_step.sh" < /tmp/in_vm_{GID}_remote.sh \
+      && ssh $SSHO "$USER_NAME@$IP" "sudo -S -p '' install -m 600 .scaffold_step.sh /root/.scaffold_step.sh; rc=\$?; rm -f .scaffold_step.sh; exit \$rc" <<< "$MASS_PASSWORD" \
+      || { echo "FAILED: could not write the step's script into VM $GID"; exit 1; }
     gsu "systemctl stop $UNIT 2>/dev/null; systemctl reset-failed $UNIT 2>/dev/null; rm -f /root/.scaffold_step.log /root/.scaffold_step.err /root/.scaffold_step.reported /root/.scaffold_step.rc; true" >/dev/null
     gsu "systemd-run --unit $UNIT --collect -p StandardOutput=append:/root/.scaffold_step.log -p StandardError=append:/root/.scaffold_step.err bash -c 'bash /root/.scaffold_step.sh; echo \$? > /root/.scaffold_step.rc'" >/dev/null \
       || { echo "FAILED: could not start $UNIT inside VM $GID (is systemd running in the guest?)"; exit 1; }

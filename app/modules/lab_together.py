@@ -39,6 +39,33 @@ def take_reset(job_id: str) -> bool:
     return False
 
 
+#: §17.2026 — what the checks before delivery found and the engine did NOT open a step for (each had its one fix):
+#: job -> lines the delivery question carries. Live (5b4880c0, 2026-11-05, §17.1933): "A file failing again ... is
+#: logged and the question is parked as before" -- the operator was asked to deliver code whose tests fail together,
+#: and only the log said so.
+_STILL_OPEN: dict[str, list[str]] = {}
+
+
+def clear_still_open(job_id: str) -> None:
+    """Start of the checks before a delivery question: nothing is known open yet."""
+    _STILL_OPEN.pop(job_id, None)
+
+
+def note_still_open(job_id: str, line: str) -> None:
+    lines = _STILL_OPEN.setdefault(job_id, [])
+    if line not in lines:
+        lines.append(line)
+
+
+def still_open_note(job_id: str) -> str:
+    """§17.2026 — the delivery question's note on what still fails ("" when nothing does)."""
+    lines = _STILL_OPEN.get(job_id) or []
+    if not lines:
+        return ""
+    return ("Before you answer -- the engine's checks before delivery left these open (it opens no more steps for "
+            "them; delivering now delivers them as they are):\n" + "".join(f"- {x}\n" for x in lines[:20]))
+
+
 #: §17.1934 — a stale tests-only step's text, once it is narrowed to the modules no current test file covers
 NARROWED_KEY = "stale_tests_narrowed"
 _NARROW_NOTE = ("\n\n§17.1934 — write this file's tests for {mods} only. Every other module it tested has its own tests "
@@ -92,6 +119,17 @@ def narrow_stale_test_steps(tasks: list[dict], rows: list[dict], files: dict[str
     return changes
 
 
+def _failing_by_file(failed: list[str]) -> dict[str, list[str]]:
+    """pytest node ids -> {test file: [test names]} (a parametrised id's bracket dropped), in order, each once."""
+    by_file: dict[str, list[str]] = {}
+    for nid in failed:
+        path, _, name = nid.partition("::")
+        leaf = name.rsplit("::", 1)[-1].split("[", 1)[0]
+        if leaf not in by_file.setdefault(path, []):
+            by_file[path].append(leaf)
+    return by_file
+
+
 def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str], by_key: dict[str, dict],
                         owned: list[tuple[str, str, list[str]]] | None = None) -> list[tuple[str, str, list[str]]]:
     """(step, test file, failing test names) for each failing file whose writer is a tests-only step of this job not
@@ -137,6 +175,8 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
     if res.verdict != "fail" or not res.failed:
         logger.info("lab_tests_together job=%s verdict=%s files=%d passed=%d", job_id, res.verdict, len(tests),
                     len(res.passed))
+        if res.verdict != "pass":                                                                # §17.2026
+            note_still_open(job_id, f"the job's tests were not run together ({res.verdict}): {res.reason[:300]}")
         return []
     from app.modules.engine_plan import _PYTEST_COUNTS_RE
     cm = next((m for m in _PYTEST_COUNTS_RE.finditer(res.reason or "") if any(m.groups())), None)
@@ -150,7 +190,15 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
                 by_key[k] = {**by_key[k], "tool_config": cfg if isinstance(cfg, dict) else json.loads(cfg)}
     reset: list[str] = []
     owned: list[tuple[str, str, list[str]]] = []
-    for step, path, names in steps_to_read_again(tests, res.failed, by_key, owned):
+    again = steps_to_read_again(tests, res.failed, by_key, owned)
+    # §17.2026 — a failing file no step is read again for, and no fix step is opened for: the delivery question says so
+    handled = {p for _s, p, _n in again} | {p for _s, p, _n in owned}
+    for path, names in _failing_by_file(res.failed).items():
+        if path not in handled:
+            note_still_open(job_id, f"`{path}` (step {(tests.get(path) or ('', '?'))[1]}): {len(names)} test(s) fail when "
+                                f"the job's tests run together ({counts}): {', '.join(names[:8])} -- its step was "
+                                "read again for this once already, or is not this job's to redraw")
+    for step, path, names in again:
         row = by_key[step]
         async with async_session() as db:
             node_id = (await db.execute(text("SELECT id FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
@@ -236,6 +284,8 @@ async def failing_test_fix_steps(job_id: str, deliver_key: str, files: list[tupl
         title = f"Fix {Path(path).stem} (its tests fail with the job's)"
         if title in titles:
             logger.warning("lab_tests_together_failing file=%s step=%s -- its fix step ran once already", path, step)
+            note_still_open(job_id, f"`{path}` (step {step}): {len(names)} test(s) fail when the job's tests run together "
+                                f"({counts}): {', '.join(names[:8])} -- its fix step \"{title}\" ran once already")
             continue
         prompt = (f"Python test module `{path}` -- step {step}'s tests: edit it in place (the whole file, every test "
                   f"kept). Run with the job's other tests before delivery ({counts}), these fail:\n"
@@ -310,4 +360,71 @@ async def lint_fix_steps(job_id: str, deliver_key: str) -> list[str]:
         if key:
             added.append(key)
             logger.warning("lab_lint_fix_added job=%s step=%s file=%s findings=%d", job_id, key, path, len(lines))
+    return added
+
+
+async def import_fix_steps(job_id: str, deliver_key: str) -> list[str]:
+    """§17.2027 — before delivery, every one of the job's modules is imported in the sandbox with the rest present, each
+    on its own: the together-run (§17.1933) imports a module only when one of the job's test files does. A module that
+    does not import gets a fix step (once; the delivery waits on it) for the file the failure is in -- the deepest of
+    the job's own frames -- so the importer whose `from x import NAME` broke is fixed once, not every module that
+    imports it. Live (5b4880c0, 2026-11-05, §17.1931): the delivered branch's backtester, the backtesting entry point
+    and the lab's wiring module no longer imported, and the delivery question had opened. A fix step that ran once
+    already is named in the delivery question instead (§17.2026). Returns the steps added."""
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source
+    from app.modules.engine_plan import _tests_note
+    from app.sandbox import engine_tests
+    async with async_session() as db:
+        rows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+        titles = {r[0] for r in (await db.execute(_t("SELECT title FROM dag_nodes WHERE job_id = :j"),
+                                                  {"j": job_id})).all()}
+    files = engine_source.job_files(rows)
+    mods = {p: v for p, v in files.items() if p.startswith("app/") and p.endswith(".py") and not engine_tests.is_test(p)}
+    if not mods:
+        return []
+    output = "\n\n".join(f"```python\n# {p}\n{code.rstrip()}\n```" for p, (code, _s) in sorted(mods.items()))
+    res = await engine_tests.check(output, {"node_key": f"{deliver_key}:imports", "title": "the job's modules together"},
+                                   rows)
+    logger.info("lab_imports_together job=%s verdict=%s modules=%d failed=%d", job_id, res.verdict, len(mods),
+                len(res.imports))
+    if res.verdict == "pass":
+        return []
+    if res.verdict != "fail":
+        note_still_open(job_id, f"the job's modules were not imported together ({res.verdict}): {res.reason[:300]}")
+        return []
+    if not res.imports:
+        note_still_open(job_id, "the job's modules do not import together, and the sandbox named no module: "
+                            + res.reason[-300:])
+        return []
+    by_file: dict[str, list[dict]] = {}
+    for f in res.imports:
+        own = [fr.rsplit(":", 1)[0] for fr in f["frames"] if fr.rsplit(":", 1)[0] in mods]
+        at = own[-1] if own else f["module"].replace(".", "/") + ".py"
+        by_file.setdefault(at, []).append(f)
+    taken = {str(r.get("node_key")) for r in rows}
+    added: list[str] = []
+    for path, fails in sorted(by_file.items()):
+        leaf = Path(path).stem
+        title = f"Fix {leaf} (it does not import with the job's modules)"
+        lines = [f"`{f['module']}`: {f['error']}" + (f" (at {', '.join(f['frames'][-2:])})" if f["frames"] else "")
+                 for f in fails]
+        if title in titles or path not in mods:
+            logger.warning("lab_imports_together_failing job=%s file=%s -- %s", job_id, path,
+                           "its fix step ran once already" if title in titles else "not one of the job's files")
+            note_still_open(job_id, f"`{path}` does not import with the job's modules: {'; '.join(lines[:3])}"
+                                + (f" -- its fix step \"{title}\" ran once already" if title in titles else ""))
+            continue
+        step = mods[path][1]
+        owner = "the earlier job's" if ":" in step else f"step {step}'s"
+        prompt = (f"Python module `{leaf}.py` -- {owner} module: edit it in place (the whole file, its public names "
+                  "kept). Imported with the job's other modules before delivery, it does not import:\n"
+                  + "".join(f"- {ln}\n" for ln in lines)
+                  + "Make it import: a name it takes from another of the job's modules that that module no longer has "
+                    "is taken from where it lives now, or defined here; change nothing else. " + _tests_note(leaf))
+        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt)
+        if key:
+            added.append(key)
+            logger.warning("lab_import_fix_added job=%s step=%s file=%s modules=%d", job_id, key, path, len(fails))
     return added

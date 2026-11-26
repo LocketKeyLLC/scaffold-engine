@@ -1963,6 +1963,10 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         except SyntaxError:
             continue
         imported: dict[str, tuple[str, str]] = {}
+        # §17.2028 — every job class a name imports, with or without an `__init__`: `imported` holds what is CALLED
+        # against a shape (functions, constructors), so an instance of a class with no `__init__` (`Client()`) was
+        # never recognised and its methods' calls went unchecked
+        classes_imported: dict[str, tuple[str, str]] = {}
         mods: dict[str, str] = {}
         from app.modules.engine_contracts import _own_nodes as _own_nodes_
         owned_imports = {id(x) for f_ in ast.walk(tree) if isinstance(f_, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -1996,6 +2000,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                             found.append(msg)
                     elif (al.name in d["funcs"] or al.name in d.get("ctors", {})) and id(n) not in owned_imports:
                         imported[al.asname or al.name] = (leaf, al.name)
+                    if al.name in d.get("classes", {}) and id(n) not in owned_imports:
+                        classes_imported[al.asname or al.name] = (leaf, al.name)              # §17.2028
             elif isinstance(n, ast.Import) and id(n) not in owned_imports:
                 for al in n.names:
                     leaf = al.name.split(".")[-1]
@@ -2023,6 +2029,7 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
         # one alias -- the file-wide map kept the last, and every other test's `mod.f(…)` was "a name it has no"
         local_mods: dict[int, dict[str, str]] = {}
         local_imported: dict[int, dict[str, tuple[str, str]]] = {}
+        local_classes: dict[int, dict[str, tuple[str, str]]] = {}                               # §17.2028
         for fn in ast.walk(tree):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 own = list(_own_nodes(fn))
@@ -2030,6 +2037,7 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 owner.update({id(x): id(fn) for x in own if isinstance(x, ast.Call)})
                 lm: dict[str, str] = {}
                 li: dict[str, tuple[str, str]] = {}
+                lc: dict[str, tuple[str, str]] = {}
                 for x in own:
                     if isinstance(x, ast.ImportFrom) and x.level == 0 and x.module == "app.modules":
                         lm.update({al.asname or al.name: al.name for al in x.names if al.name in defs})
@@ -2037,6 +2045,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                         leaf = x.module.split(".")[-1]
                         li.update({al.asname or al.name: (leaf, al.name) for al in x.names
                                    if al.name in defs[leaf]["funcs"] or al.name in defs[leaf].get("ctors", {})})
+                        lc.update({al.asname or al.name: (leaf, al.name) for al in x.names
+                                   if al.name in defs[leaf].get("classes", {})})
                     elif isinstance(x, ast.Import):
                         lm.update({al.asname or al.name.split(".")[-1]: al.name.split(".")[-1] for al in x.names
                                    if al.name.split(".")[-1] in defs})
@@ -2044,6 +2054,8 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                     local_mods[id(fn)] = lm
                 if li:
                     local_imported[id(fn)] = li
+                if lc:
+                    local_classes[id(fn)] = lc
         # §17.1874 — a call the test expects to raise is meant to fail before any write: the row a parent key points
         # at is not required of it. Live (5b4880c0 T5 a2/a3, 2026-10-30): every finding left after the redraws was
         # `execute_order(approval)` under `with pytest.raises(ValueError):` -- "`approval` is read for `approval_id`"
@@ -2076,7 +2088,7 @@ def sibling_refs(output: str, defs: dict[str, dict], fks: dict | None = None, ru
                 # (5b4880c0 T5 a4, 2026-11-02): two tests called `submit_order(symbol=…, qty=…, side=…)` without the
                 # required `order_type`; the constructor was checked, the method never was
                 inst = _instance_of(n.func.value.id, local_assigns.get(owner.get(id(n), 0), []), n.lineno,
-                                    fimported, fmods, defs)
+                                    {**classes_imported, **local_classes.get(owner.get(id(n), 0), {})}, fmods, defs)
                 sh = (defs[inst[0]].get("classes", {}).get(inst[1], {}).get("methods", {}).get(n.func.attr)
                       if inst else None)
                 if inst and sh:
