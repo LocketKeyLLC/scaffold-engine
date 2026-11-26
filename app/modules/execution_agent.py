@@ -3715,11 +3715,14 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     op_node.get("node_key"), bool(op_node.get("engine_half")), len(frame.get("verify") or []))
         async with async_session() as db:
             return await decision_pause.park_awaiting_decision(db, job_id, op_node, frame)
+    _still = ""
     if node is not None and _depth == 0:
         # §17.1933 — the delivery question waits until the job's tests pass together, as the engine's CI runs them
         from app.modules import engine_plan as _ep_d
         if _ep_d._DELIVER_QUESTION_RE.match(str(node.get("title") or "")):
-            from app.modules.lab_together import lint_fix_steps, review_fix_steps, stale_test_steps
+            from app.modules.lab_together import (clear_still_open, lint_fix_steps, note_still_open, review_fix_steps,
+                                                  stale_test_steps, still_open_note)
+            clear_still_open(job_id)                                                         # §17.2026
             try:
                 if await review_fix_steps(job_id):                                           # §17.1941
                     return None
@@ -3729,8 +3732,15 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     return None
             except Exception as exc:
                 logger.error("lab_tests_together_failed job=%s err=%r", job_id, exc)
+                note_still_open(job_id, f"the checks before delivery stopped on an error: {exc!r}"[:400])
+            _still = still_open_note(job_id)
     if node is not None:
         frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
+        # §17.2026 — what the checks before delivery left open is in the question, not only in the log
+        if _still:
+            frame["detail"] = (str(frame.get("detail") or "").rstrip() + "\n\n" + _still).strip()
+            logger.warning("deliver_question_carries_open job=%s node=%s lines=%d", job_id, node.get("node_key"),
+                           _still.count("\n- ") + 1)
     else:
         if ch is None or run_node is None:      # the branch above guarantees both; typed for the checker
             return None

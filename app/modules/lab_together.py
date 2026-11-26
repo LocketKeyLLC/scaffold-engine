@@ -39,6 +39,33 @@ def take_reset(job_id: str) -> bool:
     return False
 
 
+#: §17.2026 — what the checks before delivery found and the engine did NOT open a step for (each had its one fix):
+#: job -> lines the delivery question carries. Live (5b4880c0, 2026-11-05, §17.1933): "A file failing again ... is
+#: logged and the question is parked as before" -- the operator was asked to deliver code whose tests fail together,
+#: and only the log said so.
+_STILL_OPEN: dict[str, list[str]] = {}
+
+
+def clear_still_open(job_id: str) -> None:
+    """Start of the checks before a delivery question: nothing is known open yet."""
+    _STILL_OPEN.pop(job_id, None)
+
+
+def note_still_open(job_id: str, line: str) -> None:
+    lines = _STILL_OPEN.setdefault(job_id, [])
+    if line not in lines:
+        lines.append(line)
+
+
+def still_open_note(job_id: str) -> str:
+    """§17.2026 — the delivery question's note on what still fails ("" when nothing does)."""
+    lines = _STILL_OPEN.get(job_id) or []
+    if not lines:
+        return ""
+    return ("Before you answer -- the engine's checks before delivery left these open (it opens no more steps for "
+            "them; delivering now delivers them as they are):\n" + "".join(f"- {x}\n" for x in lines[:20]))
+
+
 #: §17.1934 — a stale tests-only step's text, once it is narrowed to the modules no current test file covers
 NARROWED_KEY = "stale_tests_narrowed"
 _NARROW_NOTE = ("\n\n§17.1934 — write this file's tests for {mods} only. Every other module it tested has its own tests "
@@ -92,6 +119,17 @@ def narrow_stale_test_steps(tasks: list[dict], rows: list[dict], files: dict[str
     return changes
 
 
+def _failing_by_file(failed: list[str]) -> dict[str, list[str]]:
+    """pytest node ids -> {test file: [test names]} (a parametrised id's bracket dropped), in order, each once."""
+    by_file: dict[str, list[str]] = {}
+    for nid in failed:
+        path, _, name = nid.partition("::")
+        leaf = name.rsplit("::", 1)[-1].split("[", 1)[0]
+        if leaf not in by_file.setdefault(path, []):
+            by_file[path].append(leaf)
+    return by_file
+
+
 def steps_to_read_again(tests: dict[str, tuple[str, str]], failed: list[str], by_key: dict[str, dict],
                         owned: list[tuple[str, str, list[str]]] | None = None) -> list[tuple[str, str, list[str]]]:
     """(step, test file, failing test names) for each failing file whose writer is a tests-only step of this job not
@@ -137,6 +175,8 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
     if res.verdict != "fail" or not res.failed:
         logger.info("lab_tests_together job=%s verdict=%s files=%d passed=%d", job_id, res.verdict, len(tests),
                     len(res.passed))
+        if res.verdict != "pass":                                                                # §17.2026
+            note_still_open(job_id, f"the job's tests were not run together ({res.verdict}): {res.reason[:300]}")
         return []
     from app.modules.engine_plan import _PYTEST_COUNTS_RE
     cm = next((m for m in _PYTEST_COUNTS_RE.finditer(res.reason or "") if any(m.groups())), None)
@@ -150,7 +190,15 @@ async def stale_test_steps(job_id: str, deliver_key: str) -> list[str]:
                 by_key[k] = {**by_key[k], "tool_config": cfg if isinstance(cfg, dict) else json.loads(cfg)}
     reset: list[str] = []
     owned: list[tuple[str, str, list[str]]] = []
-    for step, path, names in steps_to_read_again(tests, res.failed, by_key, owned):
+    again = steps_to_read_again(tests, res.failed, by_key, owned)
+    # §17.2026 — a failing file no step is read again for, and no fix step is opened for: the delivery question says so
+    handled = {p for _s, p, _n in again} | {p for _s, p, _n in owned}
+    for path, names in _failing_by_file(res.failed).items():
+        if path not in handled:
+            note_still_open(job_id, f"`{path}` (step {(tests.get(path) or ('', '?'))[1]}): {len(names)} test(s) fail when "
+                                f"the job's tests run together ({counts}): {', '.join(names[:8])} -- its step was "
+                                "read again for this once already, or is not this job's to redraw")
+    for step, path, names in again:
         row = by_key[step]
         async with async_session() as db:
             node_id = (await db.execute(text("SELECT id FROM dag_nodes WHERE job_id = :j AND node_key = :k"),
@@ -236,6 +284,8 @@ async def failing_test_fix_steps(job_id: str, deliver_key: str, files: list[tupl
         title = f"Fix {Path(path).stem} (its tests fail with the job's)"
         if title in titles:
             logger.warning("lab_tests_together_failing file=%s step=%s -- its fix step ran once already", path, step)
+            note_still_open(job_id, f"`{path}` (step {step}): {len(names)} test(s) fail when the job's tests run together "
+                                f"({counts}): {', '.join(names[:8])} -- its fix step \"{title}\" ran once already")
             continue
         prompt = (f"Python test module `{path}` -- step {step}'s tests: edit it in place (the whole file, every test "
                   f"kept). Run with the job's other tests before delivery ({counts}), these fail:\n"
