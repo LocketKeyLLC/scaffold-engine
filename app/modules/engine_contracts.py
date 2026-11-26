@@ -499,6 +499,14 @@ def _returns_hint(code: str, fname: str) -> str:
     return query_return(code, fname)
 
 
+def _at_lines(path: str, line: int, also: list[int] | set[int]) -> str:
+    """§17.2010/§17.2022 — "`path:L1`" for a finding about one line, "`path:L1` (and lines L2, …)" for one about
+    several: a retry keeps what its findings do not name, so a finding names every line it is about (the leading
+    `path:line` kept for whatever reads it, §17.2021 reads the rest)."""
+    rest = sorted(set(also) - {line})
+    return f"`{path}:{line}`" + (f" (and line{'s' if len(rest) > 1 else ''} {', '.join(map(str, rest))})" if rest else "")
+
+
 def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str],
                    fks: dict[str, dict[str, str]] | None = None) -> list[str]:
     """§17.1836 — each test that replaces a function of another finished module of the job that never leaves the
@@ -510,23 +518,26 @@ def internal_fakes(files: dict[str, str], modules: dict[str, str], own: set[str]
     reach = {**modules, **{p.rsplit("/", 1)[1][:-3]: c for p, c in files.items()
                           if p.startswith("app/") and p.endswith(".py")}}
     found: list[str] = []
-    seen: set[tuple[str, str]] = set()
     for path, code in files.items():
         if not path.startswith("tests/"):
             continue
-        for mod, name, line in _patch_targets(code):
-            origin = _origin(reach, mod, name) if mod in reach else None
+        # §17.2022 — one finding per stand-in and file, naming every line that makes it: the seen-set spanned the
+        # files and named the first line only, so a retry fixed that line and kept the rest (the §17.2010 shape)
+        seen: set[tuple[str, str]] = set()
+        targets = [(m, n, ln, _origin(reach, m, n) if m in reach else None) for m, n, ln in _patch_targets(code)]
+        for mod, name, line, origin in targets:
             if not origin or origin in own or origin not in modules or (origin, name) in seen:
                 continue
             if reaches_outside(modules[origin], job, reach, frozenset({origin})):
                 continue
             seen.add((origin, name))
+            also = {ln for _m, n, ln, o in targets if (o, n) == (origin, name)}
             hint = _returns_hint(modules[origin], name)
             # §17.1852 — and WHICH rows: the tables the real one reads (followed through the job's modules) and the
             # finished writers that insert them, so "insert the rows it reads" is an instruction, not a hope;
             # §17.1853 — parents first, along the job's foreign keys
             found.append(
-                f"`{path}:{line}` replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
+                f"{_at_lines(path, line, also)} replaces `{name}` (`{origin}`, a finished module that never leaves the engine) with "
                 "a stand-in: call the real one -- against the scratch database, with the rows it reads, when it uses "
                 "one -- so the test sees what it really does"
                 + (f" (it returns {hint})" if hint else "")
@@ -1017,9 +1028,11 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
             continue
         raises = _expects_a_raise(tree)
         scopes, covering, _fns = _test_scopes(tree, code)
-        seen: set[tuple[str, str]] = set()
+        # §17.2022 — every call that runs it unpatched, one finding per function, naming all their lines: the first
+        # one alone was named, and a retry fixed that test and kept the others (the §17.2010 shape)
+        hits: dict[tuple[str, str], list[tuple[int, list[str], list[str]]]] = {}
         for mod, fname, line in _test_calls(code):
-            if mod not in reach or (mod, fname) in seen or any(a <= line <= b for a, b in raises):
+            if mod not in reach or any(a <= line <= b for a, b in raises):
                 continue
             scope = _scope_of(scopes, line)
             if scope and not scope.split("@")[0].startswith("test"):
@@ -1032,10 +1045,14 @@ def runs_secrets_for_real(files: dict[str, str], modules: dict[str, str], own: s
             readers = sorted(set(secrets.values()) - covered) if "runner_secrets" not in covered else []
             if not readers:
                 continue
-            seen.add((mod, fname))
-            named = sorted(s for s, r in secrets.items() if s and r in readers)
+            hits.setdefault((mod, fname), []).append(
+                (line, readers, sorted(s for s, r in secrets.items() if s and r in readers)))
+        for (mod, fname), calls in hits.items():
+            line = calls[0][0]
+            readers = sorted({r for _ln, rs, _n in calls for r in rs})
+            named = sorted({s for _ln, _r, ns in calls for s in ns})
             found.append(
-                f"`{path}:{line}` runs `{fname}` (`{mod}`) for real, and it reads the operator secret"
+                f"{_at_lines(path, line, {ln for ln, _r, _n in calls})} runs `{fname}` (`{mod}`) for real, and it reads the operator secret"
                 + (f"{'s' if len(named) > 1 else ''} {', '.join(f'`{s}`' for s in named)}" if named else "s it needs")
                 + f" through `values_for` ({', '.join(f'`{r}`' for r in readers)}) -- the sandbox has no secrets, "
                 "so the code refuses to run (§17.1776). Patch "
@@ -4070,11 +4087,15 @@ def unreturned_keys(code: str, modules: dict[str, str]) -> list[dict]:
             if not carries:
                 continue                                         # unknown, or no dict literal at all: no claim
             for key, line in _reads_of(fn, var):
-                if key in carries or (pmod, pfn, key) in seen:
+                if key in carries:
+                    continue
+                if (pmod, pfn, key) in seen:
+                    # §17.2022 — the same key read again: named on the first one's finding, not dropped
+                    next(g for g in out if (g["producer"], g["key"]) == (f"{pmod}.{pfn}", key))["also"].append(line)
                     continue
                 seen.add((pmod, pfn, key))
                 out.append({"producer": f"{pmod}.{pfn}", "var": var, "key": key, "carries": sorted(carries),
-                            "line": line})
+                            "line": line, "also": []})
     return out
 
 
@@ -4134,7 +4155,7 @@ def unreturned_reads(files: dict[str, str], modules: dict[str, str]) -> list[str
         for g in unreturned_keys(code, modules):
             pmod, pfn = g["producer"].split(".", 1)
             lives = _key_lives(modules, g["key"])
-            found.append(f"`{path}:{g['line']}` reads `{g['key']}` from what `{pfn}` (`{pmod}`) returns, and it "
+            found.append(f"{_at_lines(path, g['line'], g['also'])} reads `{g['key']}` from what `{pfn}` (`{pmod}`) returns, and it "
                          f"returns dicts with keys {', '.join(f'`{k}`' for k in g['carries'])} -- never `{g['key']}`"
                          + (f". {lives}" if lives else ""))
     return found

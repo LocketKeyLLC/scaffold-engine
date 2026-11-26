@@ -106,10 +106,10 @@ def test_c():
 '''
     found = internal_fakes(_files(test), MODULES, {"paper_signal_generator"})
     assert [f.split(" with a stand-in")[0] for f in found] == [
-        "`tests/test_paper_signal_generator.py:6` replaces `build_row` (`paper_audit_trail_writer`, a finished module "
-        "that never leaves the engine)",
+        "`tests/test_paper_signal_generator.py:6` (and line 13) replaces `build_row` (`paper_audit_trail_writer`, a "
+        "finished module that never leaves the engine)",
         "`tests/test_paper_signal_generator.py:10` replaces `write_signal` (`paper_audit_trail_writer`, a finished "
-        "module that never leaves the engine)"]                                      # build_row once, not twice
+        "module that never leaves the engine)"]               # build_row once, naming both its lines (§17.2022)
     assert "(it returns dicts with keys `ok`, `ticker`)" in found[0]                 # not the nested `return 5`
 
 
