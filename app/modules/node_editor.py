@@ -97,7 +97,10 @@ async def list_nodes(job_id: str, db: AsyncSession) -> dict:
             "SELECT node_key, title, description, status, depends_on, "
             "       execution_order, edit_version, prompt_template, "
             "       assigned_model, tool, "
-            "       COALESCE(is_deliverable, FALSE) AS is_deliverable, tool_config "
+            "       COALESCE(is_deliverable, FALSE) AS is_deliverable, tool_config, "
+            # §17.2031 — why a failed step failed, under the name /exec/status gives it (§17.450): the graph is where
+            # an auto run is watched (§17.1513), and it showed a blocked job's failed step as a red box and nothing else
+            "       CASE WHEN status = 'failed' THEN last_verification_reason END AS failure_reason "
             "FROM dag_nodes WHERE job_id = :j "
             "ORDER BY execution_order, node_key"
         ),
