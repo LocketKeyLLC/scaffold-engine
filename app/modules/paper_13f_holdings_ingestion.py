@@ -26,7 +26,8 @@ from app.modules.runner_secrets import values_for
 logger = logging.getLogger("scaffold")
 
 # Fixed values that must never change at runtime (module constants).
-SUBMISSIONS_URL_TEMPLATE = "https://data.sec.gov/submissions/CIK{}.json"
+SUBMISSIONS_BASE = "https://data.sec.gov/submissions"
+SUBMISSIONS_URL_TEMPLATE = SUBMISSIONS_BASE + "/CIK{}.json"
 ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 INDEX_URL_TEMPLATE = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
 RATE_LIMIT_SECONDS = 0.5  # well under SEC's 10 req/s limit
@@ -58,18 +59,33 @@ def _parse_edgar_date(value: str | None) -> datetime | None:
         return None
 
 
+def _column_rows(columns: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows from EDGAR's column layout (``{"form": [...], "accessionNumber": [...], ...}``, one index per filing)."""
+    forms = columns.get("form")
+    if not isinstance(forms, list):
+        return []
+    return [
+        {key: (values[i] if isinstance(values, list) and i < len(values) else None) for key, values in columns.items()}
+        for i in range(len(forms))
+    ]
+
+
 def _iter_recent_rows(payload: Any) -> Iterable[dict[str, Any]]:
-    """Yield recent filing rows from either ``filings.recent`` or a bare ``recent``."""
+    """Yield recent filing rows from either ``filings.recent`` or a bare ``recent``.
+
+    §17.2041 -- EDGAR writes ``filings.recent`` and each older page as COLUMNS (parallel arrays, as
+    paper_edgar_form_4_ingestion reads them), so a real filer yielded no row at all; a list of rows is still read."""
     if not isinstance(payload, dict):
         return
     filings = payload.get("filings")
-    if isinstance(filings, dict):
-        recent = filings.get("recent")
+    candidates = [filings.get("recent")] if isinstance(filings, dict) else []
+    candidates.append(payload.get("recent"))
+    candidates.append(payload if "form" in payload else None)  # an older page is the columns themselves
+    for recent in candidates:
         if isinstance(recent, list):
             yield from recent
-    recent = payload.get("recent")
-    if isinstance(recent, list):
-        yield from recent
+        elif isinstance(recent, dict):
+            yield from _column_rows(recent)
 
 
 def _find_13f_hr_rows(payload: Any) -> list[dict[str, Any]]:
@@ -204,6 +220,11 @@ async def _fetch_additional_rows(
         url = file_info.get("url") or file_info.get("name")
         if not url:
             continue
+        # §17.2041 -- EDGAR lists the older pages by file name only
+        # ("CIK0001067983-submissions-001.json"); they live beside the base
+        # submissions JSON. Requested as-is, every filer with paged history failed.
+        if not str(url).startswith("http"):
+            url = f"{SUBMISSIONS_BASE}/{url}"
         response = await _rate_limited_request(client, url, headers=headers)
         data = response.json()
         for row in _find_13f_hr_rows(data):

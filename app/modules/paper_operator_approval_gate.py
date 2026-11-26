@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.database import async_session
 from app.modules.operator_ask import answer_handler, decision, open_decision_job
+from app.modules.paper_order_executor import execute_order
 
 logger = logging.getLogger("scaffold")
 
@@ -85,12 +86,13 @@ async def _record_approval(
     operator_id: str,
     decision: str,
     reason: Optional[str] = None,
-) -> None:
-    await db.execute(
+) -> int:
+    result = await db.execute(
         text(
             """
             INSERT INTO approval (proposal_id, operator_id, decision, reason)
             VALUES (:proposal_id, :operator_id, :decision, :reason)
+            RETURNING id
             """
         ),
         {
@@ -100,7 +102,9 @@ async def _record_approval(
             "reason": reason,
         },
     )
+    approval_id = int(result.scalar_one())
     await db.commit()
+    return approval_id
 
 
 async def request_approval(proposal: dict[str, Any], *, db: Optional[Any] = None) -> dict[str, Any]:
@@ -176,13 +180,32 @@ async def handle_approval_answer(
     proposal_id = payload.get("proposal_id")
     operator_id = answer.get("choice", "operator")
     async with async_session() as db:
-        await _record_approval(
+        approval_id = await _record_approval(
             db,
             proposal_id=proposal_id,
             operator_id=operator_id,
             decision="approved",
         )
     logger.info("Proposal %s approved by operator", proposal_id)
+
+    # §17.2041 -- the approved order is placed now, through the order executor
+    # (operator_ask: "an approved order is placed then, not on some later
+    # poll"). Only this approved branch reaches it. A failure -- the Alpaca keys
+    # not stored yet, the broker refusing -- leaves the approval recorded with no
+    # broker order id, and the lab's POST /execution sends it once it can.
+    try:
+        placed = await execute_order(
+            {"id": approval_id, "proposal_id": proposal_id, "decision": "approved"}
+        )
+        logger.info(
+            "Proposal %s order placed (broker_order_id row %s)",
+            proposal_id,
+            placed.get("broker_order_id"),
+        )
+    except Exception as exc:  # noqa: BLE001 - the approval stands; /execution sends it later
+        logger.warning(
+            "Proposal %s approved but its order was not placed: %s", proposal_id, exc
+        )
 
 
 __all__ = [

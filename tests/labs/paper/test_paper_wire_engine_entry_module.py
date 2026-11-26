@@ -348,13 +348,13 @@ def test_install_registers_daily_batch_job():
     mock_scheduler = MagicMock()
     with patch("app.modules.paper_wire_engine_entry_module.get_scheduler", return_value=mock_scheduler):
         install(app)
-    mock_scheduler.add_job.assert_called_once()
-    call = mock_scheduler.add_job.call_args
-    assert call.kwargs.get("id") == DAILY_BATCH_JOB_ID
+    # §17.2041: the daily batch is one of four runs; it records the day-start equity and honours a pause first
+    calls = {c.kwargs.get("id"): c for c in mock_scheduler.add_job.call_args_list}
+    call = calls[DAILY_BATCH_JOB_ID]
     assert call.kwargs.get("trigger") == "cron"
     assert call.kwargs.get("hour") == DAILY_BATCH_HOUR
     assert call.kwargs.get("minute") == DAILY_BATCH_MINUTE
-    assert call.args[0] == entry.run_daily_batch
+    assert call.args[0] == entry.run_scheduled_daily_batch
 
 
 def test_install_registers_routes():
