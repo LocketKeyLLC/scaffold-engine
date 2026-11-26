@@ -103,7 +103,16 @@ def _format_reviewer_feedback(node: dict) -> str:
 
 
 #: an engine gate's "this draft patches a name the module does not have" (`engine_contracts.unknown_patch_targets`)
-_NO_SUCH_PATCH_RE = re.compile(r"patches `(\w+)` on `(\w+)`, which has no such name")
+_NO_SUCH_PATCH_RE = re.compile(r"patches `(?P<n>\w+)` on `(?P<m>[\w.]+)`, which has no such name")
+#: §17.2023 — and every other gate finding that says a module has no such name: an import of it
+#: (`engine_source.sibling_refs` / `unresolved_refs`, `engine_contracts.missing_module_attrs`), a call of it, a read
+#: of it as a module attribute
+_NO_SUCH_NAME_RES = (
+    re.compile(r"`from [\w.]+ import \w+`: `(?P<m>[\w.]+)`(?: \(step [^)]*\))? has no `(?P<n>\w+)`"),
+    re.compile(r"`\w+\.\w+\(…\)`: `(?P<m>\w+)` \(step [^)]*\) has no `(?P<n>\w+)`"),
+    re.compile(r"imports `(?P<n>\w+)` from `(?P<m>[\w.]+)`, which has no such name"),
+    re.compile(r"reads `\w+\.\w+`, but `(?P<m>[\w.]+)` has no top-level `(?P<n>\w+)`"),
+)
 
 
 def _superseded(earlier: str, newest: str) -> str:
@@ -111,12 +120,19 @@ def _superseded(earlier: str, newest: str) -> str:
     module does not have marked as not applying. Live (69fe61c4 NOKEY2, 2026-11-24): one draft's module read `values_for`
     itself, so the view gate asked for a test patching `app.modules.paper_wire_engine_entry_module.values_for`; the
     next drafts dropped that read, the patch-target gate refused the patch ("which has no such name"), and the
-    history still said "every one must stay fixed" -- the step kept the patch through six attempts and failed."""
-    for name, mod in dict.fromkeys(_NO_SUCH_PATCH_RE.findall(newest or "")):
-        target = f"app.modules.{mod}.{name}"
-        if target in earlier:
-            earlier = earlier.replace(f"`{target}`", f"`{target}` (no longer: `{mod}` has no `{name}` now -- patch "
-                                                     f"it nowhere)", 1)
+    history still said "every one must stay fixed" -- the step kept the patch through six attempts and failed.
+    §17.2023 — not only a patch: any name the later reason says the module has no longer (imported, called, read) is
+    marked wherever the earlier one asks for it as `app.modules.M.N` or `M.N`, and every mention, not the first."""
+    gone: dict[tuple[str, str], str] = {}
+    for m in _NO_SUCH_PATCH_RE.finditer(newest or ""):
+        gone.setdefault((m["m"].rsplit(".", 1)[-1], m["n"]), "patch it nowhere")
+    for rx in _NO_SUCH_NAME_RES:
+        for m in rx.finditer(newest or ""):
+            gone.setdefault((m["m"].rsplit(".", 1)[-1], m["n"]), "use it nowhere")
+    for (mod, name), how in gone.items():
+        note = f" (no longer: `{mod}` has no `{name}` now -- {how})"
+        earlier = re.sub(rf"`(?:app\.modules\.)?{re.escape(mod)}\.{re.escape(name)}(?:\(…\)|\(\))?`(?! \(no longer)",
+                         lambda x: x.group(0) + note, earlier)
     return earlier
 
 

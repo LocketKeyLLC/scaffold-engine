@@ -84,6 +84,14 @@ updates:
     groups:
       docker-base-images:
         patterns: ["*"]
+    # §17.2040 — hold the python base at 3.14.x. #1167 rolled every image to
+    # python:3.15.2-slim and the orchestrator build failed: tree-sitter has no
+    # cp315 wheel, so pip compiles it from source and the slim image has no gcc.
+    # Digest and patch rolls within 3.14 still arrive; lift this when the pinned
+    # deps ship 3.15 wheels (a 3.15 build of requirements.txt is the check).
+    ignore:
+      - dependency-name: "python"
+        versions: [">=3.15"]
 
   # ── GitHub Actions used by the three workflows ───────────────────────────
   - package-ecosystem: "github-actions"
