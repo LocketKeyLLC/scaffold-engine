@@ -23,7 +23,7 @@ from app.modules.paper_enforce_read_only_data import read_only_session
 from app.modules.paper_entry_approval import run_approval_entry_point
 from app.modules.paper_entry_backtesting import run_backtesting_entry_point
 from app.modules.paper_execution_entry_point import run_execution_entry_point
-from app.modules.paper_fill_tracker import track_fills
+from app.modules.paper_fill_tracker import run_fill_tracker
 from app.modules.paper_lab_schedule import (
     DAILY_INGEST_JOB_ID,
     DAILY_INGEST_TRIGGER,
@@ -425,7 +425,7 @@ def _start_stream_consumer() -> Optional[asyncio.Task]:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None
-    return loop.create_task(track_fills())
+    return loop.create_task(run_fill_tracker())   # §17.2042 — supervised: no keys is a logged wait, not a crash
 
 
 def install(app: FastAPI) -> None:

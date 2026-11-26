@@ -56,6 +56,10 @@ class FillTrackerAuthError(FillTrackerError):
     """Raised when Alpaca stream credentials are missing or rejected."""
 
 
+class FillTrackerSecretsMissing(FillTrackerAuthError):
+    """§17.2042 — the Alpaca keys are not stored (the lab runs without them; the stream starts once they are)."""
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -257,7 +261,7 @@ async def track_fills() -> None:
         api_key_id = secrets.get(ALPACA_API_KEY_ID_SECRET_NAME)
         secret_key = secrets.get(ALPACA_API_SECRET_KEY_SECRET_NAME)
         if not api_key_id or not secret_key:
-            raise FillTrackerAuthError(
+            raise FillTrackerSecretsMissing(
                 "Alpaca stream secrets not configured; store "
                 "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"
             )
@@ -355,3 +359,47 @@ async def track_fills() -> None:
                 buffered, seen, last_flushed_ts = await _flush_buffered(
                     db, buffered, seen, last_flushed_ts
                 )
+
+
+#: §17.2042 — how often the supervisor re-reads the stored keys while they are missing, and the ceiling of its backoff
+#: after a rejected key or an unexpected error. A stream that closed normally is reconnected after RECONNECT_SECONDS.
+SECRETS_POLL_SECONDS: float = 300.0
+MAX_BACKOFF_SECONDS: float = 300.0
+RECONNECT_SECONDS: float = 5.0
+
+
+async def run_fill_tracker() -> None:
+    """§17.2042 — keep `track_fills` running for the life of the engine; never let it die unobserved.
+
+    The lab's entry starts this as a background task nobody awaits. Started on `track_fills` itself, a lab without
+    Alpaca keys raised `FillTrackerAuthError` at once ("Task exception was never retrieved" in the log) and the
+    stream stayed dead after the operator stored the keys, until the engine restarted. Here: missing keys are logged
+    once and re-read every SECRETS_POLL_SECONDS, so storing them starts the stream; a rejected key or any other error
+    is logged and retried with a backoff; a stream that closed is reconnected. Cancellation ends it.
+    """
+    backoff = RECONNECT_SECONDS
+    missing_logged = False
+    while True:
+        try:
+            await track_fills()
+        except FillTrackerSecretsMissing:
+            if not missing_logged:
+                logger.warning("paper_fill_tracker_unavailable: %s and %s are not stored; the fill stream starts "
+                               "when they are (re-read every %ss)", ALPACA_API_KEY_ID_SECRET_NAME,
+                               ALPACA_API_SECRET_KEY_SECRET_NAME, int(SECRETS_POLL_SECONDS))
+                missing_logged = True
+            await asyncio.sleep(SECRETS_POLL_SECONDS)
+            continue
+        except FillTrackerAuthError as exc:
+            logger.error("paper_fill_tracker_auth_failed: %s (retry in %ss)", exc, int(backoff))
+        except Exception as exc:
+            logger.error("paper_fill_tracker_failed: %r (retry in %ss)", exc, int(backoff))
+        else:
+            missing_logged = False
+            backoff = RECONNECT_SECONDS
+            logger.info("paper_fill_tracker_reconnecting in %ss", int(RECONNECT_SECONDS))
+            await asyncio.sleep(RECONNECT_SECONDS)
+            continue
+        missing_logged = False
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
