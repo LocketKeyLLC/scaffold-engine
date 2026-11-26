@@ -361,3 +361,70 @@ async def lint_fix_steps(job_id: str, deliver_key: str) -> list[str]:
             added.append(key)
             logger.warning("lab_lint_fix_added job=%s step=%s file=%s findings=%d", job_id, key, path, len(lines))
     return added
+
+
+async def import_fix_steps(job_id: str, deliver_key: str) -> list[str]:
+    """§17.2027 — before delivery, every one of the job's modules is imported in the sandbox with the rest present, each
+    on its own: the together-run (§17.1933) imports a module only when one of the job's test files does. A module that
+    does not import gets a fix step (once; the delivery waits on it) for the file the failure is in -- the deepest of
+    the job's own frames -- so the importer whose `from x import NAME` broke is fixed once, not every module that
+    imports it. Live (5b4880c0, 2026-11-05, §17.1931): the delivered branch's backtester, the backtesting entry point
+    and the lab's wiring module no longer imported, and the delivery question had opened. A fix step that ran once
+    already is named in the delivery question instead (§17.2026). Returns the steps added."""
+    from sqlalchemy import text as _t
+
+    from app.modules import engine_source
+    from app.modules.engine_plan import _tests_note
+    from app.sandbox import engine_tests
+    async with async_session() as db:
+        rows = [dict(r) for r in await engine_source.code_rows(db, job_id)]
+        titles = {r[0] for r in (await db.execute(_t("SELECT title FROM dag_nodes WHERE job_id = :j"),
+                                                  {"j": job_id})).all()}
+    files = engine_source.job_files(rows)
+    mods = {p: v for p, v in files.items() if p.startswith("app/") and p.endswith(".py") and not engine_tests.is_test(p)}
+    if not mods:
+        return []
+    output = "\n\n".join(f"```python\n# {p}\n{code.rstrip()}\n```" for p, (code, _s) in sorted(mods.items()))
+    res = await engine_tests.check(output, {"node_key": f"{deliver_key}:imports", "title": "the job's modules together"},
+                                   rows)
+    logger.info("lab_imports_together job=%s verdict=%s modules=%d failed=%d", job_id, res.verdict, len(mods),
+                len(res.imports))
+    if res.verdict == "pass":
+        return []
+    if res.verdict != "fail":
+        note_still_open(job_id, f"the job's modules were not imported together ({res.verdict}): {res.reason[:300]}")
+        return []
+    if not res.imports:
+        note_still_open(job_id, "the job's modules do not import together, and the sandbox named no module: "
+                            + res.reason[-300:])
+        return []
+    by_file: dict[str, list[dict]] = {}
+    for f in res.imports:
+        own = [fr.rsplit(":", 1)[0] for fr in f["frames"] if fr.rsplit(":", 1)[0] in mods]
+        at = own[-1] if own else f["module"].replace(".", "/") + ".py"
+        by_file.setdefault(at, []).append(f)
+    taken = {str(r.get("node_key")) for r in rows}
+    added: list[str] = []
+    for path, fails in sorted(by_file.items()):
+        leaf = Path(path).stem
+        title = f"Fix {leaf} (it does not import with the job's modules)"
+        lines = [f"`{f['module']}`: {f['error']}" + (f" (at {', '.join(f['frames'][-2:])})" if f["frames"] else "")
+                 for f in fails]
+        if title in titles or path not in mods:
+            logger.warning("lab_imports_together_failing job=%s file=%s -- %s", job_id, path,
+                           "its fix step ran once already" if title in titles else "not one of the job's files")
+            note_still_open(job_id, f"`{path}` does not import with the job's modules: {'; '.join(lines[:3])}"
+                                + (f" -- its fix step \"{title}\" ran once already" if title in titles else ""))
+            continue
+        step = mods[path][1]
+        owner = "the earlier job's" if ":" in step else f"step {step}'s"
+        prompt = (f"Python module `{leaf}.py` -- {owner} module: edit it in place (the whole file, its public names "
+                  "kept). Imported with the job's other modules before delivery, it does not import:\n"
+                  + "".join(f"- {ln}\n" for ln in lines)
+                  + "Make it import: a name it takes from another of the job's modules that that module no longer has "
+                    "is taken from where it lives now, or defined here; change nothing else. " + _tests_note(leaf))
+        key = await _insert_fix_step(job_id, deliver_key, taken, title, prompt)
+        if key:
+            added.append(key)
+            logger.warning("lab_import_fix_added job=%s step=%s file=%s modules=%d", job_id, key, path, len(fails))
+    return added
