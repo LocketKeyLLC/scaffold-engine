@@ -328,14 +328,52 @@ def relevant_facts(node: dict, facts: Optional[list]) -> list[str]:
     return [t for _a, _b, t in sorted(scored)][:8]
 
 
+#: §17.2039 (#110) — `jobs.metadata` key: the steps the executor handed to the operator because no runner exists.
+WITHOUT_RUNNER = "operators_without_runner"
+
+
+async def mark_without_runner(db: AsyncSession, job_id: str, node_key: str) -> None:
+    """Record that ``node_key`` is the operator's for want of a runner (idempotent; the caller commits)."""
+    await db.execute(text(
+        "UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{operators_without_runner}', "
+        "COALESCE(metadata->'operators_without_runner', '[]'::jsonb) || to_jsonb(CAST(:nk AS text))) "
+        "WHERE id = :jid AND NOT (COALESCE(metadata->'operators_without_runner', '[]'::jsonb) ? :nk)"),
+        {"jid": job_id, "nk": node_key})
+
+
+async def marked_without_runner(db: AsyncSession, job_id: str) -> set[str]:
+    raw = (await db.execute(text("SELECT metadata->'operators_without_runner' FROM jobs WHERE id = :jid"),
+                            {"jid": job_id})).scalar()
+    raw = json.loads(raw) if isinstance(raw, str) else raw
+    return {str(k) for k in raw} if isinstance(raw, list) else set()
+
+
+async def runner_missing(db: AsyncSession) -> bool:
+    """§17.2039 — no runner can carry out a hands-on step (none registered, or the MCP consumer is off) and the
+    supervised-run seam is the one in use. A registered runner that does not answer is NOT missing: it holds the step
+    (§17.1685)."""
+    from app.config import settings
+    if settings.shell_tool_enabled or not settings.execution_supervised_runs_enabled:
+        return False
+    from app.modules import supervised_runs
+    state, _name = await supervised_runs.runner_registered(db)
+    return state != "registered"
+
+
 async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]:
-    """The first dep-satisfied pending step whose remaining work is the operator's."""
+    """The first dep-satisfied pending step whose remaining work is the operator's.
+
+    §17.2039 (#110) — with no runner, that includes every hands-on step: nothing else can carry it out, and written
+    up as a runbook it was recorded done with nothing executed. Such a step comes back with ``no_runner`` set."""
     md = (await db.execute(text("SELECT metadata FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar()
     md = json.loads(md) if isinstance(md, str) else (md or {})
     decided = (md or {}).get("decisions") or {}
+    marked = {str(k) for k in (md or {}).get(WITHOUT_RUNNER) or []}
+    _missing: Optional[bool] = None
+    _brief = ""
     rows = (await db.execute(text("""
         SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
-               n.execution_order, n.last_verification_reason, n.output_text
+               n.execution_order, n.last_verification_reason, n.output_text, n.tool_config
           FROM dag_nodes n
          WHERE n.job_id = :jid AND n.status = 'pending'
            AND NOT EXISTS (
@@ -352,10 +390,18 @@ async def pending_operator_step(db: AsyncSession, job_id: str) -> Optional[dict]
         if isinstance(entry, dict) and entry.get("result") == ENGINE_HALF_DONE:
             node["engine_half"] = entry
             return node
-        if entry:
-            continue
-        if is_wholly_operators(node):
+        if is_wholly_operators(node) and not entry:
             return node
+        if _missing is None:
+            _missing = await runner_missing(db)
+            if _missing:
+                _brief = str((await db.execute(text("SELECT refined_brief FROM jobs WHERE id = :jid"),
+                                               {"jid": job_id})).scalar() or "")
+        if _missing:
+            from app.modules import supervised_runs
+            if node["node_key"] in marked or supervised_runs.is_hands_on_node(node, brief=_brief):
+                node["no_runner"] = True
+                return node
     return None
 
 
@@ -422,10 +468,23 @@ async def frame_operator(node: dict, *, upstream: str = "", last_check: str = ""
                          facts: Optional[list] = None, also: Optional[list[dict]] = None) -> dict:
     part = operators_part(node) or _text(node)
     also = list(also or [])
-    walk = await _walkthrough(node, part, upstream, relevant_facts(node, facts), also, has_checks=bool(checks(node)))
-    if not walk:
-        walk = f"## 👉 Do this next\n{part}\n\n(The engine could not write a fuller walkthrough this time.)"
-    chk = checks(node)
+    if node.get("no_runner"):
+        # §17.2039 (#110) — no runner: the step is the operator's whole, in its own words. There is no machine for
+        # the engine to read, so it promises no check (resolve_operator would answer `no_channel`) and their note
+        # is the record. No model draw: the step's text is the instruction.
+        part = _text(node).strip()
+        chk: list = []
+        also = []
+        walk = ("## 👉 Do this next\nNo runner is registered, so the engine cannot carry out this step on the "
+                "machine, and it does not record it done unless you do it.\n\n" + part
+                + "\n\n## ✅ Done when\nYou have done it: press \"I've done it\" and type what you saw into the note -- "
+                  "that is the record the next steps use.")
+    else:
+        walk = await _walkthrough(node, part, upstream, relevant_facts(node, facts), also,
+                                  has_checks=bool(checks(node)))
+        if not walk:
+            walk = f"## 👉 Do this next\n{part}\n\n(The engine could not write a fuller walkthrough this time.)"
+        chk = checks(node)
     return {
         "kind": KIND, "framed": True, "node_key": node.get("node_key"), "title": node.get("title"),
         "question": f"Your turn — step {node.get('node_key')}: {node.get('title')}",
