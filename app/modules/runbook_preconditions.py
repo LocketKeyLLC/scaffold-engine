@@ -846,6 +846,46 @@ async def writes_where_the_check_does_not_read(spec, texts: list[str], verify: l
     return out
 
 
+#: §17.2034 — the runner's (and the engine's own `scrub_run_output`'s) mask, `***`, standing where a VALUE goes:
+#: `Key=***`, `"apiKey": "***"`, `X-Api-Key: ***`, `<ApiKey>***</ApiKey>`, `@ByteArray(***)`. Markdown's `***bold***`,
+#: a `# ***` banner and a bare `"***"` literal (code that MASKS: `return "***" if secret else v`, measured in the
+#: stored drafts) are not values.
+_REDACTED_VALUE_RE = re.compile(
+    r"[=:]\s*[\"']?\*\*\*(?![*\w])(?=[\"'\s,;})\]&]|$)|>\*\*\*</|\(\*\*\*\)", re.M)
+
+
+def a_redacted_value_written_back(commands: list[str], files: Optional[list[dict]]) -> list[dict]:
+    """§17.2034 — a block that writes the mask `***` where a secret's value goes.
+
+    What a read prints comes back with every secret the runner or the engine knows replaced by `***`
+    (`local_runner_mcp.redact`, `scrub_run_output`, §17.1391's credential shapes). A developed step that reads a
+    config and writes the WHOLE file back carries the mask in place of the key: the service's ApiKey, a
+    password, a token become the three characters `***`, the service restarts with a credential nobody holds,
+    and every client of it fails -- while the step's own check (the file is there, the unit is active) passes.
+    The 2026-10-12 audit ledger recorded the shape; nothing refused it. One judgment per file or command."""
+    out: list[dict] = []
+    texts = [("this block's commands", str(c)) for c in commands or []] + \
+            [(str((f or {}).get("path") or "a written file"), str((f or {}).get("content") or "")) for f in files or []]
+    seen: set[str] = set()
+    for where, t in texts:
+        if where in seen:
+            continue
+        for ln in t.split("\n"):
+            if ln.lstrip().startswith(("#", ";", "//")) or not _REDACTED_VALUE_RE.search(ln):
+                continue
+            seen.add(where)
+            out.append({"command": ln.strip()[:200], "why": (
+                f"{where} writes `***` where a value goes. That is the runner's mask for a secret a read printed "
+                f"(it replaces every value it holds with `***` before anything reaches the engine), not the value: "
+                f"written back, the service's real key or password becomes the three characters `***`, it restarts "
+                f"with a credential nobody holds, and the step's own check still passes because the file is there. "
+                f"Change only the lines this step is about (a `sed` on that key, the service's own API), or put the "
+                f"secret in by NAME (`$NAME`, or a `$(…)` read of it on the machine) -- never re-emit a file you read "
+                f"back with its masked values.")})
+            break
+    return out
+
+
 def files_the_block_runs(commands: list[str], files: Optional[list[dict]]) -> list[dict]:
     """§17.1420 — the written files the block EXECUTES (`bash /tmp/x.sh`, `python3 /tmp/x.py`, `node …`,
     or the path as a command). A file it only writes and delivers -- a service's code, the engine's kit --
@@ -902,6 +942,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
         out.extend(await destructive_rewrites(commands or [], spec, files))
     except Exception as exc:                       # fail-soft: blindness is not a refusal
         logger.warning("rewrite_guard_failed err=%r", exc)
+    out.extend(a_redacted_value_written_back(commands or [], files))   # §17.2034 — the mask is not the value
     inv = inventory if inventory is not None else (await read_inventory(spec) if spec is not None else None)
     # §17.1344 — an id no machine has is not a guest. Live, "in-container 999:996"
     # (the services' uid and gid) read as guest 999, and the host-side `chown` was
@@ -977,7 +1018,14 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
     addr = str(getattr(truth, "address", "") or "")
     tgid = str(getattr(truth, "gid", "") or "")
     if addr and tgid and tgid in subjects:
-        hit = next(((t, m) for t in texts for m in _SSH_TARGET_RE.finditer(t)
+        # §17.2034 — only an ssh the block RUNS reaches the step's guest: its commands and the files it executes,
+        # at heredoc depth <= 1 (§17.1338/1420's line). A file it only writes (a service's code that ssh's from the
+        # guest to ANOTHER machine at runtime) names that machine, not a wrong address for this one -- live, the
+        # panel's route file ssh's from CT 111 to VM 106, and this rule read 106's address as "not CT 111's".
+        _run = [_resolve_ids(str(c)) for c in commands or []] + \
+               [_resolve_ids(str((f or {}).get("content") or "")) for f in files_the_block_runs(commands, files)]
+        _ran = ["\n".join(ln for ln in executed_lines(t) if not ssh_runs_inside_a_guest(ln)) for t in _run]
+        hit = next(((t, m) for t in _ran for m in _SSH_TARGET_RE.finditer(t)
                     if m.group(2) != addr and m.group(2) not in subject), None)
         if hit:
             t, m = hit
