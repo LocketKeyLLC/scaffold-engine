@@ -118,7 +118,7 @@ def compute_series(
             "gross_return": 0.0,
             "costs": 0.0,
             "max_drawdown": 0.0,
-            "sharpe_ratio": 0.0,
+            "sharpe_ratio": None,   # §17.2045 — no data is not a measured 0
             "turnover": 0.0,
         }
 
@@ -152,7 +152,7 @@ def compute_series(
             "gross_return": 0.0,
             "costs": 0.0,
             "max_drawdown": 0.0,
-            "sharpe_ratio": 0.0,
+            "sharpe_ratio": None,   # §17.2045 — no data is not a measured 0
             "turnover": 0.0,
         }
 
@@ -170,7 +170,9 @@ def compute_series(
     else:
         gross_return = float(gross_return)
     max_drawdown = float(_get_attr(latest_item, "max_drawdown") or 0.0)
-    sharpe_ratio = float(_get_attr(latest_item, "sharpe_ratio") or 0.0)
+    # §17.2045 — a Sharpe ratio the calculator could not compute (too few daily returns) stays None, not 0
+    _sharpe = _get_attr(latest_item, "sharpe_ratio")
+    sharpe_ratio = None if _sharpe is None else float(_sharpe)
     turnover = float(_get_attr(latest_item, "turnover") or 0.0)
 
     return {

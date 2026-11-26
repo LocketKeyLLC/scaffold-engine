@@ -17,7 +17,8 @@ Runs (registered by `paper_wire_engine_entry_module.install`, on the engine's on
     proposes unless the strategy is paused.
   - `run_eod_snapshot` (weekdays 21:30 UTC, after the close): per-position P&L with the account's own cash and
     equity, then the performance metrics row.
-  - `run_weekly` (Saturdays 12:00 UTC): 13F holdings (filed quarterly) and the strategy re-evaluation.
+  - `run_weekly` (Saturdays 12:00 UTC): 13F holdings (filed quarterly), FINRA's weekly ATS totals (§17.2044) and
+    the strategy re-evaluation.
 
 Every part needing a secret the operator has not stored is reported ``unavailable`` with the secret's name and the
 run goes on: one source never stops the others, and nothing here raises to the scheduler."""
@@ -38,7 +39,7 @@ from app.modules.paper_congressional_trade_ingestion import fetch_disclosures
 from app.modules.paper_daily_signal_proposal_batch import run_daily_batch
 from app.modules.paper_day_start_equity_recording import record_day_start_equity
 from app.modules.paper_edgar_form_4_ingestion import SEC_USER_AGENT_SECRET, ingest_form_4_filings
-from app.modules.paper_finra_data_ingestion import ingest_finra_files
+from app.modules.paper_finra_data_ingestion import ingest_finra_ats_weekly, ingest_finra_files
 from app.modules.paper_news_ingestion import ingest_news_batch
 from app.modules.paper_p_l_calculator import calculate_pnl
 from app.modules.paper_performance_metrics_calculator import get_performance_metrics
@@ -282,9 +283,15 @@ async def handle_strategy_answer(job_id: str, node_key: str, answer: dict[str, A
     logger.info('event="paper_strategy_answered" job=%s choice=%s', job_id, answer.get("choice"))
 
 
-async def run_weekly() -> dict[str, Any]:
-    """Saturdays: the quarter's 13F holdings, then the strategy re-evaluation and what it decides."""
+async def run_weekly(*, now: Optional[datetime] = None) -> dict[str, Any]:
+    """Saturdays: the quarter's 13F holdings, FINRA's weekly ATS totals, then the strategy re-evaluation and what it
+    decides."""
+    now = now or datetime.now(timezone.utc)
     report: dict[str, Any] = {}
+    # §17.2044 — FINRA's public Query API (no key); the weeks published in the lookback window, each stored once
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        report["finra_ats"] = await _guarded("finra_ats", lambda: ingest_finra_ats_weekly(
+            symbols=sorted(ALLOW_LIST), until=now.date(), http_post=client.post))
     email = await _sec_contact_email()
     if email:
         async def _thirteen_f() -> dict[str, int]:

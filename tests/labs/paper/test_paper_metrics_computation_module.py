@@ -125,7 +125,7 @@ def test_compute_series_empty_view_returns_zeros():
     assert result["gross_return"] == 0.0
     assert result["costs"] == 0.0
     assert result["max_drawdown"] == 0.0
-    assert result["sharpe_ratio"] == 0.0
+    assert result["sharpe_ratio"] is None   # §17.2045: no data is not a measured 0
     assert result["turnover"] == 0.0
 
 

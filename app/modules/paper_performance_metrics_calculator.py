@@ -7,9 +7,10 @@ the paper trading account, and compares against the SPY benchmark.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from itertools import pairwise
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import text
 
@@ -21,6 +22,9 @@ logger = logging.getLogger("scaffold")
 
 ZERO = Decimal("0")
 TRADING_DAYS_PER_YEAR = 252
+#: §17.2045 — a Sharpe ratio needs a spread of daily returns: fewer than this and the ratio is not reported (None),
+#: never 0 (which reads as a measured, flat strategy)
+MIN_DAILY_RETURNS_FOR_SHARPE = 2
 
 
 def _to_decimal(value: Any) -> Decimal:
@@ -29,6 +33,45 @@ def _to_decimal(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+def _opt_str(value: Any) -> Optional[str]:
+    return None if value is None else str(value)
+
+
+def _closing_equity_by_day(rows: Sequence[Any]) -> list[tuple[date, Decimal]]:
+    """§17.2045 — each UTC day's closing equity: its last pnl row's equity (rows come oldest first).
+
+    The lab writes a day-start row (13:00 UTC), the after-close P&L row and then the metrics row (21:30 UTC), so a
+    day's last row is its close. A row without a positive equity is not a reading.
+    """
+    closes: dict[date, Decimal] = {}
+    for row in rows:
+        ts = row["as_of_ts"]
+        equity = _to_decimal(row["equity"])
+        if ts is None or equity <= ZERO:
+            continue
+        closes[ts.astimezone(timezone.utc).date() if ts.tzinfo else ts.date()] = equity
+    return sorted(closes.items())
+
+
+def daily_returns(rows: Sequence[Any]) -> list[Decimal]:
+    """§17.2045 — the account's daily returns from its own equity series: each close over the close before it."""
+    closes = [equity for _day, equity in _closing_equity_by_day(rows)]
+    return [(b - a) / a for a, b in pairwise(closes)]
+
+
+def sharpe_ratio(returns: Sequence[Decimal]) -> tuple[Optional[Decimal], Optional[str]]:
+    """§17.2045 — the annualised Sharpe ratio (risk-free rate 0, sqrt(252)) and, when there is none, why."""
+    n = len(returns)
+    if n < MIN_DAILY_RETURNS_FOR_SHARPE:
+        return None, (f"not enough data: {n} daily return{'s' if n != 1 else ''} recorded, "
+                      f"{MIN_DAILY_RETURNS_FOR_SHARPE} needed")
+    mean_return = sum(returns) / Decimal(n)
+    variance = sum((r - mean_return) ** 2 for r in returns) / Decimal(n - 1)
+    if variance <= ZERO:
+        return None, f"undefined: the {n} daily returns do not vary"
+    return (mean_return / variance.sqrt()) * Decimal(TRADING_DAYS_PER_YEAR).sqrt(), None
 
 
 async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
@@ -44,7 +87,8 @@ async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
         return {
             "return_after_costs": ZERO,
             "max_drawdown": ZERO,
-            "sharpe_ratio": ZERO,
+            "sharpe_ratio": None,
+            "sharpe_ratio_note": sharpe_ratio([])[1],
             "turnover": ZERO,
             "spy_benchmark_return": ZERO,
             "account_value": ZERO,
@@ -52,7 +96,7 @@ async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
             "equity": ZERO,
             "realized_pnl": ZERO,
             "unrealized_pnl": ZERO,
-            "daily_return": ZERO,
+            "daily_return": None,
             "cumulative_return": ZERO,
         }
 
@@ -92,18 +136,10 @@ async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
             if drawdown < max_drawdown:
                 max_drawdown = drawdown
 
-    # Sharpe ratio: from daily_return snapshots
-    daily_returns = [_to_decimal(row["daily_return"]) for row in rows if row["daily_return"] is not None]
-    if len(daily_returns) >= 2:
-        mean_return = sum(daily_returns) / Decimal(len(daily_returns))
-        variance = sum((r - mean_return) ** 2 for r in daily_returns) / Decimal(len(daily_returns) - 1)
-        std_dev = variance.sqrt() if variance > ZERO else ZERO
-        if std_dev > ZERO:
-            sharpe_ratio = (mean_return / std_dev) * Decimal(TRADING_DAYS_PER_YEAR).sqrt()
-        else:
-            sharpe_ratio = ZERO
-    else:
-        sharpe_ratio = ZERO
+    # §17.2045 — Sharpe ratio from the account's own equity series (a day's close over the close before it). It was
+    # read from `daily_return`, which no writer fills, so it stayed 0; None (with the reason) when it cannot be said.
+    returns = daily_returns(rows)
+    sharpe, sharpe_note = sharpe_ratio(returns)
 
     # Turnover: traded value divided by average account value
     total_traded_value = ZERO
@@ -132,10 +168,10 @@ async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
     else:
         spy_benchmark_return = ZERO
 
-    return {
+    metrics: dict[str, Any] = {
         "return_after_costs": return_after_costs,
         "max_drawdown": max_drawdown,
-        "sharpe_ratio": sharpe_ratio,
+        "sharpe_ratio": sharpe,
         "turnover": turnover,
         "spy_benchmark_return": spy_benchmark_return,
         "account_value": final_account_value,
@@ -143,9 +179,12 @@ async def _get_performance_metrics_with_db(db: Any) -> dict[str, Any]:
         "equity": _to_decimal(last["equity"]),
         "realized_pnl": _to_decimal(last["realized_pnl"]),
         "unrealized_pnl": _to_decimal(last["unrealized_pnl"]),
-        "daily_return": _to_decimal(last["daily_return"]),
+        "daily_return": returns[-1] if returns else None,
         "cumulative_return": cumulative_return,
     }
+    if sharpe_note:
+        metrics["sharpe_ratio_note"] = sharpe_note
+    return metrics
 
 
 async def get_performance_metrics() -> dict[str, Any]:
@@ -153,7 +192,7 @@ async def get_performance_metrics() -> dict[str, Any]:
     async with async_session() as db:
         metrics = await _get_performance_metrics_with_db(db)
 
-        # Convert all metrics to strings for write_pnl (expects str)
+        # Strings for write_pnl; a metric that cannot be said (§17.2045: no Sharpe yet) is stored NULL, not "None"
         await write_pnl(
             as_of_ts=datetime.now(timezone.utc),
             account_value=str(metrics["account_value"]),
@@ -161,10 +200,10 @@ async def get_performance_metrics() -> dict[str, Any]:
             equity=str(metrics["equity"]),
             realized_pnl=str(metrics["realized_pnl"]),
             unrealized_pnl=str(metrics["unrealized_pnl"]),
-            daily_return=str(metrics["daily_return"]),
+            daily_return=_opt_str(metrics["daily_return"]),
             cumulative_return=str(metrics["cumulative_return"]),
             max_drawdown=str(metrics["max_drawdown"]),
-            sharpe_ratio=str(metrics["sharpe_ratio"]),
+            sharpe_ratio=_opt_str(metrics["sharpe_ratio"]),
             turnover=str(metrics["turnover"]),
             spy_benchmark_return=str(metrics["spy_benchmark_return"]),
         )

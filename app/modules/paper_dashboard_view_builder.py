@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 from app.modules.paper_metrics_computation_module import compute_series
 
 _ALLOWED_SPANS = ("1w", "1m", "3m", "all")
+#: §17.2045 — the Sharpe tile when there is no ratio yet (fewer than two daily returns recorded)
+SHARPE_NOT_ENOUGH_DATA = "not enough data"
 
 
 def _escape_str(value: Any) -> Any:
@@ -68,7 +70,8 @@ def build_dashboard_context(
         "gross_return": chart["gross_return"],
         "costs": chart["costs"],
         "drawdown": chart["max_drawdown"],
-        "sharpe": chart["sharpe_ratio"],
+        # §17.2045 — no Sharpe ratio yet (fewer than two daily returns) is said, never shown as 0
+        "sharpe": SHARPE_NOT_ENOUGH_DATA if chart["sharpe_ratio"] is None else chart["sharpe_ratio"],
         "turnover": chart["turnover"],
     }
 

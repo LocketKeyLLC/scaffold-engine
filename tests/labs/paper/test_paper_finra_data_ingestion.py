@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -11,7 +12,6 @@ from sqlalchemy import text
 
 from app.database import async_session
 from app.modules.paper_finra_data_ingestion import (
-    FINRA_ATS_VOLUME_URL,
     FINRA_SHORT_INTEREST_URL,
     FinraFile,
     FinraRecord,
@@ -45,11 +45,12 @@ def _http_response(text: str = "", status_code: int = 200) -> FakeResponse:
 
 
 def _short_interest_content() -> str:
-    """Return sample short interest pipe-delimited content."""
+    """Rows in the daily short-volume file's shape (§17.2043: Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|
+    Market, as cdn.finra.org serves it; the AAPL row's volumes are the real 2026-11-25 ones)."""
     return (
-        "20261103|AAPL|123456|1000000|1.23\n"
-        "20261103|MSFT|0|0|0\n"
-        "20261103|GOOG|500|600|0.8\n"
+        "20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
+        "20261103|MSFT|0|0|0|Q\n"
+        "20261103|GOOG|500|0|600|Q\n"
     )
 
 
@@ -61,8 +62,11 @@ async def test_finra_file_url_short_interest() -> None:
 
 @pytest.mark.asyncio
 async def test_finra_file_url_ats_volume() -> None:
+    # §17.2044 — FINRA serves no weekly ATS file (cdn.finra.org/ats/weekly/ATSvolume<date>.txt answers 403); the weekly
+    # totals come from its Query API (ingest_finra_ats_weekly), so no file URL is built for it
     f = FinraFile(source="ats_volume", release_date=date(2026, 11, 3), version=1)
-    assert f.url == FINRA_ATS_VOLUME_URL.format(date="20261103")
+    with pytest.raises(ValueError, match="weekly ATS"):
+        f.url
 
 
 @pytest.mark.asyncio
@@ -96,7 +100,7 @@ def test_finra_record_payload() -> None:
 @pytest.mark.asyncio
 async def test_ingest_finra_file_short_interest() -> None:
     release = date(2026, 11, 3)
-    content = "20261103|AAPL|123456|1000000|1.23\n"
+    content = "20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
 
     async def fake_get(url: str) -> FakeResponse:
         return _http_response(text=content)
@@ -112,44 +116,22 @@ async def test_ingest_finra_file_short_interest() -> None:
 
 @pytest.mark.asyncio
 async def test_ingest_finra_file_ats_volume() -> None:
-    content = "20261103|AAPL|1000|5000|20.0\n"
+    # §17.2044 — the file path fetches nothing for the weekly ATS totals (FINRA serves no such file)
+    fake_get = AsyncMock()
 
-    async def fake_get(url: str) -> FakeResponse:
-        return _http_response(text=content)
-
-    counts = await ingest_finra_file(
-        source="ats_volume",
-        release_date=date(2026, 11, 3),
-        version=1,
-        http_get=fake_get,
-    )
-    assert counts == {"ingested_items": 1, "signals": 1}
-
-    async with async_session() as db:
-        item = await db.execute(
-            text("SELECT source, external_id, payload FROM ingested_item")
+    with pytest.raises(ValueError, match="weekly ATS"):
+        await ingest_finra_file(
+            source="ats_volume",
+            release_date=date(2026, 11, 3),
+            version=1,
+            http_get=fake_get,
         )
-        row = item.fetchone()
-        assert row is not None
-        assert row[0] == "finra"
-        assert row[1] == "2026-11-03:AAPL:ats_volume:1"
-        payload = row[2]
-        assert payload["ats_volume"] == "1000"
-        assert payload["total_volume"] == "5000"
-
-        sig = await db.execute(
-            text("SELECT ticker, signal_type, direction FROM signal")
-        )
-        sig_row = sig.fetchone()
-        assert sig_row is not None
-        assert sig_row[0] == "AAPL"
-        assert sig_row[1] == "finra_context"
-        assert sig_row[2] == "long"
+    fake_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_ingest_finra_file_skips_malformed_rows() -> None:
-    content = "bad|row\n20261103|AAPL|123456|1000000|1.23\n"
+    content = "bad|row\n20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
 
     async def fake_get(url: str) -> FakeResponse:
         return _http_response(text=content)
@@ -184,8 +166,8 @@ async def test_ingest_finra_files_batch() -> None:
 
     async def fake_get(url: str) -> FakeResponse:
         if "20261103" in url:
-            return _http_response(text="20261103|AAPL|123456|1000000|1.23\n")
-        return _http_response(text="20261104|MSFT|500|600|0.8\n")
+            return _http_response(text="20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n")
+        return _http_response(text="20261104|MSFT|500|0|600|Q\n")
 
     total = await ingest_finra_files(
         source="short_interest",
@@ -201,7 +183,7 @@ async def test_ingest_finra_file_uses_default_httpx() -> None:
     # that providing a normal callable works and the function behaves
     # identically to a default httpx client.
     release = date(2026, 11, 3)
-    content = "20261103|AAPL|123456|1000000|1.23\n"
+    content = "20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
 
     async def fake_get(url: str) -> FakeResponse:
         return _http_response(text=content)
@@ -218,7 +200,7 @@ async def test_ingest_finra_file_uses_default_httpx() -> None:
 @pytest.mark.asyncio
 async def test_ingest_finra_file_idempotent() -> None:
     release = date(2026, 11, 3)
-    content = "20261103|AAPL|123456|1000000|1.23\n"
+    content = "20261103|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
 
     async def fake_get(url: str) -> FakeResponse:
         return _http_response(text=content)
@@ -260,9 +242,9 @@ async def test_zero_volume_record_is_flat() -> None:
         date(2026, 11, 3),
         1,
         "MSFT",
-        short_interest="0",
-        avg_daily_volume="0",
-        days_to_cover="0",
+        short_volume="0",
+        short_exempt_volume="0",
+        total_volume="0",
     )
     assert _direction_for(record) == "flat"
 
@@ -271,9 +253,9 @@ async def test_zero_volume_record_is_flat() -> None:
         date(2026, 11, 3),
         1,
         "AAPL",
-        short_interest="123456",
-        avg_daily_volume="1000000",
-        days_to_cover="1.23",
+        short_volume="9758284.194435",
+        short_exempt_volume="27391.310000",
+        total_volume="16888251.033617",
     )
     assert _direction_for(nonzero) == "long"
 
@@ -311,7 +293,7 @@ async def test_unsupported_file_type_rejected() -> None:
 @pytest.mark.asyncio
 async def test_flat_signal_recorded_in_db() -> None:
     release = date(2026, 11, 3)
-    content = "20261103|MSFT|0|0|0\n"
+    content = "20261103|MSFT|0|0|0|Q\n"
 
     async def fake_get(url: str) -> FakeResponse:
         return _http_response(text=content)

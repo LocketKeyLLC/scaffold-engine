@@ -66,7 +66,9 @@ def _client_factory(client):
 
 FINRA_DAY = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol20261123.txt"
 ROUTES = {
-    FINRA_DAY: FakeResponse(text_body="20261123|AAPL|123456|1000000|1.23\n20261123|MSFT|222|3000|0.5\n"),
+    FINRA_DAY: FakeResponse(text_body="Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market\n"   # §17.2043: the real file's shape
+                                 "20261123|AAPL|9758284.194435|27391.310000|16888251.033617|B,Q,N\n"
+                                 "20261123|MSFT|3667369.018560|20396|8092743.376544|B,Q,N\n2\n"),
     "https://disclosures-clerk.house.gov": FakeResponse(text_body="<html>house</html>"),
     "https://efdsearch.senate.gov": FakeResponse(text_body="<html>senate</html>"),
 }
@@ -278,6 +280,8 @@ async def test_weekly_without_the_sec_contact_still_re_evaluates(monkeypatch, no
                                                                 ask_without_running):
     monkeypatch.setattr(pls, "re_evaluate_strategy",
                         AsyncMock(return_value={"decision": "pause", "paused": True, "reason": "lost"}))
+    # §17.2044 — the weekly run also asks FINRA's API; never from a test
+    monkeypatch.setattr(pls, "ingest_finra_ats_weekly", AsyncMock(return_value={"ingested_items": 0, "signals": 0}))
 
     report = await pls.run_weekly()
 

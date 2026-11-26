@@ -61,6 +61,29 @@ def _build_user_agent(contact_email: str) -> str:
     return SEC_USER_AGENT_TEMPLATE.format(email=contact_email)
 
 
+def _raw_document_name(primary_document: str) -> str:
+    """§17.2046 — the filing's own XML for a ``primaryDocument`` EDGAR lists as its XSL rendering.
+
+    EDGAR's submissions JSON names a Form 4's primary document by the page it renders from the XML
+    (``xslF345X05/wk-form4.xml``, Apple 0000320193-25-000079, read live 2026-11-19); the folder holds the XML itself under
+    the bare name, as it does for 13F (``xslForm13F_X01/primary_doc.xml`` listed, ``primary_doc.xml`` in the folder,
+    §17.1975). Only a leading ``xsl…/`` directory is taken off; any other path is kept as it is.
+    """
+    head, sep, tail = primary_document.partition("/")
+    if sep and tail and head.lower().startswith("xsl") and "/" not in tail:
+        return tail
+    return primary_document
+
+
+def _is_ownership_document(xml_bytes: bytes | str) -> bool:
+    """§17.2046 — a Form 4's XML has the ``ownershipDocument`` root; a rendered page (XHTML or HTML) does not."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return False
+    return _local_name(root.tag) == "ownershipDocument"
+
+
 def _build_filing_url(cik: int | str, accession_number: str, primary_document: str) -> str:
     """Build the archive URL for a single filing's primary document."""
     cik_int = int(cik)
@@ -319,12 +342,24 @@ async def ingest_form_4_filings(
         primary_doc = filing.get("primaryDocument")
         if not primary_doc:
             continue
-
-        url = _build_filing_url(cik, accession, primary_doc)
-        try:
-            xml_bytes = await _rate_limited_get_bytes(client, url, headers)
-        except Exception:
-            logger.warning("Failed to fetch Form 4 primary document %s", url)
+        # §17.2046 — the filing's own XML first (the listed path may be its XSL rendering), then the listed path; a
+        # document that is not a Form 4's XML is not read as one -- it was recorded "not a purchase" every time.
+        xml_bytes = None
+        document = None
+        for candidate in dict.fromkeys((_raw_document_name(primary_doc), primary_doc)):
+            url = _build_filing_url(cik, accession, candidate)
+            try:
+                body = await _rate_limited_get_bytes(client, url, headers)
+            except Exception:
+                logger.warning("Failed to fetch Form 4 document %s", url)
+                continue
+            if _is_ownership_document(body):
+                xml_bytes, document = body, candidate
+                break
+        if xml_bytes is None:
+            logger.warning('event="form4_document_unreadable" cik=%s accession=%s primary=%s: no Form 4 XML '
+                           "(ownershipDocument) at the filing's own name or the listed path; not recorded",
+                           cik, accession, primary_doc)
             continue
 
         parsed = _parse_form4_xml(xml_bytes)
@@ -337,6 +372,7 @@ async def ingest_form_4_filings(
             "filingDate": filing.get("filingDate"),
             "reportDate": filing.get("reportDate"),
             "primaryDocument": primary_doc,
+            "document": document,
             "primaryDocDescription": filing.get("primaryDocDescription"),
             "items": filing.get("items"),
             "ticker": ticker,

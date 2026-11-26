@@ -212,7 +212,8 @@ async def test_get_performance_metrics_with_db_empty():
     assert metrics["equity"] == Decimal("0")
     assert metrics["return_after_costs"] == Decimal("0")
     assert metrics["max_drawdown"] == Decimal("0")
-    assert metrics["sharpe_ratio"] == Decimal("0")
+    assert metrics["sharpe_ratio"] is None   # §17.2045: no history is not a measured 0
+    assert metrics["sharpe_ratio_note"].startswith("not enough data")
     assert metrics["turnover"] == Decimal("0")
     assert metrics["spy_benchmark_return"] == Decimal("0")
 
@@ -261,7 +262,7 @@ async def test_get_performance_metrics_with_db_single_row():
     assert metrics["return_after_costs"] == Decimal("0")
     assert metrics["turnover"] == Decimal("0")
     assert metrics["max_drawdown"] == Decimal("0")
-    assert metrics["sharpe_ratio"] == Decimal("0")
+    assert metrics["sharpe_ratio"] is None   # §17.2045: one close, no daily return
 
 
 @pytest.mark.asyncio
@@ -305,9 +306,10 @@ async def test_get_performance_metrics_with_db_max_drawdown():
 async def test_get_performance_metrics_with_db_sharpe_ratio():
     base_ts = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
     async with async_session() as db:
-        await _insert_pnl(db, as_of_ts=base_ts, daily_return="0.01")
-        await _insert_pnl(db, as_of_ts=base_ts + timedelta(days=1), daily_return="0.02")
-        await _insert_pnl(db, as_of_ts=base_ts + timedelta(days=2), daily_return="0.03")
+        # §17.2045: the ratio reads the equity series (each day's close over the one before), not `daily_return`
+        await _insert_pnl(db, as_of_ts=base_ts, equity="100000.00")
+        await _insert_pnl(db, as_of_ts=base_ts + timedelta(days=1), equity="101000.00")    # +1%
+        await _insert_pnl(db, as_of_ts=base_ts + timedelta(days=2), equity="103020.00")    # +2%
 
         with patch(
             "app.modules.paper_performance_metrics_calculator.get_spy_benchmark",
@@ -315,8 +317,10 @@ async def test_get_performance_metrics_with_db_sharpe_ratio():
         ):
             metrics = await _get_performance_metrics_with_db(db)
 
-    expected = (Decimal("0.02") / Decimal("0.01")) * Decimal("252").sqrt()
-    assert metrics["sharpe_ratio"] == expected
+    returns = [Decimal("0.01"), Decimal("0.02")]
+    mean = sum(returns) / 2
+    std = (sum((r - mean) ** 2 for r in returns) / 1).sqrt()
+    assert metrics["sharpe_ratio"] == (mean / std) * Decimal("252").sqrt()
 
 
 @pytest.mark.asyncio
@@ -324,6 +328,7 @@ async def test_get_performance_metrics_with_db_sharpe_ratio_insufficient_data():
     base_ts = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
     async with async_session() as db:
         await _insert_pnl(db, as_of_ts=base_ts, daily_return="0.01")
+        await _insert_pnl(db, as_of_ts=base_ts + timedelta(days=1), equity="101000.00")   # one daily return
 
         with patch(
             "app.modules.paper_performance_metrics_calculator.get_spy_benchmark",
@@ -331,7 +336,8 @@ async def test_get_performance_metrics_with_db_sharpe_ratio_insufficient_data():
         ):
             metrics = await _get_performance_metrics_with_db(db)
 
-    assert metrics["sharpe_ratio"] == Decimal("0")
+    assert metrics["sharpe_ratio"] is None   # §17.2045: one daily return is not enough for a ratio
+    assert metrics["sharpe_ratio_note"] == "not enough data: 1 daily return recorded, 2 needed"
 
 
 @pytest.mark.asyncio
