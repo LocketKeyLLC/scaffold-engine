@@ -382,7 +382,7 @@ async def test_the_code_verifier_is_shown_the_modules_that_already_exist(monkeyp
     from app.modules import execution_verify as ev
     seen = {}
 
-    async def _run(messages, role, overrides):
+    async def _run(messages, role, overrides, **_kw):
         seen["user"] = messages[1]["content"]
         return "pass", "", 1.0
     monkeypatch.setattr(ev, "_run_verification", _run)
