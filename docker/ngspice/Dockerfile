@@ -3,7 +3,7 @@
 # Isolates the ngspice CLI behind a small FastAPI HTTP surface so the
 # orchestrator never runs untrusted SPICE input in its own process tree.
 # Network-only contract — no shared volumes, no host filesystem access.
-FROM python:3.14.7-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
+FROM python:3.14.9-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS runtime
 
 WORKDIR /code
 
