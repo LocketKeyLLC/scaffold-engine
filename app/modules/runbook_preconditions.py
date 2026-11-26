@@ -523,7 +523,7 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
     The file itself settles it, so the file is read: a `grep -c '^\['` through the
     runner. Unreadable means no judgment.
     """
-    if spec is None or not gid:
+    if spec is None:
         return []
     out: list[dict] = []
     joined = "\n".join(str(t or "") for t in texts)
@@ -545,11 +545,18 @@ async def a_bare_append_lands_in_the_last_section(spec, texts: list[str], gid: s
             if not m:
                 continue                       # a variable the engine cannot resolve: no judgment
             path = m.group(1)
+        # §17.2032 — the file is read in the guest the LINE addresses, as §17.1361 made its sibling do. A block
+        # whose step names guest 103 and appends with `pct exec 105 -- sh -c '… >> /conf'` read 103's copy of
+        # that path ("No such file": a gap, never a judgment) and the misplaced key went unjudged.
+        _g = _IN_GUEST_LINE_RE.search(ln)
+        here = _g.group("gid") if _g else str(gid or "")
+        if not here.isdigit():
+            continue
         # §17.1353 — `_read` returns the LISTING, not `(ok, text)`. This site unpacked
         # it as a pair, so every call raised ValueError into `unmet`'s warning and this
         # rule never once fired in production. A mocked read hid it: all four of its
         # tests stubbed `_read` with a 2-tuple the real function never returns.
-        out_text = await _read(spec, f"pct exec {gid} -- sh -c 'grep -c \"^\\[\" {path}'")
+        out_text = await _read(spec, f"pct exec {here} -- sh -c 'grep -c \"^\\[\" {path}'")
         if not str(out_text or "").strip():
             # §17.1363 — "nothing is refused out of blindness" was right and silent:
             # the blindness itself is now in the frame.
@@ -942,17 +949,18 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None,
             out.extend(_file_ssh_needs_its_own_credential(files, subjects, inv, plan))
     # §17.1343 — a key appended to the END of a SECTIONED config is read as a
     # different setting: the file itself settles it, so the file is read.
-    if subjects:
-        try:
-            out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, subjects[0], reading=reading))
-        except Exception as exc:
-            logger.warning("append_section_check_failed err=%r", exc)
+    # §17.2032 — each line is read in the guest IT addresses (`pct exec N --`); the step's subject is only the
+    # fallback for a line that names none, so a block whose title names no guest is still judged line by line.
+    _here = subjects[0] if subjects else ""
+    try:
+        out.extend(await a_bare_append_lands_in_the_last_section(spec, texts, _here, reading=reading))
+    except Exception as exc:
+        logger.warning("append_section_check_failed err=%r", exc)
     # §17.1353 — an in-place substitution whose pattern the file does not hold is inert.
-    if subjects:
-        try:
-            out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, subjects[0], reading=reading))
-        except Exception as exc:
-            logger.warning("inert_edit_check_failed err=%r", exc)
+    try:
+        out.extend(await an_in_place_edit_the_file_cannot_match(spec, texts, _here, reading=reading))
+    except Exception as exc:
+        logger.warning("inert_edit_check_failed err=%r", exc)
     # §17.1360 — the work writes a setting into a config that has no concept of it
     # while the step's own check reads it from the service's API.
     if services and verify:
