@@ -46,8 +46,16 @@ from app.modules import assist_agent
 
 
 @pytest_asyncio.fixture
-async def assist_session(insert_job):
-    """A real job, DAG and assist session, claimed at T1."""
+async def assist_session(insert_job, monkeypatch):
+    """A real job, DAG and assist session, claimed at T1.
+
+    §17.2054 — the verify hard-block these tests exercise is a valve whose code
+    default is OFF; only docker-compose.yml turns it on for the running engine.
+    A lane that starts from .env alone ran with it off: the control below saw the
+    step commit, and the affirmed test passed with nothing there to outrank.
+    Pin the valve the tests are about instead of inheriting it from the deploy."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_block_on_incomplete_verify", True)
     job_id = await insert_job(
         status="planning", title="live operator loop",
         refined_brief={"description": "stand up a control panel", "goals": ["g"]},
