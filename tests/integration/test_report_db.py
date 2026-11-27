@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import uuid
 
-import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -21,8 +20,10 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
-pytestmark = pytest.mark.needs_orchestrator   # §17.1080 — calls the running engine, not just its DB
+# §17.2053 — these tests call the engine IN-PROCESS (``engine_client``, tests/integration/
+# conftest.py), not the running orchestrator at scaffold-orchestrator:8000: the rows
+# they seed go through ``async_session`` into the TEST database, which that engine
+# never reads, so every lookup came back ``404 ... not found``.
 
 
 _SPEC_JSON = {
@@ -187,12 +188,12 @@ async def seeded_pipeline():
 
 
 @pytest.mark.smoke
-async def test_get_report_json_converged(seeded_pipeline):
+async def test_get_report_json_converged(engine_client, seeded_pipeline):
     _, _, sizing_id, sim_run_id = await seeded_pipeline(converged=True)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{sizing_id}/report",
+            f"/device-sizings/{sizing_id}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -220,12 +221,12 @@ async def test_get_report_json_converged(seeded_pipeline):
 
 
 @pytest.mark.smoke
-async def test_get_report_markdown_format(seeded_pipeline):
+async def test_get_report_markdown_format(engine_client, seeded_pipeline):
     _, _, sizing_id, _ = await seeded_pipeline(converged=True)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{sizing_id}/report",
+            f"/device-sizings/{sizing_id}/report",
             params={"format": "markdown"},
             headers=_api_headers(),
         )
@@ -244,14 +245,14 @@ async def test_get_report_markdown_format(seeded_pipeline):
 
 
 @pytest.mark.smoke
-async def test_get_report_non_converged_renders_with_banner(seeded_pipeline):
+async def test_get_report_non_converged_renders_with_banner(engine_client, seeded_pipeline):
     _, _, sizing_id, _ = await seeded_pipeline(
         converged=False, measured_fc=5000.0,
     )
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{sizing_id}/report",
+            f"/device-sizings/{sizing_id}/report",
             params={"format": "markdown"},
             headers=_api_headers(),
         )
@@ -263,22 +264,22 @@ async def test_get_report_non_converged_renders_with_banner(seeded_pipeline):
 
 
 @pytest.mark.smoke
-async def test_get_report_404_when_sizing_missing():
+async def test_get_report_404_when_sizing_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{bogus}/report",
+            f"/device-sizings/{bogus}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
 
 
 @pytest.mark.smoke
-async def test_get_report_400_on_unknown_format(seeded_pipeline):
+async def test_get_report_400_on_unknown_format(engine_client, seeded_pipeline):
     _, _, sizing_id, _ = await seeded_pipeline()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{sizing_id}/report",
+            f"/device-sizings/{sizing_id}/report",
             params={"format": "pdf"},
             headers=_api_headers(),
         )
@@ -442,12 +443,12 @@ async def seeded_digital_pipeline():
 
 
 @pytest.mark.smoke
-async def test_get_digital_report_json_converged(seeded_digital_pipeline):
+async def test_get_digital_report_json_converged(engine_client, seeded_digital_pipeline):
     _, _, sizing_id, sim_run_id = await seeded_digital_pipeline()
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/digital-sizings/{sizing_id}/report",
+            f"/digital-sizings/{sizing_id}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -464,11 +465,11 @@ async def test_get_digital_report_json_converged(seeded_digital_pipeline):
 
 
 @pytest.mark.smoke
-async def test_get_digital_report_markdown_format(seeded_digital_pipeline):
+async def test_get_digital_report_markdown_format(engine_client, seeded_digital_pipeline):
     _, _, sizing_id, _ = await seeded_digital_pipeline()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/digital-sizings/{sizing_id}/report",
+            f"/digital-sizings/{sizing_id}/report",
             params={"format": "markdown"},
             headers=_api_headers(),
         )
@@ -482,36 +483,36 @@ async def test_get_digital_report_markdown_format(seeded_digital_pipeline):
 
 
 @pytest.mark.smoke
-async def test_device_url_rejects_digital_id(seeded_digital_pipeline):
+async def test_device_url_rejects_digital_id(engine_client, seeded_digital_pipeline):
     """Cross-URL guard: /device-sizings/{id} must refuse digital
     sizing ids with 404 (not return the wrong-shape report)."""
     _, _, sizing_id, _ = await seeded_digital_pipeline()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/device-sizings/{sizing_id}/report",
+            f"/device-sizings/{sizing_id}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
 
 
 @pytest.mark.smoke
-async def test_digital_url_rejects_analog_id(seeded_pipeline):
+async def test_digital_url_rejects_analog_id(engine_client, seeded_pipeline):
     """Mirror of above: /digital-sizings/{id} refuses analog ids."""
     _, _, sizing_id, _ = await seeded_pipeline(converged=True)
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/digital-sizings/{sizing_id}/report",
+            f"/digital-sizings/{sizing_id}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
 
 
 @pytest.mark.smoke
-async def test_get_digital_report_404_when_missing():
+async def test_get_digital_report_404_when_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/digital-sizings/{bogus}/report",
+            f"/digital-sizings/{bogus}/report",
             headers=_api_headers(),
         )
     assert resp.status_code == 404

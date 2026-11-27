@@ -34,12 +34,26 @@ process, where ``run_broker._runs`` is its own empty dict. It was measuring the
 wrong process and would have reported "the run stopped" for every run that ever
 worked. ``/exec/status``'s ``detached_running`` is the cross-process answer, and
 node state comes from Postgres, which both processes genuinely share.
+
+§17.2053 — "genuinely share" stopped being true at §17.1108: the test process
+is pinned to the TEST database, while ``localhost:8000`` is the operator's
+engine on PRODUCTION (and, inside the throwaway test container, nothing at all).
+The seeded job was never there to run. The engine is now one this module
+starts for itself — a uvicorn subprocess on 127.0.0.1:8003 with the test
+process's environment, so its ``DATABASE_URL`` is the one the rows went into —
+the same pattern as test_runner_loop_live.py (:8001). It is still a separate
+process, so liveness is still read over HTTP.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import socket
+import subprocess
+import sys
+import time
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -49,8 +63,58 @@ from app.database import async_session
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.timeout(900)]
 
-BASE_URL = "http://localhost:8000"
+# §17.2053 — this module's OWN engine (see the module docstring), never the
+# running orchestrator: that one reads production, not the rows seeded here.
+ROOT = Path(__file__).resolve().parents[2]
+ENGINE_PORT = 8003
+BASE_URL = f"http://127.0.0.1:{ENGINE_PORT}"
 AUTH = {"X-API-Key": os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")}
+
+
+def _port_open(port: int, timeout: float = 1.0) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+@pytest.fixture(scope="module")
+def engine():
+    """A second engine on the test process's database (same env, so the same
+    ``DATABASE_URL``); stopped when the module is done."""
+    assert not _port_open(ENGINE_PORT), f"port {ENGINE_PORT} is already taken"
+    env = {**os.environ,
+           "SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP": "false", "LOG_FILE": "",
+           "SCAFFOLD_PREWARM_RERANKER": "false", "OTEL_SDK_DISABLED": "true"}
+    log = open(os.environ.get("ITEST_LOG_DIR", "/tmp") + "/itest_detached_engine.log", "wb")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
+         "--port", str(ENGINE_PORT), "--log-level", "warning"],
+        cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+
+    def _healthy() -> bool:
+        try:
+            r = httpx.get(f"{BASE_URL}/health", timeout=3.0)
+            return r.status_code == 200 and r.json().get("status") == "healthy"
+        except Exception:
+            return False
+    try:
+        deadline = time.monotonic() + 120
+        while not _healthy():
+            if proc.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError(f"the test engine on :{ENGINE_PORT} never became healthy "
+                                     f"(exit={proc.poll()}; log: {log.name})")
+            time.sleep(1.0)
+        yield proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
 
 
 async def _seed_job_with_dag(job_id: str) -> None:
@@ -150,7 +214,7 @@ async def _node_statuses(job_id: str) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
-async def test_real_executor_run_survives_a_client_disconnect():
+async def test_real_executor_run_survives_a_client_disconnect(engine):
     """Start a real run, walk away mid-node, and confirm the engine carried on.
 
     Before §17.1007 this is exactly what killed a run: the disconnect cancelled
@@ -203,7 +267,7 @@ async def test_real_executor_run_survives_a_client_disconnect():
         await _cleanup(job_id)
 
 
-async def test_reattaching_to_a_real_run_does_not_start_a_second_one():
+async def test_reattaching_to_a_real_run_does_not_start_a_second_one(engine):
     """`run_broker.start` is idempotent per job. Against the real executor that
     matters more than anywhere else: a second walk would re-run every node."""
     job_id = str(uuid.uuid4())

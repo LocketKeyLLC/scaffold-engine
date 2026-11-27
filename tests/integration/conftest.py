@@ -71,6 +71,38 @@ def _skip_without_orchestrator(request):
         pytest.skip("orchestrator not reachable at scaffold-orchestrator:8000 (needs_orchestrator)")
 
 
+@pytest_asyncio.fixture
+async def engine_client():
+    """§17.2053 — an HTTP client for the engine IN THIS PROCESS, on this
+    process's database.
+
+    The test process writes its fixture rows through ``app.database.async_session``,
+    which §17.1108 pins to the TEST database (``*_test``; conftest refuses any
+    other). The running orchestrator at ``scaffold-orchestrator:8000`` reads
+    PRODUCTION — so a test that seeds a row here and then asks that engine for
+    it gets ``404 ... not found`` every time (14 such failures across six files,
+    unrun because CI's Tier 2 is gated off). Serving the app through
+    ``httpx.ASGITransport`` puts the router and the rows on the same database,
+    and keeps the test's writes off the operator's engine.
+
+    Usage: ``async with engine_client(timeout=10.0) as client:`` then relative
+    paths (``client.get("/design/...")``). The timeout is accepted for parity
+    with the old call sites; ASGITransport itself never times out a request.
+    """
+    import httpx
+
+    from app.main import app
+
+    def _make(*, timeout: float = 10.0) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://engine-under-test",
+            timeout=timeout,
+        )
+
+    return _make
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_db_pool():
     """Dispose the SQLAlchemy engine's connection pool before every test.

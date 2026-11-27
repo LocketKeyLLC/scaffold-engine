@@ -33,7 +33,10 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
+# §17.2053 — these tests call the engine IN-PROCESS (``engine_client``, tests/integration/
+# conftest.py), not the running orchestrator at scaffold-orchestrator:8000: the rows
+# they seed go through ``async_session`` into the TEST database, which that engine
+# never reads, so every lookup came back ``404 ... not found``.
 
 _VALID_SPEC: dict = {
     "schema_version": "1.0.0",
@@ -165,7 +168,7 @@ async def _services_ready() -> tuple[bool, str]:
 # actually runs end-to-end and surfaces the timeout-override gap.
 @pytest.mark.smoke
 @pytest.mark.timeout(900)
-async def test_device_sizing_live_end_to_end(confirmed_spec_and_selection):
+async def test_device_sizing_live_end_to_end(engine_client, confirmed_spec_and_selection):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")
     ready, reason = await _services_ready()
@@ -176,9 +179,9 @@ async def test_device_sizing_live_end_to_end(confirmed_spec_and_selection):
 
     # The closed loop may chew through up to 3 LLM rounds × ngspice
     # build/run. Give the orchestrator round-trip plenty of headroom.
-    async with httpx.AsyncClient(timeout=1500.0) as client:
+    async with engine_client(timeout=1500.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/topology-selections/{sel_id}/size",
+            f"/topology-selections/{sel_id}/size",
             params={"max_iterations": 3},
             headers=_api_headers(),
         )

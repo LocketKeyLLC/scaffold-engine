@@ -285,6 +285,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_spa_a11y_wiring.py \
 			tests/test_research_feed_wiring.py \
 			tests/test_the_runtime_image_carries_the_labs_tests_17_1998.py \
+			tests/test_integration_tests_ask_the_engine_on_their_own_db_17_2053.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
