@@ -62,7 +62,9 @@ def test_a_proxmox_host_admin_step_gets_no_in_guest_template():
 def test_the_gate_is_wired_into_frame_run():
     import inspect
     from app.modules import supervised_runs
-    assert "prints_a_secret(cmds, verify, shape_files)" in inspect.getsource(supervised_runs.frame_run)
+    # §17.2056 — through the one shared gate, which resolve_run calls too
+    assert "prints_a_secret(commands, verify, files)" in inspect.getsource(supervised_runs.secret_output_refusals)
+    assert "secret_output_refusals(cmds, verify, shape_files)" in inspect.getsource(supervised_runs.frame_run)
 
 
 # §17.1603b — the host's admin work for a guest is not "changing the host instead of the guest"

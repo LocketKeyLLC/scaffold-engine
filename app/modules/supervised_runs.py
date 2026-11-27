@@ -5246,6 +5246,52 @@ def prints_a_secret(commands: list[str], verify: Optional[list[str]] = None,
     return out
 
 
+#: §17.2056 — what may stand around a check's one read of a file: `sudo`, `pct exec N --`/`qm guest exec N --`, `sh -c '…'`
+_BARE_READ_PREFIX_RE = re.compile(
+    r"^\s*(?:sudo(?:\s+-\S+)*\s+)?(?:(?:pct\s+exec|qm\s+guest\s+exec)\s+\d+\s+--\s+)?(?:sudo(?:\s+-\S+)*\s+)?"
+    r"(?:(?:ba)?sh\s+-c\s+(?P<q>['\"]))?$")
+
+
+def a_check_that_reads_a_secret_file(verify: list[str]) -> tuple[list[str], list[dict]]:
+    """§17.2056 — a CHECK whose whole work is to print a file named as a secret becomes that file's `stat`.
+
+    Live (tests/integration/test_auto_mode_live.py H3, 2 of 5 runs on 734943c5): the step said "Done when `ls -l
+    …/token.txt` shows the file"; the drafter added the check `cat …/token.txt`, §17.1603's gate refused it, the one
+    redraft reached for `python3` (off the allow-list) and was rejected, and a block whose commands were all allowed
+    parked with Run withheld. The refusal names its own remedy -- check it exists and its mode -- so a check that only
+    READS the file is the engine's to replace, and says so on the frame (`engine_fixed`). Only that exact shape: a read
+    piped on, a command that prints a secret, a check that uses the file -- the gate still judges each of them."""
+    out: list[str] = []
+    notes: list[dict] = []
+    for v in verify or []:
+        v = str(v)
+        m = _CAT_FILE_RE.search(v)
+        path = m.group(1) if m else ""
+        pre = _BARE_READ_PREFIX_RE.match(v[:m.start()]) if m else None
+        q = (pre.group("q") or "") if pre else ""
+        if not (m and pre and _SECRET_FILE_NAME_RE.search(path.rsplit("/", 1)[-1])
+                and v[m.end():].strip() == q):
+            out.append(v)
+            continue
+        new = f"{v[:m.start()]}stat -c %a:%U {path}{v[m.end():]}"
+        notes.append({"why": f"replaced the check `{v[:120]}` with `{new[:120]}` -- it printed `{path}`, a file named as "
+                             f"a secret, into the run's record; the stat shows the file is there and who may read it"})
+        if new not in out:
+            out.append(new)
+    return out, notes
+
+
+def secret_output_refusals(commands: list[str], verify: Optional[list[str]] = None,
+                           files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.2056 — the ONE judgement of whether a block puts a secret into its output (§17.1603, §17.1652, §17.1673,
+    §17.1958), made by `frame_run` on the checks the run will make (the step's own included) and again by `resolve_run`
+    on what it is about to run. Live, the frame judged its checks BEFORE §17.1630 appended the step's own "Done when"
+    ones and the run judged none, so a "Done when `cat …/api_key.txt`" was offered Run and would print the key."""
+    from app.modules.prints_a_secret import prints_a_credential, prints_a_units_environment, prints_arr_settings
+    return (prints_a_secret(commands, verify, files) + prints_a_credential(commands, verify, files)
+            + prints_arr_settings(commands, verify, files) + prints_a_units_environment(commands, verify, files))
+
+
 #: §17.1612 — `. FILE` / `source FILE`, and what the standard release files define
 _SOURCED_RE = re.compile(r"(?:^|[\s;&|(`])(?:\.|source)\s+([\"']?/[^\s;&|)`]+)")
 _SOURCED_ANY = "*sourced*"
@@ -8017,6 +8063,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         _vdrops = list(_vdrops) + [{"why": f"dropped the check `{w[:120]}` -- it names no path, so it would walk the "
                                            f"runner's working directory `/`, the whole root filesystem"}
                                    for w in _walkers]
+    # §17.2056 — a check that only prints a file named as a secret is replaced by its stat, before any gate judges it
+    verify, _secret_check_notes = a_check_that_reads_a_secret_file(verify)
+    _vdrops = list(_vdrops) + _secret_check_notes
     # §17.1548 — a check that curls a service the engine holds a login for presents it
     # as HTTP Basic auth, the password fed to the guest on stdin as the runner-resolved
     # placeholder. BEFORE inputs_for, so the `<SECRET>` it inserts is picked up as a
@@ -8144,12 +8193,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1355 — the block mistook the engine's own scaffolding for the work:
     # a written file that runs itself, and a check that reads only that file.
     refused = refused + the_block_runs_its_own_scaffolding(shape_files)
-    from app.modules.prints_a_secret import prints_a_credential as _prints_a_credential
-    refused = refused + _prints_a_credential(cmds, verify, shape_files)  # §17.1652 — a key is used, never printed (§17.1970: in the body too)
-    from app.modules.prints_a_secret import prints_arr_settings as _prints_arr_settings
-    refused = refused + _prints_arr_settings(cmds, verify, shape_files)  # §17.1673 — an *arr settings list holds credentials
-    from app.modules.prints_a_secret import prints_a_units_environment as _prints_a_units_environment
-    refused = refused + _prints_a_units_environment(cmds, verify, shape_files)   # §17.1958 — a unit's Environment holds keys
+    # §17.1652/§17.1673/§17.1958/§17.1603 — a secret printed into the output: judged ONCE, below, by
+    # `secret_output_refusals` on the checks the run will make (§17.2056), the step's own included
     from app.modules.check_writes import a_check_that_writes as _a_check_that_writes
     refused = refused + _a_check_that_writes(cmds, node)                 # §17.1659 — a check does not change what it checks
     refused = refused + a_check_that_only_reads_the_scaffolding(verify, shape_files)
@@ -8202,7 +8247,6 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + secret_in_a_guest_exec_command_line(cmds, policy)       # §17.1733
     refused = refused + a_secret_sent_to_an_unconfirmed_machine(cmds, policy, env, services, inventory)   # §17.1741
-    refused = refused + prints_a_secret(cmds, verify, shape_files)        # §17.1603
     refused = refused + a_command_that_does_not_parse(cmds)               # §17.1616
     from app.modules.arr_api_shapes import wrong_fields as _wrong_fields
     refused = refused + _wrong_fields(cmds, shape_files)                  # §17.1694
@@ -8324,6 +8368,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # the run (§17.1470/§17.1625), so OL2's frame listed `qm status 110` while two in-guest checks ran after it.
     if cmds:
         verify = with_own_checks(node, verify, cmds)
+        # §17.2056 — an own check `with_own_checks` replaced by its stat is a changed check: said on the frame
+        from app.modules.operator_steps import checks as _own_checks
+        _repairs = list(_repairs) + a_check_that_reads_a_secret_file(_own_checks(node))[1]
+    # §17.2056 — judged HERE, on every check the run will make (the step's own appended just above), by the same
+    # function `resolve_run` applies to what it is about to run: the frame never offers Run for a block /decide refuses
+    _whys = {str((r or {}).get("why") or "") for r in refused}
+    refused = refused + [r for r in secret_output_refusals(cmds, verify, shape_files) if r["why"] not in _whys]
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -8635,6 +8686,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             return {"outcome": "not_runnable", "refused": [{"command": "", "why": (
                 f"`<{_left_ph[0]}>` is still in the command after the answers were applied, so it would run with the "
                 f"placeholder itself (§17.1649).")}]}
+    # §17.2056 — the same judgement `frame_run` made, on what is about to run: a frame parked before it, or a check
+    # the frame never saw, is refused here -- before anything is claimed or sent -- never printed into the record
+    _leaks = secret_output_refusals(commands, verify_cmds, [f for f in (waiting.get("files") or []) if isinstance(f, dict)])
+    if _leaks:
+        return {"outcome": "not_runnable",
+                "refused": [{"command": mask_secrets(r["command"], values, need), "why": r["why"]} for r in _leaks]}
     ch = await channel(db)
     if ch is None:
         return {"outcome": "no_channel"}
@@ -12899,7 +12956,8 @@ def with_own_checks(node: Optional[dict], verify: list, commands: Optional[list]
     # check that says where it runs is added, or any check when the block has checks and all run on the host.
     host_level = bool(out) and not any(into.match(c) for c in out)
     inside = _inside_the_guest(commands)                                     # §17.1625
-    for c in checks(node):
+    # §17.2056 — an own check that prints a secret-named file runs as its stat, at the frame and at the run alike
+    for c in a_check_that_reads_a_secret_file(checks(node))[0]:
         if inside and not into.match(c) and not _HOST_CHECK_RE.match(c):
             c = inside(c)              # the step's work is in the guest: so is its bare check
         elif not (into.match(c) or host_level):
