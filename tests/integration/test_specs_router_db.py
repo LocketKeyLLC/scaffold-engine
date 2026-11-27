@@ -14,7 +14,6 @@ import json
 import uuid
 from datetime import datetime
 
-import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -23,8 +22,10 @@ from app.config import settings
 from app.database import async_session
 from app.routers.specs import CONFIRMED_BY_API_KEY
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
-pytestmark = pytest.mark.needs_orchestrator   # §17.1080 — calls the running engine, not just its DB
+# §17.2053 — these tests call the engine IN-PROCESS (``engine_client``, tests/integration/
+# conftest.py), not the running orchestrator at scaffold-orchestrator:8000: the rows
+# they seed go through ``async_session`` into the TEST database, which that engine
+# never reads, so every lookup came back ``404 ... not found``.
 
 # A minimal but valid spec — matches spec_schema.json. Re-validating
 # is the schema test's job; here we only need a row that exists.
@@ -104,12 +105,12 @@ def _api_headers() -> dict[str, str]:
 
 
 @pytest.mark.smoke
-async def test_confirm_endpoint_sets_columns(inserted_spec):
+async def test_confirm_endpoint_sets_columns(engine_client, inserted_spec):
     spec_id = await inserted_spec(confirmed=False)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{spec_id}/confirm",
+            f"/specs/{spec_id}/confirm",
             headers=_api_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -132,7 +133,7 @@ async def test_confirm_endpoint_sets_columns(inserted_spec):
 
 
 @pytest.mark.smoke
-async def test_confirm_is_idempotent_reconfirm_updates_timestamp(inserted_spec):
+async def test_confirm_is_idempotent_reconfirm_updates_timestamp(engine_client, inserted_spec):
     spec_id = await inserted_spec(confirmed=True)
 
     async with async_session() as db:
@@ -144,9 +145,9 @@ async def test_confirm_is_idempotent_reconfirm_updates_timestamp(inserted_spec):
 
     # Sleep is overkill (NOW() has microsecond resolution); just hit
     # the endpoint and assert the new timestamp is >= the prior one.
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{spec_id}/confirm",
+            f"/specs/{spec_id}/confirm",
             headers=_api_headers(),
         )
     assert resp.status_code == 200
@@ -164,12 +165,12 @@ async def test_confirm_is_idempotent_reconfirm_updates_timestamp(inserted_spec):
 
 
 @pytest.mark.smoke
-async def test_unconfirm_endpoint_clears_columns(inserted_spec):
+async def test_unconfirm_endpoint_clears_columns(engine_client, inserted_spec):
     spec_id = await inserted_spec(confirmed=True)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{spec_id}/unconfirm",
+            f"/specs/{spec_id}/unconfirm",
             headers=_api_headers(),
         )
     assert resp.status_code == 200
@@ -190,11 +191,11 @@ async def test_unconfirm_endpoint_clears_columns(inserted_spec):
 
 
 @pytest.mark.smoke
-async def test_confirm_404_when_spec_missing():
+async def test_confirm_404_when_spec_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{bogus}/confirm",
+            f"/specs/{bogus}/confirm",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
@@ -202,24 +203,24 @@ async def test_confirm_404_when_spec_missing():
 
 
 @pytest.mark.smoke
-async def test_unconfirm_404_when_spec_missing():
+async def test_unconfirm_404_when_spec_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{bogus}/unconfirm",
+            f"/specs/{bogus}/unconfirm",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
 
 
 @pytest.mark.smoke
-async def test_pending_list_returns_unconfirmed_rows(inserted_spec):
+async def test_pending_list_returns_unconfirmed_rows(engine_client, inserted_spec):
     pending_id = await inserted_spec(confirmed=False)
     confirmed_id = await inserted_spec(confirmed=True)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with engine_client(timeout=10.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/specs/pending",
+            "/specs/pending",
             headers=_api_headers(),
         )
     assert resp.status_code == 200

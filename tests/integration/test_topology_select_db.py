@@ -28,7 +28,10 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
+# §17.2053 — these tests call the engine IN-PROCESS (``engine_client``, tests/integration/
+# conftest.py), not the running orchestrator at scaffold-orchestrator:8000: the rows
+# they seed go through ``async_session`` into the TEST database, which that engine
+# never reads, so every lookup came back ``404 ... not found``.
 
 _VALID_SPEC: dict = {
     "schema_version": "1.0.0",
@@ -146,7 +149,7 @@ async def _corpus_has_eng_chunks() -> bool:
 # only matters when the test actually proceeds.
 @pytest.mark.smoke
 @pytest.mark.timeout(900)
-async def test_topology_select_live_end_to_end(confirmed_spec):
+async def test_topology_select_live_end_to_end(engine_client, confirmed_spec):
     if os.environ.get("SCAFFOLD_SKIP_LIVE_LLM") == "1":
         pytest.skip("SCAFFOLD_SKIP_LIVE_LLM=1")
     if not await _model_reachable():
@@ -160,9 +163,9 @@ async def test_topology_select_live_end_to_end(confirmed_spec):
     # several minutes — give the orchestrator round-trip a generous
     # ceiling so the test's own httpx timeout never wins the race.
     # The orchestrator's own ollama timeout governs the upstream call.
-    async with httpx.AsyncClient(timeout=900.0) as client:
+    async with engine_client(timeout=900.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/specs/{spec_id}/topology-select",
+            f"/specs/{spec_id}/topology-select",
             headers=_api_headers(),
         )
 

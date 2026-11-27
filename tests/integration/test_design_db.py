@@ -1,5 +1,5 @@
 """
-Integration tests for ``/design`` against the real orchestrator.
+Integration tests for ``/design`` against the real router and Postgres.
 
 Covers the cheap, deterministic surfaces — endpoint mounting, schema
 shape, error mapping — but NOT the live LLM end-to-end advance (the
@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import uuid
 
-import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -21,8 +20,10 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 
-ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
-pytestmark = pytest.mark.needs_orchestrator   # §17.1080 — calls the running engine, not just its DB
+# §17.2053 — these tests call the engine IN-PROCESS (``engine_client``, tests/integration/
+# conftest.py), not the running orchestrator at scaffold-orchestrator:8000: the rows
+# they seed go through ``async_session`` into the TEST database, which that engine
+# never reads, so every lookup came back ``404 ... not found``.
 
 
 def _api_headers() -> dict[str, str]:
@@ -46,18 +47,18 @@ async def cleanup_design_jobs():
 
 
 @pytest.mark.smoke
-async def test_get_design_404_when_missing():
+async def test_get_design_404_when_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with engine_client(timeout=5.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/design/{bogus}",
+            f"/design/{bogus}",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
 
 
 @pytest.mark.smoke
-async def test_get_design_404_when_job_type_legacy(cleanup_design_jobs):
+async def test_get_design_404_when_job_type_legacy(engine_client, cleanup_design_jobs):
     """A regular (legacy) job row exists but isn't a design_circuit
     — GET /design/{id} must reject it, not silently treat it as
     one."""
@@ -75,9 +76,9 @@ async def test_get_design_404_when_job_type_legacy(cleanup_design_jobs):
         await db.commit()
     cleanup_design_jobs.append(job_id)
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with engine_client(timeout=5.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/design/{job_id}",
+            f"/design/{job_id}",
             headers=_api_headers(),
         )
     assert resp.status_code == 404
@@ -85,7 +86,7 @@ async def test_get_design_404_when_job_type_legacy(cleanup_design_jobs):
 
 
 @pytest.mark.smoke
-async def test_advance_400_on_unknown_stage(cleanup_design_jobs):
+async def test_advance_400_on_unknown_stage(engine_client, cleanup_design_jobs):
     async with async_session() as db:
         row = await db.execute(
             text(
@@ -100,9 +101,9 @@ async def test_advance_400_on_unknown_stage(cleanup_design_jobs):
         await db.commit()
     cleanup_design_jobs.append(job_id)
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with engine_client(timeout=5.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/design/{job_id}/advance",
+            f"/design/{job_id}/advance",
             params={"stage": "bogus"},
             headers=_api_headers(),
         )
@@ -110,11 +111,11 @@ async def test_advance_400_on_unknown_stage(cleanup_design_jobs):
 
 
 @pytest.mark.smoke
-async def test_advance_404_when_job_missing():
+async def test_advance_404_when_job_missing(engine_client):
     bogus = uuid.uuid4()
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with engine_client(timeout=5.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/design/{bogus}/advance",
+            f"/design/{bogus}/advance",
             params={"stage": "topology"},
             headers=_api_headers(),
         )
@@ -122,7 +123,7 @@ async def test_advance_404_when_job_missing():
 
 
 @pytest.mark.smoke
-async def test_get_design_aggregates_chain(cleanup_design_jobs):
+async def test_get_design_aggregates_chain(engine_client, cleanup_design_jobs):
     """Seed a full chain (job + spec + topology_selection +
     device_sizing) via SQL, then assert /design/{id} returns all the
     cross-stage refs in one payload."""
@@ -255,9 +256,9 @@ async def test_get_design_aggregates_chain(cleanup_design_jobs):
         sizing_id = str(sizing_row.scalar_one())
         await db.commit()
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with engine_client(timeout=5.0) as client:
         resp = await client.get(
-            f"{ORCHESTRATOR_URL}/design/{job_id}",
+            f"/design/{job_id}",
             headers=_api_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -282,7 +283,7 @@ async def test_get_design_aggregates_chain(cleanup_design_jobs):
 
 @pytest.mark.smoke
 @pytest.mark.timeout(900)
-async def test_post_design_ambiguity_returns_inline(cleanup_design_jobs):
+async def test_post_design_ambiguity_returns_inline(engine_client, cleanup_design_jobs):
     """An ambiguous brief must surface ambiguities[] in the 200 body
     with NO job row created.
 
@@ -294,9 +295,9 @@ async def test_post_design_ambiguity_returns_inline(cleanup_design_jobs):
     both at 900s; orchestrator's own Ollama timeout governs upstream.
     """
     payload = {"brief": "Make a fast filter."}
-    async with httpx.AsyncClient(timeout=900.0) as client:
+    async with engine_client(timeout=900.0) as client:
         resp = await client.post(
-            f"{ORCHESTRATOR_URL}/design",
+            "/design",
             json=payload,
             headers=_api_headers(),
         )
