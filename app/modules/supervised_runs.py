@@ -6627,6 +6627,16 @@ def awk_fields_the_runner_reads_as_secrets(commands: list[str], verify: list[str
         f"secret, quotes or not, and would refuse the line; to awk the two are the same field")}]
 
 
+def names_a_block_binds(text: str) -> set[str]:
+    """§17.1578 — the `$UPPER` names a block sets itself (`X=…`, `for X in`, `read X`, `local X`): not secrets."""
+    text = str(text or "")
+    bound = {m.group("name") for m in _VAR_SET_RE.finditer(text)
+             if not _SELF_ASSIGN_RE.match(text[m.start("name"):])}
+    bound |= {g for m in _VAR_BIND_RE.finditer(text)
+              for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+    return bound
+
+
 def single_quoted_names_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> list[dict]:
     """§17.1638 — any OTHER `$UPPER` inside single quotes that no store holds: the shell leaves it alone, the runner
     demands it as a secret and refuses the approved block. Said before Run, so it redrafts instead."""
@@ -6636,10 +6646,7 @@ def single_quoted_names_the_runner_reads_as_secrets(commands: list[str], policy:
     for cmd in commands or []:
         text = str(cmd or "")
         # a name the block binds itself is §17.1578's (an old runner) or nobody's (helper 23 leaves it alone)
-        bound = {m.group("name") for m in _VAR_SET_RE.finditer(text)
-                 if not _SELF_ASSIGN_RE.match(text[m.start("name"):])}
-        bound |= {g for m in _VAR_BIND_RE.finditer(text)
-                  for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        bound = names_a_block_binds(text)
         hits = sorted({m.group(1) for a, b in _single_quoted_spans(text)
                        for m in _SECRET_REF_RE.finditer(text[a:b])} - held - bound)
         if hits:
@@ -6674,10 +6681,7 @@ def locals_the_runner_reads_as_secrets(commands: list[str], policy: dict) -> lis
     out: list[dict] = []
     for cmd in commands or []:
         text_value = str(cmd or "")
-        bound = {m.group("name") for m in _VAR_SET_RE.finditer(text_value)
-                 if not _SELF_ASSIGN_RE.match(text_value[m.start("name"):])}
-        bound |= {g for m in _VAR_BIND_RE.finditer(text_value)
-                  for g in (m.group("for"), m.group("sel"), m.group("read"), m.group("loc")) if g}
+        bound = names_a_block_binds(text_value)
         hits = sorted({m.group(1) for m in _SECRET_REF_RE.finditer(text_value)} & bound - held)
         if hits:
             names = ", ".join(f"`${n}`" for n in hits)
@@ -12926,7 +12930,37 @@ def own_checks_not_read(node: Optional[dict], verify: list) -> str:
     return ""
 
 
-async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]]) -> Optional[dict]:
+def checks_need_approval(verify_cmds: list, policy: Optional[dict]) -> str:
+    """§17.2051 — ``""``, or why these checks cannot be read BEFORE the operator approves the block.
+
+    A check is asked twice: before the block is parked (§17.1302's "already met?") and after it runs (§17.1281). Only
+    the second carries what the approval brings: the operator's answers to the frame's `<INPUT>`s (substituted in
+    `resolve_run`, §17.1649) and the engine-held secret values, handed out of band to `run_block` for an APPROVED run
+    and never before (§17.1193; §17.1430/1720: a value reaches the root shell only, on stdin). Before approval a check
+    that names an unanswered `<INPUT>` would run with the literal placeholder, and one whose `$NAME` only the engine
+    holds is refused by the runner ("this command needs $NAME, which neither the engine sent nor this runner's secrets
+    file holds"). Live (job 0fb4ea7f RD80, every redeploy): `GUEST_USER="<AI_USER>" bash /tmp/in_vm_110.sh check
+    'curl -s http://localhost:8000/health' # $MASS_PASSWORD` was sent, refused, and logged
+    `supervised_run_already_met_unreadable` -- the engine could never learn the step was already done, and paid a
+    refused runner call to find that out. Names the runner holds itself (policy ``secrets``) and names a check binds
+    itself are readable now."""
+    runner_holds = {str(x) for x in ((policy or {}).get("secrets") or [])}
+    for c in verify_cmds or []:
+        c = str(c or "")
+        inputs = placeholders([c])
+        if inputs:
+            return (f"the check `{c[:100]}` needs `<{inputs[0]}>`, which the operator answers with the approval -- "
+                    "before it, the check would run with the placeholder itself")
+        engine_held = [n for n in dict.fromkeys(m.group(1) for m in _SECRET_REF_RE.finditer(c))
+                       if n not in runner_holds and n not in names_a_block_binds(c)]
+        if engine_held:
+            return (f"the check `{c[:100]}` needs `${engine_held[0]}`, which the runner does not hold and the engine "
+                    "sends only with an approved run (a secret is never expanded outside the root shell)")
+    return ""
+
+
+async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str]],
+                      policy: Optional[dict] = None) -> Optional[dict]:
     """§17.1302 — read the step's OWN verify checks off the machine before the
     block is parked. When every check confirms the step's goal, the step is
     already done and nothing should run: return the evidence; else None.
@@ -12962,6 +12996,12 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)
+        return None
+    # §17.2051 — a check only the approval can make runnable is not sent before it: "cannot check before approval"
+    # is a known answer, said once, not a refused runner call read back as "unreadable".
+    _needs = checks_need_approval(verify_cmds, policy)
+    if _needs:
+        logger.info("supervised_run_already_met_needs_approval node=%s why=%s", (node or {}).get("node_key"), _needs)
         return None
     pasted, ran = await run_verify(spec, verify_cmds, env)
     answered = [r for r in ran or [] if r.get("ran")]

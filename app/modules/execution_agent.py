@@ -4673,7 +4673,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         _state_only = not supervised_runs.may_be_already_met(run_node, frame, _developed, _engine_check)  # §17.1426/1641/1692
         if _depth < 6 and not _state_only:
             try:
-                _met = await supervised_runs.already_met(spec, run_node, frame, _env)
+                _met = await supervised_runs.already_met(spec, run_node, frame, _env, policy=policy)   # §17.2051
             except Exception as exc:
                 logger.warning("already_met_check_failed job=%s node=%s err=%r", job_id,
                                run_node.get("node_key"), exc)
