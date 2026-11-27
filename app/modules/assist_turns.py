@@ -179,7 +179,10 @@ async def capture_assistant_reply(
         _written = parse_file_writes(content or "")
         if _written:
             from app.modules.assist_environment import set_environment
-            await set_environment(session_id=session_id, file_writes=_written, db=db)
+            # §17.2048 — record WHICH step's reply wrote it, so a later step's
+            # diagnosis is not handed this file as its own (live: RDV80 was).
+            await set_environment(session_id=session_id, file_writes=_written,
+                                  file_node_key=node_key, db=db)
             logger.info("assist_file_write_recorded session_id=%s files=%r",
                         session_id,
                         {k: v["expected"] for k, v in _written.items()})

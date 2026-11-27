@@ -1396,7 +1396,8 @@ async def run_step_research(
     # the brief's in-place plan. Inject the same unified memory (notes + facts,
     # with §17.714 supersession) every other prompt site grounds on.
     context_parts.extend(
-        assist_guide._render_memory_or_legacy(mem.environment, mem.operator_notes)
+        assist_guide._render_memory_or_legacy(mem.environment, mem.operator_notes,
+                                              node_key=node_key)  # §17.2048
     )
     if mem.job_digest:
         context_parts.append(mem.job_digest)
@@ -3195,6 +3196,7 @@ async def verify_submit_outcome(
         run_report=run_report,
         environment=_environment_from_metadata(row["metadata"]),
         done_criteria=done_criteria,
+        node_key=node_key,  # §17.2048 — the file ledger scoped to this step
         # §17.688 — a decision node is judged on the CHOICE, not the downstream
         # concrete artifact (its task text names a table/config later steps apply).
         is_decision=is_decision_node(row.get("node_type")),

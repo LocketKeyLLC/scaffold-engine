@@ -216,6 +216,7 @@ async def set_environment(
     file_writes: dict | None = None,   # §17.965
     file_sizes: dict | None = None,    # §17.965
     file_contents: dict | None = None,  # §17.967
+    file_node_key: str | None = None,   # §17.2048 — the step those file facts belong to
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
@@ -319,7 +320,8 @@ async def set_environment(
         from app.modules.assist_files import merge_file_writes
         current["file_writes"] = merge_file_writes(
             current.get("file_writes"), written=file_writes,
-            observed=file_sizes, contents=file_contents)
+            observed=file_sizes, contents=file_contents,
+            node_key=file_node_key)  # §17.2048 — which step wrote / measured it
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

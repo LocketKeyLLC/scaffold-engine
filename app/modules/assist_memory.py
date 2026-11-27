@@ -637,7 +637,8 @@ async def derive_turn_memory(
             sizes = parse_file_sizes(msg)
             if sizes:
                 await set_environment(
-                    session_id=session_id, file_sizes=sizes, db=db)
+                    session_id=session_id, file_sizes=sizes,
+                    file_node_key=node_key, db=db)  # §17.2048 — the step that measured it
                 result["file_sizes_observed"] = sorted(sizes)
                 logger.info("assist_file_size_observed session_id=%s sizes=%r",
                             session_id, sizes)
@@ -649,7 +650,8 @@ async def derive_turn_memory(
                 bodies = parse_file_contents(msg, _known)
                 if bodies:
                     await set_environment(
-                        session_id=session_id, file_contents=bodies, db=db)
+                        session_id=session_id, file_contents=bodies,
+                        file_node_key=node_key, db=db)  # §17.2048
                     result["file_contents_observed"] = sorted(bodies)
                     logger.info(
                         "assist_file_content_observed session_id=%s paths=%r",

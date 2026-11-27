@@ -721,6 +721,7 @@ async def verify_step_success(
     run_report: str = "",   # §17.1159 — which issued commands ran / were skipped (deterministic)
     environment: Optional[dict] = None, is_decision: bool = False,
     done_criteria: str = "",  # §17.1100 — the walkthrough's own "Done when" bar
+    node_key: Optional[str] = None,  # §17.2048 — scopes the file ledger to this step
 ) -> dict:
     """Judge whether pasted evidence indicates the step worked. Fail-soft.
 
@@ -752,7 +753,7 @@ async def verify_step_success(
 
     # §17.710b — verify grounds on the unified memory (facts help judge against
     # the real system) or the legacy env block, per the valve. No notes here.
-    env_block = "\n\n".join(_render_memory_or_legacy(environment, None))
+    env_block = "\n\n".join(_render_memory_or_legacy(environment, None, node_key=node_key))
     if is_decision:  # §17.688 — judge the CHOICE, not the downstream artifact
         system = _VERIFY_DECISION_SYSTEM
         user = (
@@ -2502,7 +2503,9 @@ def _build_guide_user_prompt(
         parts.append(job_digest.strip())
     # §17.710b — one injection path (unified session memory) or the legacy
     # env + notes blocks, per the assist_umem_inject valve.
-    parts.extend(_render_memory_or_legacy(environment, operator_notes))
+    # §17.2048 — the file ledger scoped to THIS step (ctx.node_key).
+    parts.extend(_render_memory_or_legacy(environment, operator_notes,
+                                          node_key=getattr(ctx, "node_key", None)))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
     # §17.1166 — the look-ups the runner (or the operator) already ran, so the
@@ -4191,7 +4194,9 @@ async def generate_fix(
     # notes, with §17.714 reset supersession) that guide/ask/decision inject.
     # Previously /fix rendered only the legacy env block (facts, no notes), so a
     # captured pivot or tool preference never reached the fix walkthrough.
-    parts.extend(_render_memory_or_legacy(environment, operator_notes))
+    # §17.2048 — and the file ledger in it is scoped to the failing step, the
+    # same scope as the mismatch/conflict directives below.
+    parts.extend(_render_memory_or_legacy(environment, operator_notes, node_key=node_key))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
         _engine_authored.append(conversation.strip())
@@ -4368,16 +4373,30 @@ async def generate_fix(
     _truncated = _pol.detect_truncated_paste(error_text or "")
     # §17.965 — a size the engine can check itself outranks any symptom report.
     from app.modules.assist_files import (
-        find_content_mismatches, find_size_mismatches,
-        find_verified_file_rewrites, verified_files)
+        conflicts_for_step, find_content_mismatches, find_size_mismatches,
+        find_verified_file_rewrites, step_file_state, verified_files)
     _fw_state = ((environment or {}).get("file_writes")
                  if isinstance((environment or {}).get("file_writes"), dict) else {})
+    # §17.2048 — the ledger is SESSION-wide; the directive is about THIS step.
+    # Live (job 0fb4ea7f, 2026-11-26 21:47:54): RDV80, a read-back that writes
+    # no files, failed and its fix prompt was ordered to act on
+    # `/etc/pve/firewall/cluster.fw` (45 written / 872 measured) and
+    # `/tmp/Caddyfile` (17 / 3 lines) — other, older steps' files. Only files
+    # this step wrote or measured reach the mismatch and conflict directives.
+    _fw_mine = step_file_state(_fw_state, node_key)
     # §17.978 — a file whose CONTENT came back wrong deserves the same directive
     # as one whose SIZE did. §17.967 detected it and only ever put it in prose.
-    _size_bad = find_size_mismatches(_fw_state) + find_content_mismatches(_fw_state)
-    _verified = verified_files(_fw_state)   # §17.967
+    _size_bad = find_size_mismatches(_fw_mine) + find_content_mismatches(_fw_mine)
+    # §17.967 — stays SESSION-wide on purpose (§17.2048 checked it): it is a
+    # restraint, not a directive — "do not rewrite a file proven correct by
+    # hash" is true whichever step wrote the file, and it never points the
+    # diagnosis AT a file.
+    _verified = verified_files(_fw_state)
     from app.modules.assist_contracts import bounded_artefacts, find_contract_conflicts
-    _conflicts = find_contract_conflicts(bounded_artefacts(_fw_state))  # §17.968
+    # §17.968 — the cross-check runs over every retained body (a pair can span
+    # steps); §17.2048 — only a pair that includes this step's file is its cause.
+    _conflicts = conflicts_for_step(
+        find_contract_conflicts(bounded_artefacts(_fw_state)), _fw_state, node_key)
     if _conflicts:
         logger.warning("assist_contract_conflict node_key=%s kinds=%r", node_key,
                        [c.get("kind") for c in _conflicts[:3]])
