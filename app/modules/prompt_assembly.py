@@ -769,9 +769,15 @@ def build_base_prompt(node: dict, brief: dict, environment: dict | None = None, 
         tail += ("\n\nWHAT THE ENGINE HAS MEASURED about the machines this step touches — use these addresses, "
                  "names and test methods rather than guessing:\n" + "\n".join(f"- {f}" for f in measured))
     if decisions:
+        # §17.2055 — a decision replaces only what it NAMES. Live, D1 chose "The local NVMe pool" (no path) and the
+        # drafter, told the decision wins, read the step's literal `mkdir -p /tmp/scaffold-auto-itest/stage1` as
+        # contradicting it and wrote `mkdir -p <NVME_POOL_MOUNT>/…` plus a chmod and a findmnt -- 2 of 14 H1 drafts.
         tail += ("\n\nTHE OPERATOR'S DECISIONS — made after parts of this step's text were written. Where one "
                  "disagrees with the step's text above, the DECISION wins and the older text is obsolete; do not "
-                 "test, build or expect what a decision ruled out:\n" + "\n".join(f"- {d}" for d in decisions))
+                 "test, build or expect what a decision ruled out. A decision replaces only what it NAMES: a path, "
+                 "name, address or command the step's text gives literally stays exactly as written unless a "
+                 "decision names the value that replaces it, and a decision that names no value never turns one "
+                 "into a <PLACEHOLDER> or a question:\n" + "\n".join(f"- {d}" for d in decisions))
     # §17.1221 — the question belongs to the STEP, asked when the operator gets
     # here, not to the plan. This is the one place every step's guide and runbook
     # is assembled, so a step that depends on something undecided opens by asking
