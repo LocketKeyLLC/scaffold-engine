@@ -259,8 +259,17 @@ def parse_file_sizes(operator_text: str) -> dict[str, int]:
 def merge_file_writes(current: dict | None,
                       written: dict | None = None,
                       observed: dict | None = None,
-                      contents: dict | None = None) -> dict:
-    """Fold a new write, a new size, and/or pasted-back content into the ledger."""
+                      contents: dict | None = None,
+                      node_key: str | None = None) -> dict:
+    """Fold a new write, a new size, and/or pasted-back content into the ledger.
+
+    §17.2048 — ``node_key`` is the step the reply/paste belongs to. A write
+    records it as ``node_key`` (the step that WROTE the file); a size or
+    content observation records it as ``observed_node_key`` (the step whose
+    output MEASURED it). The ledger is keyed by path across the whole session,
+    so without this a mismatch from one step was indistinguishable from one in
+    the step being diagnosed — see ``step_file_state``.
+    """
     merged: dict[str, dict[str, Any]] = {
         k: dict(v) for k, v in (current or {}).items() if isinstance(v, dict)
     }
@@ -272,20 +281,73 @@ def merge_file_writes(current: dict | None,
                         "sha": rec.get("sha"),
                         "body": (rec.get("body") or "")[:_MAX_BODY_CHARS] or None,
                         "observed": None,
-                        "observed_sha": None}
+                        "observed_sha": None,
+                        "node_key": node_key,            # §17.2048
+                        "observed_node_key": None}
     for path, size in (observed or {}).items():
         merged.setdefault(path, {"expected": None, "lines": None, "sha": None})
         merged[path]["observed"] = int(size)
+        merged[path]["observed_node_key"] = node_key     # §17.2048
     for path, body in (contents or {}).items():
         merged.setdefault(path, {"expected": None, "lines": None, "sha": None})
         merged[path]["observed_sha"] = content_fingerprint(body)
         merged[path]["observed_lines"] = len(normalize_content(body).splitlines())
+        merged[path]["observed_node_key"] = node_key     # §17.2048
     trimmed = dict(list(merged.items())[-_MAX_TRACKED:])
     # Only the newest few keep their text; the rest stay as hash + size.
     for path in list(trimmed)[:-_MAX_BODIES]:
         if isinstance(trimmed[path], dict):
             trimmed[path].pop("body", None)
     return trimmed
+
+
+def _file_is_this_steps(rec: dict, node_key: str) -> bool:
+    """§17.2048 — the step WROTE it, or the step's own output MEASURED it."""
+    return node_key in (rec.get("node_key"), rec.get("observed_node_key"))
+
+
+def step_file_state(state: dict | None, node_key: str | None) -> dict:
+    """§17.2048 — the part of the session-wide file ledger that is THIS step's.
+
+    Live (job 0fb4ea7f, 2026-11-26 21:47:54 UTC): step RDV80 — a read-only
+    read-back that writes no files — failed, and the fix prompt was handed
+    `/etc/pve/firewall/cluster.fw` (45 bytes written, 872 measured) and
+    `/tmp/Caddyfile` (17 lines written, 3 pasted back) as the dominant fact of
+    the turn: files other, much older steps wrote and measured. The ledger is
+    keyed by path for the whole session, and every reader treated it as the
+    failing step's evidence, so a diagnosis could be steered at another step's
+    file.
+
+    A file is this step's when the step wrote it (``node_key``) or when the
+    step's own pasted output measured it (``observed_node_key``) — the second
+    keeps §17.965's case: a later step whose `wc -c` shows an earlier step's
+    file is clipped is looking at its own evidence. An entry with NO recorded
+    step (written before §17.2048) is attributed to no step: there is no
+    honest way to say which step it belongs to, and attributing it to whichever
+    step happens to fail is exactly the defect. With no ``node_key`` (a
+    session-level turn, not a step) there is nothing to scope to, and the
+    whole ledger is returned.
+    """
+    if not node_key:
+        return {k: v for k, v in (state or {}).items() if isinstance(v, dict)}
+    return {k: v for k, v in (state or {}).items()
+            if isinstance(v, dict) and _file_is_this_steps(v, str(node_key))}
+
+
+def conflicts_for_step(conflicts: list[dict] | None, state: dict | None,
+                       node_key: str | None) -> list[dict]:
+    """§17.2048 — a §17.968 contradiction concerns this step only when one of
+    its two files is this step's (``step_file_state``). The cross-check itself
+    still runs over EVERY retained body — a step's client file can contradict
+    a server file an earlier step wrote — but a pair of files neither of which
+    this step wrote or measured is another step's business, not this
+    diagnosis's directive."""
+    if not node_key:
+        return list(conflicts or [])
+    mine = set(step_file_state(state, node_key))
+    return [c for c in (conflicts or [])
+            if isinstance(c, dict)
+            and (c.get("client") in mine or c.get("server") in mine)]
 
 
 def verified_files(state: dict | None) -> list[str]:
@@ -351,8 +413,16 @@ def find_size_mismatches(state: dict | None) -> list[dict]:
     return hits
 
 
-def render_file_writes(state: dict | None) -> str:
-    """The prompt block. A record the model cannot see is not a record (§17.913)."""
+def render_file_writes(state: dict | None, *, node_key: str | None = None) -> str:
+    """The prompt block. A record the model cannot see is not a record (§17.913).
+
+    §17.2048 — with ``node_key`` (a prompt about one step), a file that is not
+    this step's (``step_file_state``) is listed as context — which step wrote
+    it, what was measured — WITHOUT the rewrite imperative. Live, RDV80's fix
+    prompt carried "rewrite it in pieces before drawing any conclusion" for
+    `/etc/pve/firewall/cluster.fw`, a file another step wrote days earlier.
+    Without ``node_key`` the block is unchanged.
+    """
     rows = [(p, r) for p, r in (state or {}).items()
             if isinstance(r, dict) and isinstance(r.get("expected"), int)]
     if not rows:
@@ -362,6 +432,20 @@ def render_file_writes(state: dict | None) -> str:
              "did not land whole):"]
     for path, rec in rows[-10:]:
         exp, obs = rec["expected"], rec.get("observed")
+        if node_key and not _file_is_this_steps(rec, str(node_key)):
+            _by = (f"written by step {rec['node_key']}" if rec.get("node_key")
+                   else "written by an earlier step (not recorded which)")
+            if rec.get("sha") and rec.get("sha") == rec.get("observed_sha"):
+                _meas = "; VERIFIED CORRECT on disk — do not rewrite it"
+            else:
+                _meas = (f"; measured {obs} bytes when last checked"
+                         if isinstance(obs, int) and obs != exp else "")
+            lines.append(
+                f"- `{path}` — {_by}, not this step ({exp} bytes{_meas}). "
+                "Context only: this step neither wrote nor measured it, so do "
+                "not rewrite it or name it as this step's cause unless this "
+                "step's own output points at it.")
+            continue
         # §17.967 — a content match is stronger evidence than any byte count and
         # is stated first, because it is the fact that ends the rewrite loop.
         if rec.get("sha") and rec.get("sha") == rec.get("observed_sha"):

@@ -34,7 +34,34 @@ _UNCERTAIN_FACT_RE = re.compile(
 )
 
 
-def render_environment_block(environment: dict | None) -> str:
+def _file_ledger_blocks(environment: dict, node_key: str | None) -> list[str]:
+    """§17.965/968 — the file ledger and the contradictions between its files,
+    for BOTH memory renderers (legacy + unified) from one place.
+
+    §17.2048 — the two renderers each inlined this; both now scope it to the
+    step the prompt is about (``node_key``): another step's file is listed as
+    context without the rewrite imperative, and a contradiction reaches the
+    prompt only when one of its files is this step's. Live, RDV80's prompts
+    told it to rewrite `/etc/pve/firewall/cluster.fw`, another step's file.
+    ``node_key=None`` renders exactly as before."""
+    from app.modules.assist_contracts import (
+        bounded_artefacts, find_contract_conflicts, render_contract_conflicts)
+    from app.modules.assist_files import conflicts_for_step, render_file_writes
+    fw_state = (environment.get("file_writes")
+                if isinstance(environment.get("file_writes"), dict) else {})
+    out = []
+    fw = render_file_writes(fw_state, node_key=node_key)
+    if fw:
+        out.append(fw)
+    cc = render_contract_conflicts(conflicts_for_step(
+        find_contract_conflicts(bounded_artefacts(fw_state)), fw_state, node_key))
+    if cc:
+        out.append(cc)
+    return out
+
+
+def render_environment_block(environment: dict | None, *,
+                             node_key: str | None = None) -> str:
     """§17.487 — the operator's environment so the model emits concrete commands.
 
     ``environment`` = ``{"profile": str, "substitutions": {KEY: value}}`` (stored on
@@ -118,19 +145,9 @@ def render_environment_block(environment: dict | None) -> str:
         if block:
             parts.append(block)
     # §17.965 — expected vs measured file sizes, same ground-truth tier.
-    from app.modules.assist_files import render_file_writes
-    _fw_state = (environment.get("file_writes")
-                 if isinstance(environment.get("file_writes"), dict) else {})
-    _fw = render_file_writes(_fw_state)
-    if _fw:
-        parts.append(_fw)
     # §17.968 — and where two of those files disagree with each other.
-    from app.modules.assist_contracts import (
-        bounded_artefacts, find_contract_conflicts, render_contract_conflicts)
-    _cc = render_contract_conflicts(
-        find_contract_conflicts(bounded_artefacts(_fw_state)))
-    if _cc:
-        parts.append(_cc)
+    # §17.2048 — scoped to the step this prompt is about (_file_ledger_blocks).
+    parts.extend(_file_ledger_blocks(environment, node_key))
     if missing:
         parts.append(
             "### NOT AVAILABLE on the operator's system (the shell reported "
@@ -262,6 +279,7 @@ def _operator_reset_intent(notes: list[dict] | None) -> bool:
 def render_session_memory(
     environment: dict | None, operator_notes: list[dict] | None = None,
     *, budget: int | None = None,
+    node_key: str | None = None,   # §17.2048 — the step this prompt is about
 ) -> str:
     """§17.710b — ONE consolidated session-memory block: execution context +
     observed facts + provided values + operator notes, in priority order and
@@ -303,18 +321,9 @@ def render_session_memory(
     _map_block = run_gate("system_map", render_system_map, environment, default="")
     if _map_block:
         state_block = (_map_block + "\n\n" + state_block) if state_block else _map_block
-    from app.modules.assist_files import render_file_writes   # §17.965
-    _fws = (environment.get("file_writes")
-            if isinstance(environment.get("file_writes"), dict) else {})
-    _fw_block = render_file_writes(_fws)
-    if _fw_block:
-        state_block = (state_block + "\n\n" + _fw_block) if state_block else _fw_block
-    from app.modules.assist_contracts import (  # §17.968
-        bounded_artefacts, find_contract_conflicts, render_contract_conflicts)
-    _cc_block = render_contract_conflicts(
-        find_contract_conflicts(bounded_artefacts(_fws)))
-    if _cc_block:
-        state_block = (state_block + "\n\n" + _cc_block) if state_block else _cc_block
+    # §17.965/968 — the file ledger + contradictions; §17.2048 — step-scoped.
+    for _fl_block in _file_ledger_blocks(environment, node_key):
+        state_block = (state_block + "\n\n" + _fl_block) if state_block else _fl_block
     missing = [m for m in (environment.get("missing_tools") or [])
                if isinstance(m, dict) and str(m.get("tool") or "").strip()]
     missing_block = ""
@@ -573,18 +582,23 @@ def render_playbook_block(
 
 def _render_memory_or_legacy(
     environment: dict | None, operator_notes: list[dict] | None,
+    *, node_key: str | None = None,
 ) -> list[str]:
     """§17.710b — the single decision point for memory injection. When
     ``assist_umem_inject`` is on, return the unified ``render_session_memory``
     block; else the legacy separate environment + notes blocks (byte-identical
-    to pre-§17.710b). Returns the non-empty parts to append to a prompt."""
+    to pre-§17.710b). Returns the non-empty parts to append to a prompt.
+
+    §17.2048 — ``node_key`` is the step the prompt is about; it scopes the file
+    ledger (``_file_ledger_blocks``) on both paths. None = session-level."""
     if settings.assist_unified_memory_enabled and settings.assist_umem_inject:
         mem = render_session_memory(
             environment, operator_notes, budget=settings.assist_umem_max_chars,
+            node_key=node_key,
         )
         return [mem] if mem else []
     out: list[str] = []
-    env_block = render_environment_block(environment)
+    env_block = render_environment_block(environment, node_key=node_key)
     if env_block:
         out.append(env_block)
     pb_block = render_playbook_block(environment)  # §17.881 — both paths carry it

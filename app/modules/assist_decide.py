@@ -276,7 +276,8 @@ async def decide_turn(
         # session-memory block (system state, tool lacks, file writes, notes) —
         # the legacy env block carried none of it. Notes ride inside that block
         # then; only the legacy path renders them separately.
-        env_block = "\n\n".join(assist_guide._render_memory_or_legacy(mem.environment, mem.operator_notes))
+        env_block = "\n\n".join(assist_guide._render_memory_or_legacy(
+            mem.environment, mem.operator_notes, node_key=node_key))  # §17.2048
         from app.config import settings as _settings
         notes_block = ("" if (_settings.assist_unified_memory_enabled and _settings.assist_umem_inject)
                        else assist_guide.render_operator_notes_block(mem.operator_notes))
