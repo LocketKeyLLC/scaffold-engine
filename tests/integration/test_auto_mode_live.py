@@ -309,6 +309,9 @@ async def test_auto_mode_asks_then_runs(job):
     blob = json.dumps(ask3)
     assert SECRET_VALUE not in blob, "the secret's VALUE reached the engine's pause frame"
     assert any(f"${SECRET_NAME}" in c for c in ask3["commands"]), ask3["commands"]
+    # §17.2054 — a refused block surfaces HERE, not as a 409 at /decide below.
+    assert not ask3.get("refused"), f"the gate refused H3's block: {ask3.get('refused')}"
+    assert "run" in [o["id"] for o in ask3["options"]], ask3["options"]
 
     r = await _decide(jid, {"node_key": "H3", "choice": "run"})
     assert r.status_code == 200, r.text
