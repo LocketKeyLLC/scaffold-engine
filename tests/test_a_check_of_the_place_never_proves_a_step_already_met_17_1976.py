@@ -88,11 +88,19 @@ async def test_lm26_live_the_named_checks_run_inside_the_guest_and_say_not_met(m
     rv = _verify(_lm26_answer); monkeypatch.setattr(sr, "run_verify", rv)
     judge = _judge(lambda c: "contradicted" if "is-active" in c else "confirmed")
     monkeypatch.setattr(sr, "_verify_verdicts", judge)
-    assert await sr.already_met(_spec(), LM26, LM26_FRAME, {}) is None
-    ran = rv.calls[0]
+    # the named checks are composed into the pre-read, inside the guest (§17.1976/§17.1625) ...
+    ran = sr.with_own_checks(LM26, LM26_FRAME["verify"], LM26_FRAME["commands"])
     assert ran[0] == "qm status 110"
     assert _RUN.format("check 'systemctl is-active lm-ab3'") in ran, ran          # in the guest, not on the host
     assert _RUN.format("check 'tail -n 3 /root/lm_bench.log'") in ran, ran
+    # ... and §17.2051: they carry `<GUEST_USER_NAME>` (answered with the approval) and `$MASS_PASSWORD` (sent only
+    # with an approved run), so the pre-read is not sent at all -- not met, and nothing refused on the runner
+    assert await sr.already_met(_spec(), LM26, LM26_FRAME, {}) is None
+    assert rv.calls == [] and judge.calls == []
+    # with the input answered and the runner holding the secret itself, the same checks are read and say not met
+    answered = {**LM26_FRAME, "commands": [c.replace("<GUEST_USER_NAME>", "labuser") for c in LM26_FRAME["commands"]]}
+    assert await sr.already_met(_spec(), LM26, answered, {}, policy={"secrets": ["MASS_PASSWORD"]}) is None
+    assert rv.calls and rv.calls[0][0] == "qm status 110" and any("is-active lm-ab3" in c for c in rv.calls[0])
 
 
 @pytest.mark.asyncio

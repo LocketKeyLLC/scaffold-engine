@@ -1390,6 +1390,17 @@
             "title": "Job Id",
             "type": "string"
           },
+          "met_before_drop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Met Before Drop"
+          },
           "node_key": {
             "title": "Node Key",
             "type": "string"

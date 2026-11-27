@@ -375,6 +375,7 @@ async def decide_endpoint(
         reason=outcome.get("reason"), diagnosis=outcome.get("diagnosis"),
         unknown_outcome=outcome.get("unknown_outcome"),
         confirmed_after_drop=outcome.get("confirmed_after_drop"),
+        met_before_drop=outcome.get("met_before_drop"),
         evidence=outcome.get("evidence"),
     )
 

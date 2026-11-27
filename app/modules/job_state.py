@@ -84,6 +84,7 @@ async def transition(
     allow_terminal: bool = False,
     set_columns: Mapping[str, Any] | None = None,
     reason: str = "",
+    refusal_expected_when: Iterable[str] | None = None,
 ) -> str | None:
     """Move ``jobs.status`` to ``to`` in one guarded statement.
 
@@ -92,6 +93,11 @@ async def transition(
     (terminal)``. Returns the prior status when the row moved, ``None`` when
     the guard refused (logged at WARNING with the current status). Does NOT
     commit — the caller owns the transaction, as every existing site does.
+
+    §17.2052 — ``refusal_expected_when`` names the CURRENT statuses in which a
+    refusal is the caller's expected outcome, not a fault: such a refusal is
+    logged at INFO as ``job_transition_not_needed``. A refusal from any other
+    status (or a missing row) still logs ``job_transition_refused`` at WARNING.
     """
     if to not in JOB_STATUSES:
         raise ValueError(f"job_state.transition: unknown target status {to!r}")
@@ -106,6 +112,9 @@ async def transition(
         sets.append(f"{col} = :set_{col}")
         params[f"set_{col}"] = val
 
+    # validated like every other status literal: a typo here would silently re-warn (or never quiet) the refusal
+    expected_refusal = (frozenset(n.strip("'") for n in sql_status_list(refusal_expected_when).split(", "))
+                        if refusal_expected_when is not None else frozenset())
     if expected_from is not None:
         guard = f"jobs.status IN ({sql_status_list(expected_from)})"
     elif allow_terminal:
@@ -131,6 +140,16 @@ async def transition(
         current = (await db.execute(
             text("SELECT status FROM jobs WHERE id = :id"), {"id": str(job_id)},
         )).scalar()
+        # §17.2052 — a refusal the caller declared expected is the guard doing its job, not an anomaly. Live
+        # (2026-11-26, job 0fb4ea7f): `_cleanup_stuck_running_job` runs after every execute_all run; when the run
+        # parked for approval the job is `awaiting_decision`, its `running -> failed` claim is refused, and that
+        # logged `job_transition_refused` at WARNING seven times in one day, one per park -- noise in every triage.
+        if current in expected_refusal:
+            logger.info(
+                "job_transition_not_needed: job=%s to=%s current=%s guard=%s reason=%s",
+                job_id, to, current, guard, reason or "-",
+            )
+            return None
         logger.warning(
             "job_transition_refused: job=%s to=%s current=%s guard=%s reason=%s",
             job_id, to, current, guard, reason or "-",
