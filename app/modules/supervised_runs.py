@@ -8706,6 +8706,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     verify_out = ""
     _unverified = ""                           # §17.1390
     confirmed_after_drop = False
+    checks_read_back = False                   # §17.2050 — the step's checks answered after the drop
+    met_before_drop = ""                       # §17.2050 — why what ran before the drop already meets the Done when
     unreadable = False
     refuted: list[dict] = []
     if verify_cmds and (ok or indeterminate):
@@ -8731,6 +8733,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                         unreadable = True
                         logger.warning("verify_recheck_still_blank job=%s node=%s", job_id, node_key)
                 if not unreadable:
+                    checks_read_back = True
                     confirmed_after_drop = await _goal_confirmed(
                         goal_claim(str(waiting.get("title") or node_key), str(waiting.get("description") or "")), verify_cmds, pasted)
             elif ok:
@@ -8822,6 +8825,18 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     for e in executed:
         e["output"] = scrub_run_output(e.get("output"), secret_env)
     verify_out = scrub_run_output(verify_out, secret_env)
+    # §17.2050 — the connection dropped, nothing failed, and the step's checks could not settle it (blank twice, none
+    # offered, or the verify itself broke): what the run ALREADY printed is judged against the step's Done when. Live
+    # (job 0fb4ea7f RDV80, 2026-11-26): a read-back whose Done when is "it prints the `uptime -s` line" had printed
+    # `deployed 0ede435d`, the uptime line and the orchestrator-started line; then the host crashed, the next `wait`
+    # phase lost its connection, the re-check came back blank, and the step was failed for the transport -- the job
+    # blocked on a step whose finish condition sat in its own output. Checks that DID answer and did not confirm are
+    # fresh evidence and are not overridden; a scrubbed record is what the judge reads.
+    if dropped and not hard_fail and not confirmed_after_drop and not checks_read_back:
+        met_before_drop = await met_before_the_drop(waiting, node_key, executed)
+        if met_before_drop:
+            logger.warning("supervised_run_met_before_drop job=%s node=%s why=%s", job_id, node_key,
+                           met_before_drop[:200])
     # §17.1569 — the record's head is the FRAME that was approved and ran, not the pre-rewrite draft
     _head = _frame_runbook(waiting, runnable, verify_cmds) if runnable else runbook
     output = mask_secrets(_executed_report(_head, spec.name, executed, verify_out), values, need)
@@ -8875,7 +8890,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                    "did not know whether it had run. The checks above were then read back off the "
                    "machine and they show the step's goal already met, so it is recorded as done "
                    "rather than retried — repeating a write that already happened is not a retry.")
-    if ok or confirmed_after_drop or _findings:
+    if met_before_drop:
+        output += ("\n\n## The connection dropped after the step's Done when was met\n\nThe connection to "
+                   f"{spec.name} dropped while `{dropped[-1]['command'][:80]}` was running, and the step's own checks "
+                   f"could not be read afterwards. What the run had already printed is the evidence: {met_before_drop} "
+                   "It is recorded as done on that output, not failed for the transport.")
+    if ok or confirmed_after_drop or met_before_drop or _findings:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
                  "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
@@ -8883,6 +8903,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
              "why": (f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"
                      if ok else
                      mask_secrets(scrub_run_output(_findings_why, secret_env), values, need) if _findings else
+                     (f"supervised run through {spec.name}: the connection dropped at "
+                      f"`{dropped[-1]['command'][:60]}` after the run's own output met the step's Done when -- "
+                      + mask_secrets(met_before_drop, values, need))[:1000] if met_before_drop else
                      f"supervised run through {spec.name}: the response to "
                      f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
                      f"the machine confirm the step's goal is met")})
@@ -8896,7 +8919,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         # §17.1466 — a guest that moved: a fact, the steps ahead corrected, a step for what done steps set up
         await _aw.after_run(db, spec, job_id, node_key, _aw_guests, _aw_before)
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out,
-                "confirmed_after_drop": confirmed_after_drop}
+                "confirmed_after_drop": confirmed_after_drop, "met_before_drop": bool(met_before_drop)}
     last = executed[-1] if executed else None
     # §17.1201 — the runner's connection dropped. Nobody knows whether the
     # command ran, and a write whose outcome is unknown is a different decision
@@ -9055,6 +9078,58 @@ def a_read_was_cut(waiting: Optional[dict], executed: list[dict]) -> str:
                     "response: counts, and one short line per item with only the fields that matter (in the guest, a "
                     "`python3` program that parses the response and prints a summary).")
     return ""
+
+
+def _done_when_claim(waiting: dict) -> str:
+    """§17.2050 — the step's description, with its prompt's "Done when" added when the description has none."""
+    from app.modules.operator_steps import done_when_clause
+    desc = str(waiting.get("description") or "")
+    if not re.search(r"\bDone when\b", desc, re.I):
+        clause = done_when_clause(str(waiting.get("prompt_template") or ""))
+        if clause:
+            desc = f"{desc} Done when {clause}".strip()
+    return desc
+
+
+async def met_before_the_drop(waiting: dict, node_key: str, executed: list[dict]) -> str:
+    """§17.2050 — why the output a run gathered BEFORE its runner connection dropped already meets the step's Done
+    when ("" when it does not, or cannot be known).
+
+    The same machinery that judges a finished run, applied to what ran: every command that answered succeeded; the
+    Done when's named prints (§17.1630) are all in that output; a read was not cut (§17.1691); and the state-check
+    judge, reading that output against the step's goal and Done when, CONFIRMS it -- `unknown` is not enough
+    (terminal status must be earned). A step that changes things is judged this way only when its Done when names
+    what it prints: its output is otherwise not its evidence, its checks are (§17.1691), and the drop left those
+    unread. Live: job 0fb4ea7f RDV80, failed for the dropped `wait` after its read-back had printed the line its
+    Done when asked for."""
+    ran = [e for e in executed or [] if not e.get("unreachable")]
+    if not ran or not all(e.get("ok") or e.get("informational") for e in ran):
+        return ""
+    own = "\n".join(str(e.get("output") or "") for e in ran)
+    if not read_substance(own):
+        return ""
+    from app.modules.operator_steps import expected_prints, missing_prints
+    expected = expected_prints({"description": waiting.get("description"),
+                                "prompt_template": waiting.get("prompt_template")})
+    reads = (only_reads(waiting)
+             or any(READS_ONLY_MARKER in str((f or {}).get("content") or "") for f in (waiting.get("files") or []))
+             or a_read_only_program(waiting, waiting.get("files") or [], waiting.get("commands") or []))
+    if not reads and not expected:
+        return ""
+    if expected and missing_prints(expected, own):
+        return ""
+    if a_read_was_cut(waiting, ran):
+        return ""
+    verdicts = await _verify_verdicts(
+        goal_claim(str(waiting.get("title") or node_key), _done_when_claim(waiting)),
+        ["(what this run printed before the connection dropped)"], "== V1 ==\n" + own.strip()[-6000:])
+    if not verdicts or not all(str(v.get("verdict") or "") == "confirmed" for v in verdicts):
+        logger.info("supervised_run_drop_output_not_confirmed node=%s verdicts=%s", node_key,
+                    [str(v.get("verdict")) for v in verdicts or []])
+        return ""
+    why = str((verdicts[0] or {}).get("reason") or "").strip()
+    return ((f"it printed {', '.join('`' + t[:60] + '`' for t in expected)}, which its Done when names, and " if expected
+             else "") + "the judge confirms the step's goal in it" + (f" ({why[:200]})" if why else "") + ".")
 
 
 async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[dict]) -> list[dict]:
