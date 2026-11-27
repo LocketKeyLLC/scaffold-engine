@@ -1670,6 +1670,32 @@ _ALIAS_RE = re.compile(r"\b(pi-hole)\b", re.I)
 _ALIASES = {"pi-hole": "pihole"}
 
 
+#: §17.2049 — the marks of a CHANGE the engine records: a pull request (`PR #1226`, `PRs #1216–#1225`) or a sprint-log
+#: section (`§17.2043`). A parenthetical that cites one describes what some code change carries, not what this step does.
+_CHANGE_REF_RE = re.compile(r"\bPRs?\s*#\d+|§\s*\d+\.\d+")
+
+
+def _change_notes_blanked(text: str) -> str:
+    """§17.2049 — `text` with every balanced parenthetical that cites a change (`_CHANGE_REF_RE`) blanked to spaces (so
+    offsets keep their order). Nested parentheses are matched as one span: the outermost span that cites a change goes
+    whole. An unbalanced `(` is left alone -- prose is not code, and a stray bracket must not swallow the step."""
+    chars, stack = list(text), []
+    spans: list[tuple[int, int]] = []
+    for i, c in enumerate(text):
+        if c == "(":
+            stack.append(i)
+        elif c == ")" and stack:
+            spans.append((stack.pop(), i))
+    done: list[tuple[int, int]] = []
+    for a, b in sorted(spans, key=lambda ab: ab[0] - ab[1]):            # outermost (longest) first
+        if any(x <= a and b <= y for x, y in done):
+            continue
+        if _CHANGE_REF_RE.search(text, a, b):
+            chars[a:b + 1] = " " * (b + 1 - a)
+            done.append((a, b))
+    return "".join(chars)
+
+
 def names_in(node: Optional[dict]) -> list[str]:
     """The service names a step's text mentions, lower-cased and deduplicated, in order of appearance.
 
@@ -1678,7 +1704,16 @@ def names_in(node: Optional[dict]) -> list[str]:
     and the model wrote `192.168.1.130` (the guest ID) and then a `<PIHOLE_IP>`."""
     # §17.1590 — the step's whole text: the planner wrote c2792d4b T7's "(… FlareSolverr)" into prompt_template, so
     # neither proxy was measured and the handlers kept a dead address
-    text = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    # §17.2049 — but a service the body only MENTIONS inside a note of what a change carries is not one it acts on.
+    # Live (job 0fb4ea7f RD79/RD80, "Inside VM 110: redeploy the scaffold engine's services at … (main 0ede435d; it
+    # carries … (PRs #1216–#1225: … Prowlarr-only arr endpoints refused, …) …)"): every redeploy swept the guests for
+    # Prowlarr (`service_guests named=['prowlarr']`, ~25 s), read it in 110 and 102, and carried 10.5k chars of
+    # Prowlarr evidence into a frame that only redeploys the engine. A parenthetical that cites a PR or a §-section is
+    # that history; c2792d4b T7's "(e.g., Palworld, media, network, FlareSolverr)" cites none, so its list still counts
+    # (§17.1590). The title is what the step IS (§17.1705) and is never blanked.
+    title = str((node or {}).get("title") or "")
+    body = " ".join(str((node or {}).get(k) or "") for k in ("description", "prompt_template"))
+    text = title + " " + _change_notes_blanked(body)
     hits = [(m.start(), m.group(1).lower()) for m in _NAME_RE.finditer(text)]
     hits += [(m.start(), _ALIASES[m.group(1).lower()]) for m in _ALIAS_RE.finditer(text)]
     return list(dict.fromkeys(n for _, n in sorted(hits)))
