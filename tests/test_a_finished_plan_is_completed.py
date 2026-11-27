@@ -39,7 +39,7 @@ class _DB:
 def _run(monkeypatch, open_, total):
     seen = {}
 
-    async def transition(db, job_id, *, to, expected_from, reason):
+    async def transition(db, job_id, *, to, expected_from, reason, **_kw):
         seen["to"] = to
         return None                      # stop before the node cleanup
     monkeypatch.setattr(ea, "transition", transition)

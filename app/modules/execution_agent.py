@@ -218,6 +218,10 @@ def executor_inflight_count() -> int:
 # ---------------------------------------------------------------------------
 _CLEANUP_TASKS: set[asyncio.Task] = set()
 
+#: §17.2052 — the statuses a job is in when its run ended the way runs end: parked for the operator, blocked on a
+#: failed step, or finished. The cleanup's `running -> failed` claim refusing on one of these is its no-op, not a fault.
+CLEANUP_LEFT_RUNNING_STATUSES: frozenset[str] = frozenset({"awaiting_decision", "blocked"}) | TERMINAL_JOB_STATUSES
+
 async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> None:
     """Reset a job stuck at ``running`` to a terminal status and mark any
     orphaned ``running`` dag_nodes as ``failed``. No-op if the job is no
@@ -241,9 +245,13 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
             # §17.1107 (ledger S-4) — was SELECT status → if != running return →
             # unguarded UPDATE: a cancel or completion landing between the two
             # statements was overwritten with 'failed'. One guarded claim now.
+            # §17.2052 — a job that already left `running` (a park for approval, a clean `completed`/`blocked`
+            # exit, a cancel) is exactly the no-op this docstring promises: the refusal is expected and logs at
+            # INFO. Any OTHER current status (or a vanished row) is still a warning.
             prior = await transition(
                 db, job_id, to=terminal, expected_from=("running",),
                 reason=f"execute_all_nodes_cleanup:{exit_reason}",
+                refusal_expected_when=CLEANUP_LEFT_RUNNING_STATUSES,
             )
             if prior is None:
                 return
