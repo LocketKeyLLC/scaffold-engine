@@ -372,6 +372,7 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "PRINTS a whole systemd unit",                  # §17.1958
                    "PRINTS the unit's environment",                # §17.1958
                    "written BEFORE its commands run",               # §17.1960
+                   "where this step's own command gives it literally",   # §17.2055
                    "is a value this block makes itself",           # §17.1968
                    "reads this value itself and asks the operator for it",   # §17.1968b
                    "uses bash-only syntax")                         # §17.1982
@@ -438,6 +439,7 @@ _WHOSE_GAP: dict[str, str] = {
     "PRINTS a whole systemd unit": "drafter",
     "PRINTS the unit's environment": "drafter",
     "written BEFORE its commands run": "drafter",
+    "where this step's own command gives it literally": "drafter",   # §17.2055 — write the step's literal as given
     "is a value this block makes itself": "drafter",                  # §17.1968 — a `<NAME>` its own `$(…)` fills
     "reads this value itself and asks the operator for it": "drafter",   # §17.1968b — a `<NAME>` its own read prints
     "uses bash-only syntax": "drafter",          # §17.1982 — where the engine cannot run it with bash: redraft as bash/POSIX
@@ -677,7 +679,13 @@ def shape_retry_note(frame: dict, previous: Optional[dict] = None, repeated: boo
         return ""
     if any(catastrophic(str(r.get("command") or "")) for r in (frame or {}).get("refused") or []):
         return ""
-    if any(str(r.get("why") or "").startswith(_NOT_ALLOWED) for r in (frame or {}).get("refused") or []):
+    # §17.2055 — except where the drafter turned the STEP'S OWN literal command into a placeholder: the command the
+    # permission was judged on is not the step's (live: `mkdir -p x/scaffold-auto-itest/stage1`, the gate's dummy
+    # standing in for `<NVME_POOL_MOUNT>`), so restoring the step's command is not redrafting around a permission. If
+    # the restored block still needs one, the redraft's frame parks on it and asks, as before.
+    _restoring = any(LITERAL_MADE_A_PLACEHOLDER in str(r.get("why") or "") for r in (frame or {}).get("refused") or [])
+    if not _restoring and any(str(r.get("why") or "").startswith(_NOT_ALLOWED)
+                              for r in (frame or {}).get("refused") or []):
         return ""
     lines = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}" for r in shapes)
     # §17.1277 — live, draft 1 was hang-safe and unbatched, draft 2 batched by
@@ -5167,6 +5175,83 @@ def step_text(node: dict) -> str:
     return "\n".join(seen)
 
 
+#: §17.2055 — the marker of the refusal below (registered in `_SHAPE_REFUSALS` / `_WHOSE_GAP`: the drafter's to fix).
+LITERAL_MADE_A_PLACEHOLDER = "where this step's own command gives it literally"
+
+
+def _as_pattern(cmd: str) -> Optional[re.Pattern]:
+    """``cmd`` as a pattern in which each ``<NAME>`` matches the value it stands for (the same name, the same value)."""
+    parts, seen = [], set()
+    for i, piece in enumerate(_PLACEHOLDER_RE.split(cmd)):
+        if i % 2 == 0:
+            parts.append(re.escape(piece))
+        elif piece in seen:
+            parts.append(f"(?P={piece})")
+        else:
+            seen.add(piece)
+            parts.append(f"(?P<{piece}>.+?)")
+    try:
+        return re.compile("".join(parts)) if seen else None
+    except re.error:
+        return None
+
+
+def a_literal_the_step_gives_made_a_placeholder(commands: list[str], verify: list[str],
+                                                node: Optional[dict]) -> list[dict]:
+    """§17.2055 — a command the step's own text gives LITERALLY, drafted back with one of its values turned into a
+    ``<PLACEHOLDER>``.
+
+    Live (the §17.1189 auto-mode integration test, 2 of 14 recorded H1 drafts): H1 says "Run this: `mkdir -p
+    /tmp/scaffold-auto-itest/stage1`", and its upstream decision D1 chose "The local NVMe pool" -- naming no path.
+    The runbook prompt says a decision WINS where it disagrees with the step's text, so the drafter decided the two
+    disagreed and wrote `mkdir -p <NVME_POOL_MOUNT>/scaffold-auto-itest/stage1` (and a `chmod`, and a `findmnt`);
+    the other draft wrote `mkdir -p <STAGING_DIR>`. The gate judged the shape with the dummy `x`, refused `mkdir -p
+    x/scaffold-auto-itest/stage1` as off the write-allow list, and a permission refusal is never redrafted -- so the
+    step's own one-line command was parked as a question about a mount point nobody asked for.
+
+    The step already holds the value: it is the span of the step's command the placeholder stands in for. So a draft
+    command that matches one of the step's literal commands with a value cut out is the drafter's to fix, and is
+    refused as such (a redraft is told the command and the value). A literal that is itself a placeholder, and a
+    secret's name, are left alone: a step may write `<API_KEY>`, and a credential must never be written literally.
+    """
+    from app.modules.runbook_inputs import secret_name
+    from app.modules.step_classify import step_commands
+    literals: list[str] = []
+    for cmd, _sentence in step_commands(step_text(node or {})):
+        flat = " ".join(str(cmd).split())
+        if flat and flat not in literals and not _PLACEHOLDER_RE.search(flat) and "…" not in flat:
+            literals.append(flat)
+    if not literals:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in list(commands or []) + list(verify or []):
+        c = " ".join(str(raw or "").split())
+        if c in seen or not _PLACEHOLDER_RE.search(c):
+            continue
+        seen.add(c)
+        pat = _as_pattern(c)
+        if pat is None:
+            continue
+        for lit in literals:
+            m = pat.fullmatch(lit)
+            if not m:
+                continue
+            vals = {k: v for k, v in m.groupdict().items() if v is not None}
+            if not vals or any(secret_name(k) or "<" in v or not v.strip() for k, v in vals.items()):
+                continue
+            given = ", ".join(f"`<{k}>` stands for `{v}`" for k, v in vals.items())
+            out.append({"command": str(raw)[:200], "why": (
+                f"{given} where this step's own command gives it literally -- the step says `{lit}`. "
+                f"A value the step already holds is "
+                f"written as the step wrote it, not turned into a placeholder for the operator to fill. An operator "
+                f"decision replaces a value only when the decision NAMES the replacement; one that names no value "
+                f"leaves the step's command as it is. Write `{lit}` exactly as the step gives it, and add no command "
+                f"the step does not ask for to make up for a value you did not have (§17.2055).")})
+            break
+    return out
+
+
 def verify_needs_a_value_the_run_never_used(commands: list[str], verify: list[str],
                                             files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1288 — a placeholder that appears ONLY in a verify command is a value
@@ -8181,6 +8266,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1271 — and judge the written files the same way the commands are judged.
     refused = refused + file_writes_will_not_work(shape_files) + _secret_files
     refused = refused + a_file_in_a_folder_the_step_makes(cmds, shape_files)   # §17.1960
+    refused = refused + a_literal_the_step_gives_made_a_placeholder(cmds, verify, node)   # §17.2055
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
     # §17.1257 — compile what the block hands to another interpreter. Supersedes
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
