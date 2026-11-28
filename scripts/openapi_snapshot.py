@@ -5,14 +5,15 @@ The snapshot at ``docs/openapi.json`` is the stability anchor for the
 PR review, which forces a deliberate decision about backward compatibility
 and version bumps.
 
-Usage (run inside the orchestrator container — needs the same Python env
-as the running app). The Makefile wraps these::
+Usage (needs the app's Python env; run it in a throwaway dev container with
+the WORKING TREE mounted at /code — never the live orchestrator, whose /code
+is not the tree being checked, §17.2063). The Makefile wraps these::
 
     # Write JSON to stdout — Makefile redirects to docs/openapi.json on the host
-    docker exec scaffold-orchestrator python scripts/openapi_snapshot.py
+    make openapi-snapshot
 
-    # Compare the live spec against the committed snapshot mounted in
-    docker exec scaffold-orchestrator python scripts/openapi_snapshot.py --check
+    # Compare the working tree's spec against its committed snapshot
+    make openapi-check
 
 The write path uses stdout (not a file write) so the host process owns the
 file — bind-mount permissions stay clean. ``--check`` reads the committed

@@ -44,6 +44,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FAKE_PVE = ROOT / "tests" / "integration" / "fixtures" / "fake_pve"
 HELPER_PORT = 8794
 RUNNER_NAME = "itest-pve-runner"
+# §17.2064 — the subprocess logs this module writes; a failing test prints their tail (conftest).
+ITEST_LOGS = ("itest_pve_helper.log",)
 TOKEN = "itest-pve-" + uuid.uuid4().hex[:12]
 
 FAILING = "qm set 106 --scsi0 local-lvm:100"

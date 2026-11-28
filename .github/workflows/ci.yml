@@ -101,8 +101,9 @@ jobs:
             pip install -r requirements-ci.txt
           fi
 
-      # §17.175 — OpenAPI drift gate. `make openapi-check` uses `docker exec`
-      # (operator-only path); in CI we run the script directly since
+      # §17.175 — OpenAPI drift gate. `make openapi-check` runs this same
+      # command in a throwaway dev container over the working tree (§17.2063;
+      # it used to `docker exec` the live orchestrator); in CI we run it directly since
       # requirements-ci.txt already brings in everything `from app.main import app`
       # needs. Catches contract drift before tests even run, so a developer who
       # adds an endpoint without regenerating docs/openapi.json sees a fast

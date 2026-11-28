@@ -47,6 +47,46 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
+# §17.2064 — a live test that starts its OWN engine/helper subprocess writes
+# their output to files under $ITEST_LOG_DIR (default /tmp). In a throwaway
+# container that directory dies with the container, so a failure there left
+# nothing but an assertion line: one "1 failed, 23 passed" on main 92c26e33
+# could not be explained afterwards. A module that spawns processes names its
+# log files in ``ITEST_LOGS``; when one of its tests fails (setup, call or
+# teardown), the tail of each file is attached to the report, so the failure
+# prints the engine's side of the story wherever it ran.
+ITEST_LOG_TAIL_LINES = 150
+
+
+def itest_log_tail(path: Path, lines: int = ITEST_LOG_TAIL_LINES) -> str:
+    """The last ``lines`` lines of ``path``, or a line saying why there are none."""
+    try:
+        text_ = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return f"(no such file: {path})"
+    except OSError as exc:
+        return f"(unreadable: {path}: {exc})"
+    tail = text_.splitlines()[-lines:]
+    return "\n".join(tail) if tail else f"(empty: {path})"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if not report.failed:
+        return
+    names = getattr(getattr(item, "module", None), "ITEST_LOGS", ()) or ()
+    if not names:
+        return
+    import os
+    log_dir = Path(os.environ.get("ITEST_LOG_DIR", "/tmp"))
+    for name in names:
+        report.sections.append(
+            (f"§17.2064 {name} (last {ITEST_LOG_TAIL_LINES} lines, {report.when})",
+             itest_log_tail(log_dir / name)))
+
+
 _ORCH_REACHABLE: bool | None = None
 
 

@@ -356,8 +356,18 @@ jobs:
       # a week (four errors on every run, visible to no workflow). Verified
       # with every engine hostname dead: 59 passed, 27 skipped (the tests that
       # call the RUNNING orchestrator carry `needs_orchestrator` and skip).
-      # Excluded: *_live* (need the orchestrator), retrieval_eval + milvus
-      # schema parity (need Milvus).
+      # Excluded: retrieval_eval + milvus schema parity (need Milvus), and the
+      # live tests that start their own engine/helper and call a REAL model
+      # (Ollama/SearXNG) — each named below.
+      #
+      # §17.2062 — this used to be `--ignore-glob='*_live*'`, which also swept
+      # up test_assist_live_operator_loop.py: a Postgres-only file (the model
+      # is stubbed; "live" there means the real router and real rows). Its
+      # failing control (§17.2054) sat unseen for weeks because no workflow
+      # ran it and Tier 2 (integration.yml) is gated off. The exclusions are
+      # now explicit, and tests/test_integration_lane_17_2062.py pins the list
+      # against the reasons, so a new file is collected unless someone names
+      # why it cannot be.
       - name: Integration lane (tests/integration/*_db, Postgres only)
         run: |
           docker run --rm \
@@ -387,7 +397,12 @@ jobs:
             -w /code \
             scaffold-orchestrator:ci \
             pytest tests/integration/ -m integration --timeout=120 -q \
-              --ignore-glob='*_live*' \
+              --ignore=tests/integration/test_auto_mode_live.py \
+              --ignore=tests/integration/test_runner_loop_live.py \
+              --ignore=tests/integration/test_detached_run_live.py \
+              --ignore=tests/integration/test_diagnosis_accuracy_live.py \
+              --ignore=tests/integration/test_codegen_golden_live.py \
+              --ignore=tests/integration/test_spec_extractor_live.py \
               --ignore=tests/integration/test_retrieval_eval.py \
               --ignore=tests/integration/test_milvus_schema_parity.py
 

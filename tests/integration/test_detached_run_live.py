@@ -67,6 +67,8 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.timeout(
 # running orchestrator: that one reads production, not the rows seeded here.
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE_PORT = 8003
+# §17.2064 — the subprocess logs this module writes; a failing test prints their tail (conftest).
+ITEST_LOGS = ("itest_detached_engine.log",)
 BASE_URL = f"http://127.0.0.1:{ENGINE_PORT}"
 AUTH = {"X-API-Key": os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")}
 
