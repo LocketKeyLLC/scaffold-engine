@@ -1918,6 +1918,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 | Target | Effect |
 |---|---|
 | `make test` | Core suite — throwaway dev container + dedicated `scaffold_engine_test` DB (§17.1108); `make test-integration` is the explicit live lane |
+| `make test-integration-lane` | ALL of `tests/integration` in a throwaway dev container on `scaffold_engine_test` — own engines/helpers, never the live engine; run before each deploy (§17.2062) |
 | `make test-sdk` | SDK suite (`/code/sdk/tests/`) |
 | `make test-cli` | CLI suite (`/code/cli/tests/`) |
 | `make ci` | CI-safe tests, dev image (no live deps) + bench gates |
@@ -1939,7 +1940,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 | `make sync-schemas` | Refresh `sdk/scaffold_client/schemas.py` from `app/schemas.py` |
 | `make reindex` | Re-embed the toon_v2 corpus |
 | `make openapi-snapshot` | Regenerate `docs/openapi.json` from the live FastAPI app |
-| `make openapi-check` | Verify snapshot matches the live spec (CI gate) |
+| `make openapi-check` | Verify snapshot matches the working tree's spec — throwaway dev container, what CI runs (§17.2063) |
 | `make help` | Show all targets |
 
 ---

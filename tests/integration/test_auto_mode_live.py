@@ -52,6 +52,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE_PORT = 8002
 HELPER_PORT = 8792
 RUNNER_NAME = "itest-auto-runner"
+# §17.2064 — the subprocess logs this module writes; a failing test prints their tail (conftest).
+ITEST_LOGS = ("itest_auto_engine.log", "itest_auto_helper.log")
 TOKEN = "itest-auto-" + uuid.uuid4().hex[:12]
 AUTH = {"X-API-Key": os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")}
 BASE = f"http://127.0.0.1:{ENGINE_PORT}"

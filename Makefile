@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test-runner-loop test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift check-tuned-picks ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test-integration-lane test-runner-loop test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift check-tuned-picks ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -127,6 +127,25 @@ test-auto-mode: test-db ## §17.1189 — AUTO MODE's own loop END TO END (decisi
 test-diagnosis: test-db ## §17.1203 — DIAGNOSIS ACCURACY against a Proxmox-SHAPED machine (tests/integration/fixtures/fake_pve): its own helper (:8794, --write-allow ANY) over the real MCP transport. Measures whether a diagnosis names storage that exists ONLY on the machine — i.e. whether it looked. Needs Ollama + SearXNG. ~3-6 min.
 	@mkdir -p $(AUTO_MODE_LOG_DIR) && chmod 777 $(AUTO_MODE_LOG_DIR)
 	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(AUTO_MODE_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_diagnosis_accuracy_live.py --timeout=900 -q -p no:warnings -s
+
+# §17.2062 — the WHOLE tests/integration directory, the way it can actually run
+# here. Tier 2 (integration.yml) is gated off — it needs a self-hosted runner
+# registered on the engine host plus a repo variable, and its first step
+# rebuilds the LIVE orchestrator — and `test-integration` above execs into the
+# live container, whose production DATABASE_URL the §17.1108 guard refuses. So
+# nothing ran the live-model files at all, and the Postgres-only CI lane
+# skipped the ones named *_live*. This lane runs every file in a THROWAWAY dev
+# container against $(TEST_DB_NAME); the live tests start their OWN engines
+# (:8001/:8002/:8003) and helpers (:8791/:8792/:8794) inside that container and
+# call the composed Ollama/SearXNG read-only; Milvus is only read. Never the
+# live engine. Run it before each deploy. Engine/helper logs and junit.xml land
+# in $(INTEGRATION_LANE_LOG_DIR); a failing live test also prints its logs' tail.
+INTEGRATION_LANE_LOG_DIR ?= /tmp/scaffold-integration-lane
+test-integration-lane: test-db ## §17.2062 — ALL of tests/integration in a THROWAWAY dev container against $(TEST_DB_NAME) (own engines/helpers inside the container; never the live engine). Run before each deploy. ~10-15 min; needs Postgres + Ollama (+ SearXNG, Milvus read-only). Logs + junit: $(INTEGRATION_LANE_LOG_DIR)
+	@rm -rf $(INTEGRATION_LANE_LOG_DIR) && mkdir -p $(INTEGRATION_LANE_LOG_DIR) && chmod 777 $(INTEGRATION_LANE_LOG_DIR)
+	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(INTEGRATION_LANE_LOG_DIR):/itest scaffold-engine:dev \
+		pytest tests/integration --timeout=900 -q -p no:warnings -l \
+		--junitxml=/itest/junit.xml
 
 test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
 	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
@@ -442,8 +461,16 @@ openapi-snapshot: ## Regenerate docs/openapi.json from the WORKING TREE (a throw
 		mv docs/openapi.json.tmp docs/openapi.json && \
 		echo "Wrote docs/openapi.json ($$(wc -c < docs/openapi.json) bytes)."
 
-openapi-check: ## Verify docs/openapi.json matches the live spec, SHAPES included (needs the container). The route-path half is static and runs in ci-tier-0 (§17.942).
-	docker exec $(CONTAINER) python scripts/openapi_snapshot.py --check
+# §17.2063 — this used to `docker exec` into the LIVE orchestrator, whose /code is
+# the main checkout (or the prod image), not the tree being checked: from a
+# worktree it reported "docs/openapi.json is missing", and from the main checkout
+# it compared the RUNNING app's routes rather than the branch's. It now checks
+# the WORKING TREE the way CI's §17.175 step does (no .env, no services, no
+# network) in a throwaway dev container — the sibling of openapi-snapshot.
+openapi-check: _ensure_dev_image ## Verify docs/openapi.json matches the WORKING TREE's spec, SHAPES included (throwaway dev container, no .env, no network — what CI's §17.175 step runs; §17.2063). The route-path half is static and runs in ci-tier-0 (§17.942).
+	@docker run --rm --network none -e SCAFFOLD_API_KEY=openapi-check -e LOG_FILE= -e HOME=/tmp \
+		-e PYTHONDONTWRITEBYTECODE=1 --user $$(id -u):$$(id -g) -v $(CURDIR):/code:ro -w /code \
+		scaffold-engine:dev python scripts/openapi_snapshot.py --check
 
 sync-schemas: ## Refresh sdk/scaffold_client/schemas.py from app/schemas.py (byte-equal vendor)
 	cp app/schemas.py sdk/scaffold_client/schemas.py

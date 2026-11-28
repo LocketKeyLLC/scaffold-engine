@@ -26,8 +26,9 @@ make test
 `make test` runs the core suite in a **throwaway** dev container against a dedicated
 `scaffold_engine_test` database (created and migrated on first run by `make test-db`); the live
 orchestrator and the production database are never touched. The suite refuses to start against
-any database whose name does not end in `_test`. Integration-marked tests (they drive the live
-engine) are the explicit `make test-integration` lane.
+any database whose name does not end in `_test`. Integration-marked tests run with `make test-integration-lane`: the whole
+`tests/integration` directory in a throwaway container on the test database, with the live tests
+starting their own engines inside it (§17.2062). Run it before a deploy.
 
 Or target a specific file (same throwaway container; `make -n test` prints the exact `docker run`):
 

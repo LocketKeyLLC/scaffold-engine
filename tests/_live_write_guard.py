@@ -139,7 +139,8 @@ def explain_non_test_database() -> str | None:
         f"REFUSING TO RUN: DATABASE_URL points at database {name!r}, which is not a "
         f"test database (name must end in {TEST_DB_SUFFIX!r}). `make test` provisions "
         f"and uses scaffold_engine_test (§17.1108); the integration lane is "
-        f"`make test-integration`. Set SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1 only to drive "
+        f"`make test-integration-lane` (a throwaway container on the test DB, §17.2062), or "
+        f"`make test-integration` to drive the live engine. Set SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1 only to drive "
         f"the live engine deliberately from a throwaway box."
     )
 
