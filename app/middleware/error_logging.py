@@ -14,6 +14,8 @@ import traceback
 from urllib.parse import urlparse
 
 import httpx
+import structlog
+from sqlalchemy import exc as sa_exc
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -68,21 +70,69 @@ def _redact_secrets(text_in: str) -> str:
     return out
 
 
+_TB_MAX = 4000
+_TB_HEAD = 1000
+_TB_MARK = "\n  ... [{n} chars truncated — head and tail kept] ...\n"
+
+
+def _bounded_traceback(tb: str) -> str:
+    """§17.2068 — bound a traceback to ~_TB_MAX chars keeping its TAIL.
+
+    ``tb[:4000]`` kept the head and cut the final line naming the exception
+    plus the innermost frames — the part that says what failed. Keep the first
+    _TB_HEAD chars (where it entered) and the rest from the end.
+    """
+    if len(tb) <= _TB_MAX:
+        return tb
+    tail = _TB_MAX - _TB_HEAD
+    cut = len(tb) - _TB_HEAD - tail
+    return tb[:_TB_HEAD] + _TB_MARK.format(n=cut) + tb[-tail:]
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """§17.2068 — ``Type: message``, never empty.
+
+    ``str(TimeoutError())`` is ``''`` — the live rows stored nothing. The type
+    name is always given; an empty message says so, and the direct cause's type
+    is named (asyncio.timeout raises ``TimeoutError from CancelledError``).
+    """
+    msg = str(exc).strip()
+    out = f"{type(exc).__name__}: {msg}" if msg else f"{type(exc).__name__}: <no message>"
+    cause = exc.__cause__
+    if cause is not None:
+        cmsg = str(cause).strip()
+        out += f" (caused by {type(cause).__name__}" + (f": {cmsg})" if cmsg else ")")
+    return out
+
+
 class ErrorLoggingMiddleware(BaseHTTPMiddleware):
     """Intercept unhandled exceptions → write to error_logs → return 500/503."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint,
     ) -> Response:
+        # §17.2068 — only ``Exception`` is caught: a cancelled request (client
+        # disconnect, server shutdown) raises ``CancelledError``, a
+        # BaseException that Starlette's call_next does not capture either, so
+        # it propagates untouched and is never recorded as a 500.
         try:
             return await call_next(request)
         except Exception as exc:
-            tb = traceback.format_exc()
-            error_msg_raw = str(exc)[:1000]
+            tb = _bounded_traceback(traceback.format_exc())
+            what = _describe_exception(exc)
+            request_id = structlog.contextvars.get_contextvars().get("request_id")
+            # §17.2068 — the row names the request: error_logs has no
+            # method/path column, so the message carries them (path only —
+            # a query string may hold a credential).
+            where = f"{request.method} {request.url.path}"
+            if request_id:
+                where += f" [request_id={request_id}]"
+            error_msg_raw = f"{where}: {what}"[:1000]
             error_msg_safe = _redact_secrets(error_msg_raw)
             logger.error(
                 "http_request_failed: exception=%s method=%s path=%s error=%s",
-                type(exc).__name__, request.method, request.url.path, error_msg_safe,
+                type(exc).__name__, request.method, request.url.path,
+                _redact_secrets(what[:1000]),
             )
 
             # Classify error type
@@ -104,7 +154,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                         {
                             "error_type": error_type,
                             "error_message": error_msg_raw,
-                            "stack_trace": tb[:4000],
+                            "stack_trace": tb,
                         },
                     )
                     await session.commit()
@@ -124,7 +174,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                 )
                 logger.error(
                     "error_log_db_write_failed_traceback:\n%s",
-                    _redact_secrets(tb)[:4000],
+                    _redact_secrets(tb),
                 )
 
             # §17.183: typed upstream-down classification. Pre-§17.183 every
@@ -152,7 +202,7 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 content={
                     "error": type(exc).__name__,
-                    "message": error_msg_safe,
+                    "message": _redact_secrets(what[:1000]),
                     "path": request.url.path,
                 },
             )
@@ -232,6 +282,14 @@ def _classify_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.HTTPError):
+        return "transient"
+    # §17.2068 — the builtin TimeoutError (asyncio.timeout's, which asyncpg's
+    # connect raises when Postgres does not answer within connect_args
+    # timeout) and SQLAlchemy's pool-checkout timeout are timeouts, not
+    # programmer errors. A refused/reset connection is transient.
+    if isinstance(exc, (TimeoutError, sa_exc.TimeoutError)):
+        return "timeout"
+    if isinstance(exc, ConnectionError):
         return "transient"
     if isinstance(exc, (ValueError, KeyError)):
         return "validation"
