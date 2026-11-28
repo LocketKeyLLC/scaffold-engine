@@ -812,4 +812,6 @@ async def skip_node_endpoint(
     # §17.810 — ownership gate. body.job_id is a UUID-validated field on the
     # schema, so it is safe to hand straight to assert_visible.
     await assert_visible(db, principal, body.job_id, detail=f"job not found: {body.job_id}")
-    return await skip_node(job_id=body.job_id, node_key=body.node_key, db=db)
+    # §17.2065 — the skip settles the job and records why (body.reason) and who (the caller's identity)
+    return await skip_node(job_id=body.job_id, node_key=body.node_key, db=db,
+                           reason=body.reason, by=principal.identity)

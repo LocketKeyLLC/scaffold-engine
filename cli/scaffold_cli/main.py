@@ -1523,18 +1523,27 @@ Examples:
              epilog=SKIP_EPILOG)
 @click.argument("job_id")
 @click.argument("node_key")
+@click.option("--reason", default=None, help="Why the step is skipped (recorded on the step).")
 @click.pass_context
-def skip(ctx: click.Context, job_id: str, node_key: str) -> None:
+def skip(ctx: click.Context, job_id: str, node_key: str, reason: str | None) -> None:
     cfg = ctx.obj["cfg"]
+    body = {"job_id": job_id, "node_key": node_key}
+    if reason:
+        body["reason"] = reason
     try:
         with Client(cfg.api_url, cfg.api_key) as c:
-            data = c.post("/skip", json={"job_id": job_id, "node_key": node_key})
+            data = c.post("/skip", json=body)
     except CLIError as exc:
         click.secho(str(exc), fg="red", err=True)
         sys.exit(1)
+    if isinstance(data, dict) and data.get("status") == "error":
+        click.secho(str(data.get("message") or "skip refused"), fg="red", err=True)
+        sys.exit(1)
     click.secho(f"skipped {node_key} on {job_id[:8]}", fg="green")
-    if isinstance(data, dict) and (status := data.get("status")):
-        click.echo(f"  job status now: {status}")
+    if isinstance(data, dict) and (message := data.get("message")):
+        click.echo(f"  {message}")          # §17.2065 — names the job's status after the skip
+    elif isinstance(data, dict) and (status := data.get("status")):
+        click.echo(f"  step status now: {status}")
     _hint(f"scaffold jobs status {job_id}")
 
 

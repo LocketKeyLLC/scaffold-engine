@@ -128,6 +128,14 @@ def test_skip_node(client):
     assert kwargs["json"] == {"job_id": "job-1", "node_key": "T2"}
 
 
+def test_skip_node_carries_the_reason(client):
+    """§17.2065 — the reason rides the body only when given."""
+    with patch.object(client._http, "request", return_value=_resp(200, {})) as m:
+        client.skip("job-1", "T2", reason="done by hand")
+    _args, kwargs = _last_call(m)
+    assert kwargs["json"] == {"job_id": "job-1", "node_key": "T2", "reason": "done by hand"}
+
+
 # --------------------------------------------------------------------------
 # client.jobs.*
 # --------------------------------------------------------------------------

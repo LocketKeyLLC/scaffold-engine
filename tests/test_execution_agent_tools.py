@@ -109,12 +109,20 @@ class TestSkipNodeReturnShape:
         from app.schemas import ExecutionResult
 
         row_result = MagicMock()
-        row_result.mappings.return_value.first.return_value = {"id": "node-uuid-1"}
+        row_result.mappings.return_value.first.return_value = {
+            "id": "node-uuid-1", "status": "pending", "last_verification_reason": None}
+        row_result.scalar.return_value = "executing"
         db = AsyncMock()
         db.execute = AsyncMock(return_value=row_result)
         db.commit = AsyncMock()
 
-        result = await skip_node("job-1", "T1", db)
+        # §17.2065 — the job-settling half runs on the real schema in
+        # tests/integration/test_a_skip_settles_the_job_17_2065_db.py; here only the shape is pinned.
+        from app.modules import execution_agent as ea
+        with patch.object(ea, "_withdraw_stale_frame", AsyncMock()), \
+             patch.object(ea, "_settle_after_skip", AsyncMock(return_value="")), \
+             patch("app.modules.node_editor._audit", AsyncMock()):
+            result = await skip_node("job-1", "T1", db)
 
         validated = ExecutionResult(**result)
         assert validated.status == "skipped"

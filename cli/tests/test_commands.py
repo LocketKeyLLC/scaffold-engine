@@ -697,6 +697,25 @@ def test_skip_posts_with_both_ids(runner):
     assert res.exit_code == 0
 
 
+def test_skip_sends_the_reason_and_prints_the_job_outcome(runner):
+    """§17.2065 — `--reason` rides the body; the reply's message (the job's status after the skip) is printed."""
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = {
+            "status": "skipped", "message": "Skipped T2 (done by hand); the job is completed"}
+        res = runner.invoke(cli, ["skip", "abc-1234", "T2", "--reason", "done by hand"])
+    _args, kwargs = ClientCls.return_value.__enter__.return_value.post.call_args
+    assert kwargs["json"] == {"job_id": "abc-1234", "node_key": "T2", "reason": "done by hand"}
+    assert res.exit_code == 0 and "the job is completed" in res.output
+
+
+def test_skip_refused_exits_nonzero(runner):
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.post.return_value = {
+            "status": "error", "message": "Job is completed; its steps are not skipped"}
+        res = runner.invoke(cli, ["skip", "abc-1234", "T2"])
+    assert res.exit_code == 1
+
+
 def test_schedule_list_renders_table(runner):
     response = {"schedules": [
         {"id": 1, "topic": "k8s news", "depth": "medium",

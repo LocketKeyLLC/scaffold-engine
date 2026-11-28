@@ -485,6 +485,8 @@ class DecideResult(BaseModel):
 class SkipNodeInput(BaseModel):
     job_id: str
     node_key: str
+    # §17.2065 — why the step is skipped: written to the step's reason ("skipped by <who>: <why>") and the edit log
+    reason: str | None = Field(default=None, max_length=500)
 
     @field_validator("job_id")
     @classmethod

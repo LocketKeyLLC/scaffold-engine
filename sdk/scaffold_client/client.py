@@ -207,11 +207,14 @@ class Client:
             },
         )
 
-    def skip(self, job_id: str, node_key: str) -> dict[str, Any]:
-        """``POST /skip`` — mark a node as ``skipped`` and unblock downstream work."""
-        return self.request(
-            "POST", "/skip", json={"job_id": job_id, "node_key": node_key}
-        )
+    def skip(self, job_id: str, node_key: str, reason: str | None = None) -> dict[str, Any]:
+        """``POST /skip`` — mark a node as ``skipped`` and unblock downstream work.
+
+        ``reason`` (§17.2065) is recorded on the step with the caller's identity."""
+        body: dict[str, Any] = {"job_id": job_id, "node_key": node_key}
+        if reason:
+            body["reason"] = reason
+        return self.request("POST", "/skip", json=body)
 
     # ------------------------------------------------------------------
     # Lifecycle.
