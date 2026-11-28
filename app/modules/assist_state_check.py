@@ -1320,8 +1320,9 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
          WHERE id = :sid
     """), {"sid": session_id, "patch": json.dumps({"pending_state_check": pending})})
     await db.commit()
-    logger.warning("state_check_started session_id=%s node_key=%s claims=%d probes=%d deferred=%d refused=%d",
-                   session_id, pending["node_key"], len(claims), len(probes), len(deferred), len(refused))
+    logger.log(logging.WARNING if refused else logging.INFO,   # §17.2061 — routine unless a probe was refused
+               "state_check_started session_id=%s node_key=%s claims=%d probes=%d deferred=%d refused=%d",
+               session_id, pending["node_key"], len(claims), len(probes), len(deferred), len(refused))
     targets = sum(1 for c in claims if c.get("kind") != "pin")
     # §17.1105 — offer the local runner iff it isn't configured (when it is,
     # assist_turn runs the probes itself and this paste message is never shown).

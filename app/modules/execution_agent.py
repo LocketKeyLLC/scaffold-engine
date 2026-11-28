@@ -3652,6 +3652,14 @@ async def unmet_dependencies(db, job_id: str, node: dict) -> list[str]:
     return [d for d in deps if d not in done]
 
 
+def _log_parked(job_id: str, run_node: dict, frame: dict) -> None:
+    """§17.2061 — parking a clean draft for approval is the normal flow (INFO); a draft with refusals warns."""
+    logger.log(logging.WARNING if frame.get("refused") else logging.INFO,
+               "supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
+               job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame.get("commands") or []),
+               len(frame.get("refused") or []), frame.get("runner"))
+
+
 async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
     """§17.1184 — if the next claimable step is a decision the operator has not
     delegated, frame it, park the job in ``awaiting_decision`` and return the
@@ -3943,8 +3951,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                   reading=_reading)
             if _before:
                 up_block = (up_block + "\n\n" + _before).strip()
-                logger.warning("previous_attempt_carried job=%s node=%s chars=%d",
-                               job_id, run_node.get("node_key"), len(_before))
+                logger.info("previous_attempt_carried job=%s node=%s chars=%d",   # §17.2061
+                            job_id, run_node.get("node_key"), len(_before))
         except Exception as exc:
             logger.warning("previous_attempt_skipped job=%s err=%r", job_id, exc)
         # §17.1694 — the *arr API shapes the step reads, so the draft uses the real field names
@@ -3962,7 +3970,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _ev = await _ge.earlier_reads(_db_ge, job_id, run_node, _inv)
             if _ev:
                 up_block = (up_block + "\n\n" + _ev).strip()
-                logger.warning("guest_evidence_carried job=%s node=%s chars=%d", job_id, run_node.get("node_key"), len(_ev))
+                logger.info("guest_evidence_carried job=%s node=%s chars=%d", job_id, run_node.get("node_key"), len(_ev))
         except Exception as exc:
             logger.warning("guest_evidence_skipped job=%s err=%r", job_id, exc)
         # §17.1290 — the first draft comes from a template when one owns this shape (the truth says which)
@@ -4096,10 +4104,12 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 _rh_reports[rb] = report
                 refused = rehearsal.refusal_from(report)
                 _ran = bool(report) and not report.get("error")
-                logger.warning("rehearsal_done job=%s node=%s outcome=%s seeds=%d secs=%s",
-                               job_id, run_node.get("node_key"),
-                               ("refused" if refused else "passed") if _ran else "could_not_run",
-                               len(_rh_seeds), (report or {}).get("seconds"))
+                # §17.2061 — a passed rehearsal is routine (INFO); refused / could-not-run warns
+                logger.log(logging.INFO if (_ran and not refused) else logging.WARNING,
+                           "rehearsal_done job=%s node=%s outcome=%s seeds=%d secs=%s",
+                           job_id, run_node.get("node_key"),
+                           ("refused" if refused else "passed") if _ran else "could_not_run",
+                           len(_rh_seeds), (report or {}).get("seconds"))
                 return refused
             except Exception as exc:
                 logger.warning("rehearsal_failed job=%s node=%s err=%r", job_id, run_node.get("node_key"), exc)
@@ -4116,7 +4126,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             # read the page it is about and the page check can be derived
             host, _widened = develop.widen_to_served(host, workspace)
             if _widened:
-                logger.warning("develop_served_dirs_added job=%s node=%s dirs=%s", job_id, _nk_dev, _widened)
+                logger.info("develop_served_dirs_added job=%s node=%s dirs=%s", job_id, _nk_dev, _widened)
                 workspace = await develop.read_workspace(spec, host)
             # §17.1592 — a proxy the service's own files name is a service in play, named by the step or not
             _ws_proxies = supervised_runs.engine_deployed_services(develop.proxies_in_workspace(workspace), _services)
@@ -4258,7 +4268,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 # no commands and no refusal, the reasons living only in these log lines.
                 empty_frame["refused"] = list(empty_frame.get("refused") or []) + develop.nothing_refusal(evidence)
                 return empty_frame
-            logger.warning("develop_done job=%s node=%s score=%s", job_id, _nk_dev, best[0])
+            logger.info("develop_done job=%s node=%s score=%s", job_id, _nk_dev, best[0])
             return best[1]
 
         async def _pre_for(rb: str) -> list[dict]:
@@ -4756,9 +4766,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
         if _disp is not None and _disp[0] == "refuse":
             frame["refused"] = list(frame.get("refused") or []) + [_disp[1]]
             frame["suggested"] = "myself"
-        logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
-                       job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
-                       len(frame["refused"]), frame["runner"])
+        _log_parked(job_id, run_node, frame)
         # §17.1194 — a prefix a REAL step was refused for is the honest way to
         # widen the allow-list: the recommendation is read off the plan's words,
         # the runbook reaches for more. Recorded, never acted on.
