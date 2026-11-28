@@ -66,7 +66,7 @@ def test_every_judge_path_builds_its_claim_the_same_way():
     assert src.count("goal_claim(") >= 4          # the def + three call sites
     assert 'contradicted(await _verify_verdicts(\n                    str(waiting.get("title")' not in src
     assert '_goal_confirmed(\n                        str(waiting.get("title")' not in src
-    assert "goal_claim(title, " in inspect.getsource(sr.already_met) if hasattr(sr, "already_met") else True
+    assert "goal_claim(title, " in inspect.getsource(sr.checks_confirm_met)    # §17.2059 — already_met judges there
 
 
 @pytest.mark.asyncio

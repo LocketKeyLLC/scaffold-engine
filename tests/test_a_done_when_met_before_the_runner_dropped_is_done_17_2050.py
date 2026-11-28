@@ -34,8 +34,10 @@ READ_BACK = {
                         "started. Change nothing. Done when it prints the `uptime -s` line."),
     "commands": [PHASE.format(p) for p in ("start", "wait", "wait", "last")],
     "verify": [PHASE.format("check 'uptime -s'")], "refused": []}
-BEFORE_DROP_GOOD = ("deployed 1a2b3c4d fix(x): something (#1)\n2026-11-20 09:14:07\n"
-                    "scaffold-orchestrator started")
+# §17.2060 — a read-only in-guest block prints each statement's heading and exit (`runbook_templates.with_sections`)
+BEFORE_DROP_GOOD = ("$ cat /opt/scaffold-engine/DEPLOYED\ndeployed 1a2b3c4d fix(x): something (#1)\n-- exit 0\n"
+                    "$ uptime -s\n2026-11-20 09:14:07\n-- exit 0\n"
+                    "$ docker logs scaffold-orchestrator 2>&1 | grep -m1 started\nscaffold-orchestrator started\n-- exit 0")
 _EVIDENCE = re.compile(r"\b\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\b|deploy ok r42")
 
 

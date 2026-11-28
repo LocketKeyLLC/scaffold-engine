@@ -1036,7 +1036,35 @@ def read_only_remote(remote_commands: str) -> str:
     text = str(remote_commands or "")
     if not strict_line(text).startswith("set +e"):
         return text
-    return "\n".join(ln for ln in text.split("\n") if not _SHELL_OPTIONS_RE.match(ln.strip()))
+    return with_sections("\n".join(ln for ln in text.split("\n") if not _SHELL_OPTIONS_RE.match(ln.strip())))
+
+
+#: §17.2060 — the lines a read-only in-guest block prints around each of its statements, so the guest's one log is
+#: split into the output of each command and the exit it gave (`$ uptime -s` / its lines / `-- exit 0`)
+SECTION_OPEN = "printf '$ %s\\n' "
+SECTION_CLOSE = "printf -- '-- exit %s\\n' \"$?\""
+
+
+def with_sections(body: str) -> str:
+    """§17.2060 — a read-only in-guest block whose every statement prints its own heading and exit code.
+
+    The guest runs the block as one detached unit and the record keeps one log: a Done when like "it prints the
+    `uptime -s` line" (job 0fb4ea7f RDV80) could only be judged by the model, which cannot tell the boot-time line
+    from any other command's. Each statement is now preceded by ``$ <statement>`` and followed by ``-- exit N``; the
+    lines between are that command's output, which `supervised_runs.output_sections` reads back. A body the
+    statement split cannot follow (a heredoc, a `\\` continuation) is left as it was."""
+    import shlex
+    lines = str(body or "").split("\n")
+    if any("<<" in ln or ln.rstrip().endswith("\\") for ln in lines):
+        return body
+    out: list[str] = []
+    for group in _statement_groups([ln for ln in lines if ln.strip()]):
+        if all(ln.strip().startswith("#") for ln in group):
+            out += group
+            continue
+        label = " ".join(_join_statement([ln for ln in group if not ln.strip().startswith("#")]).split())
+        out += [SECTION_OPEN + shlex.quote(label), *group, SECTION_CLOSE]
+    return "\n".join(out)
 
 
 _BLOCK_OPEN_RE = re.compile(r"(?<![\w-])(?:if|for|while|until|case)(?![\w-])")
@@ -1054,22 +1082,42 @@ def shell_statements(lines: list[str]) -> list[str]:
     multi-line blocks was judged line by line; `for p in …; do` and `if command -v caddy …; then` are heads with no
     body, so no read table holds them, the block was not marked read-only (§17.1608), and the frame was refused "this
     block has no check at all" (§17.1345) although §17.1680 exempts exactly a read-only template block."""
-    out: list[str] = []
+    groups = _statement_groups(lines)
+    if groups and _unclosed(groups[-1]):                                  # an unclosed block: judged as it stands
+        return [_join_statement(g) for g in groups[:-1]] + ["; ".join(groups[-1])]
+    return [_join_statement(g) for g in groups]
+
+
+def _depth_of(ln: str) -> int:
+    code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
+    return len(_BLOCK_OPEN_RE.findall(code)) - len(_BLOCK_CLOSE_RE.findall(code))
+
+
+def _unclosed(group: list[str]) -> bool:
+    return sum(_depth_of(ln) for ln in group) > 0
+
+
+def _statement_groups(lines: list[str]) -> list[list[str]]:
+    """§17.1957 — the body's lines grouped into whole shell statements, each group its original lines."""
+    out: list[list[str]] = []
     cur: list[str] = []
     depth = 0
     for ln in lines:
-        code = _QUOTED_RE.sub("''", ln.split(" #", 1)[0])
-        depth += len(_BLOCK_OPEN_RE.findall(code)) - len(_BLOCK_CLOSE_RE.findall(code))
+        depth += _depth_of(ln)
         cur.append(ln)
         if depth <= 0:
-            joined = ""
-            for part in cur:
-                joined = part if not joined else (f"{joined} {part}" if _CONTINUES_RE.search(joined) else f"{joined}; {part}")
-            out.append(joined)
+            out.append(cur)
             cur, depth = [], 0
-    if cur:                                                               # an unclosed block: judged as it stands
-        out.append("; ".join(cur))
+    if cur:
+        out.append(cur)
     return out
+
+
+def _join_statement(group: list[str]) -> str:
+    joined = ""
+    for part in group:
+        joined = part if not joined else (f"{joined} {part}" if _CONTINUES_RE.search(joined) else f"{joined}; {part}")
+    return joined
 
 
 def strict_line(remote_commands: str) -> str:

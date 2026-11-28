@@ -68,7 +68,11 @@ def test_the_claim_comes_after_every_refusal_in_the_source():
     assert src.index("fill_files(_files, values)") < claim, "the file check runs BEFORE the claim"
     after = src[claim:src.index("supervised_run_started")]
     assert '"outcome": "node_gone"' in after
-    assert after.count('"outcome":') == 1, "the only exit between the claim and the run is the claim failing"
+    # §17.2059 — the one other exit is not a refusal: the checks read after the approval found the step already met,
+    # and the node it claimed is recorded `done` on that evidence before it returns
+    assert after.count('"outcome":') == 2, "the only exits: the claim failing, and the step found already met"
+    met = after.index('"outcome": "already_met"')
+    assert after.rindex("UPDATE dag_nodes SET status = 'done'", 0, met) < met
 
 
 @pytest.mark.asyncio

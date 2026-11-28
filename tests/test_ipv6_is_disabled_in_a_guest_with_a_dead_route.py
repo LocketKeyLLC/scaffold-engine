@@ -175,7 +175,7 @@ def test_the_check_ends_with_a_verdict_word_the_frame_carries_as_an_expectation(
     frame = sr.frame_run(STEP, "## Run this\n```bash\necho draft\n```\n", spec, {"allow": ["ANY"], "sudo": False, "helper": "22"},
                          inventory={"names": {"101": "jellyfin"}})
     assert frame["expects"] == {frame["verify"][0]: "STATE-OK"}
-    src = inspect.getsource(sr.already_met)
+    src = inspect.getsource(sr.checks_confirm_met)       # §17.2059 — the judging half of already_met
     assert '(frame or {}).get("expects")' in src                         # the pre-pass reads it
 
 

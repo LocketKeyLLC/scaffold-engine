@@ -1338,6 +1338,17 @@
       },
       "DecideResult": {
         "properties": {
+          "already_met": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Already Met"
+          },
           "confirmed_after_drop": {
             "anyOf": [
               {

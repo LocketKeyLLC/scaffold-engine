@@ -4688,6 +4688,16 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                 logger.warning("already_met_check_failed job=%s node=%s err=%r", job_id,
                                run_node.get("node_key"), exc)
                 _met = None
+            if not _met:
+                # §17.2059 — a read only the approval can make runnable runs after it, before the block's commands
+                try:
+                    _after = supervised_runs.check_after_approval(run_node, frame, policy)
+                except Exception as exc:
+                    logger.warning("check_after_approval_failed job=%s node=%s err=%r", job_id,
+                                   run_node.get("node_key"), exc)
+                    _after = ""
+                if _after:
+                    frame["check_after_approval"] = _after
             if _met:
                 from datetime import datetime as _dt, timezone as _tz
                 _nk = run_node.get("node_key")

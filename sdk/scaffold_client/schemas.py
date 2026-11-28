@@ -460,7 +460,7 @@ class DecideResult(BaseModel):
     resolved: Literal["operator", "engine"]
     status: str = "executing"
     run_started: bool = False
-    # §17.1186 — what a run pause did: resolved | delegated | ran | failed | runbook | skipped
+    # §17.1186 — what a run pause did: resolved | delegated | ran | failed | runbook | skipped | already_met (§17.2059)
     outcome: str = "resolved"
     node_status: str | None = None
     # §17.1266 — and WHAT HAPPENED. §17.1261 put the run's detail into
@@ -478,6 +478,7 @@ class DecideResult(BaseModel):
     unknown_outcome: bool | None = None     # §17.1201 — the runner dropped mid-block
     confirmed_after_drop: bool | None = None
     met_before_drop: bool | None = None     # §17.2050 — done on what ran before the runner dropped
+    already_met: bool | None = None         # §17.2059 — its checks, read after the approval, showed it already done
     evidence: str | None = None             # §17.1458 — what the operator-step checks read on the machine
 
 

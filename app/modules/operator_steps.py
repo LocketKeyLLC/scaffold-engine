@@ -268,6 +268,33 @@ def expected_prints(node: Optional[dict]) -> list[str]:
     return out
 
 
+#: §17.2060 — "Done when it prints the `uptime -s` line" / "shows the `df -h /` output" / "prints the output of `X`":
+#: a COMMAND whose output is the proof, not a text to find
+_NAMED_OUTPUT_RE = re.compile(
+    r"\b(?:the|its)\s+((?:`[^`\n]+`(?:\s*,\s*|\s+(?:and|plus)\s+)?)+)\s*(?:lines?|outputs?|results?|readings?)\b"
+    r"|\b(?:output|result|lines?)\s+(?:of|from)\s+((?:`[^`\n]+`(?:\s*,\s*|\s+(?:and|plus)\s+)?)+)", re.I)
+_PRINT_VERB_RE = re.compile(r"\b(?:prints?|shows?|outputs?|returns?|gives?|says|reads?|lists?)\b", re.I)
+
+
+def named_outputs(node: Optional[dict]) -> list[str]:
+    """§17.2060 — the backticked texts the step's "Done when" names as a thing whose output it prints ("it prints the
+    `uptime -s` line"), which §17.1630's exact-print rule (`expected_prints`, a backtick right after the verb) never
+    sees. Live (job 0fb4ea7f RDV80): that wording left the dropped run's earlier output to the judge model alone."""
+    n = node or {}
+    body = "\n\n".join(dict.fromkeys(str(n.get(k) or "").strip() for k in ("description", "prompt_template")
+                                     if str(n.get(k) or "").strip()))
+    clause = done_when_clause(body)
+    out: list[str] = []
+    if not _PRINT_VERB_RE.search(clause):
+        return out
+    for m in _NAMED_OUTPUT_RE.finditer(clause):
+        for t in _BACKTICK_RE.findall(m.group(1) or m.group(2) or ""):
+            t = " ".join(t.split())
+            if t and t not in out:
+                out.append(t)
+    return out
+
+
 def missing_prints(expected: list[str], printed: str) -> list[str]:
     """The expected texts the run's output does not contain, whitespace-insensitively."""
     flat = " ".join((printed or "").split())

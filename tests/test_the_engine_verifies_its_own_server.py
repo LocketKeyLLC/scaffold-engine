@@ -66,7 +66,9 @@ def test_a_shell_option_does_not_make_a_read_a_write_or_end_the_reads(tmp_path):
     from app.modules import runbook_templates as rt
     assert rt.strict_line(VS2_LINES).startswith("set +e")
     body = rt.read_only_remote(VS2_LINES)
-    assert "set -euo pipefail" not in body and body.count("\n") == VS2_LINES.count("\n") - 1
+    # §17.2060 — each statement is framed by its heading and exit lines; the statements themselves are unchanged
+    own = [ln for ln in body.split("\n") if not ln.startswith((rt.SECTION_OPEN, rt.SECTION_CLOSE))]
+    assert "set -euo pipefail" not in own and own == VS2_LINES.split("\n")[1:]
     # bash-level: the unit is inactive and the grep finds nothing -- both are answers, and the last read still runs
     bindir = tmp_path / "bin"; bindir.mkdir()
     for name, out in (("systemctl", 'echo inactive; exit 3'), ("grep", "exit 1"), ("git", "echo 1cb00182")):
