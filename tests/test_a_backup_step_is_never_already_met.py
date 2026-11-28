@@ -15,5 +15,5 @@ def test_backup_titles_are_taken_now():
 
 
 def test_wired_into_already_met():
-    src = inspect.getsource(sr.already_met)
+    src = inspect.getsource(sr.already_met_blind)          # §17.2059 — one blindness rule for both reads
     assert "_blind = _blind or a_backup_is_taken_now(node)" in src

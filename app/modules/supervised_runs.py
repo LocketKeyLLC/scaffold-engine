@@ -8828,6 +8828,37 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if refs:
         from app.modules import runner_secrets as _rs
         secret_env = await _rs.values_for(db, refs)
+    # §17.2059 — the "already met?" read the approval had to unlock (§17.2051) runs now: after the approval bound its
+    # values, through the same approved channel, before any command. Confirmed → done on that evidence, nothing run.
+    if waiting.get("check_after_approval"):
+        try:
+            _met_now, _pre_wrote = await already_met_after_approval(spec, waiting, node_key, verify_cmds, _files, secret_env)
+        except Exception as exc:                 # the read is an optimisation: a broken one never stops the approved run
+            logger.warning("supervised_run_after_approval_failed job=%s node=%s err=%r", job_id, node_key, exc)
+            _met_now, _pre_wrote = None, []
+        if _met_now:
+            _why_after = str(waiting.get("check_after_approval") or "")
+            _rec = already_met_record({"title": waiting.get("title")}, spec.name, _met_now, after_approval=_why_after)
+            if _pre_wrote:
+                _rec += ("\nWritten first so the checks could run (the engine's own check script, nothing of the step's "
+                         "work): " + ", ".join(f"`{e.get('command')}`" for e in _pre_wrote) + "\n")
+            _rec = mask_secrets(scrub_run_output(_rec, secret_env), values, need)
+            await db.execute(
+                text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
+                     "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
+                {"jid": job_id, "nk": node_key, "out": _rec,
+                 "why": (f"already met: {_met_now['checks']} verify check(s) read off {spec.name} after the approval, "
+                         "before the run, confirm the goal -- none of the block's commands ran")})
+            logger.warning("supervised_run_already_met_after_approval job=%s node=%s checks=%d verdicts=%s", job_id,
+                           node_key, _met_now["checks"], [str(v.get("verdict")) for v in _met_now["verdicts"]])
+            try:                                                 # §17.1315 — as the pre-read's already-met path does
+                from app.modules import machine_truth as _mt
+                await _mt.after_step_done(job_id, {"node_key": node_key, "title": str(waiting.get("title") or "")})
+            except Exception as exc:
+                logger.warning("after_step_done_failed job=%s node=%s err=%r", job_id, node_key, exc)
+            return {"outcome": "already_met", "node_status": "done", "executed": _pre_wrote,
+                    "verify": mask_secrets(scrub_run_output(str(_met_now.get("report") or ""), secret_env), values, need),
+                    "already_met": True}
     logger.info("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",   # §17.2061
                 job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
     executed = await _sw.write_files_on(spec, _files) if _files else []
@@ -9263,6 +9294,12 @@ async def met_before_the_drop(waiting: dict, node_key: str, executed: list[dict]
         return ""
     if expected and missing_prints(expected, own):
         return ""
+    # §17.2060 — "it prints the `uptime -s` line": that command ran, exited 0 and printed something that is not an error
+    named = named_outputs(waiting)
+    unmet = named_output_unmet(named, ran)
+    if unmet:
+        logger.info("supervised_run_drop_named_output_unmet node=%s why=%s", node_key, "; ".join(unmet)[:300])
+        return ""
     if a_read_was_cut(waiting, ran):
         return ""
     verdicts = await _verify_verdicts(
@@ -9274,7 +9311,103 @@ async def met_before_the_drop(waiting: dict, node_key: str, executed: list[dict]
         return ""
     why = str((verdicts[0] or {}).get("reason") or "").strip()
     return ((f"it printed {', '.join('`' + t[:60] + '`' for t in expected)}, which its Done when names, and " if expected
-             else "") + "the judge confirms the step's goal in it" + (f" ({why[:200]})" if why else "") + ".")
+             else "")
+            + (f"{', '.join('`' + t[:60] + '`' for t in named)} ran, exited 0 and printed its output, as its Done when "
+               "asks, and " if named else "")
+            + "the judge confirms the step's goal in it" + (f" ({why[:200]})" if why else "") + ".")
+
+
+def named_outputs(waiting: Optional[dict]) -> list[str]:
+    """§17.2060 — the texts the step's Done when names as a thing whose output it prints (`operator_steps`)."""
+    from app.modules.operator_steps import named_outputs as _named
+    return _named({"description": (waiting or {}).get("description"),
+                   "prompt_template": (waiting or {}).get("prompt_template")})
+
+
+def output_sections(executed: Optional[list[dict]]) -> list[dict]:
+    """§17.2060 — each command's own output, with the exit it gave: ``[{command, lines, exit}]``.
+
+    A command the runner ran is its own record (`run_block`: command, output, exit). A read-only in-guest block runs
+    as ONE record whose log the template splits per statement (`runbook_templates.with_sections`: ``$ <statement>``,
+    its lines, ``-- exit N``); a section that never printed its ``-- exit`` did not finish in this output and is not
+    one. A dropped call (`unreachable`) answered nothing."""
+    out: list[dict] = []
+    for e in executed or []:
+        if e.get("unreachable") or e.get("refused"):
+            continue
+        text_out = str(e.get("output") or "")
+        cur: Optional[dict] = None
+        for ln in text_out.splitlines():
+            close = _SECTION_CLOSE_RE.search(ln)
+            if cur is not None and close:
+                if ln[:close.start()].strip():                     # a last line with no newline of its own
+                    cur["lines"].append(ln[:close.start()])
+                cur["exit"] = int(close.group(1))
+                out.append(cur)
+                cur = None
+                continue
+            opened = _SECTION_OPEN_RE.match(ln)
+            if opened:
+                cur = {"command": opened.group(1), "lines": [], "exit": None}
+            elif cur is not None:
+                cur["lines"].append(ln)
+        out.append({"command": str(e.get("command") or ""), "lines": text_out.splitlines(),
+                    "exit": 0 if e.get("ok") else (e.get("exit") if e.get("exit") not in (0, None) else 1)})
+    return out
+
+
+_SECTION_OPEN_RE = re.compile(r"^\$ (.+?)\s*$")
+_SECTION_CLOSE_RE = re.compile(r"-- exit (\d+)\s*$")
+#: §17.2060 — a line that is a failure, not a reading
+_ERROR_LINE_RE = re.compile(
+    r"command not found|No such file or directory|Permission denied|cannot (?:access|open|read|stat|connect)\b"
+    r"|Connection refused|Could not resolve|^\s*(?:error|fatal|failed)\b|^(?:bash|sh|zsh): ", re.I)
+_HARD_ERROR_RE = re.compile(r"Traceback \(most recent call last\)|command not found", re.I)
+
+
+def _runs_named(command: str, name: str) -> bool:
+    """§17.2060 — True when ``command`` runs ``name`` as a whole simple command (wrapped or bare, or one stage of a
+    pipeline): `uptime -s` is in `uptime -s | tee /tmp/x`, never in `uptime` or `echo uptime -s`."""
+    from app.modules.operator_steps import _own_segments
+    want = " ".join(str(name or "").split())
+    if not want:
+        return False
+    for c in dict.fromkeys([str(command or ""), _unwrap_check(str(command or ""))]):
+        if " ".join(c.split()) == want or any(" ".join(seg.split()) == want for seg in _own_segments(c)):
+            return True
+    return False
+
+
+def named_output_unmet(named: list[str], executed: Optional[list[dict]]) -> list[str]:
+    """§17.2060 — why the run does NOT show what its Done when names ("it prints the `uptime -s` line"): for each named
+    command, a section of the output where that very command ran, exited 0, and printed something that is not an
+    error. Another command's output never stands in for it. A named text that is no command the run shows (one word,
+    `deployed`) is held to §17.1630's rule instead: it is in the output."""
+    from app.modules.operator_steps import _looks_like_command, missing_prints
+    sections = output_sections(executed)
+    unmet: list[str] = []
+    for name in named or []:
+        hits = [s for s in sections if _runs_named(s["command"], name)]
+        if not hits:
+            if _looks_like_command(name):
+                unmet.append(f"`{name}` is named by its Done when and no output of it is in the run (it did not run as "
+                             "its own command, or its output cannot be told from the others')")
+            elif missing_prints([name], "\n".join("\n".join(s["lines"]) for s in sections)):
+                unmet.append(f"nothing printed `{name}`, which its Done when names")
+            continue
+        good = []
+        for s in hits:
+            lines = [ln for ln in s["lines"] if ln.strip()]
+            errors = [ln for ln in lines if _ERROR_LINE_RE.search(ln)]
+            if (s["exit"] == 0 and lines and len(errors) < len(lines)
+                    and not any(_HARD_ERROR_RE.search(ln) for ln in lines)):
+                good.append(s)
+        if not good:
+            last = hits[-1]
+            shown = "; ".join(ln.strip() for ln in last["lines"] if ln.strip())[:120] or "nothing"
+            unmet.append(f"`{name}` ran but exited {last['exit']} and printed {shown!r} -- not the output its Done "
+                         "when names")
+    return unmet
 
 
 async def judge_a_read_only_block(waiting: dict, node_key: str, executed: list[dict]) -> list[dict]:
@@ -13205,15 +13338,7 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
                                   (frame or {}).get("commands") or [])          # §17.1470, §17.1625
     if not verify_cmds or not (frame or {}).get("commands"):
         return None
-    # §17.1365 — a pre-pass means nothing when the checks could not have failed.
-    _blind = checks_can_witness_the_change(
-        [str(c) for c in (frame or {}).get("commands") or []], verify_cmds,
-        (frame or {}).get("files") or [])
-    # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
-    _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
-    # §17.1976 — the PLACE (the VM is up) is not the step's effect, and the step's own named checks are among the reads
-    _blind = (_blind or checks_read_only_the_place(verify_cmds, (frame or {}).get("commands") or [])
-              or own_checks_not_read(node, verify_cmds))
+    _blind = already_met_blind(node, frame, verify_cmds)
     if _blind:
         logger.warning("supervised_run_already_met_blind node=%s why=%s",
                        (node or {}).get("node_key"), _blind)
@@ -13224,6 +13349,135 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     if _needs:
         logger.info("supervised_run_already_met_needs_approval node=%s why=%s", (node or {}).get("node_key"), _needs)
         return None
+    return await checks_confirm_met(spec, node, frame, verify_cmds, env)
+
+
+def already_met_blind(node: Optional[dict], frame: Optional[dict], verify_cmds: list) -> str:
+    """``""``, or why the step's checks cannot show it already met, whatever they print: §17.1365 (they could not have
+    failed), §17.1655 (a backup is taken now), §17.1671d (the block proves what no pre-read can), §17.1976 (they read
+    only the PLACE, or leave out the step's own named check). One rule for the read before the frame is parked and the
+    read after the approval (§17.2059)."""
+    commands = [str(c) for c in (frame or {}).get("commands") or []]
+    # §17.1365 — a pre-pass means nothing when the checks could not have failed.
+    _blind = checks_can_witness_the_change(commands, verify_cmds, (frame or {}).get("files") or [])
+    # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
+    _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
+    # §17.1976 — the PLACE (the VM is up) is not the step's effect, and the step's own named checks are among the reads
+    # §17.2059b — and an ACT (redeploy, rebuild, restart) leaves the state its checks read as it was before it
+    return str(_blind or checks_read_only_the_place(verify_cmds, commands) or own_checks_not_read(node, verify_cmds)
+               or the_work_is_an_act(node, frame))
+
+
+#: §17.2059b — a command whose work is to DO something again, not to make a state true: the state it leaves (the
+#: service up, healthy, on its compose file) is the state it found, so no read of that state can say it already ran
+_ACT_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:systemctl\s+(?:restart|reload|try-restart|reload-or-restart)\b|service\s+\S+\s+(?:restart|reload)\b"
+    r"|docker(?:-compose|\s+compose)?\s+(?:restart\b|build\b|[^\n;&|]*\bup\b[^\n;&|]*--(?:build|force-recreate)\b)"
+    r"|(?:qm|pct)\s+reboot\b|reboot\b|git\s+(?:-C\s+\S+\s+)?(?:pull|fetch|checkout|reset)\b"
+    r"|\S*deploy_on_guest\.sh\b|make\s+(?:re)?deploy\b)", re.M)
+#: the same act named by the step's title
+_ACT_TITLE_RE = re.compile(r"\b(?:re-?deploy\w*|rebuild\w*|restart\w*|reboot\w*|reload\w*|re-?run\w*|redo|again)\b", re.I)
+
+
+def the_work_is_an_act(node: Optional[dict], frame: Optional[dict]) -> str:
+    """§17.2059b — ``""``, or why the step's work is an ACT its checks cannot see done: a redeploy, rebuild, restart,
+    reboot or re-run. Such a step is never "already met": what its checks read (the engine answers `healthy`, it runs
+    on `docker-compose.nogpu.yml`) held before the act and holds after it, so a confirmed read proves the place, not
+    the act -- §17.1976's rule ("a restart is an act"), applied to the work rather than to the checks.
+
+    Live (job 0fb4ea7f RD82, "VM 110: redeploy the engine at main 92c26e33", template deploy_scaffold_engine): its
+    Done when -- "`curl -s http://localhost:8000/health` prints `"status":"healthy"` and `docker inspect … ollama`
+    prints `docker-compose.nogpu.yml`" -- is true before every redeploy. With §17.2059's after-approval read it would
+    have been recorded already met and the merged commit never deployed. Read in the title, the commands, and the
+    work a template carries into the guest (its `REMOTE` body), never the template's own wrapper."""
+    title = str((node or {}).get("title") or "")
+    m = _ACT_TITLE_RE.search(title)
+    if m:
+        return f"the step's work is an act (\"{m.group(0)}\" in its title): its checks read the same before and after it"
+    texts = [str(c) for c in (frame or {}).get("commands") or []]
+    for f in (frame or {}).get("files") or []:
+        body = str((f or {}).get("content") or "")
+        remote = _REMOTE_HEREDOC_RE.search(body)
+        texts.append(remote.group(1) if remote else ("" if _SCAFFOLD_PATH_RE.fullmatch(str((f or {}).get("path") or ""))
+                                                     else body))
+    for t in texts:
+        m = _ACT_RE.search(t)
+        if m:
+            return (f"the block's work is an act (`{m.group(0).strip()[:60]}`): what its checks read held before it ran, "
+                    "so a confirmed read does not say it already ran")
+    return ""
+
+
+def check_after_approval(node: Optional[dict], frame: Optional[dict], policy: Optional[dict]) -> str:
+    """§17.2059 — ``""``, or why this frame's "already met?" read must wait for the approval and run, through the
+    approved channel, BEFORE the block's commands.
+
+    §17.2051 stopped sending a pre-approval read that needs what only the approval brings (an `<INPUT>` the operator
+    answers, a `$NAME` the engine sends only with an approved run). Right, and it left every step run inside a guest
+    over ssh -- each check `GUEST_USER="<AI_USER>" bash /tmp/in_vm_110.sh check '…' # $MASS_PASSWORD` -- never learning
+    it was already done. Only a step the pre-read would otherwise have asked qualifies: the caller has already ruled
+    out the steps §17.1426/1641/1692 exempt, and the same blindness rules (`already_met_blind`) apply here."""
+    if not (frame or {}).get("commands"):
+        return ""
+    verify_cmds = with_own_checks(node, (frame or {}).get("verify") or [], (frame or {}).get("commands") or [])
+    if not verify_cmds or already_met_blind(node, frame, verify_cmds):
+        return ""
+    return checks_need_approval(verify_cmds, policy)
+
+
+def _check_scaffolding(verify_cmds: list, files: Optional[list]) -> list[dict]:
+    """§17.2059 — the frame's files the checks RUN that are the engine's own scaffolding (`/tmp/in_vm_N.sh`, whose
+    `check` phase runs one read inside the guest): written first, each with its own signed approval, so the read runs
+    what this frame carries. A file that is the step's work (a config, a unit) is never written before its check."""
+    out = []
+    for f in files or []:
+        path = str((f or {}).get("path") or "")
+        if path and _SCAFFOLD_PATH_RE.fullmatch(path) and any(_invokes(str(c), path) for c in verify_cmds or []):
+            out.append({"path": path, "content": str((f or {}).get("content") or "")})
+    return out
+
+
+async def already_met_after_approval(spec, waiting: dict, node_key: str, verify_cmds: list[str],
+                                     files: Optional[list[dict]], held: Optional[dict[str, str]]) -> tuple[Optional[dict], list[dict]]:
+    """§17.2059 — the "already met?" read §17.2051 had to hold back, run once the approval has bound what it needs.
+
+    ``verify_cmds`` are the checks as they will run (the operator's answers substituted, `$NAME` kept), ``held`` the
+    engine-held values `resolve_run` already read for this approved run: the same out-of-band ``env`` the post-run
+    verify sends (§17.1193/1281), so no secret is sent earlier than it was, and each check is its own single-use,
+    signed runner approval (`run_block` mints one per command; a plain check takes the read-only channel). The rules
+    are the pre-read's: the frame said it qualifies (`check_after_approval`, decided where the frame was drawn, which
+    knows what §17.1426/1641/1692 exempt), the blindness rules are re-applied to the frame as parked, and only checks
+    that ALL answered and that the judge CONFIRMS against the step's goal and Done when count (§17.1302/1976 -- never
+    a check of the place alone). Returns ``(evidence or None, the scaffolding writes it made)``."""
+    why = str((waiting or {}).get("check_after_approval") or "")
+    if not why or not verify_cmds:
+        return None, []
+    node = {"node_key": node_key, "title": waiting.get("title"), "description": _done_when_claim(waiting),
+            "prompt_template": waiting.get("prompt_template")}
+    parked = with_own_checks(node, waiting.get("verify") or [], waiting.get("commands") or [])
+    blind = already_met_blind(node, waiting, parked) if parked else "no checks"
+    if blind or len(parked) != len(verify_cmds):
+        logger.info("supervised_run_after_approval_blind node=%s why=%s", node_key,
+                    blind or f"{len(parked)} checks parked, {len(verify_cmds)} to run")
+        return None, []
+    wrote: list[dict] = []
+    scaffold = _check_scaffolding(verify_cmds, files)
+    if scaffold:
+        from app.modules import assist_supervised as _sw
+        wrote = await _sw.write_files_on(spec, scaffold)
+        if len(wrote) != len(scaffold) or not all(e.get("ok") for e in wrote):
+            logger.info("supervised_run_after_approval_unreadable node=%s why=the check script was not written", node_key)
+            return None, wrote
+    met = await checks_confirm_met(spec, node, waiting, verify_cmds, held, held=held)
+    logger.info("supervised_run_after_approval_checked node=%s met=%s checks=%d", node_key, bool(met), len(verify_cmds))
+    return met, wrote
+
+
+async def checks_confirm_met(spec, node: Optional[dict], frame: Optional[dict], verify_cmds: list,
+                             env: Optional[dict[str, str]], *, held: Optional[dict[str, str]] = None) -> Optional[dict]:
+    """§17.1302 — read ``verify_cmds`` off the machine and judge them: the evidence when EVERY check answered and the
+    judge CONFIRMS every one against the step's goal and its "done when"; else None. ``held`` (§17.2059): the
+    engine-held values sent with the read, scrubbed from what the judge reads and from the report."""
     pasted, ran = await run_verify(spec, verify_cmds, env)
     answered = [r for r in ran or [] if r.get("ran")]
     if not _has_evidence(pasted, ran) or len(answered) != len(verify_cmds):
@@ -13233,6 +13487,8 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
                     (node or {}).get("node_key"),
                     [f"{r.get('id')}: {str(r.get('why') or 'no marker')[:60]}" for r in ran or [] if not r.get("ran")] or "all")
         return None
+    if held:
+        pasted = scrub_run_output(pasted, held)
     title = str((node or {}).get("title") or (frame or {}).get("node_key") or "")
     claim = goal_claim(title, str((node or {}).get("description") or ""))
     # §17.1570g — the runbook's own "`cmd` shows `text`" bullets, plus what a rewrite declared on the frame
@@ -13249,12 +13505,16 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
     return {"report": _probe_report(pasted, ran), "verdicts": verdicts, "checks": len(verify_cmds)}
 
 
-def already_met_record(node: dict, runner: str, met: dict) -> str:
+def already_met_record(node: dict, runner: str, met: dict, *, after_approval: str = "") -> str:
     """The node's output when §17.1302 found the goal already met: the reads,
-    verbatim, and why nothing ran."""
+    verbatim, and why nothing ran. ``after_approval`` (§17.2059): why the read
+    waited for the approval -- it ran after it, before any of the block's commands."""
     title = str((node or {}).get("title") or "")
-    lines = ["## Already met — nothing was run\n",
-             f"Before running anything, the engine read this step's own checks off {runner}:\n",
+    lead = (f"Before running anything, the engine read this step's own checks off {runner}:\n" if not after_approval else
+            f"After your approval and before running any of the block's commands, the engine read this step's own checks "
+            f"off {runner}, through the same approved channel. They could not be read before the approval: "
+            f"{after_approval.rstrip('.')}.\n")
+    lines = ["## Already met — nothing was run\n", lead,
              "```", str(met.get("report") or "").rstrip(), "```", "",
              f"Every check confirms the goal (\"{title}\"), so the block was not run and the step is recorded as done. "
              "Repeating a change the machine already shows is not a step forward.", ""]
@@ -13315,12 +13575,14 @@ def _frame_runbook(waiting: dict, commands: list[str], verify_cmds: list[str]) -
     # script's `REMOTE` heredoc, and the record kept only the wrapper (`bash /tmp/in_vm_110.sh start`). Live (job
     # 0fb4ea7f), T9's record never said Ollama went into Docker, so every later reader -- the drafter of T11, the
     # operator -- could not tell how to run it.
+    from app.modules.runbook_templates import SECTION_CLOSE, SECTION_OPEN
     inside = []
     for f in (w.get("files") or []):
         m = _REMOTE_HEREDOC_RE.search(str((f or {}).get("content") or ""))
         if m:
             inside += [ln for ln in m.group(1).splitlines()
-                       if ln.strip() and not ln.startswith(("set ", "export DEBIAN_FRONTEND"))]
+                       if ln.strip() and not ln.startswith(("set ", "export DEBIAN_FRONTEND"))
+                       and not ln.startswith((SECTION_OPEN, SECTION_CLOSE))]          # §17.2060 — the template's own
     if inside:
         lines += ["", "## Ran inside the guest", "```bash", *inside, "```"]
     if verify_cmds:

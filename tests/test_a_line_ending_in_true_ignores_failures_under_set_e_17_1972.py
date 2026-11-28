@@ -101,7 +101,8 @@ def test_what_is_not_a_statement_under_set_e_is_left_alone():
 def test_a_read_only_block_is_not_under_set_e_and_is_left_alone():
     frame = _frame("grep -rIl -e 'needle' /etc/hosts 2>/dev/null; true\ncat /etc/os-release")
     body = _remote_body(frame["files"][0]["content"])
-    assert body.startswith("set +e") and "grep -rIl -e 'needle' /etc/hosts 2>/dev/null; true" in body
+    # §17.2060 — each statement of a read is its own section: `a; true` is the two lines `a` and `true`, unrepaired
+    assert body.startswith("set +e") and "\ngrep -rIl -e 'needle' /etc/hosts 2>/dev/null\n" in body and "\ntrue\n" in body
     assert not [n for n in frame["engine_fixed"] if "`{ …; } || true`" in n]
 
 

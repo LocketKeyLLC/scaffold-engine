@@ -143,10 +143,11 @@ def test_already_met_declines_when_the_checks_are_blind():
 
     from app.modules import supervised_runs as sr
     src = inspect.getsource(sr.already_met)
-    assert "checks_can_witness_the_change(" in src
+    assert "checks_can_witness_the_change(" in inspect.getsource(sr.already_met_blind)   # §17.2059 — one rule, both reads
     assert "supervised_run_already_met_blind" in src
     # and it declines BEFORE spending a read on the runner
-    assert src.index("checks_can_witness_the_change(") < src.index("run_verify(")
+    assert src.index("already_met_blind(") < src.index("checks_confirm_met(")
+    assert "run_verify(" not in src and "run_verify(" in inspect.getsource(sr.checks_confirm_met)
 
 
 def test_the_already_met_record_still_names_its_evidence():
@@ -154,7 +155,7 @@ def test_the_already_met_record_still_names_its_evidence():
     import inspect
 
     from app.modules import supervised_runs as sr
-    src = inspect.getsource(sr.already_met)
+    src = inspect.getsource(sr.checks_confirm_met)       # §17.2059 — the judging half of already_met
     assert "all(k == \"confirmed\" for k in kinds)" in src
 
 

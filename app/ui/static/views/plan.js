@@ -325,6 +325,7 @@ export function renderPlan(container, jobId, opts = {}) {
       });
       const why = String(res.reason || "").split("\n").find((l) => l.trim()) || "";
       toast(res.outcome === "ran" ? `${nodeKey} ran — continuing.`
+          : res.outcome === "already_met" ? `${nodeKey} was already done — its own checks, read after your approval, show it met; nothing ran.`
           : res.outcome === "failed" ? `${nodeKey} stopped${why ? ": " + why.slice(0, 140) : " — see the node output."}`
           : res.outcome === "redraft" ? `${nodeKey} sent back with your correction.`
           : res.outcome === "runbook" ? `${nodeKey} kept as a runbook for you.`

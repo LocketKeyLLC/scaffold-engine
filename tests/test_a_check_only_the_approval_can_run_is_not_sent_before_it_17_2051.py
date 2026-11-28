@@ -24,8 +24,10 @@ from app.modules import supervised_runs as sr
 
 RUN_LINE = 'GUEST_USER="<AI_USER>" bash /tmp/in_vm_110.sh start # $MASS_PASSWORD'
 LIVE_CHECK = "GUEST_USER=\"<AI_USER>\" bash /tmp/in_vm_110.sh check 'curl -s http://localhost:8000/health' # $MASS_PASSWORD"
-NODE = {"node_key": "RD80", "title": "Redeploy the engine in VM 110 at the merged commit",
-        "description": "Pull the merged commit and rebuild the orchestrator inside VM 110. "
+# the live check came from RD80, a redeploy; §17.2059b makes a redeploy an ACT that is never already met (so never read
+# at all), so the approval rule is exercised on a step that makes a STATE true, with the same check
+NODE = {"node_key": "RD80", "title": "VM 110: turn on the engine's health route",
+        "description": "Set HEALTH_ROUTE=on in the engine's settings inside VM 110. "
                        "Done when `curl -s http://localhost:8000/health` answers status ok."}
 # the runner holds ARR_KEY itself; the engine holds MASS_PASSWORD and DB_TOKEN (sent only with an approved run)
 POLICY = {"allow": ["ANY"], "secrets": ["ARR_KEY"], "held": ["MASS_PASSWORD", "DB_TOKEN"], "helper": "24"}
@@ -84,8 +86,9 @@ async def test_a_check_only_the_approval_can_run_is_not_sent(caplog, verify, nee
     (["for F in /opt/a /opt/b; do test -s \"$F\" && echo present; done"], "block"),     # a name the check binds
 ])
 async def test_a_check_the_runner_can_answer_now_still_proves_a_step_met(verify, path):
-    node = {"node_key": "RD81", "title": "Read the service health", "description": "Restart the service."}
-    frame = {"commands": ["systemctl restart arrsvc"], "verify": verify, "files": []}
+    # §17.2059b: an install, not a restart -- a restart is an act and is never already met
+    node = {"node_key": "RD81", "title": "Read the service health", "description": "Install the service."}
+    frame = {"commands": ["apt-get install -y arrsvc"], "verify": verify, "files": []}
     met, probes, block = await _already_met(frame, node=node)
     assert met and met["checks"] == 1, met
     assert (probes if path == "probes" else block).await_count == 1

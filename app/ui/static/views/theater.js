@@ -988,6 +988,7 @@ export function renderTheater(container, jobId, ctx = {}) {
         // it; "see the node's output" was the engine knowing and not saying.
         const why = String(res.reason || "").split("\n").find((l) => l.trim()) || "";
         toast(res.outcome === "ran" ? `${nodeKey} ran on ${d.runner || "the runner"} — continuing.`
+            : res.outcome === "already_met" ? `${nodeKey} was already done — its own checks, read on ${d.runner || "the runner"} after your approval, show it met; nothing ran.`
             : res.outcome === "failed" ? (why
                 ? `${nodeKey} stopped: ${why.length > 160 ? why.slice(0, 160) + "…" : why}`
                 : `${nodeKey} stopped at a failed command — see the node's output.`)
