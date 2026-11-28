@@ -26,12 +26,12 @@ from app.config import Settings
 from app.routers import assist as assist_router
 
 
-def test_the_valve_exists_and_ships_off():
-    # The CODE default ships off (live-on via compose). Read the field default,
-    # not Settings() — the container test lane inherits the live compose env,
-    # where this valve is set ON, so Settings() would report the live value.
-    assert Settings.model_fields["assist_block_on_unclear_when_unsure"].default is False, (
-        "behavioural valves ship code-default-off, live via compose"
+def test_the_valve_exists_and_ships_on():
+    # §17.2058 — the code default IS the deployed value (compose ships it ON), so
+    # the test lane exercises the configuration that runs. Read the field
+    # default, not Settings(), so a .env in the lane cannot mask a regression.
+    assert Settings.model_fields["assist_block_on_unclear_when_unsure"].default is True, (
+        "the code default must equal the deployed (compose) value — §17.2058"
     )
 
 

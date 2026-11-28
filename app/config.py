@@ -183,6 +183,14 @@ DEFAULT_TTL_SECONDS = 180 * 86400
 class Settings(BaseSettings):
     """All config sourced from env vars set in docker-compose.yml."""
 
+    # §17.2058 — a field's default here IS the deployed value. docker-compose.yml
+    # may restate it as ``${NAME:-x}`` (so it stays visible + overridable from
+    # .env), but ``x`` must equal the default below: the test lane builds Settings
+    # from these defaults, not from compose, so a split means every test runs a
+    # configuration no engine deploys. tests/test_compose_code_default_parity.py
+    # (ci-tier-0) fails on any split. A test that needs a legacy (valve-off) path
+    # pins that valve itself (realistic_settings / monkeypatch.setattr).
+
     # Auth
     scaffold_api_key: SecretStr = SecretStr("")
     scaffold_auth_disabled: bool = False
@@ -819,8 +827,8 @@ class Settings(BaseSettings):
     # it's attached to (ALCE citation precision). Extends the same black-box /
     # fail-soft lineage as faithfulness + CoVe; wired into the eval gate
     # (score_retrieval.py --citation-faithfulness + the live gate test).
-    # Default-OFF; one LLM judge-call per scored answer.
-    citation_faithfulness_check_enabled: bool = False
+    # Default ON (§17.2058: the code default is the deployed one); one LLM judge-call per scored answer.
+    citation_faithfulness_check_enabled: bool = True
     citation_faithfulness_model_role: str = "model_verifier"
     # §17.662 — after a research run, surface a small set of user-tailored
     # decision OPTIONS ("branch out into choices that suit the user's needs")
@@ -852,12 +860,12 @@ class Settings(BaseSettings):
     # default-off. Both reuse grounding_min_score + cove_model_role.
     grounding_correct_enabled: bool = True
     node_grounding_enabled: bool = False
-    # §17.576 — learning flywheel (opt-in, default OFF both directions). When a
+    # §17.576 — learning flywheel (default ON (§17.2058: the code default is the deployed one)). When a
     # job completes with grounding ≥ exemplar_min_grounding, its deliverable is
     # ingested into RAG tagged source_type="exemplar"; at DAG-plan time, similar
     # exemplars are retrieved + injected as few-shot "proven prior solutions".
     # Pollution guard: the grounding threshold + RAG's 3-tier dedup. Fail-soft.
-    exemplar_ingest_enabled: bool = False
+    exemplar_ingest_enabled: bool = True
     exemplar_min_grounding: float = Field(default=0.85, ge=0.0, le=1.0)
     exemplar_retrieval_enabled: bool = False
     exemplar_retrieval_top_k: int = Field(default=2, ge=1, le=10)
@@ -1035,9 +1043,8 @@ class Settings(BaseSettings):
     # On a DECISION step's first view, guarantee the walkthrough carries a
     # "## My suggestion" lean (parity with the now-decisive commit path); if the
     # model dropped it, generate just that block from the options it produced and
-    # append it. Code default OFF so tests + fresh installs keep the legacy path
-    # (and never fire the follow-up call); live-on via compose. Fail-soft.
-    assist_decision_suggestion_enforce: bool = False
+    # append it. Default ON (§17.2058: the code default is the deployed one). Fail-soft.
+    assist_decision_suggestion_enforce: bool = True
     # §17.771 — the unified assist decision (`assist_decide.decide_turn`): ONE
     # context-rich call that replaces the fragmented classifier + phrase-gates +
     # track + reroute. THIS server-side flag gates the /decide ENDPOINT (returns
@@ -1048,8 +1055,8 @@ class Settings(BaseSettings):
     # deterministic shell-error signal re-applied as a VETO post-filter in
     # `_dispatch_decision` and the cascade as the low-confidence/error fallback.
     # (The Phase-1 SHADOW mode — Decision logged for comparison, pipeline unchanged
-    # — is historical.) Default OFF so tests + fresh installs keep the legacy path.
-    assist_unified_decision_enabled: bool = False
+    # — is historical.) Default ON (§17.2058: the code default is the deployed one).
+    assist_unified_decision_enabled: bool = True
     assist_decide_model_role: str = "model_general"
     # §17.1072 — "router" (the model_router tool-call loop with its four retry
     # mechanisms) or "instructor" (schema-validated retries via Ollama's
@@ -1077,11 +1084,8 @@ class Settings(BaseSettings):
     # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT
     # decision honours the same high-precision vetoes the client cascade applies on
     # fall-through (§17.679 "deterministic gate over the LLM", uniformly). Default
-    # OFF: it changes confident-path routing on the assist hot path, so it ships
-    # dark and gets a live assist A/B before the flip — same discipline as every
-    # other assist behavioral valve on this box. Killable instantly if live
-    # regresses. The client cascade stays the /decide-unavailable fallback.
-    assist_decide_deterministic_overrides: bool = False
+    # ON (§17.2058: the code default is the deployed one); killable via env if live regresses. The client cascade stays the /decide-unavailable fallback.
+    assist_decide_deterministic_overrides: bool = True
     # §17.771 (post-verify) — the Phase-1 SHADOW logger, now DECOUPLED from the
     # authority valve above. Once the unified decision is the live authority, the
     # shadow's data-gathering purpose is done: it just fires a redundant
@@ -1109,11 +1113,10 @@ class Settings(BaseSettings):
     # (3) repeat-failure escalation (assist_fix_streak_threshold consecutive
     # unresolved fixes on a node) — forced research floor + an explicit
     # "these commands already failed, produce a different approach" section.
-    # Code-default OFF (§17.819 pattern — fresh installs and the test suite make
-    # zero model calls and schedule zero background tasks); the live compose
-    # turns it ON via ASSIST_COMMIT_RECONCILE_ENABLED. Lesson re-learned: a
-    # default-ON background scheduler leaked tasks into 80 unrelated tests.
-    assist_commit_reconcile_enabled: bool = False
+    # Default ON (§17.2058: the code default is the deployed one). A test that must not schedule the background reconcile pins
+    # it off itself (§17.819: a background scheduler once leaked tasks into 80
+    # unrelated tests).
+    assist_commit_reconcile_enabled: bool = True
     # §17.941 — raised 12 -> 30 now that `proven` is ELASTIC at render time
     # (render_playbook_block trims it to a share of the memory budget, newest
     # kept). 12 was never a judgement about how many methods are worth
@@ -1157,11 +1160,10 @@ class Settings(BaseSettings):
     # error/traceback being recorded as success). Adds one sync tool_call per
     # submit; disable to skip it. When assist_block_on_failed_verify is also
     # true, a 'failed' verdict does NOT mark the node done — the step stays
-    # claimable until a clean re-submit. Default off (a false-negative verdict
-    # could wrongly hold a real success); the verdict is always surfaced so the
-    # user can act on it regardless.
+    # claimable until a clean re-submit. Blocking is ON (§17.2058: the code default is the deployed one); the
+    # verdict is always surfaced so the user can act on it regardless.
     assist_verify_on_submit: bool = True
-    assist_block_on_failed_verify: bool = False
+    assist_block_on_failed_verify: bool = True
     # §17.731 — block a commit when the evidence shows the step's DELIVERABLE
     # isn't done yet (verdict 'incomplete'), distinct from a command 'failed'.
     # The live failure: "Install guest OS" was marked done from an ISO-download
@@ -1170,17 +1172,15 @@ class Settings(BaseSettings):
     # marching the plan two steps past reality. 'incomplete' catches "you did
     # the setup but not the actual task". Conservative by design (the verifier
     # only returns it on affirmative not-done evidence; ambiguity stays
-    # 'unclear' → commits). Code default off (preserves legacy + tests); live
-    # via compose. The step stays claimable so the operator finishes it — or
+    # 'unclear' → commits). Default ON (§17.2058: the code default is the deployed one). The step stays claimable so the operator finishes it — or
     # `/assist skip` to override a false block.
-    assist_block_on_incomplete_verify: bool = False
+    assist_block_on_incomplete_verify: bool = True
     # §17.1101 — when a paste doesn't verify against the CURRENT step, match it
     # to the pending step(s) it actually completes (verified against each step's
-    # own 'Done when') and commit those. Off by default (behavioural), live via
-    # compose. §17.1102 — surface near-duplicate pending steps for dedup.
-    assist_evidence_step_match_enabled: bool = False
+    # own 'Done when') and commit those. Default ON (§17.2058: the code default is the deployed one). §17.1102 — surface near-duplicate pending steps for dedup.
+    assist_evidence_step_match_enabled: bool = True
     assist_evidence_step_match_max_candidates: int = 5
-    assist_flag_duplicate_pending_steps: bool = False
+    assist_flag_duplicate_pending_steps: bool = True
     # §17.1016 — block a commit when the verdict is 'unclear' AND the operator's
     # own message says they cannot tell. Surface-verified gap: §17.1014 stopped
     # "i believe it is done but am unsure" counting as a completion CLAIM, which
@@ -1199,8 +1199,8 @@ class Settings(BaseSettings):
     # operator's stated uncertainty keeps a verifier outage non-blocking while
     # catching the case where the human has said, in words, that they do not
     # know. `confirm` (operator_affirmed) still commits — an explicit decision
-    # outranks this, a hedge does not. Code default off; live via compose.
-    assist_block_on_unclear_when_unsure: bool = False
+    # outranks this, a hedge does not. Default ON (§17.2058: the code default is the deployed one).
+    assist_block_on_unclear_when_unsure: bool = True
     # §17.490 — after a submit, extract the concrete values the operator
     # actually used (the IP/path/name they filled into a <PLACEHOLDER> the
     # walkthrough emitted) from their evidence and fold them into the session
@@ -1260,11 +1260,11 @@ class Settings(BaseSettings):
     # funnel (detect-secrets keyword/format plugins + two house regexes; the
     # entropy plugins stay off). Kinds are logged, values never are.
     assist_redact_secrets_enabled: bool = True
-    assist_unified_memory_enabled: bool = False   # master gate for §17.710
+    assist_unified_memory_enabled: bool = True   # master gate for §17.710
     assist_umem_capture: bool = True              # Stage A — record raw turns
-    assist_umem_inject: bool = False              # Stage B — consolidate + inject
+    assist_umem_inject: bool = True              # Stage B — consolidate + inject
     assist_umem_grounding: bool = False           # Stage C — pre-commit warn on contradiction
-    assist_umem_max_chars: int = Field(default=4000, ge=500, le=20000)
+    assist_umem_max_chars: int = Field(default=12000, ge=500, le=20000)
     # §17.715 — unconditional per-message DERIVE. §17.710a made CAPTURE
     # unconditional, but the review-and-log step stayed trigger-gated (only
     # skip/question≥6w pivots, explicit notes, and submit-facts). A plan change
@@ -1273,8 +1273,8 @@ class Settings(BaseSettings):
     # cheap model_general extraction (off the request path, dedup-safe) that logs
     # any plan-relevant note (decision/constraint/addition/preference) or durable
     # fact. Silent scribe — the interactive re-plan surface stays on the explicit
-    # pivot path (§17.693). Default OFF (legacy behavior); flip live via env.
-    assist_umem_derive: bool = False              # §17.715 — derive memory from every turn
+    # pivot path (§17.693). Default ON (§17.2058: the code default is the deployed one).
+    assist_umem_derive: bool = True              # §17.715 — derive memory from every turn
     # §17.725 — fact SUPERSESSION. The ledger is append-only and `set_environment`
     # only dedups exact matches, so a new observation that CONTRADICTS an earlier
     # fact left both in the ledger (live: "P40 in group 13" AND "P40 in group 37")
@@ -1283,8 +1283,8 @@ class Settings(BaseSettings):
     # known facts and may echo the ones the new evidence directly contradicts;
     # those verbatim matches are RETRACTED from the ledger as the new facts fold
     # in. The raw assist_turns transcript keeps everything (§17.710a), so a
-    # retraction never destroys evidence. Default OFF; flip live via env.
-    assist_umem_supersede: bool = False           # §17.725 — retract contradicted facts
+    # retraction never destroys evidence. Default ON (§17.2058: the code default is the deployed one).
+    assist_umem_supersede: bool = True           # §17.725 — retract contradicted facts
     # §17.727 — ledger CONSOLIDATION. §17.725 removes direct contradictions, but
     # redundant same-truth facts still pile up (the live ledger stated the oasis
     # pool three ways), bloating every prompt and burning the §17.722 budget on
@@ -1293,8 +1293,8 @@ class Settings(BaseSettings):
     # for MERGE GROUPS by index; application is deterministic and lossless by
     # construction — only facts explicitly in a valid ≥2-member group are
     # replaced (at the group's newest position), everything else is untouched,
-    # and the raw assist_turns transcript keeps the originals. Default OFF.
-    assist_umem_consolidate: bool = False         # §17.727 — merge redundant facts
+    # and the raw assist_turns transcript keeps the originals. Default ON (§17.2058: the code default is the deployed one).
+    assist_umem_consolidate: bool = True         # §17.727 — merge redundant facts
     assist_facts_consolidate_min: int = Field(default=30, ge=5, le=200)
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
@@ -1428,8 +1428,8 @@ class Settings(BaseSettings):
     # transcript (DB-backed) is injected into fix/guide/research AND surfaced to
     # the operator, so both stay oriented. Refreshed only when the step's turn
     # count grows by `assist_step_recap_every` since the last recap (cheap).
-    # Code default off (legacy + tests); live via compose.
-    assist_step_recap_enabled: bool = False
+    # Default ON (§17.2058: the code default is the deployed one).
+    assist_step_recap_enabled: bool = True
     assist_step_recap_every: int = Field(default=3, ge=1, le=20)
     assist_step_recap_min_turns: int = Field(default=4, ge=1, le=40)
     # §17.752 — the recap was node-scoped + transcript-only: it never read the
@@ -1455,9 +1455,8 @@ class Settings(BaseSettings):
     # grows by `assist_project_recap_every` (so ~one LLM call per completed step,
     # cached across the many turns within a step); starts once `min_nodes` are done.
     # Prepended to the job digest in the §17.751 funnel (so all 5 generation sites
-    # get it) and threaded into the note/pivot analyzer. Code default off (extra
-    # LLM path); live via compose.
-    assist_project_recap_enabled: bool = False
+    # get it) and threaded into the note/pivot analyzer. Default ON (§17.2058: the code default is the deployed one).
+    assist_project_recap_enabled: bool = True
     assist_project_recap_every: int = Field(default=1, ge=1, le=20)
     assist_project_recap_min_nodes: int = Field(default=1, ge=1, le=40)
     # §17.754 — the progress-TRACKING agent (operator-directed). The recap/facts
@@ -1469,9 +1468,8 @@ class Settings(BaseSettings):
     # action — on_step / advance / add_step. `add_step` (a real uncovered sub-task)
     # inserts a guided step (§17.736) and walks them through it instead of
     # repeating. Guardrails: valve-gated, confidence-thresholded, fail-soft to
-    # on_step (never traps the turn or mutates the plan on a guess). Code default
-    # off; live via compose.
-    assist_progress_tracker_enabled: bool = False
+    # on_step (never traps the turn or mutates the plan on a guess). Default ON (§17.2058: the code default is the deployed one).
+    assist_progress_tracker_enabled: bool = True
     # §17.851 — code-enforced placeholder resolution on generated guidance
     # (§17.668 lesson: prompt rules alone don't stick). Default ON by operator
     # decision: fail-soft at every layer (worst case the text ships unchanged),
@@ -1498,17 +1496,17 @@ class Settings(BaseSettings):
     # describe the abandoned system (an LLM pass keeps durable host/network/storage/
     # new-build facts). §17.714 only demoted them at render time, so they lingered
     # and leaked. `max_frac` is a hard guardrail: never retract more than this
-    # fraction of the ledger in one sweep (a mis-firing model can't wipe it). Code
-    # default off; live via compose.
-    assist_reset_facts_sweep_enabled: bool = False
+    # fraction of the ledger in one sweep (a mis-firing model can't wipe it).
+    # Default ON (§17.2058: the code default is the deployed one).
+    assist_reset_facts_sweep_enabled: bool = True
     assist_reset_facts_sweep_max_frac: float = Field(default=0.9, ge=0.1, le=1.0)
     # §17.756 — ground-or-ask: a prompt directive on guide/fix so any
     # operator-specific value (username, IP, hostname, path, …) NOT in the confirmed
     # facts is emitted as a <PLACEHOLDER> and listed under a `## Confirm these
     # values` section — instead of hardcoding a stale guess lifted from the
     # transcript (the `ai-defruscio` username leak). Folded into generation (no
-    # extra LLM call). Skipped for decision nodes. Code default off; live via compose.
-    assist_ground_or_ask_enabled: bool = False
+    # extra LLM call). Skipped for decision nodes. Default ON (§17.2058: the code default is the deployed one).
+    assist_ground_or_ask_enabled: bool = True
     # §17.757 — cross-component fact sharing. A decomposed umbrella project (e.g. a
     # homelab: Proxmox + GPU + media stack + game server) has components that share
     # ONE host / network / storage, but facts (§17.709) are session-scoped, so a
@@ -1516,8 +1514,8 @@ class Settings(BaseSettings):
     # bridge, the ZFS pool, hardware). When on, the §17.751 funnel folds the facts
     # observed on SIBLING components (same `parent_job_id`) into the environment the
     # generation grounds on — deduped and capped. Standalone (non-umbrella) jobs are
-    # unaffected. Code default off; live via compose.
-    assist_cross_component_facts_enabled: bool = False
+    # unaffected. Default ON (§17.2058: the code default is the deployed one).
+    assist_cross_component_facts_enabled: bool = True
     assist_cross_component_facts_cap: int = Field(default=40, ge=1, le=200)
     # §17.759 — share only DURABLE cross-cutting infrastructure facts (hardware /
     # host network / storage / access), not transient states ("nic DOWN") or
@@ -1532,35 +1530,34 @@ class Settings(BaseSettings):
     # progress · recently-done · current step · what's next + the cached project
     # recap) so the operator gets context instead of being dropped into a raw step.
     # Deterministic + reads the CACHED project recap (no model call on the start
-    # path). Code default off; live via compose.
-    assist_reconnect_orientation_enabled: bool = False
+    # path). Default ON (§17.2058: the code default is the deployed one).
+    assist_reconnect_orientation_enabled: bool = True
     # §17.758 — screen-state grounding: a directive on guide/fix so a walkthrough
     # for an INTERACTIVE surface (OS installer, TUI, BIOS/boot menu, noVNC console,
     # web wizard) whose current screen isn't confirmed OPENS by asking what's on
     # screen and makes the first action conditional — instead of assuming a screen
     # and sending keystrokes to the wrong place (the storage-screen assumption).
-    # Folded into generation (no extra LLM call); skipped for decision nodes. Code
-    # default off; live via compose.
-    assist_screen_grounding_enabled: bool = False
+    # Folded into generation (no extra LLM call); skipped for decision nodes.
+    # Default ON (§17.2058: the code default is the deployed one).
+    assist_screen_grounding_enabled: bool = True
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving
     # step. The panel is a presentation of the §17.738 recap, so enabling it
     # also forces the recap to be computed (see get_step_recap) even if
-    # assist_step_recap_enabled is off. Code default off; live via compose.
-    assist_status_panel_enabled: bool = False
+    # assist_step_recap_enabled is off. Default ON (§17.2058: the code default is the deployed one).
+    assist_status_panel_enabled: bool = True
     # §17.741 — lead each guide/fix turn with a "👉 Do this next" section: the
     # single most-immediate action (one command / one concrete step), before the
     # fuller walkthrough — so the operator's attention lands on what to do NOW.
     # Prompt-level (a leading section the model emits); skipped for decision
-    # nodes (they suggest a choice, not an action). Code default off; live via
-    # compose.
-    assist_next_callout_enabled: bool = False
+    # nodes (they suggest a choice, not an action). Default ON (§17.2058: the code default is the deployed one).
+    assist_next_callout_enabled: bool = True
     # §17.932 — require an explicit, observable "Done when" close on every
     # walkthrough plus the control that advances. Guidance ended on "then
     # tell me what it shows", which never tells the operator the step is
     # over; finished steps stayed open and the session read as stuck.
-    assist_done_criterion_enabled: bool = False
+    assist_done_criterion_enabled: bool = True
     # §17.1011 — one step is ONE action. Live evidence (the homelab job, node
     # T35 "Configure reverse proxy"): a single step's guidance ran 4,817 chars
     # across NINE sections and was internally divided into "Phase A / Phase B /
@@ -1576,9 +1573,8 @@ class Settings(BaseSettings):
     # emits Phase A/B/C, because the defect is SCOPE, not word count. When on,
     # the walkthrough may not sub-divide into phases, is capped at
     # `assist_single_action_max_steps` numbered actions in one place, and its
-    # headline action must match its finish line. Code default off; live via
-    # compose.
-    assist_single_action_enabled: bool = False
+    # headline action must match its finish line. Default ON (§17.2058: the code default is the deployed one).
+    assist_single_action_enabled: bool = True
     # Cap on numbered actions in one walkthrough's "Run this" (§17.1011). T35
     # had 8 across three phases; 5 leaves room for a genuinely multi-command
     # single action (backup → edit → reload → verify) without licensing a
@@ -1591,8 +1587,8 @@ class Settings(BaseSettings):
     # down). When on, fix/guide/ask carry a discipline framing (honor confirmed
     # CONSTRAINTS, stop cycling once approaches have failed and commit to ONE
     # path, match the operator's real capability) and the recap distills a
-    # CONSTRAINTS section. Code default off; live via compose.
-    assist_problem_solving_enabled: bool = False
+    # CONSTRAINTS section. Default ON (§17.2058: the code default is the deployed one).
+    assist_problem_solving_enabled: bool = True
     # §17.689 — multi-turn decision deliberation. A decision node whose
     # deliverable is a CONCRETE artifact (a VLAN table, a partition layout, a
     # config set) used to commit on the operator's FIRST partial answer ("3
@@ -1619,9 +1615,8 @@ class Settings(BaseSettings):
     # VM). Surface-and-ask: the operator confirms via /replan/apply before any
     # finished work is reset. Reopening resets the node to pending so its stale
     # "done" output stops leading the prompt as MANDATORY upstream context.
-    # Code-default OFF (fresh installs / tests keep the pending-only behavior);
-    # live via compose ASSIST_PIVOT_REOPEN_ENABLED=true.
-    assist_pivot_reopen_enabled: bool = False
+    # Default ON (§17.2058: the code default is the deployed one).
+    assist_pivot_reopen_enabled: bool = True
     # §17.763 — the §17.693 fuzzy-reroute path (detect_reroute) runs the impact
     # analyzer over a message the turn classifier only weakly placed
     # (question/skip). With this on, that path analyzes CONSERVATIVELY: it flags a

@@ -479,6 +479,11 @@ services:
       # operator names candidates. Nothing auto-swaps.
       MODEL_ROLE_LEARNING_ENABLED: "${MODEL_ROLE_LEARNING_ENABLED:-false}"
       MODEL_ROLE_LEARNING_CANDIDATES: '${MODEL_ROLE_LEARNING_CANDIDATES:-{}}'
+      # §17.2058 — every ${NAME:-x} fallback below EQUALS the app/config.py code
+      # default, so the test lane (which builds Settings from code defaults, not
+      # this file) runs the configuration that deploys. The lines stay so the
+      # deployed value is visible here and overridable from .env;
+      # tests/test_compose_code_default_parity.py (ci-tier-0) fails on a split.
       # §17.702 — learning flywheel: ingest a completed project's deliverable as
       # a retrievable RAG exemplar so future related builds get it as a few-shot.
       # Default-on here; EXEMPLAR_MIN_GROUNDING (0.85) still gates quality, and
@@ -487,13 +492,11 @@ services:
       EXEMPLAR_MIN_GROUNDING: "${EXEMPLAR_MIN_GROUNDING:-0.85}"
       # §17.799 — citation-faithfulness: generate the research summary with
       # inline [n] citations over numbered sources, then score whether each
-      # citation's cited source actually supports the sentence. Code default
-      # False (tests + fresh installs exercise the un-attributed summary);
-      # enabled at runtime here. Adds one LLM judge call per research summary.
+      # citation's cited source actually supports the sentence. Adds one LLM
+      # judge call per research summary.
       # Overridable from .env.
       CITATION_FAITHFULNESS_CHECK_ENABLED: "${CITATION_FAITHFULNESS_CHECK_ENABLED:-true}"
-      # §17.710d — unified session memory. Enabled at RUNTIME here (code defaults
-      # stay False so tests + fresh installs exercise the legacy path). Master +
+      # §17.710d — unified session memory. Master +
       # capture (Stage A) + inject (Stage B) on; grounding (Stage C) stays
       # opt-in — it adds a model_general call per submit. All overridable from .env.
       ASSIST_UNIFIED_MEMORY_ENABLED: "${ASSIST_UNIFIED_MEMORY_ENABLED:-true}"
@@ -501,17 +504,17 @@ services:
       ASSIST_UMEM_INJECT: "${ASSIST_UMEM_INJECT:-true}"
       ASSIST_UMEM_GROUNDING: "${ASSIST_UMEM_GROUNDING:-false}"
       ASSIST_UMEM_DERIVE: "${ASSIST_UMEM_DERIVE:-true}"
-      # §17.725 — retract contradicted facts as new evidence folds in (code
-      # default off for tests; the raw transcript keeps everything).
+      # §17.725 — retract contradicted facts as new evidence folds in (the raw
+      # transcript keeps everything).
       ASSIST_UMEM_SUPERSEDE: "${ASSIST_UMEM_SUPERSEDE:-true}"
       # §17.881 — commit-time memory reconciliation + session playbook (retire
       # outcome-contradicted facts; fold proven/ruled-out methods; one bg
-      # model call per step commit). Code default off (tests/fresh installs).
+      # model call per step commit).
       ASSIST_COMMIT_RECONCILE_ENABLED: "${ASSIST_COMMIT_RECONCILE_ENABLED:-true}"
       # §17.727 — merge redundant same-truth facts when the ledger grows
       # (background, debounced, lossless-by-construction application).
       ASSIST_UMEM_CONSOLIDATE: "${ASSIST_UMEM_CONSOLIDATE:-true}"
-      # §17.722 — the code default (4000) is too small for a real session: a
+      # §17.722 — 4000 (the old code default) is too small for a real session: a
       # mature facts ledger alone exceeds it, and pre-§17.722 that collapsed
       # the injected memory to just the header + profile. 12000 chars ≈ 3k
       # tokens — comfortably inside every guidance prompt.
@@ -520,7 +523,7 @@ services:
       # a clear failure, or shows the step's deliverable isn't done yet
       # (incomplete — e.g. the OS installer only downloaded / at the boot menu),
       # does NOT mark the step done. The step stays claimable; /assist skip
-      # overrides a false block. Code defaults stay off (legacy + tests).
+      # overrides a false block.
       ASSIST_BLOCK_ON_FAILED_VERIFY: "${ASSIST_BLOCK_ON_FAILED_VERIFY:-true}"
       ASSIST_BLOCK_ON_INCOMPLETE_VERIFY: "${ASSIST_BLOCK_ON_INCOMPLETE_VERIFY:-true}"
       # §17.1016 — hold the step when the verdict is 'unclear' AND the operator
@@ -532,16 +535,15 @@ services:
       ASSIST_BLOCK_ON_UNCLEAR_WHEN_UNSURE: "${ASSIST_BLOCK_ON_UNCLEAR_WHEN_UNSURE:-true}"
       # §17.771 (Phase 2) — the unified assist decision as LIVE authority. One
       # /decide call routes each turn; a low-confidence/unavailable decision falls
-      # through to the deterministic cascade (retained safety net). Code default
-      # off (tests + fresh installs use the cascade); live here. PAIR VALVE:
+      # through to the deterministic cascade (retained safety net). PAIR VALVE:
       # pipelines/scaffold_router/valves.json → assist_unified_decision_enabled
       # (both must be on). Also enables the §17.771 Phase-1 shadow on fall-through.
       ASSIST_UNIFIED_DECISION_ENABLED: "${ASSIST_UNIFIED_DECISION_ENABLED:-true}"
       # §17.855 (audit "policy migration") — re-apply the deterministic phrase
       # gates (pivot/help/how-to/shell-result, `assist_policy`) as a post-filter
       # on the /decide result, so the CONFIDENT decision honours the same
-      # high-precision vetoes the cascade only gets on fall-through. Code default
-      # off (fresh installs conservative); live here after the §17.855 A/B (which
+      # high-precision vetoes the cascade only gets on fall-through. Live after
+      # the §17.855 A/B (which
       # corrected real confident-path misroutes + closed the ask-framed-pivot gap).
       # §17.1177 — was `:-false` under a comment that says "live here after the
       # §17.855 A/B". I scanned every `VAR: "${VAR:-true|false}"` in this file
@@ -551,18 +553,18 @@ services:
       # ran and the /decide model's confident route went unchecked.
       ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-true}"
       # §17.771 (deferred, now done) — guarantee a "## My suggestion" lean on a
-      # decision step's first view; on a miss, generate + append it. Code default
-      # off (tests/fresh installs); live here. Fires only on a decision + miss.
+      # decision step's first view; on a miss, generate + append it. Fires only
+      # on a decision + miss.
       ASSIST_DECISION_SUGGESTION_ENFORCE: "${ASSIST_DECISION_SUGGESTION_ENFORCE:-true}"
       # §17.738 — running per-step progress recap so long troubleshooting steps
       # stay coherent (the 6-turn window loses the thread). Injected into
       # fix/guide/research from the full node transcript; cached, refreshed
-      # every few turns. Code default off (tests); live here.
+      # every few turns.
       ASSIST_STEP_RECAP_ENABLED: "${ASSIST_STEP_RECAP_ENABLED:-true}"
       # §17.741 — surface the recap to the OPERATOR: a "📍 Where we are" panel
       # (goal / done / open / next) above each walkthrough, and a leading
       # "👉 Do this next" callout so the single immediate action draws the eye.
-      # Panel implies the recap (forces its computation). Code default off; live here.
+      # Panel implies the recap (forces its computation).
       ASSIST_STATUS_PANEL_ENABLED: "${ASSIST_STATUS_PANEL_ENABLED:-true}"
       ASSIST_NEXT_CALLOUT_ENABLED: "${ASSIST_NEXT_CALLOUT_ENABLED:-true}"
       ASSIST_DONE_CRITERION_ENABLED: "${ASSIST_DONE_CRITERION_ENABLED:-true}"  # §17.932
@@ -583,19 +585,18 @@ services:
       # §17.742 — problem-solving discipline for tangled, multi-attempt steps:
       # honor confirmed CONSTRAINTS, stop cycling once approaches have failed
       # (commit to one path), match the operator's real capability. Recap gains
-      # a CONSTRAINTS section (also shown in the panel). Code default off; live here.
+      # a CONSTRAINTS section (also shown in the panel).
       ASSIST_PROBLEM_SOLVING_ENABLED: "${ASSIST_PROBLEM_SOLVING_ENABLED:-true}"
       # §17.753 — the cross-step "living project recap" (§17.679): a distilled,
       # evolving whole-project state board (arc / decisions / remaining / cross-step
       # constraints), refreshed as steps complete, prepended to the job digest for
-      # every generation site and threaded into the note/pivot analyzer. Code
-      # default off (extra LLM path); live here.
+      # every generation site and threaded into the note/pivot analyzer.
       ASSIST_PROJECT_RECAP_ENABLED: "${ASSIST_PROJECT_RECAP_ENABLED:-true}"
       # §17.754 — the progress-TRACKING agent. On a substantive help/how-to turn it
       # reconciles the session pointer with where the operator actually is; if they
       # moved to a sub-task the plan has no step for, it inserts a guided step and
       # walks them through it instead of repeating the current step. Fail-soft,
-      # confidence-gated. Code default off; live here.
+      # confidence-gated.
       ASSIST_PROGRESS_TRACKER_ENABLED: "${ASSIST_PROGRESS_TRACKER_ENABLED:-true}"
       # §17.899 — the missing half of §17.890. A completion CLAIM outranks the
       # verifier; the live failure was a genuine claim about the WRONG THING
@@ -610,35 +611,32 @@ services:
       ASSIST_DENIAL_REOPEN_MAX_TURNS: "${ASSIST_DENIAL_REOPEN_MAX_TURNS:-3}"
       # §17.755 — on a reset/rebuild note, auto-retract the facts about the
       # abandoned system (durable host/network/storage/new-build facts kept) so the
-      # append-only ledger stops dragging dead state into later steps. Code default
-      # off; live here.
+      # append-only ledger stops dragging dead state into later steps.
       ASSIST_RESET_FACTS_SWEEP_ENABLED: "${ASSIST_RESET_FACTS_SWEEP_ENABLED:-true}"
       # §17.756 — ground-or-ask: guide/fix emit a <PLACEHOLDER> + a "Confirm these
       # values" section for any operator-specific value not in the confirmed facts,
-      # instead of hardcoding a stale guess from the transcript. Code default off;
-      # live here.
+      # instead of hardcoding a stale guess from the transcript.
       ASSIST_GROUND_OR_ASK_ENABLED: "${ASSIST_GROUND_OR_ASK_ENABLED:-true}"
       # §17.761 — reconnect orientation: /assist/start attaches a WHERE-YOU-ARE
       # snapshot (title · progress · recently-done · current step · next + cached
       # project recap) so picking a job back up in a fresh chat leads with context,
-      # not a raw step. Deterministic, no model call. Code default off; live here.
+      # not a raw step. Deterministic, no model call.
       ASSIST_RECONNECT_ORIENTATION_ENABLED: "${ASSIST_RECONNECT_ORIENTATION_ENABLED:-true}"
       # §17.757 — cross-component fact sharing: a decomposed umbrella's components
       # share one host/network/storage, so the funnel folds sibling components'
-      # observed facts into a later component's grounding (deduped, capped). Code
-      # default off; live here.
+      # observed facts into a later component's grounding (deduped, capped).
       ASSIST_CROSS_COMPONENT_FACTS_ENABLED: "${ASSIST_CROSS_COMPONENT_FACTS_ENABLED:-true}"
       # §17.758 — screen-state grounding: guide/fix for an interactive surface
       # (installer, TUI, BIOS/boot menu, noVNC console, web wizard) whose current
       # screen isn't confirmed OPENS by asking what's on screen and makes the first
-      # action conditional, instead of assuming a screen. Code default off; live here.
+      # action conditional, instead of assuming a screen.
       ASSIST_SCREEN_GROUNDING_ENABLED: "${ASSIST_SCREEN_GROUNDING_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:
       # the operator confirms before any finished work is reset. Reopening resets
       # the node to pending so its stale "done" output stops leading later prompts
-      # as MANDATORY upstream context. Code default off (tests); live here.
+      # as MANDATORY upstream context.
       ASSIST_PIVOT_REOPEN_ENABLED: "${ASSIST_PIVOT_REOPEN_ENABLED:-true}"
     env_file:
       - .env

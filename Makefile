@@ -265,6 +265,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_sse_event_inventory.py \
 			tests/test_sdk_schema_parity.py \
 			tests/test_settings_patch_scan.py \
+			tests/test_compose_code_default_parity.py \
 			tests/test_spa_route_inventory.py \
 			tests/test_openapi_route_inventory.py \
 			tests/test_operator_field_inventory.py \
