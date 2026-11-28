@@ -36,7 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import async_session
-from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, touch, transition
+from app.modules.job_state import JOB_STATUSES, NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, touch, transition
 from app import model_router
 from app.config import settings, get_model
 from app.utils.progress import EmitThrottle, ProgressTracker
@@ -222,6 +222,18 @@ _CLEANUP_TASKS: set[asyncio.Task] = set()
 #: failed step, or finished. The cleanup's `running -> failed` claim refusing on one of these is its no-op, not a fault.
 CLEANUP_LEFT_RUNNING_STATUSES: frozenset[str] = frozenset({"awaiting_decision", "blocked"}) | TERMINAL_JOB_STATUSES
 
+async def every_step_finished(db: AsyncSession, job_id: str) -> bool:
+    """§17.1492 / §17.2065 — the job has steps and every one of them is finished (`done` or `skipped`).
+
+    One rule for every place that decides "this job is complete because its plan is": the run's cleanup (a run that
+    found nothing left to do) and `skip_node` (a skip that took the last open step). Unlike `_all_nodes_done`, a job
+    with NO steps is not finished -- an empty plan completes nothing."""
+    left = (await db.execute(text(
+        "SELECT count(*) FILTER (WHERE status NOT IN ('done', 'skipped')) AS open, count(*) AS total "
+        "FROM dag_nodes WHERE job_id = :jid"), {"jid": job_id})).mappings().first()
+    return bool(left) and int(left["total"] or 0) > 0 and int(left["open"] or 0) == 0
+
+
 async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> None:
     """Reset a job stuck at ``running`` to a terminal status and mark any
     orphaned ``running`` dag_nodes as ``failed``. No-op if the job is no
@@ -237,10 +249,7 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
                 # §17.1492 — unless every step is finished: a run started after an approval ran the LAST step
                 # (resolve_run → decide restarts the run) finds nothing to do, emits pipeline_complete, and the
                 # job was left at running → "failed". Live, the home-lab job: 131 done, 61 skipped, none failed.
-                left = (await db.execute(text(
-                    "SELECT count(*) FILTER (WHERE status NOT IN ('done', 'skipped')) AS open, count(*) AS total "
-                    "FROM dag_nodes WHERE job_id = :jid"), {"jid": job_id})).mappings().first()
-                if left and int(left["total"] or 0) > 0 and int(left["open"] or 0) == 0:
+                if await every_step_finished(db, job_id):      # §17.2065 — the one rule, shared with skip_node
                     terminal = "completed"
             # §17.1107 (ledger S-4) — was SELECT status → if != running return →
             # unguarded UPDATE: a cancel or completion landing between the two
@@ -828,6 +837,58 @@ async def _withdraw_stale_frame(db: AsyncSession, job_id: str) -> None:
     except Exception:
         await db.rollback()
         logger.exception("decision_withdraw_failed job=%s", job_id)
+
+
+async def _store_completion_deliverable(db: AsyncSession, job_id: str) -> None:
+    """What a job that just became `completed` gets: its compiled deliverable, its artifacts, the flywheel hook.
+
+    §17.2065 — lifted out of `execute_next_node`'s "nothing left to claim, every step finished" branch so a skip that
+    finishes the last open step (`skip_node`) completes the job the same way a run does, not by a bare status flip
+    that leaves no deliverable. The caller has already won the `completed` flip and committed it."""
+    # X.2: _compile_output now returns (text, was_synthesized).
+    compiled, was_synthesized = await _compile_output(job_id, db)
+    if compiled:
+        kind = await compute_deliverable_kind(job_id, db)  # §17.519
+        await db.execute(
+            text(
+                "UPDATE jobs SET compiled_output = :co, "
+                "compiled_output_synthesized = :syn, "
+                "deliverable_kind = :dk WHERE id = :jid"
+            ),
+            {"co": compiled, "syn": was_synthesized,
+             "dk": kind, "jid": job_id},
+        )
+        # §17.598 — commit the deliverable BEFORE persisting
+        # artifacts, and run artifacts in their OWN session. The
+        # artifact INSERT shares the deliverable's transaction
+        # otherwise, so a DBAPI error there (e.g. a NUL byte in
+        # node output) aborts the tx and the trailing commit
+        # silently loses compiled_output on an already-'completed'
+        # job. Best-effort: never let an artifact write break it.
+        await db.commit()
+        try:
+            async with async_session() as _adb:
+                await persist_job_artifacts(job_id, _adb, deliverable_kind=kind)
+                await _adb.commit()
+        except Exception:
+            logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
+        # §17.576 — learning flywheel (opt-in): a high-grounding
+        # deliverable becomes a retrievable exemplar. No-op when
+        # the valve is off or grounding is below threshold.
+        try:
+            _grow = await db.execute(
+                text("SELECT metadata->'grounding'->>'score' FROM jobs WHERE id = :jid"),
+                {"jid": job_id},
+            )
+            _gscore = _grow.scalar()
+            from app.modules.flywheel import maybe_ingest_exemplar
+            await maybe_ingest_exemplar(
+                job_id=job_id, compiled_output=compiled,
+                deliverable_kind=kind,
+                grounding_score=float(_gscore) if _gscore is not None else None,
+            )
+        except Exception:
+            logger.exception("exemplar_ingest hook failed job=%s", job_id)
 
 
 async def _flip_job_blocked(db: AsyncSession, job_id: str) -> bool:
@@ -1968,50 +2029,7 @@ async def execute_next_node(
                 flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
                 await db.commit()
                 if flipped:
-                    # X.2: _compile_output now returns (text, was_synthesized).
-                    compiled, was_synthesized = await _compile_output(job_id, db)
-                    if compiled:
-                        kind = await compute_deliverable_kind(job_id, db)  # §17.519
-                        await db.execute(
-                            text(
-                                "UPDATE jobs SET compiled_output = :co, "
-                                "compiled_output_synthesized = :syn, "
-                                "deliverable_kind = :dk WHERE id = :jid"
-                            ),
-                            {"co": compiled, "syn": was_synthesized,
-                             "dk": kind, "jid": job_id},
-                        )
-                        # §17.598 — commit the deliverable BEFORE persisting
-                        # artifacts, and run artifacts in their OWN session. The
-                        # artifact INSERT shares the deliverable's transaction
-                        # otherwise, so a DBAPI error there (e.g. a NUL byte in
-                        # node output) aborts the tx and the trailing commit
-                        # silently loses compiled_output on an already-'completed'
-                        # job. Best-effort: never let an artifact write break it.
-                        await db.commit()
-                        try:
-                            async with async_session() as _adb:
-                                await persist_job_artifacts(job_id, _adb, deliverable_kind=kind)
-                                await _adb.commit()
-                        except Exception:
-                            logger.exception("persist_job_artifacts failed (complete) job=%s", job_id)
-                        # §17.576 — learning flywheel (opt-in): a high-grounding
-                        # deliverable becomes a retrievable exemplar. No-op when
-                        # the valve is off or grounding is below threshold.
-                        try:
-                            _grow = await db.execute(
-                                text("SELECT metadata->'grounding'->>'score' FROM jobs WHERE id = :jid"),
-                                {"jid": job_id},
-                            )
-                            _gscore = _grow.scalar()
-                            from app.modules.flywheel import maybe_ingest_exemplar
-                            await maybe_ingest_exemplar(
-                                job_id=job_id, compiled_output=compiled,
-                                deliverable_kind=kind,
-                                grounding_score=float(_gscore) if _gscore is not None else None,
-                            )
-                        except Exception:
-                            logger.exception("exemplar_ingest hook failed job=%s", job_id)
+                    await _store_completion_deliverable(db, job_id)  # §17.2065 — shared with skip_node
                 return {"status": "complete", "message": "All nodes done. Job complete."}
 
             # Partial compile for blocked jobs (#22, cached)
@@ -3509,20 +3527,96 @@ async def execute_next_node(
         "tool": tool,               # §17.1930 — what the loops' after-step hooks read (`_add_review_fixes`)
     }
 
-async def skip_node(job_id: str, node_key: str, db: AsyncSession) -> dict:
-    """Mark a specific node as skipped."""
+#: §17.2065 — a skip never reopens or rewrites a job the operator finished or cancelled.
+SKIP_REFUSED_JOB_STATUSES: frozenset[str] = frozenset({"completed", "cancelled"})
+#: §17.2065 — the statuses a skip may settle: a job ready to run, held on a failed step, or stopped by one. A
+#: `running` job belongs to its executor (it re-reads the plan and settles itself); an assist-owned status belongs
+#: to the assist session; a parked one (`awaiting_decision`) is first settled by withdrawing its frame.
+SKIP_SETTLES_FROM: tuple[str, ...] = ("blocked", "executing", "failed")
+#: the statuses a skip leaves as they are by design: its refused transition there is the guard working (INFO)
+_SKIP_LEAVES: frozenset[str] = JOB_STATUSES - frozenset(SKIP_SETTLES_FROM)
+
+
+async def skip_node(job_id: str, node_key: str, db: AsyncSession, *,
+                    reason: str | None = None, by: str | None = None) -> dict:
+    """Mark a specific node as skipped, and settle the job it belonged to.
+
+    §17.2065 — the skip used to stop at the node row: skipping the last open step (live, job 0fb4ea7f: RDV41, LM5,
+    CL2, all failed) left the job `blocked` until an unrelated /execute/all pass found nothing to do and finalized
+    it, and the skip recorded neither why nor who. Now, in one pass:
+
+      * the node goes to `skipped`, its `last_verification_reason` says "skipped by <who>: <why>", and the
+        pre-image (status + the reason it carried) goes to `dag_node_edits` (op `skip`) -- a failed step's reason
+        is not lost to the overwrite;
+      * a parked frame that asked about a step now settled is withdrawn (`_withdraw_stale_frame`, the one path
+        every settled step takes: `awaiting_decision` -> `blocked`);
+      * every step finished (`every_step_finished`, the cleanup's rule) -> `completed` with its deliverable
+        (`_store_completion_deliverable`, the run's own completion);
+      * otherwise a job held `blocked`/`failed` by the failed step just skipped, with no other step failed or
+        running, goes to `executing` -- what a retry sets when it clears the step in the way.
+
+    Every job write is `job_state.transition` with `expected_from=SKIP_SETTLES_FROM`, so a job an executor is
+    running, or one cancelled/completed meanwhile, is never moved by the skip."""
+    from app.modules.node_editor import _audit
+    job_status = (await db.execute(
+        text("SELECT status FROM jobs WHERE id = :j"), {"j": job_id})).scalar()
+    if job_status in SKIP_REFUSED_JOB_STATUSES:
+        return {"status": "error", "job_id": job_id, "node_key": node_key,
+                "message": f"Job is {job_status}; its steps are not skipped"}
     row = await db.execute(
-        text("SELECT id FROM dag_nodes WHERE job_id = :job_id AND node_key = :key"),
+        text("SELECT id, status, last_verification_reason FROM dag_nodes "
+             "WHERE job_id = :job_id AND node_key = :key"),
         {"job_id": job_id, "key": node_key},
     )
     r = row.mappings().first()
     if not r:
         return {"status": "error", "message": f"Node '{node_key}' not found"}
+    who = (by or "").strip() or "operator"
+    why = " ".join((reason or "").split())[:500] or "no reason given"
+    note = f"skipped by {who}: {why}"
     # §17.1107 — a 'done' node is never skipped over; a running one may be
     # (the executor's own terminal write is guarded on 'running' and loses).
-    if not await _set_node_status(db, r["id"], "skipped", expected_status=("pending", "running", "failed")):
+    if not await _set_node_status(db, r["id"], "skipped", verification_reason=note,
+                                  expected_status=("pending", "running", "failed")):
         return {"status": "error", "message": f"Node '{node_key}' is already done; nothing to skip"}
-    return {"status": "skipped", "node_key": node_key}
+    await _audit(db, job_id, node_key, "skip",
+                 {"status": r["status"], "last_verification_reason": r["last_verification_reason"]},
+                 {"status": "skipped", "last_verification_reason": note}, who)
+    await db.commit()
+    logger.info("node_skipped job=%s node=%s by=%s reason=%s", job_id, node_key, who, why)
+
+    await _withdraw_stale_frame(db, job_id)              # §17.1989 — a step settled; is the parked one still asked?
+    settled = await _settle_after_skip(db, job_id, node_key, skipped_from=str(r["status"]))
+    now = (await db.execute(text("SELECT status FROM jobs WHERE id = :j"), {"j": job_id})).scalar()
+    return {"status": "skipped", "job_id": job_id, "node_key": node_key,
+            "message": f"Skipped {node_key} ({why}); the job is {now}" + (f" ({settled})" if settled else "")}
+
+
+async def _settle_after_skip(db: AsyncSession, job_id: str, node_key: str, *, skipped_from: str) -> str:
+    """§17.2065 — the job status a skip leaves behind (see `skip_node`). Returns what moved, or ""."""
+    if await every_step_finished(db, job_id):
+        prior = await transition(db, job_id, to="completed", expected_from=SKIP_SETTLES_FROM,
+                                 reason=f"skip_node:{node_key}:every_step_finished",
+                                 refusal_expected_when=_SKIP_LEAVES)
+        await db.commit()
+        if prior is None:
+            return ""
+        await _store_completion_deliverable(db, job_id)
+        await db.commit()
+        logger.info("job_autocompleted: job=%s (skip of %s)", job_id, node_key)
+        return f"{prior} -> completed: every step finished"
+    if skipped_from != "failed":
+        return ""
+    stuck = (await db.execute(text(
+        "SELECT count(*) FROM dag_nodes WHERE job_id = :j AND status IN ('failed', 'running')"),
+        {"j": job_id})).scalar()
+    if int(stuck or 0) > 0:
+        return ""
+    prior = await transition(db, job_id, to="executing", expected_from=("blocked", "failed"),
+                             reason=f"skip_node:{node_key}:failed_step_cleared",
+                             refusal_expected_when=_SKIP_LEAVES | {"executing"})
+    await db.commit()
+    return f"{prior} -> executing: the failed step is out of the way" if prior else ""
 
 # §17.299 — `retry_failed_node` lives in `execution_retry`. The auto-
 # retry budget consumption in `execute_all_nodes` below imports it
