@@ -100,6 +100,12 @@ async def test_lm26_live_the_named_checks_run_inside_the_guest_and_say_not_met(m
     # with the input answered and the runner holding the secret itself, the same checks are read and say not met
     answered = {**LM26_FRAME, "commands": [c.replace("<GUEST_USER_NAME>", "labuser") for c in LM26_FRAME["commands"]]}
     assert await sr.already_met(_spec(), LM26, answered, {}, policy={"secrets": ["MASS_PASSWORD"]}) is None
+    # §17.2059b — and "start … AGAIN" is an act: what any check reads held before it, so nothing is read at all
+    assert "act" in sr.the_work_is_an_act(LM26, answered) and rv.calls == []
+    # the step's named checks still read and say not met when the step is a state (the same checks, a non-act title)
+    state = {**LM26, "title": "VM 110: the benchmark A/B runs as a transient unit"}
+    assert sr.the_work_is_an_act(state, answered) == ""
+    assert await sr.already_met(_spec(), state, answered, {}, policy={"secrets": ["MASS_PASSWORD"]}) is None
     assert rv.calls and rv.calls[0][0] == "qm status 110" and any("is-active lm-ab3" in c for c in rv.calls[0])
 
 

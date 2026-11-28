@@ -168,6 +168,22 @@ def test_a_read_only_guest_block_prints_a_section_per_statement_bash_level():
     assert "printf" not in head and "cat /etc/hostname" in head
 
 
+def test_two_commands_on_one_line_are_two_sections_bash_level():
+    """Live RDV82: `git -C … log -1 --format="deployed %h %s"; uptime -s` on ONE line. As one section the deploy line
+    would stand in for an `uptime -s` that printed nothing; split, each answers for itself."""
+    body = 'echo "deployed 1a2b3c4d"; ls /nonexistent-2060-uptime\nsystemctl is-active nothing-2060 || true'
+    rendered = rt.read_only_remote(body)
+    run = subprocess.run(["bash", "-c", rt.strict_line(body) + "\n" + rendered], capture_output=True, text=True)
+    secs = {s["command"]: s for s in sr.output_sections([{"command": "x", "ok": True, "exit": 0, "output": run.stdout}])}
+    assert {'echo "deployed 1a2b3c4d"', "ls /nonexistent-2060-uptime", "systemctl is-active nothing-2060 || true"} <= set(secs)
+    assert sr.named_output_unmet(["ls /nonexistent-2060-uptime"],
+                                 [{"command": "x", "ok": True, "exit": 0, "output": run.stdout}])
+    # a compound and a quoted `;` stay whole
+    assert rt._top_level_statements("echo 'a; b'; echo c") == ["echo 'a; b'", "echo c"]
+    loop = "for u in a b; do echo $u; done"
+    assert loop in rt.read_only_remote(loop)
+
+
 def test_a_body_the_split_cannot_follow_and_a_write_block_are_unchanged():
     heredoc = "python3 - <<'PY'\nprint(1)\nPY"
     assert rt.with_sections(heredoc) == heredoc

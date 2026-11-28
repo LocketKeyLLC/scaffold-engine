@@ -1058,13 +1058,53 @@ def with_sections(body: str) -> str:
     if any("<<" in ln or ln.rstrip().endswith("\\") for ln in lines):
         return body
     out: list[str] = []
+    groups: list[list[str]] = []
     for group in _statement_groups([ln for ln in lines if ln.strip()]):
+        # `git log -1; uptime -s` on one line is two commands: each gets its own section, so one's output never
+        # stands in for the other's (§17.2060). A compound (`for …; do …; done`, `if …`) stays whole.
+        if len(group) == 1 and not _BLOCK_OPEN_RE.search(_QUOTED_RE.sub("''", group[0])):
+            groups += [[part] for part in _top_level_statements(group[0])]
+        else:
+            groups.append(group)
+    for group in groups:
         if all(ln.strip().startswith("#") for ln in group):
             out += group
             continue
         label = " ".join(_join_statement([ln for ln in group if not ln.strip().startswith("#")]).split())
         out += [SECTION_OPEN + shlex.quote(label), *group, SECTION_CLOSE]
     return "\n".join(out)
+
+
+def _top_level_statements(line: str) -> list[str]:
+    """§17.2060 — one line split at its unquoted `;` (a trailing ` # comment` stays with the last part)."""
+    parts, cur, quote, i = [], [], "", 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "\\" and i + 1 < len(line):
+            cur.append(line[i:i + 2])
+            i += 2
+            continue
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            cur.append(line[i:])
+            break
+        elif line.startswith(";;", i):
+            cur.append(";;")
+            i += 2
+            continue
+        elif ch == ";":
+            parts.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts if parts and not quote else [line]
 
 
 _BLOCK_OPEN_RE = re.compile(r"(?<![\w-])(?:if|for|while|until|case)(?![\w-])")

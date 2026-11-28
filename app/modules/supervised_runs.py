@@ -13363,7 +13363,49 @@ def already_met_blind(node: Optional[dict], frame: Optional[dict], verify_cmds: 
     # §17.1655 — a BACKUP is taken now, before the change it guards; a backup that already exists is an older one
     _blind = _blind or a_backup_is_taken_now(node) or str((frame or {}).get("always_run") or "")
     # §17.1976 — the PLACE (the VM is up) is not the step's effect, and the step's own named checks are among the reads
-    return str(_blind or checks_read_only_the_place(verify_cmds, commands) or own_checks_not_read(node, verify_cmds))
+    # §17.2059b — and an ACT (redeploy, rebuild, restart) leaves the state its checks read as it was before it
+    return str(_blind or checks_read_only_the_place(verify_cmds, commands) or own_checks_not_read(node, verify_cmds)
+               or the_work_is_an_act(node, frame))
+
+
+#: §17.2059b — a command whose work is to DO something again, not to make a state true: the state it leaves (the
+#: service up, healthy, on its compose file) is the state it found, so no read of that state can say it already ran
+_ACT_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:systemctl\s+(?:restart|reload|try-restart|reload-or-restart)\b|service\s+\S+\s+(?:restart|reload)\b"
+    r"|docker(?:-compose|\s+compose)?\s+(?:restart\b|build\b|[^\n;&|]*\bup\b[^\n;&|]*--(?:build|force-recreate)\b)"
+    r"|(?:qm|pct)\s+reboot\b|reboot\b|git\s+(?:-C\s+\S+\s+)?(?:pull|fetch|checkout|reset)\b"
+    r"|\S*deploy_on_guest\.sh\b|make\s+(?:re)?deploy\b)", re.M)
+#: the same act named by the step's title
+_ACT_TITLE_RE = re.compile(r"\b(?:re-?deploy\w*|rebuild\w*|restart\w*|reboot\w*|reload\w*|re-?run\w*|redo|again)\b", re.I)
+
+
+def the_work_is_an_act(node: Optional[dict], frame: Optional[dict]) -> str:
+    """§17.2059b — ``""``, or why the step's work is an ACT its checks cannot see done: a redeploy, rebuild, restart,
+    reboot or re-run. Such a step is never "already met": what its checks read (the engine answers `healthy`, it runs
+    on `docker-compose.nogpu.yml`) held before the act and holds after it, so a confirmed read proves the place, not
+    the act -- §17.1976's rule ("a restart is an act"), applied to the work rather than to the checks.
+
+    Live (job 0fb4ea7f RD82, "VM 110: redeploy the engine at main 92c26e33", template deploy_scaffold_engine): its
+    Done when -- "`curl -s http://localhost:8000/health` prints `"status":"healthy"` and `docker inspect … ollama`
+    prints `docker-compose.nogpu.yml`" -- is true before every redeploy. With §17.2059's after-approval read it would
+    have been recorded already met and the merged commit never deployed. Read in the title, the commands, and the
+    work a template carries into the guest (its `REMOTE` body), never the template's own wrapper."""
+    title = str((node or {}).get("title") or "")
+    m = _ACT_TITLE_RE.search(title)
+    if m:
+        return f"the step's work is an act (\"{m.group(0)}\" in its title): its checks read the same before and after it"
+    texts = [str(c) for c in (frame or {}).get("commands") or []]
+    for f in (frame or {}).get("files") or []:
+        body = str((f or {}).get("content") or "")
+        remote = _REMOTE_HEREDOC_RE.search(body)
+        texts.append(remote.group(1) if remote else ("" if _SCAFFOLD_PATH_RE.fullmatch(str((f or {}).get("path") or ""))
+                                                     else body))
+    for t in texts:
+        m = _ACT_RE.search(t)
+        if m:
+            return (f"the block's work is an act (`{m.group(0).strip()[:60]}`): what its checks read held before it ran, "
+                    "so a confirmed read does not say it already ran")
+    return ""
 
 
 def check_after_approval(node: Optional[dict], frame: Optional[dict], policy: Optional[dict]) -> str:
