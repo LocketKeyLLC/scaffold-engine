@@ -27,9 +27,10 @@ scsi0: local-lvm:vm-106-disk-0,size=100G
 NEIGH = """192.168.1.129 dev vmbr0 lladdr bc:24:11:b4:af:15 STALE
 192.168.1.1 dev vmbr0 lladdr 4c:ab:f8:d1:54:91 DELAY
 """
-FDB = """bc:24:11:b4:af:15 dev tap110i0 master vmbr0
-4c:ab:f8:d1:54:91 dev nic3 master vmbr0
-"""
+#: §17.2057 — `cat /sys/class/net/<tap|veth>NNNi0/statistics/rx_packets`: frames the guest sent since it came up
+TX_SILENT = "0\n"
+TX_SENT = "1843027\n"
+TX_ABSENT = "cat: /sys/class/net/veth111i0/statistics/rx_packets: No such file or directory\n"
 PLAN = [{"node_key": "ADD5", "title": "Install Ubuntu Server 22.04 on VM 106", "status": "done"},
         {"node_key": "ADD9", "title": "Start VM 106 (palworld-server)", "status": "done"},
         {"node_key": "ADD26", "title": "Install the SSH public key on the AI VM (192.168.1.129)", "status": "done"},
@@ -45,7 +46,7 @@ def _inventory():
 
 
 def test_vm_106_measured_on_the_live_fixtures():
-    t = mt.truth_from_texts("106", inventory=_inventory(), qm_config=QM_CONFIG_106, neigh=NEIGH, fdb=FDB,
+    t = mt.truth_from_texts("106", inventory=_inventory(), qm_config=QM_CONFIG_106, neigh=NEIGH, tx=TX_SILENT,
                             agent_ping=(False, "QEMU guest agent is not running"), plan=PLAN)
     assert t.kind == "vm" and t.status == "running" and t.name == "palworld-server"
     assert t.has_os is False and [d["name"] for d in t.disks] == ["vm-106-disk-0"]
@@ -55,7 +56,7 @@ def test_vm_106_measured_on_the_live_fixtures():
 
 
 def test_vm_110_measured_has_a_key_and_an_unknown_disk():
-    t = mt.truth_from_texts("110", inventory=_inventory(), neigh=NEIGH, fdb=FDB, plan=PLAN)
+    t = mt.truth_from_texts("110", inventory=_inventory(), neigh=NEIGH, tx=TX_SILENT, plan=PLAN)
     assert t.kind == "vm" and t.status == "running" and t.name == "ai-vm"
     assert t.disks == [] and t.has_os is None, "no thin volume listed: unknown, not False"
     assert t.key_known_by and t.key_known_by.startswith("ADD26")
@@ -76,7 +77,7 @@ def test_needs_follow_the_blocks_shape():
 
 
 def test_the_empty_disk_contradicts_the_finished_install_and_reopens_it():
-    t = mt.truth_from_texts("106", inventory=_inventory(), qm_config=QM_CONFIG_106, neigh=NEIGH, fdb=FDB, plan=PLAN)
+    t = mt.truth_from_texts("106", inventory=_inventory(), qm_config=QM_CONFIG_106, neigh=NEIGH, tx=TX_SILENT, plan=PLAN)
     rows = mt.contradictions(ADD82, t, {"exists", "running", "has_os", "reachable"}, PLAN)
     os_row = next(r for r in rows if r["kind"] == "record_contradicted:os")
     assert os_row["reopen"] == "ADD5" and os_row["covered_by"] is None and os_row["blocks"] is True
@@ -107,7 +108,7 @@ def test_a_start_only_step_needs_no_os_and_a_stopped_vm_names_the_step_that_star
 
 def test_a_running_vm_that_transmits_nothing_is_not_up():
     inv = _inventory(); inv["disks"]["106"] = [{"name": "vm-106-disk-0", "data_percent": 12.5}]
-    t = mt.truth_from_texts("106", inventory=inv, qm_config=QM_CONFIG_106, neigh=NEIGH, fdb=FDB, plan=PLAN)
+    t = mt.truth_from_texts("106", inventory=inv, qm_config=QM_CONFIG_106, neigh=NEIGH, tx=TX_SILENT, plan=PLAN)
     assert t.has_os is True and t.transmits is False
     rows = mt.contradictions(ADD82, t, {"reachable"}, PLAN)
     assert any(r["kind"] == "not_transmitting" for r in rows) and all(not r["blocks"] for r in rows)
@@ -147,7 +148,7 @@ def _live_inventory():
 
 
 def test_the_live_host_vm_106_has_no_os_and_no_presence():
-    t = mt.truth_from_texts("106", inventory=_live_inventory(), qm_config=_live("cfg106"), neigh=_live("neigh"), fdb=_live("fdb"),
+    t = mt.truth_from_texts("106", inventory=_live_inventory(), qm_config=_live("cfg106"), neigh=_live("neigh"), tx=TX_SILENT,
                             agent_ping=(True, _live("ping106")), plan=PLAN)
     assert (t.kind, t.status, t.name) == ("vm", "running", "palworld-server")
     assert t.has_os is False and t.mac == "bc:24:11:e8:9f:7a" and t.bridge == "vmbr0"
@@ -158,7 +159,7 @@ def test_the_live_host_vm_106_has_no_os_and_no_presence():
 
 def test_the_live_host_vm_110_is_up_keyed_and_without_an_agent():
     node = {"node_key": "ADD49", "title": "Make aiserver (VM 110) reachable on SSH port 22", "description": ""}
-    t = mt.truth_from_texts("110", inventory=_live_inventory(), qm_config=_live("cfg110"), neigh=_live("neigh"), fdb=_live("fdb"),
+    t = mt.truth_from_texts("110", inventory=_live_inventory(), qm_config=_live("cfg110"), neigh=_live("neigh"), tx=TX_SENT,
                             agent_ping=(True, _live("ping110")), plan=PLAN)
     assert (t.kind, t.status, t.name) == ("vm", "running", "ai-vm")
     assert t.mac and t.transmits is True and t.address == "192.168.1.129"
@@ -171,10 +172,11 @@ def test_the_live_host_ct_111_has_a_mac_a_bridge_and_no_presence():
     """§17.1301 — `pct config` writes the MAC fourth (`hwaddr=`), not first; the
     live measurement of CT 111 at 06:56 UTC was `mac None, bridge None`."""
     node = {"node_key": "ADD68", "title": "Set static IP on control-panel container 111", "description": ""}
-    t = mt.truth_from_texts("111", inventory=_live_inventory(), qm_config=_live("cfg111"), neigh=_live("neigh"), fdb=_live("fdb"), plan=PLAN)
+    t = mt.truth_from_texts("111", inventory=_live_inventory(), qm_config=_live("cfg111"), neigh=_live("neigh"), tx=TX_ABSENT, plan=PLAN)
     assert (t.kind, t.status, t.name) == ("ct", "stopped", "control-panel")
     assert t.mac == "bc:24:11:66:89:94" and t.bridge == "vmbr0"
-    assert t.transmits is False and t.address is None and t.agent is None
+    assert t.transmits is None and t.address is None and t.agent is None, \
+        "§17.2057 — a stopped container has no host port to read: unknown, not a verdict"
     assert "pct config" in t.reads and "qm config" not in t.reads
     assert mt.contradictions(node, t, {"exists"}, PLAN) == []
 
@@ -193,12 +195,14 @@ async def test_read_guest_truth_asks_pct_config_for_a_container(monkeypatch):
         asked.append(command)
         if command.startswith("pct config"):
             return True, _live("cfg111")
-        return True, {"ip neigh show": _live("neigh"), "bridge fdb show": _live("fdb")}.get(command, "")
+        return True, {"ip neigh show": _live("neigh"),
+                      "cat /sys/class/net/veth111i0/statistics/rx_packets": TX_ABSENT}.get(command, "")
     monkeypatch.setattr(mt, "_probe", fake_probe)
     t = await mt.read_guest_truth(object(), "111", _live_inventory(), PLAN)
-    assert asked[0] == "pct config 111" and "ip neigh show" in asked and "bridge fdb show" in asked
+    assert asked[0] == "pct config 111" and "ip neigh show" in asked \
+        and "cat /sys/class/net/veth111i0/statistics/rx_packets" in asked and "bridge fdb show" not in asked
     assert not any(a.startswith("qm ") for a in asked), "a container is never asked with qm"
-    assert t.mac == "bc:24:11:66:89:94" and t.transmits is False
+    assert t.mac == "bc:24:11:66:89:94" and t.transmits is None
 
 
 def test_the_live_stopped_caddy_container_reopens_its_recorded_start():

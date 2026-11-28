@@ -79,4 +79,5 @@ def test_the_address_is_the_ipv4_entry_wherever_ip_neigh_lists_it():
     assert t.address == "192.168.1.129"
     t6 = mt.truth_from_texts("110", inventory={"cts": {}, "vms": {"110": {"status": "running"}}, "names": {"110": "ai-vm"}},
                              qm_config=QM_CONFIG_110, neigh=NEIGH_V6_FIRST.split("\n", 1)[0])
-    assert t6.address == "fe80::be24:11ff:feb4:af15", "with only a v6 entry, that is what was measured"
+    assert t6.address is None, "§17.2057 — with only a link-local entry, no address was measured (RD82 measured fe80)"
+    assert "no IPv4 entry" in t6.reads["ip neigh"]

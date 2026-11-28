@@ -301,12 +301,18 @@ def exec_hint(svc) -> str:
 
 
 async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
-    """``(ok, output)`` — ``ok`` None when the runner could not be asked."""
+    """``(ok, output)`` — ``ok`` None when the read did not happen: the runner could not be asked, refused it, timed
+    out, or (§17.2057) the guest never answered. Live (RD82, 2026-11-27): `qm guest exec 110 -- sh -c 'ss -tlnp'` on a
+    VM with no guest agent printed "No QEMU guest agent configured", came back ``ok``, parsed to no listeners, and
+    VM 110 -- twenty services -- was logged as running none (`services=[]`). The output is kept for the record."""
     try:
-        from app.modules.assist_local_runner import _plain_output, unwrap_guest_exec
+        from app.modules.assist_local_runner import _plain_output, not_evidence, unwrap_guest_exec
         from app.modules.mcp_client import call_tool
         res = await call_tool(spec, "run_readonly", {"command": command, "timeout_s": 20})
-        return (not bool(res.is_error)), unwrap_guest_exec(command, _plain_output(res) or "")
+        out = _plain_output(res) or ""
+        if not_evidence(out, False, command=command):
+            return None, out
+        return (not bool(res.is_error)), unwrap_guest_exec(command, out)
     except Exception as exc:
         logger.warning("service_truth_probe_failed cmd=%r err=%r", command, exc)
         return None, ""
@@ -391,11 +397,11 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
     for gid in running[:limit]:
         if len(found) == len(wanted):
             break
-        ok, ss_text = await _probe(spec, f"{in_guest(gid, gid in _vm_ids)} sh -c 'ss -tlnp'")
+        _cmd = f"{in_guest(gid, gid in _vm_ids)} sh -c 'ss -tlnp'"
+        ok, ss_text = await _probe(spec, _cmd)
         if not ok:
             if reading is not None:
-                reading.gap(f"guest {gid}", "the runner could not read `ss -tlnp` in it"
-                            if ok is None else "`ss -tlnp` in it answered nothing")
+                reading.gap(f"guest {gid}", _unread_why(_cmd, ok, ss_text))
             continue
         swept.append(str(gid))
         procs = listeners_in(ss_text)
@@ -436,22 +442,33 @@ async def guests_of_the_named_services(spec, names: list[str], cts: Optional[dic
     return found
 
 
+def _unread_why(command: str, ok: Optional[bool], out: str) -> str:
+    """Why `command` said nothing about the guest, in the runner's or the guest channel's own words."""
+    if ok is None:
+        from app.modules.assist_local_runner import not_evidence
+        return (not_evidence(out, False, command=command)
+                or "the runner could not read `ss -tlnp` in it")
+    return "`ss -tlnp` in it answered nothing"
+
+
 async def read_services(spec, gid: str, units: Optional[list[str]] = None,
                         mentioned: Optional[list[str]] = None, reading=None,
-                        vm: bool = False) -> list[ServiceTruth]:
+                        vm: bool = False) -> Optional[list[ServiceTruth]]:
     """Measure the services on one running container: what listens, and what each
-    listener is. Fail-soft per field; unreadable means empty, never a guess."""
+    listener is. Fail-soft per field. §17.2057 — None when the listeners could not be
+    read at all; ``[]`` only when they were read and none of them is a service."""
     if spec is None or not gid:
-        return []
-    ok, ss_text = await _probe(spec, f"{in_guest(gid, vm)} sh -c 'ss -tlnp'")
+        return None
+    _cmd = f"{in_guest(gid, vm)} sh -c 'ss -tlnp'"
+    ok, ss_text = await _probe(spec, _cmd)
     if not ok:
         # §17.1363 — an empty list here used to be indistinguishable from "this
         # guest runs nothing". It is a gap, and it is recorded as one.
+        why = _unread_why(_cmd, ok, ss_text)
         if reading is not None:
-            reading.gap(f"the services in guest {gid}",
-                        "the runner could not read `ss -tlnp` in it" if ok is None
-                        else "`ss -tlnp` in it answered nothing")
-        return []
+            reading.gap(f"the services in guest {gid}", why)
+        logger.info("service_truth_read guest=%s services=None (unread: %s)", gid, why)
+        return None
     procs = listeners_in(ss_text)      # §17.1356 — one parser, used by the guest lookup too
     # §17.1368 — and the guest's own address, because a service's port means nothing
     # without the machine it is on. Live, a draft running ON THE HOST called
@@ -606,7 +623,7 @@ async def read_services(spec, gid: str, units: Optional[list[str]] = None,
         # It is also noise at per-guest-per-name granularity (nine lines for three
         # services across three guests), and the sweep above already states which
         # guest each named service lives in, so nothing is recorded here.
-    logger.warning("service_truth_read guest=%s services=%s", gid, [s.name for s in out])
+    logger.info("service_truth_read guest=%s services=%s", gid, [s.name for s in out])
     return out
 
 

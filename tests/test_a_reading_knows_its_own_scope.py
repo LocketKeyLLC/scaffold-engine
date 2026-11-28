@@ -168,7 +168,7 @@ async def test_an_unreadable_guest_is_a_gap_not_an_empty_service_list(monkeypatc
         return None, ""
     monkeypatch.setattr(st, "_probe", fake_probe)
     r = Reading()
-    assert await st.read_services(_Spec(), "105", mentioned=["qbittorrent"], reading=r) == []
+    assert await st.read_services(_Spec(), "105", mentioned=["qbittorrent"], reading=r) is None   # §17.2057
     assert any(g["what"] == "the services in guest 105" for g in r.gaps()), r.gaps()
 
 

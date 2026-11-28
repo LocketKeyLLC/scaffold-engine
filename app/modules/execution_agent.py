@@ -3865,7 +3865,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     # The listeners on the guest and the names the step mentions are
                     # what `read_services` goes on.
                     _services += await _st.read_services(spec, _g, mentioned=_named,
-                                                        reading=_reading, vm=_g in _vms and _g not in _cts)
+                                                        reading=_reading, vm=_g in _vms and _g not in _cts) or []
             # §17.1591 — the engine's own deploys (Docker inside CT 107/108) are services the step may name
             _own = supervised_runs.engine_deployed_services(_named, _services)
             if _own:
