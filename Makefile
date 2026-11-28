@@ -142,7 +142,7 @@ test-diagnosis: test-db ## §17.1203 — DIAGNOSIS ACCURACY against a Proxmox-SH
 # in $(INTEGRATION_LANE_LOG_DIR); a failing live test also prints its logs' tail.
 INTEGRATION_LANE_LOG_DIR ?= /tmp/scaffold-integration-lane
 test-integration-lane: test-db ## §17.2062 — ALL of tests/integration in a THROWAWAY dev container against $(TEST_DB_NAME) (own engines/helpers inside the container; never the live engine). Run before each deploy. ~10-15 min; needs Postgres + Ollama (+ SearXNG, Milvus read-only). Logs + junit: $(INTEGRATION_LANE_LOG_DIR)
-	@rm -rf $(INTEGRATION_LANE_LOG_DIR) && mkdir -p $(INTEGRATION_LANE_LOG_DIR) && chmod 777 $(INTEGRATION_LANE_LOG_DIR)
+	@mkdir -p $(INTEGRATION_LANE_LOG_DIR) && chmod 777 $(INTEGRATION_LANE_LOG_DIR)
 	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(INTEGRATION_LANE_LOG_DIR):/itest scaffold-engine:dev \
 		pytest tests/integration --timeout=900 -q -p no:warnings -l \
 		--junitxml=/itest/junit.xml
