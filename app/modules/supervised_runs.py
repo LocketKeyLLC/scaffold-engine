@@ -8849,8 +8849,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 {"jid": job_id, "nk": node_key, "out": _rec,
                  "why": (f"already met: {_met_now['checks']} verify check(s) read off {spec.name} after the approval, "
                          "before the run, confirm the goal -- none of the block's commands ran")})
-            logger.warning("supervised_run_already_met_after_approval job=%s node=%s checks=%d verdicts=%s", job_id,
-                           node_key, _met_now["checks"], [str(v.get("verdict")) for v in _met_now["verdicts"]])
+            # §17.2067 — a step found already met is a normal outcome: INFO
+            logger.info("supervised_run_already_met_after_approval job=%s node=%s checks=%d verdicts=%s", job_id,
+                        node_key, _met_now["checks"], [str(v.get("verdict")) for v in _met_now["verdicts"]])
             try:                                                 # §17.1315 — as the pre-read's already-met path does
                 from app.modules import machine_truth as _mt
                 await _mt.after_step_done(job_id, {"node_key": node_key, "title": str(waiting.get("title") or "")})
@@ -13340,8 +13341,13 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         return None
     _blind = already_met_blind(node, frame, verify_cmds)
     if _blind:
-        logger.warning("supervised_run_already_met_blind node=%s why=%s",
-                       (node or {}).get("node_key"), _blind)
+        # §17.2067 — the level follows the reason. A step that is never "already met" BY ITS KIND (an act, a backup
+        # taken now, a block that proves what no pre-read can) is the gate working: INFO, naming that reason. Checks
+        # that could not witness the step (they could not fail, read only the place, leave out its own check) are a
+        # defect in what was drafted: WARNING.
+        _by_design = never_met_by_design(node, frame)
+        logger.log(logging.INFO if _by_design else logging.WARNING, "supervised_run_already_met_blind node=%s why=%s",
+                   (node or {}).get("node_key"), _by_design or _blind)
         return None
     # §17.2051 — a check only the approval can make runnable is not sent before it: "cannot check before approval"
     # is a known answer, said once, not a refused runner call read back as "unreadable".
@@ -13350,6 +13356,13 @@ async def already_met(spec, node: dict, frame: dict, env: Optional[dict[str, str
         logger.info("supervised_run_already_met_needs_approval node=%s why=%s", (node or {}).get("node_key"), _needs)
         return None
     return await checks_confirm_met(spec, node, frame, verify_cmds, env)
+
+
+def never_met_by_design(node: Optional[dict], frame: Optional[dict]) -> str:
+    """§17.2067 — ``""``, or why this step is never "already met" by what it IS, whatever its checks read: a backup is
+    taken now (§17.1655), its block proves what no pre-read can (§17.1671d), its work is an act (§17.2059b). The
+    by-design subset of `already_met_blind`'s reasons; the rest are about the drafted checks."""
+    return str(a_backup_is_taken_now(node) or (frame or {}).get("always_run") or the_work_is_an_act(node, frame) or "")
 
 
 def already_met_blind(node: Optional[dict], frame: Optional[dict], verify_cmds: list) -> str:

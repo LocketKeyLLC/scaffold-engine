@@ -94,6 +94,11 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+#: §17.2066 — how a pipeline_complete frame starts: execute_all_nodes reads it off the parallel frontier's stream to
+#: name its exit "finished".
+_PIPELINE_COMPLETE_FRAME = "event: pipeline_complete\n"
+
+
 def _conf_or_default(value, default: float = 0.5) -> float:
     """§17.1060 — a node's recorded confidence, or the neutral default when
     none was recorded (0.0 is a real value and stays 0.0)."""
@@ -240,6 +245,10 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
     longer at ``running`` (clean exits already set ``completed``/``blocked``)."""
     try:
         async with async_session() as db:
+            # §17.2066 — the level follows the outcome: a run that FINISHED (emitted pipeline_complete) and is
+            # still `running` is completed by its named reason at INFO; a cancel, an exception or the unexplained
+            # safety default below stays a WARNING.
+            routine = False
             if exit_reason == "cancelled":
                 terminal = "cancelled"
             elif exit_reason == "exception":
@@ -251,6 +260,7 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
                 # job was left at running → "failed". Live, the home-lab job: 131 done, 61 skipped, none failed.
                 if await every_step_finished(db, job_id):      # §17.2065 — the one rule, shared with skip_node
                     terminal = "completed"
+                    routine = exit_reason == "finished"
             # §17.1107 (ledger S-4) — was SELECT status → if != running return →
             # unguarded UPDATE: a cancel or completion landing between the two
             # statements was overwritten with 'failed'. One guarded claim now.
@@ -272,7 +282,7 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
                 {"jid": job_id},
             )
             await db.commit()
-            logger.warning(
+            (logger.info if routine else logger.warning)(
                 "execute_all_nodes_cleanup: job=%s running->%s (reason=%s)",
                 job_id, terminal, exit_reason,
             )
@@ -822,6 +832,26 @@ async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
         {"jid": job_id},
     )
     return res.fetchone() is not None
+
+
+async def _complete_finished_job(db: AsyncSession, job_id: str, *, reason: str) -> bool:
+    """Complete a job whose every step is finished: flip it to 'completed' and compile its deliverable. True iff
+    THIS call won the flip (a job some other writer already completed is left as it is, and nothing is compiled
+    twice).
+
+    §17.2066 — the one finisher for a run that finds nothing left to do. It was inline in ``execute_next_node``'s
+    no-claimable branch (the serial path's terminal), and the parallel frontier's terminal never reached it: that
+    branch assumed the last WORKER had autocompleted the job. A run started by an approval (resolve_run → decide
+    restarts the run) whose step the approval already settled claims nothing and runs no worker, so nobody completed
+    the job — the cleanup's safety default did (``running->completed (reason=None)`` at WARNING, twice on job
+    0fb4ea7f on 2026-11-28), without the deliverable compile and without §17.1639's frame strip. Both terminals call
+    this now, and the flip names its reason."""
+    flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
+    await db.commit()
+    if flipped:
+        logger.info("job_finished: job=%s reason=%s", job_id, reason)
+        await _store_completion_deliverable(db, job_id)  # §17.2065 — the one completion, shared with skip_node
+    return flipped
 
 
 async def _withdraw_stale_frame(db: AsyncSession, job_id: str) -> None:
@@ -2026,10 +2056,7 @@ async def execute_next_node(
             await touch(db, job_id, reason="node_claim")
         if node is None:
             if await _all_nodes_done(db, job_id):
-                flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
-                await db.commit()
-                if flipped:
-                    await _store_completion_deliverable(db, job_id)  # §17.2065 — shared with skip_node
+                await _complete_finished_job(db, job_id, reason="no_step_left")
                 return {"status": "complete", "message": "All nodes done. Job complete."}
 
             # Partial compile for blocked jobs (#22, cached)
@@ -4468,8 +4495,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                    preconditions=await _pre_for(retry), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                 if second["commands"] and not second["refused"]:
-                    logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
-                                   job_id, run_node.get("node_key"), len(second["commands"]))
+                    logger.info("supervised_run_redraft_clean job=%s node=%s commands=%d",
+                                job_id, run_node.get("node_key"), len(second["commands"]))
                     frame = second
                 else:
                     # §17.1381 — PROGRESS IS NOT A REASON TO STOP. This branch
@@ -4526,8 +4553,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                   preconditions=await _pre_for(again), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                 if third["commands"] and not third["refused"]:
-                                    logger.warning("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
-                                                   job_id, run_node.get("node_key"), len(third["commands"]))
+                                    logger.info("supervised_run_redraft_again_clean job=%s node=%s commands=%d",
+                                                job_id, run_node.get("node_key"), len(third["commands"]))
                                     frame = third
                                 elif third["commands"] and len(third["refused"]) < min(len(frame["refused"]),
                                                                                        len(second["refused"])):
@@ -4556,8 +4583,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                                                    preconditions=await _pre_for(last), upstream=up_block, units=_units, units_by_guest=_units_by_guest, reading=_reading, inventory=_inv,
                                                     engine_address=_eaddr, services=_services)
                                                 if fourth["commands"] and not fourth["refused"]:
-                                                    logger.warning("supervised_run_redraft_last_clean job=%s node=%s commands=%d",
-                                                                   job_id, run_node.get("node_key"), len(fourth["commands"]))
+                                                    logger.info("supervised_run_redraft_last_clean job=%s node=%s commands=%d",
+                                                                job_id, run_node.get("node_key"), len(fourth["commands"]))
                                                     frame = fourth
                                                 else:
                                                     logger.warning("supervised_run_redraft_last_rejected job=%s node=%s refusals=%s",
@@ -4620,7 +4647,7 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                                                 units=_units, units_by_guest=_units_by_guest, reading=_reading,
                                                 inventory=_inv, engine_address=_eaddr, services=_services)
                 if _fr["commands"] and not _fr["refused"]:
-                    logger.warning("rehearsal_repair_clean job=%s node=%s attempt=%d", job_id, _nk, _attempt + 1)
+                    logger.info("rehearsal_repair_clean job=%s node=%s attempt=%d", job_id, _nk, _attempt + 1)
                     frame, _best = _fr, None
                     break
                 _sc = rehearsal.score(_rh_reports.get(_rb)) if _rehearsal_only(_fr) else 20_000
@@ -4664,9 +4691,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                         # must never replace an empty frame's better sibling.
                         if _apif.get("commands"):
                             frame = _apif
-                            logger.warning("supervised_run_no_commands_redraft_clean job=%s node=%s commands=%d refused=%d",
-                                           job_id, run_node.get("node_key"),
-                                           len(_apif["commands"]), len(_apif.get("refused") or []))
+                            logger.info("supervised_run_no_commands_redraft_clean job=%s node=%s commands=%d refused=%d",
+                                        job_id, run_node.get("node_key"),
+                                        len(_apif["commands"]), len(_apif.get("refused") or []))
             except Exception as exc:
                 logger.warning("no_commands_redraft_failed job=%s node=%s err=%r", job_id,
                                run_node.get("node_key"), exc)
@@ -4696,9 +4723,9 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     # §17.1269 — never trade a runnable block for a refused one.
                     if _vf.get("commands") and _vf.get("verify") and not _vf.get("refused"):
                         frame = _vf
-                        logger.warning("supervised_run_verify_redraft_clean job=%s node=%s commands=%d verify=%d",
-                                       job_id, run_node.get("node_key"),
-                                       len(_vf["commands"]), len(_vf["verify"]))
+                        logger.info("supervised_run_verify_redraft_clean job=%s node=%s commands=%d verify=%d",
+                                    job_id, run_node.get("node_key"),
+                                    len(_vf["commands"]), len(_vf["verify"]))
         except Exception as exc:
             logger.warning("verify_check_failed job=%s node=%s err=%r", job_id,
                            run_node.get("node_key"), exc)
@@ -4721,8 +4748,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
                             _wrf["commands"], run_node):
                         frame = _wrf
-                        logger.warning("supervised_run_all_reads_redraft_clean job=%s node=%s commands=%d",
-                                       job_id, run_node.get("node_key"), len(_wrf["commands"]))
+                        logger.info("supervised_run_all_reads_redraft_clean job=%s node=%s commands=%d",
+                                    job_id, run_node.get("node_key"), len(_wrf["commands"]))
         except Exception as exc:
             logger.warning("all_reads_check_failed job=%s node=%s err=%r", job_id,
                            run_node.get("node_key"), exc)
@@ -4752,8 +4779,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
                     _no_worse = len(_third.get("refused") or []) <= len(frame.get("refused") or [])
                     if _third.get("commands") and not uncovered(_step_text, _third["commands"], _third.get("files") or []) and _no_worse:
                         frame = _third
-                        logger.warning("runbook_coverage_redraft_clean job=%s node=%s", job_id,
-                                       run_node.get("node_key"))
+                        logger.info("runbook_coverage_redraft_clean job=%s node=%s", job_id,
+                                    run_node.get("node_key"))
         except Exception as exc:
             logger.warning("runbook_coverage_failed job=%s node=%s err=%r", job_id,
                            run_node.get("node_key"), exc)
@@ -4795,8 +4822,8 @@ async def _pause_for_decision(job_id: str, _depth: int = 0) -> dict | None:
             if _met:
                 from datetime import datetime as _dt, timezone as _tz
                 _nk = run_node.get("node_key")
-                logger.warning("supervised_run_already_met job=%s node=%s checks=%d verdicts=%s", job_id, _nk,
-                               _met["checks"], [str(v.get("verdict")) for v in _met["verdicts"]])
+                logger.info("supervised_run_already_met job=%s node=%s checks=%d verdicts=%s", job_id, _nk,
+                            _met["checks"], [str(v.get("verdict")) for v in _met["verdicts"]])
                 _rec = supervised_runs.already_met_record(run_node, frame["runner"], _met)
                 async with async_session() as db:
                     _upd = await db.execute(
@@ -5207,6 +5234,11 @@ async def _run_parallel_frontier(
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 async with async_session() as _term_db:
                     all_done = await _all_nodes_done(_term_db, job_id)
+                    if all_done:
+                        # §17.2066 — the last worker's autocomplete is not the only way here: a run that claimed
+                        # nothing (an approval already settled the last step) ran no worker. Finish the job here;
+                        # idempotent when a worker already did.
+                        await _complete_finished_job(_term_db, job_id, reason="no_step_left")
                 if all_done:
                     summary = await _build_pipeline_summary(
                         job_id, node_results, elapsed_ms, async_session,
@@ -5441,7 +5473,9 @@ async def execute_all_nodes(
     # ``_owns_job_running`` gates DB cleanup so a Session 1 guard rejection
     # (where another runner legitimately owns the row) does not corrupt
     # that runner's job.
-    exit_reason: str | None = None  # None = clean exit
+    # §17.2066 — "finished" when the run emitted pipeline_complete (every step finished); None = any other
+    # clean return (a park, a block, a refusal), which leaves the cleanup its safety default.
+    exit_reason: str | None = None
     exit_exception: BaseException | None = None
     retry_budget = settings.execution_global_retry_cap
     _owns_job_running = False
@@ -5613,6 +5647,8 @@ async def execute_all_nodes(
                 job_id, model_overrides=model_overrides, t0=t0,
                 retry_budget=retry_budget,
             ):
+                if _ev.startswith(_PIPELINE_COMPLETE_FRAME):
+                    exit_reason = "finished"                                 # §17.2066
                 yield _ev
             return
 
@@ -5762,6 +5798,7 @@ async def execute_all_nodes(
                         "job_id": job_id,
                         **_prog.tick(_prog.total, done_items=_prog_done),
                     })
+                exit_reason = "finished"                                     # §17.2066
                 yield _sse("pipeline_complete", summary)
                 return
 
@@ -5880,6 +5917,7 @@ async def execute_all_nodes(
                         "job_id": job_id,
                         **_prog.tick(_prog.total, done_items=_prog_done),
                     })
+                exit_reason = "finished"                                     # §17.2066
                 yield _sse("pipeline_complete", early_summary)
                 return
 
