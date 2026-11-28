@@ -113,12 +113,20 @@ _GENERIC_NAME_WORDS = frozenset({"server", "service", "guest", "container", "ubu
 
 
 async def _probe(spec, command: str) -> tuple[Optional[bool], str]:
-    """``(ok, output)`` — ``ok`` None when the runner could not be asked."""
+    """``(ok, output)`` — ``ok`` None when the read did not happen: the runner could not be asked, refused it, timed
+    out, or (§17.2057) an in-guest read never reached the guest. Live (RD82, 2026-11-27): the runner reports no error
+    for a command that exited non-zero, so `qm guest exec 110 -- …` answering "No QEMU guest agent configured" came
+    back ``ok`` and was read as the guest's answer -- `resolves: True`, `units: '0 units'` on a VM with no agent."""
     try:
-        from app.modules.assist_local_runner import _plain_output
+        from app.modules.assist_local_runner import _plain_output, not_evidence
         from app.modules.mcp_client import call_tool
         res = await call_tool(spec, "run_readonly", {"command": command, "timeout_s": 15})
-        return (not bool(res.is_error)), (_plain_output(res) or "")
+        out = _plain_output(res) or ""
+        why = not_evidence(out, False, command=command)
+        if why:
+            logger.info("machine_truth_probe_unread cmd=%r why=%s", command, why)
+            return None, out
+        return (not bool(res.is_error)), out
     except Exception as exc:
         logger.warning("machine_truth_probe_failed cmd=%r err=%r", command, exc)
         return None, ""
@@ -190,8 +198,45 @@ async def engine_address(spec) -> Optional[str]:
     return peers[0]
 
 
+#: §17.2057 — `getent hosts` printed an address: `151.101.2.132   deb.debian.org`
+_GETENT_ADDR_RE = re.compile(r"^\s*(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f]*:[0-9A-Fa-f:.]+)\s+\S", re.M)
+#: an `ip neigh` line whose destination is an IPv4 address
+_NEIGH_V4_RE = re.compile(r"\s*\d{1,3}(?:\.\d{1,3}){3}\s")
+
+
+def resolved(out: str) -> bool:
+    """§17.2057 — did `getent hosts` print an address? Non-empty is not enough: through `qm guest exec` a failed
+    lookup comes back as `(guest exit code 2)`, and a guest that was never reached prints `qm`'s own words."""
+    return bool(_GETENT_ADDR_RE.search(str(out or "")))
+
+
+def agent_answers(agent_ping: Optional[tuple[Optional[bool], str]]) -> Optional[bool]:
+    """Did `qm agent N ping` answer? None when it was not read. ONE judgment: the in-guest reads are gated on it,
+    and §17.2057's live log shows why -- they were gated on the runner having run the ping (`agent_ping[0]`), which
+    is true for "No QEMU guest agent configured", so every `qm guest exec` read ran against a VM with no agent."""
+    if agent_ping is None or agent_ping[0] is None:
+        return None
+    ok, out = agent_ping
+    low = (out or "").lower()
+    # live: "QEMU guest agent is not running" (106), "No QEMU guest agent configured" (110)
+    return bool(ok) and not any(w in low for w in ("not running", "not configured", "no qemu", "error", "timeout"))
+
+
+def tx_packets(text: str) -> Optional[int]:
+    """§17.2057 — the frames a guest has sent since its interface came up, from
+    `/sys/class/net/<tap|veth>NNNi0/statistics/rx_packets` on the host (the host side RECEIVES what the guest
+    sends). None unless the read printed exactly one number."""
+    m = re.fullmatch(r"\s*(\d+)\s*", str(text or ""))
+    return int(m.group(1)) if m else None
+
+
+def host_port(gid: str, kind: Optional[str]) -> str:
+    """The host side of a guest's net0, by Proxmox's naming: `tap110i0` for a VM, `veth111i0` for a container."""
+    return f"{'tap' if kind == 'vm' else 'veth'}{gid}i0"
+
+
 def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = "", neigh: str = "",
-                     fdb: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
+                     tx: str = "", agent_ping: Optional[tuple[Optional[bool], str]] = None,
                      plan: Optional[list[dict]] = None, dns: Optional[tuple[Optional[bool], str]] = None,
                      guest_uptime: Optional[float] = None,
                      sibling_config: str = "", units_text: str = "",
@@ -225,30 +270,36 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
     if t.mac and neigh:
         # §17.1496 — the IPv4 entry, wherever `ip neigh` lists it: a `fe80::…` line carries the
         # same lladdr and, taken first, became the guest's "address" that every ssh target was
-        # then measured against.
+        # then measured against. §17.2057 — and when there is NO IPv4 entry the address is
+        # unknown: the `_lines[0]` fallback put that fe80 line right back (RD82, VM 110 measured at
+        # `fe80::…` while it served on its LAN address), and the §17.1303 ssh-target gate would then
+        # have refused the guest's real address as "not its address".
         _lines = [ln for ln in neigh.split("\n") if t.mac in ln.lower()]
-        hit = next((ln for ln in _lines if re.match(r"\s*\d{1,3}(?:\.\d{1,3}){3}\s", ln)), _lines[0] if _lines else "")
+        hit = next((ln for ln in _lines if _NEIGH_V4_RE.match(ln)), "")
         t.address = hit.split()[0] if hit else None
-        t.reads["ip neigh"] = hit or "(no entry for the MAC)"
-    if t.mac and fdb is not None and fdb != "":
-        t.transmits = t.mac in fdb.lower()
-        t.reads["bridge fdb"] = "learned" if t.transmits else "(never seen)"
-    elif t.mac and fdb == "":
-        t.transmits = None
-    if agent_ping is not None:
-        ok, out = agent_ping
-        if ok is not None:
-            low = (out or "").lower()
-            # live: "QEMU guest agent is not running" (106), "No QEMU guest agent configured" (110)
-            t.agent = bool(ok) and not any(w in low for w in ("not running", "not configured", "no qemu", "error", "timeout"))
-            t.reads["qm agent ping"] = (out or ("answered" if t.agent else "no answer"))[:200]
+        t.reads["ip neigh"] = hit or (("(no IPv4 entry for the MAC; only " + _lines[0].split()[0]
+                                       + ", not an address to reach it at)") if _lines else "(no entry for the MAC)")
+    # §17.2057 — has the guest sent anything? The frames its host-side port received since it came up: a counter,
+    # not `bridge fdb show`, whose entries age out after 300 s (an idle guest read as "never seen") and whose whole
+    # dump -- every port's multicast and learned entries, ~25 KB on a host with twelve firewalled guests -- runs
+    # past the runner's 20 000-character cap. Live, VM 110 read `transmits: False` four minutes after it had
+    # answered the host's ARP (its IPv4 neighbour entry had just appeared).
+    if t.mac and tx:
+        n = tx_packets(tx)
+        t.transmits = None if n is None else n > 0
+        t.reads["rx_packets"] = (f"{host_port(gid, t.kind)} received {n} frame(s) from the guest" if n is not None
+                                 else "(not read)")
+    _agent = agent_answers(agent_ping)
+    if _agent is not None:
+        t.agent = _agent
+        t.reads["qm agent ping"] = (agent_ping[1] or ("answered" if t.agent else "no answer"))[:200]
     # §17.1313 — does the guest resolve names? Live, CT 120's /etc/resolv.conf was the
     # host's Tailscale stub (100.100.100.100); `apt-get update` inside it hung for the
     # runner's full 180 s, twice, and the step failed twice. One read settles it.
     if dns is not None:
         ok, out = dns
         if ok is not None:
-            t.resolves = bool(ok) and bool((out or "").strip()) and "not running" not in (out or "").lower()
+            t.resolves = bool(ok) and resolved(out)
             t.reads["getent hosts"] = ((out or "").strip() or "(printed nothing)")[:200]
             # §17.1336 — a guest that started seconds ago has not finished starting its
             # resolver. A failed probe there is UNKNOWN, so nothing is inserted and
@@ -272,8 +323,13 @@ def truth_from_texts(gid: str, *, inventory: Optional[dict], qm_config: str = ""
             w = ln.split()
             if w and _UNIT_NAME_RE.fullmatch(w[0]):
                 names.append(_UNIT_SUFFIX_RE.sub("", w[0]))
-        t.units = names[:400]
-        t.reads["systemctl list-unit-files"] = f"{len(t.units)} units"
+        # §17.2057 — a systemd guest always has service unit files, so a list with none in it is a read that
+        # failed (a non-zero exit, a guest without systemd, words that are not the listing), not "no units".
+        # `[]` would let a unit gate refuse every unit as one the guest does not have.
+        t.units = names[:400] or None
+        t.reads["systemctl list-unit-files"] = (
+            f"{len(names)} units" if names
+            else "(no unit in the answer: " + (units_text.strip().split("\n")[0][:80] or "empty") + ")")
     # §17.1690 — the tools the guest HAS, so a block that pipes into one it lacks is refused before it runs.
     if tools_read is not None:
         from app.modules.guest_tools import parse_which
@@ -302,7 +358,7 @@ def uptime_s(text: str) -> Optional[float]:
 async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Optional[list[dict]] = None) -> GuestTruth:
     """Measure guest ``gid`` once: the inventory (already read this pause) plus
     four reads. Every read is fail-soft; a field that could not be read is None."""
-    qm_config = neigh = fdb = ""
+    qm_config = neigh = tx = ""
     agent_ping: Optional[tuple[Optional[bool], str]] = None
     kind = "ct" if gid in ((inventory or {}).get("cts") or {}) else ("vm" if gid in ((inventory or {}).get("vms") or {}) else None)
     # §17.1301 — a container has a config too (`pct config`): live, CT 111 was
@@ -311,8 +367,9 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
         _ok, qm_config = await _probe(spec, f"{'qm' if kind == 'vm' else 'pct'} config {gid}")
         if parse_net0(qm_config or "")[0]:
             _ok, neigh = await _probe(spec, "ip neigh show")
-            _ok, fdb_out = await _probe(spec, "bridge fdb show")
-            fdb = fdb_out if _ok else ""
+            neigh = neigh if _ok else ""
+            _ok, tx_out = await _probe(spec, f"cat /sys/class/net/{host_port(gid, kind)}/statistics/rx_packets")
+            tx = tx_out if _ok else ""
         if kind == "vm" and ((inventory or {}).get("vms") or {}).get(gid) == "running":
             agent_ping = await _probe(spec, f"qm agent {gid} ping")
     dns: Optional[tuple[Optional[bool], str]] = None
@@ -321,18 +378,18 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
     cts = (inventory or {}).get("cts") or {}
     if spec is not None and kind == "ct" and cts.get(gid) == "running":
         dns = await _probe(spec, f"pct exec {gid} -- timeout 5 getent hosts deb.debian.org")
-        if dns[0] is not None and not (dns[1] or "").strip():
+        if dns[0] is not None and not resolved(dns[1]):
             _ok, _up = await _probe(spec, f"pct exec {gid} -- cat /proc/uptime")   # §17.1336
             guest_uptime = uptime_s(_up) if _ok else None
             other = next((c for c, st in cts.items() if st == "running" and c != gid), None)
             if other:
                 _ok, sibling_config = await _probe(spec, f"pct config {other}")
-    elif spec is not None and kind == "vm" and agent_ping is not None and agent_ping[0]:
+    elif spec is not None and kind == "vm" and agent_answers(agent_ping):        # §17.2057 — the agent, not the runner
         from app.modules.assist_local_runner import unwrap_guest_exec
         cmd = f"qm guest exec {gid} -- timeout 5 getent hosts deb.debian.org"
         ok, out = await _probe(spec, cmd)
         dns = (ok, unwrap_guest_exec(cmd, out)) if ok is not None else None
-        if dns is not None and dns[0] is not None and not (dns[1] or "").strip():
+        if dns is not None and dns[0] is not None and not resolved(dns[1]):
             _cmd = f"qm guest exec {gid} -- cat /proc/uptime"                      # §17.1336
             _ok, _up = await _probe(spec, _cmd)
             guest_uptime = uptime_s(unwrap_guest_exec(_cmd, _up)) if _ok else None
@@ -345,7 +402,7 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
             _ok, units_text = await _probe(spec, f"pct exec {gid} -- {_list}")
             units_text = units_text if _ok else ""
             tools_read = await _probe(spec, f"pct exec {gid} -- which {PROBE_ARGS}")       # §17.1690
-        elif kind == "vm" and agent_ping is not None and agent_ping[0]:
+        elif kind == "vm" and agent_answers(agent_ping):                          # §17.2057
             from app.modules.assist_local_runner import unwrap_guest_exec
             _cmd = f"qm guest exec {gid} -- {_list}"
             _ok, _out = await _probe(spec, _cmd)
@@ -353,11 +410,11 @@ async def read_guest_truth(spec, gid: str, inventory: Optional[dict], plan: Opti
             _tcmd = f"qm guest exec {gid} -- which {PROBE_ARGS}"                               # §17.1690
             _tok, _tout = await _probe(spec, _tcmd)
             tools_read = (_tok, unwrap_guest_exec(_tcmd, _tout)) if _tok is not None else None
-    t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", fdb=fdb,
+    t = truth_from_texts(gid, inventory=inventory, qm_config=qm_config or "", neigh=neigh or "", tx=tx or "",
                          agent_ping=agent_ping, plan=plan, dns=dns, sibling_config=sibling_config or "",
                          guest_uptime=guest_uptime,
                          units_text=units_text, tools_read=tools_read)
-    logger.warning("machine_truth guest=%s %s", gid, {k: (f"{len(v)} units" if k == "units" and v is not None else v)
+    logger.info("machine_truth guest=%s %s", gid, {k: (f"{len(v)} units" if k == "units" and v is not None else v)
                                                       for k, v in t.to_dict().items() if k not in ("reads", "disks")})
     return t
 
@@ -620,7 +677,7 @@ def contradictions(node: Optional[dict], truth: GuestTruth, needs: set[str],
             and {"reachable", "agent"} & needs:
         out.append({
             "kind": "not_transmitting",
-            "evidence": "`bridge fdb show`: the VM's MAC has never been learned on the bridge",
+            "evidence": f"`{host_port(truth.gid, 'vm')}` has received 0 frames from the VM since it came up",
             "fact": None, "reopen": None, "covered_by": None, "blocks": False,
             "remedy": "the guest has no network stack up yet (still booting, or no OS): wait on the MAC, do not assume",
         })

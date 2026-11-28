@@ -76,12 +76,17 @@ _NOT_EVIDENCE = (
 )
 
 
-def not_evidence(text_out: str, is_error: bool = False) -> str:
-    """Why this probe says nothing about the system, or ``''`` when it ran."""
+def not_evidence(text_out: str, is_error: bool = False, command: str = "") -> str:
+    """Why this probe says nothing about the system, or ``''`` when it ran. With ``command``, an in-guest read that
+    never reached the guest (§17.2057, `guest_did_not_answer`) says nothing about the guest either."""
     head = (text_out or "").lstrip()
     for prefix, why in _NOT_EVIDENCE:
         if head.startswith(prefix):
             return why
+    if command:
+        _why = guest_did_not_answer(command, text_out)
+        if _why:
+            return _why
     # §17.1806 — the shell could not parse the check: it never ran, so it says nothing about the system. Live (job
     # 0fb4ea7f RB1): two verify loops answered `/bin/sh: 1: Syntax error: "do" unexpected` and the step was `done`.
     if _SHELL_PARSE_ERROR_RE.match(head):
@@ -139,6 +144,39 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
 
 
 _GUEST_EXEC_RE = re.compile(r"(?<![\w./-])qm\s+guest\s+exec\s+\d+\b")
+
+
+#: §17.2057 — what `qm guest exec` / `pct exec` print THEMSELVES when the command never reached the guest. Live
+#: (RD82, 2026-11-27): VM 110 has no guest agent, `qm guest exec 110 -- getent hosts …` printed "No QEMU guest agent
+#: configured", and the machine truth logged `resolves: True` (the text was non-empty) and `units: '0 units'`.
+_GUEST_CHANNEL_DOWN_RE = re.compile(
+    r"\s*(?:No QEMU guest agent configured|QEMU guest agent is not running|Agent error\b|VM \d+ (?:is )?not running"
+    r"|CT \d+ not running|container ['\"]?\d+['\"]? (?:is )?not running"
+    r"|Configuration file '[^'\n]*/(?:qemu-server|lxc)/\d+\.conf' does not exist)", re.I)
+#: a command that is ONE `qm guest exec` and nothing after it, so its whole answer is the agent's JSON envelope
+_LONE_GUEST_EXEC_RE = re.compile(r"\s*qm\s+guest\s+exec\s+\d+\s+--\s+[^|;&]*", re.S)
+
+
+def guest_did_not_answer(command: str, out: str) -> str:
+    """§17.2057 — why an in-guest read never reached the guest, or ``''`` when the guest answered.
+
+    `qm guest exec` answers with a JSON envelope (`{"exitcode", "out-data", …}`) whenever the agent ran the command;
+    any other text from a lone `qm guest exec` is `qm` speaking, not the guest. `pct exec`'s own refusals (a stopped
+    or absent container) are matched by their words at the head of the output. Quoted arguments are masked first so
+    a `sh -c '… | …'` inside the guest is still a lone exec."""
+    text = str(out or "")
+    m = _GUEST_CHANNEL_DOWN_RE.match(text)
+    if m and re.search(r"(?<![\w./-])(?:qm\s+guest\s+exec|pct\s+exec)\s+\d+", command or ""):
+        return "the guest did not answer: " + text.strip().split("\n", 1)[0][:120]
+    masked = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", str(command or ""))
+    if _LONE_GUEST_EXEC_RE.fullmatch(masked):
+        try:
+            d = json.loads(text)
+        except (ValueError, TypeError):
+            d = None
+        if not (isinstance(d, dict) and ("out-data" in d or "exitcode" in d or "exited" in d)):
+            return "the guest agent did not answer: " + (text.strip().split("\n", 1)[0][:120] or "(no output)")
+    return ""
 
 
 def unwrap_guest_exec(command: str, out: str) -> str:
