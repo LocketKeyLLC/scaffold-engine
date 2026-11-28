@@ -140,7 +140,7 @@ def test_the_pause_reads_the_checks_before_it_parks():
     i = src.index("async def _pause_for_decision(")
     body = src[i:src.index("\nasync def ", i + 10)]
     assert body.count("supervised_runs.already_met(") == 1
-    assert body.index("supervised_runs.already_met(") < body.index('logger.warning("supervised_run_parked'), \
+    assert body.index("supervised_runs.already_met(") < body.index('_log_parked(job_id, run_node, frame)'), \
         "read the machine BEFORE parking the question"
     assert body.index("runbook_discovery") < body.index("supervised_runs.already_met("), \
         "after every redraft, so the checks read are the ones that would be parked"

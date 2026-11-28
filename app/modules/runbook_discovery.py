@@ -473,7 +473,7 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
         names[n]["value"] = ""
         names[n]["hint"] = (f"already read off {svc.lower()} in container {cid} and stored — "
                             f"the command uses $" + n + ", you do not need to type it")
-        logger.warning("runbook_input_stored name=%s kind=api_key ctid=%s chars=%d", n, cid, len(key))
+        logger.info("runbook_input_stored name=%s kind=api_key ctid=%s chars=%d", n, cid, len(key))
 
 
 async def _read(spec, command: str) -> str:

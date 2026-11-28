@@ -241,7 +241,7 @@ def test_executor_wiring():
     assert "supervised_runs.channel(db)" in pause and "pending_hands_on(db, job_id)" in pause
     # §17.1496 — every frame is drawn OFF the event loop (frame_run forks mypy / bash -n)
     assert "to_thread(supervised_runs.frame_run, " in pause and "supervised_runs.frame_run(" not in pause
-    assert "draft_runbook(" in pause and 'logger.warning("supervised_run_parked' in pause
+    assert "draft_runbook(" in pause and '_log_parked(job_id, run_node, frame)' in pause
     serial = inspect.getsource(ea.execute_all_nodes)
     assert "await _hands_on_peek(node, job_id)" in serial and 'status in ("stale", "needs_approval")' in serial
     par = inspect.getsource(ea._run_parallel_frontier)

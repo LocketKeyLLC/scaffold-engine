@@ -4562,8 +4562,8 @@ async def research_for_step(node: dict, environment: dict | None = None) -> str:
         return ""
     if not block:
         return ""
-    logger.warning("step_research_attached node=%s kind=%s sources=%d q=%r",
-                   key, kind, len(sources), query[:120])
+    logger.info("step_research_attached node=%s kind=%s sources=%d q=%r",   # §17.2061
+                key, kind, len(sources), query[:120])
     if kind == "how":
         return ("\n\n" + block
                 + "\n\nUse these to decide HOW to do this step: the CAUSE others found for this symptom and the "
@@ -4611,7 +4611,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                                                        upstream=upstream, environment=environment,   # §17.1306
                                                        retry_note=retry_note)                        # §17.1308
                 rendered = rt.render(tpl, rt.values_for(tpl, node, truth, environment, model_vals))
-                logger.warning("runbook_from_template node=%s template=%s chars=%d redraft=%s", node.get("node_key"), tpl.name,
+                logger.info("runbook_from_template node=%s template=%s chars=%d redraft=%s", node.get("node_key"), tpl.name,
                                len(rendered), bool(retry_note))
                 return rendered
         except Exception as exc:
@@ -8828,8 +8828,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if refs:
         from app.modules import runner_secrets as _rs
         secret_env = await _rs.values_for(db, refs)
-    logger.warning("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",
-                   job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
+    logger.info("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",   # §17.2061
+                job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
     executed = await _sw.write_files_on(spec, _files) if _files else []
     _wrote_all = len(executed) == len(_files) and all(e["ok"] for e in executed)
     if _wrote_all:
@@ -9052,8 +9052,10 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                      f"supervised run through {spec.name}: the response to "
                      f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
                      f"the machine confirm the step's goal is met")})
-        logger.warning("supervised_run_done job=%s node=%s commands=%d confirmed_after_drop=%s",
-                       job_id, node_key, len(executed), confirmed_after_drop)
+        # §17.2061 — a clean finish is routine (INFO); one confirmed only after the connection dropped warns
+        logger.log(logging.WARNING if confirmed_after_drop else logging.INFO,
+                   "supervised_run_done job=%s node=%s commands=%d confirmed_after_drop=%s",
+                   job_id, node_key, len(executed), confirmed_after_drop)
         try:                                                     # §17.1315 — a finished OS install voids the in-guest work before it
             from app.modules import machine_truth as _mt
             await _mt.after_step_done(job_id, {"node_key": node_key, "title": str(waiting.get("title") or "")})

@@ -692,8 +692,11 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
         ok = (code == 0) and not refused
         done.append({"command": cmd, "output": out.rstrip(), "exit": code, "ok": ok, "approval_id": ap["id"],
                      "refused": refused, "unreachable": unreachable, "informational": informational})
-        logger.warning("supervised_run runner=%s approval=%s exit=%s refused=%s informational=%s cmd=%r",
-                       getattr(spec, "name", "?"), ap["id"], code, refused, informational, cmd[:120])
+        # §17.2061 — a command that ran clean (or a read / guard whose non-zero exit is an answer) is routine:
+        # INFO. Only a refused, unreachable or failed command is a WARNING.
+        logger.log(logging.INFO if (ok or informational) else logging.WARNING,
+                   "supervised_run runner=%s approval=%s exit=%s refused=%s informational=%s cmd=%r",
+                   getattr(spec, "name", "?"), ap["id"], code, refused, informational, cmd[:120])
         if on_progress is not None:
             try:
                 await on_progress(i, len(commands))
