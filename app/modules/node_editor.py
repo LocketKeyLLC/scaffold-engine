@@ -361,7 +361,9 @@ async def _reopen_job(db: AsyncSession, job_id: str) -> None:
         {"j": job_id},
     )
     if res.fetchone() is not None:
-        logger.warning("node_edit_reopened_terminal_job job=%s -> executing", job_id)
+        # §17.2067 — reopening a finished job is what an edit to it MEANS (every redeploy adds its step to a completed
+        # job): routine, INFO. Refusals of an edit still warn where they happen.
+        logger.info("node_edit_reopened_terminal_job job=%s -> executing", job_id)
 
 
 async def _drop_parked_frame(db: AsyncSession, job_id: str, node_keys: list[str], why: str) -> bool:

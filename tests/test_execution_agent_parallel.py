@@ -76,6 +76,9 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
     monkeypatch.setattr(ea, "execute_next_node", fake_exec)
     monkeypatch.setattr(ea, "_all_nodes_done", fake_all_done)
     monkeypatch.setattr(ea, "_build_pipeline_summary", fake_summary)
+    # §17.2066 — the terminal now finishes the job itself (idempotently); here the last worker's autocomplete won
+    # the flip, so the loop's own flip finds the job completed already.
+    monkeypatch.setattr(ea, "_flip_job_completed", AsyncMock(return_value=False))  # noqa: F405
     monkeypatch.setattr(settings, "parallel_execution_max_inflight", 4)
     monkeypatch.setattr(settings, "sse_keepalive_seconds", 0.2)
 
